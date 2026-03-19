@@ -12,14 +12,22 @@ const RATE_LIMITS = {
 };
 
 async function checkAndIncrement(source) {
-  const key = `propiq:hub:rate_limit:${source}`;
-  const count = await client.incr(key);
-
-  if (count === 1) {
-    await client.expire(key, 60);
+  // Validate source parameter
+  if (!RATE_LIMITS[source]) {
+    throw new Error(`[RateLimit] Unknown rate limit source: ${source}`);
   }
 
+  const key = `propiq:hub:rate_limit:${source}`;
   const limit = RATE_LIMITS[source];
+
+  // Use Redis transaction to ensure INCR and EXPIRE are atomic
+  const results = await client.multi()
+    .incr(key)
+    .expire(key, 60)
+    .exec();
+
+  const count = results[0];
+
   if (count > limit) {
     throw new Error(`[RateLimit] ${source} limit reached (${count}/${limit}/min). Skipping request.`);
   }

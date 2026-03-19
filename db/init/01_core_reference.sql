@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS teams (
 CREATE TABLE IF NOT EXISTS players (
     player_id   INT PRIMARY KEY,
     name        VARCHAR(100) NOT NULL,
-    handedness  CHAR(1),     -- 'R', 'L', or 'S'
+    handedness  CHAR(1) CHECK (handedness IN ('R', 'L', 'S')),
     position    VARCHAR(5)
 );
 
@@ -24,8 +24,9 @@ CREATE TABLE IF NOT EXISTS park_factors (
     has_roof        BOOLEAN DEFAULT FALSE
 );
 
--- ── Seed Park Factors (2026 Savant Validated) ──────────────
+-- ── Seed Park Factors (2026 Savant Validated + Neutral Baselines) ──
 INSERT INTO park_factors (park_id, stadium_name, xwoba_factor, hr_factor, has_roof) VALUES
+    -- Validated park factors
     ('COL', 'Coors Field',          110.2, 122.1, FALSE),
     ('SF',  'Oracle Park',           91.8,  84.7, FALSE),
     ('BOS', 'Fenway Park',          107.1, 110.4, FALSE),
@@ -35,7 +36,28 @@ INSERT INTO park_factors (park_id, stadium_name, xwoba_factor, hr_factor, has_ro
     ('MIA', 'loanDepot park',        97.3,  94.1, TRUE),
     ('SEA', 'T-Mobile Park',         96.8,  91.5, TRUE),
     ('ARI', 'Chase Field',           99.4,  97.8, TRUE),
-    ('TB',  'Tropicana Field',       98.1,  96.0, TRUE)
+    ('TB',  'Tropicana Field',       98.1,  96.0, TRUE),
+    -- Remaining 20 teams with neutral baseline (100.0)
+    ('LAA', 'Angel Stadium',        100.0, 100.0, FALSE),
+    ('BAL', 'Oriole Park',          100.0, 100.0, FALSE),
+    ('ATL', 'Truist Park',          100.0, 100.0, FALSE),
+    ('CHC', 'Wrigley Field',        100.0, 100.0, FALSE),
+    ('CHW', 'Guaranteed Rate Field', 100.0, 100.0, FALSE),
+    ('CIN', 'Great American Ball Park', 100.0, 100.0, FALSE),
+    ('CLE', 'Progressive Field',    100.0, 100.0, FALSE),
+    ('DET', 'Comerica Park',        100.0, 100.0, FALSE),
+    ('KC',  'Kauffman Stadium',     100.0, 100.0, FALSE),
+    ('LAD', 'Dodger Stadium',       100.0, 100.0, FALSE),
+    ('MIL', 'American Family Field', 100.0, 100.0, TRUE),
+    ('MIN', 'Target Field',         100.0, 100.0, FALSE),
+    ('NYM', 'Citi Field',           100.0, 100.0, FALSE),
+    ('OAK', 'Oakland Coliseum',     100.0, 100.0, FALSE),
+    ('PIT', 'PNC Park',             100.0, 100.0, FALSE),
+    ('SD',  'Petco Park',           100.0, 100.0, FALSE),
+    ('STL', 'Busch Stadium',        100.0, 100.0, FALSE),
+    ('TEX', 'Globe Life Field',     100.0, 100.0, TRUE),
+    ('TOR', 'Rogers Centre',        100.0, 100.0, TRUE),
+    ('WSH', 'Nationals Park',       100.0, 100.0, FALSE)
 ON CONFLICT (park_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS games (
@@ -47,14 +69,15 @@ CREATE TABLE IF NOT EXISTS games (
     weather_wind_mph FLOAT,
     weather_wind_dir VARCHAR(20),
     umpire_id        INT,
-    roof_status      VARCHAR(15), -- 'open', 'closed', 'retractable'
-    status           VARCHAR(15)  -- 'scheduled', 'in_progress', 'final'
+    roof_status      VARCHAR(15) CHECK (roof_status IN ('open', 'closed', 'retractable')),
+    status           VARCHAR(15) CHECK (status IN ('scheduled', 'in_progress', 'final')),
+    CONSTRAINT no_self_play CHECK (home_team_id != away_team_id)
 );
 
 CREATE TABLE IF NOT EXISTS model_versions (
     version_id   VARCHAR(20) PRIMARY KEY,
     description  TEXT,
-    deployed_at  TIMESTAMP DEFAULT NOW()
+    deployed_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── Seed the locked model version ─────────────────────────
