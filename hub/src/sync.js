@@ -32,8 +32,8 @@ async function syncMarkets() {
         for (const book of props.bookmakers) {
           for (const market of book.markets) {
             for (const outcome of market.outcomes) {
-              // Stable ID generation for tracking line movement
-              const marketId = `${event.id}_${book.key}_${market.key}_${outcome.name}_${outcome.description || 'base'}`.replace(/\s+/g, '_').toLowerCase();
+              // Stable ID generation for tracking line movement (Over/Under share same row)
+              const marketId = `${event.id}_${book.key}_${market.key}_${outcome.description || 'base'}`.replace(/\s+/g, '_').toLowerCase();
               
               const query = `
                 INSERT INTO betting_markets (

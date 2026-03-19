@@ -25,5 +25,8 @@ app.listen(PORT, () => {
   console.log(`⚾ PropIQ Hub listening on :${PORT}`);
 });
 
-// Start the background sync worker
-require('./sync');
+// Start the background sync worker ONLY if explicitly enabled
+if (process.env.ENABLE_SYNC_WORKER === 'true') {
+  console.log('⚾ Background Sync Worker enabled.');
+  require('./sync');
+}

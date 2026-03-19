@@ -9,7 +9,7 @@ const { withBackoff } = require('../backoff');
 const BASE = 'https://api.sportsdata.io/v3/mlb';
 const KEY  = process.env.SPORTSDATA_API_KEY;
 
-if (!KEY) console.warn('⚠️ SPORTSDATA_API_KEY is missing.');
+if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
 
 async function getTodaysGames(date) {
   return getOrFetch(`propiq:sportsdata:games:${date}`, 60, async () => {
