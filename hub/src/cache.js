@@ -35,6 +35,7 @@ client.connect().catch(err => console.error('[Redis] Initial connection failed:'
  * propiq:bettingpros:consensus               TTL: 3600s
  */
 async function getOrFetch(key, ttl, fetchFn) {
+  // Try to get from cache first
   try {
     const cached = await client.get(key);
     if (cached) {
@@ -43,21 +44,27 @@ async function getOrFetch(key, ttl, fetchFn) {
       }
       return JSON.parse(cached);
     }
-
-    if (process.env.DEBUG) {
-      console.log(`[Cache MISS] key: ${key}`);
-    }
-
-    const fresh = await fetchFn();
-    if (fresh !== null && fresh !== undefined) {
-      await client.setEx(key, ttl, JSON.stringify(fresh));
-    }
-    return fresh;
-  } catch (err) {
-    console.error(`[Cache] Error for key ${key}:`, err.message);
-    // On cache error, still try to fetch fresh data
-    return fetchFn();
+  } catch (cacheReadErr) {
+    console.error(`[Cache] Read error for key ${key}:`, cacheReadErr.message);
   }
+
+  // Cache miss or read error - fetch fresh data (only once!)
+  if (process.env.DEBUG) {
+    console.log(`[Cache MISS] key: ${key}`);
+  }
+
+  const fresh = await fetchFn();
+
+  // Try to cache the result, but don't fail if Redis is down
+  if (fresh !== null && fresh !== undefined) {
+    try {
+      await client.setEx(key, ttl, JSON.stringify(fresh));
+    } catch (cacheWriteErr) {
+      console.error(`[Cache] Write error for key ${key}:`, cacheWriteErr.message);
+    }
+  }
+
+  return fresh;
 }
 
 module.exports = { client, getOrFetch };
