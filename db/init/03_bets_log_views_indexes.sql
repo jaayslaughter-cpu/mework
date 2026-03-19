@@ -8,11 +8,11 @@ CREATE TABLE IF NOT EXISTS bets_log (
     game_id               VARCHAR(20) REFERENCES games(game_id),
     pitcher_id            INT REFERENCES players(player_id),
     projection_id         INT REFERENCES projections(projection_id),
-    market_id             INT REFERENCES betting_markets(market_id),
+    market_id             VARCHAR(50) REFERENCES betting_markets(market_id),
     agent_name            VARCHAR(30) NOT NULL, -- '+ev_hunter', 'under_machine', '3leg_parlay', 'steam_chaser'
 
     -- ── Execution State ─────────────────────────────────────
-    bet_time              TIMESTAMP NOT NULL,
+    bet_time              TIMESTAMPTZ NOT NULL,
     bet_type              VARCHAR(10) NOT NULL,   -- 'Over' or 'Under'
     line_at_bet           FLOAT NOT NULL,
     odds_at_bet           INT NOT NULL,           -- American odds
