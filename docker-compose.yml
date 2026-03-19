@@ -47,7 +47,16 @@ services:
     restart: unless-stopped
     ports:
       - "3002:3002"
-    env_file: .env
+    environment:
+      - PORT=3002
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=postgres
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - ENABLE_SYNC_WORKER=true
+      - ODDS_API_KEY=${ODDS_API_KEY}
+      - SPORTSDATA_API_KEY=${SPORTSDATA_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,18 +65,20 @@ services:
     networks:
       - propiq_net
 
-  # ── 4. FastAPI ML Backend ──────────────────────────────────
-  api:
+  # ── 4. FastAPI ML Backend (Engine) ──────────────────────────
+  engine:
     build: ./api
-    container_name: propiq_api
+    container_name: propiq_engine
     restart: unless-stopped
     ports:
       - "8000:8000"
-    env_file: .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=postgres
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     networks:
       - propiq_net
@@ -78,10 +89,10 @@ services:
     container_name: propiq_dashboard
     restart: unless-stopped
     ports:
-      - "3000:8501"
-    env_file: .env
+      - "8501:8501"
     depends_on:
-      - api
+      - hub
+      - engine
     networks:
       - propiq_net
 
