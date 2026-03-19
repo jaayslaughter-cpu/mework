@@ -6,6 +6,7 @@ const router = express.Router();
 
 const sportsdata = require('../fetchers/sportsdata');
 const oddsapi = require('../fetchers/oddsapi');
+const espn = require('../fetchers/espn');
 
 router.get('/today', async (req, res) => {
   try {
@@ -17,7 +18,8 @@ router.get('/today', async (req, res) => {
       sportsdata.getTodaysGames(today),
       sportsdata.getStartingLineups(today),
       sportsdata.getInjuredPlayers(),
-      oddsapi.getMLBEvents()
+      oddsapi.getMLBEvents(),
+      espn.getLiveScores()
     ]);
 
     const response = {
@@ -26,6 +28,7 @@ router.get('/today', async (req, res) => {
       lineups: results[1].status === 'fulfilled' ? results[1].value : [],
       injuries: results[2].status === 'fulfilled' ? results[2].value : [],
       odds_events: results[3].status === 'fulfilled' ? results[3].value : [],
+      live_scores: results[4].status === 'fulfilled' ? results[4].value : [],
       fetch_errors: results
         .filter(r => r.status === 'rejected')
         .map(r => r.reason?.message || 'Unknown fetch error')
