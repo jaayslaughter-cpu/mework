@@ -25,7 +25,8 @@ Adds documentation for a new API service module.
 
 ## Typical Commit Signals
 
-- Create or update a markdown file in .claude/commands/ with the API service module documentation.
+- Create or update a markdown documentation file for the API service module in .claude/commands/
+- Commit the new or updated documentation file
 
 ## Notes
 
