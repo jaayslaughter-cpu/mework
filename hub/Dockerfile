@@ -4,4 +4,5 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY src/ ./src/
 EXPOSE 3002
+USER node
 CMD ["node", "src/server.js"]
