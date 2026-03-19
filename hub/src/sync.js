@@ -29,8 +29,23 @@ async function syncLoop() {
 
         for (const book of props.bookmakers) {
           for (const market of book.markets) {
+            // 1. Aggregate Over/Under outcomes in JavaScript memory first
+            const outcomesByDesc = {};
+            
             for (const outcome of market.outcomes) {
-              const marketId = `${event.id}_${book.key}_${market.key}_${outcome.description || 'base'}`.replace(/\s+/g, '_').toLowerCase();
+              const desc = outcome.description || 'base';
+              if (!outcomesByDesc[desc]) {
+                outcomesByDesc[desc] = { overOdds: null, underOdds: null, point: outcome.point || 0.5 };
+              }
+              
+              if (outcome.name === 'Over') outcomesByDesc[desc].overOdds = outcome.price;
+              if (outcome.name === 'Under') outcomesByDesc[desc].underOdds = outcome.price;
+              if (outcome.point) outcomesByDesc[desc].point = outcome.point;
+            }
+
+            // 2. Execute a single UPSERT per market description
+            for (const [desc, data] of Object.entries(outcomesByDesc)) {
+              const marketId = `${event.id}_${book.key}_${market.key}_${desc}`.replace(/\s+/g, '_').toLowerCase();
               
               const query = `
                 INSERT INTO betting_markets (
@@ -41,18 +56,14 @@ async function syncLoop() {
                 )
                 ON CONFLICT (market_id) DO UPDATE SET 
                   line = EXCLUDED.line,
-                  over_odds = COALESCE(EXCLUDED.over_odds, betting_markets.over_odds),
-                  under_odds = COALESCE(EXCLUDED.under_odds, betting_markets.under_odds),
+                  over_odds = EXCLUDED.over_odds,
+                  under_odds = EXCLUDED.under_odds,
                   updated_at = NOW();
               `;
               
-              const odds = outcome.price; 
-              const point = outcome.point || 0.5;
-              
               await pool.query(query, [
-                marketId, event.id, book.key, market.key, point, 
-                outcome.name === 'Over' ? odds : null, 
-                outcome.name === 'Under' ? odds : null
+                marketId, event.id, book.key, market.key, data.point, 
+                data.overOdds, data.underOdds
               ]);
             }
           }
