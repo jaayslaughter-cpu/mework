@@ -27,7 +27,7 @@ Activate this skill when:
 
 ## Commit Conventions
 
-Follow these commit message conventions based on 91 analyzed commits.
+Follow these commit message conventions based on 102 analyzed commits.
 
 ### Commit Style: Conventional Commits
 
@@ -38,7 +38,7 @@ Follow these commit message conventions based on 91 analyzed commits.
 
 ### Message Guidelines
 
-- Average message length: ~60 characters
+- Average message length: ~61 characters
 - Keep first line concise and descriptive
 - Use imperative mood ("Add feature" not "Added feature")
 
@@ -46,7 +46,7 @@ Follow these commit message conventions based on 91 analyzed commits.
 *Commit message example*
 
 ```text
-feat: add mework ECC bundle (.claude/commands/add-agent-configuration.md)
+feat: add mework ECC bundle (.claude/commands/add-api-service-module-documentation.md)
 ```
 
 *Commit message example*
@@ -164,14 +164,14 @@ Standard feature implementation workflow
 
 **Example commit sequence**:
 ```
-feat: add mework ECC bundle (.codex/agents/docs-researcher.toml)
+feat: add mework ECC bundle (.codex/agents/explorer.toml)
 feat: add mework ECC bundle (.codex/agents/reviewer.toml)
-feat: add mework ECC bundle (.claude/homunculus/instincts/inherited/mework-instincts.yaml)
+feat: add mework ECC bundle (.codex/agents/docs-researcher.toml)
 ```
 
 ### Add Command Or Workflow Documentation
 
-Adds documentation for a new command or workflow to the project.
+Adds documentation for a new command or workflow to the system.
 
 **Frequency**: ~3 times per month
 
@@ -190,61 +190,113 @@ Create or update a markdown file in .claude/commands/ with the command or workfl
 
 Adds documentation for a new API service module.
 
-**Frequency**: ~3 times per month
+**Frequency**: ~2 times per month
 
 **Steps**:
 1. Create or update a markdown file in .claude/commands/ with the API service module documentation.
 
 **Files typically involved**:
-- `.claude/commands/add-api-service-module.md`
+- `.claude/commands/add-api-service-module-documentation.md`
 
 **Example commit sequence**:
 ```
 Create or update a markdown file in .claude/commands/ with the API service module documentation.
 ```
 
-### Add Feature Development Documentation
+### Add Api Service Module
 
-Adds documentation for feature development workflows.
+Adds a new API service module to the project.
+
+**Frequency**: ~2 times per month
+
+**Steps**:
+1. Create or update the .claude/commands/add-api-service-module.md file to document the new module.
+
+**Files typically involved**:
+- `.claude/commands/add-api-service-module.md`
+
+**Example commit sequence**:
+```
+Create or update the .claude/commands/add-api-service-module.md file to document the new module.
+```
+
+### Add Feature Development Workflow
+
+Documents or initiates a feature development workflow.
 
 **Frequency**: ~5 times per month
 
 **Steps**:
-1. Create or update a markdown file in .claude/commands/ with feature development documentation.
+1. Create or update the .claude/commands/feature-development.md file.
 
 **Files typically involved**:
 - `.claude/commands/feature-development.md`
 
 **Example commit sequence**:
 ```
-Create or update a markdown file in .claude/commands/ with feature development documentation.
+Create or update the .claude/commands/feature-development.md file.
 ```
 
-### Add Database Migration Documentation
+### Add Database Migration Workflow
 
-Adds documentation for database migration workflows.
+Documents or initiates a database migration workflow.
 
-**Frequency**: ~4 times per month
+**Frequency**: ~3 times per month
 
 **Steps**:
-1. Create or update a markdown file in .claude/commands/ with database migration documentation.
+1. Create or update the .claude/commands/database-migration.md file.
 
 **Files typically involved**:
 - `.claude/commands/database-migration.md`
 
 **Example commit sequence**:
 ```
-Create or update a markdown file in .claude/commands/ with database migration documentation.
+Create or update the .claude/commands/database-migration.md file.
 ```
 
 ### Add Agent Configuration
 
-Adds or updates agent configuration files for various agents.
+Adds documentation for a new agent configuration.
+
+**Frequency**: ~2 times per month
+
+**Steps**:
+1. Create or update the .claude/commands/add-agent-configuration.md file.
+
+**Files typically involved**:
+- `.claude/commands/add-agent-configuration.md`
+
+**Example commit sequence**:
+```
+Create or update the .claude/commands/add-agent-configuration.md file.
+```
+
+### Add Skill Documentation
+
+Adds documentation for a new skill in the agents or Claude system.
+
+**Frequency**: ~4 times per month
+
+**Steps**:
+1. Create or update the SKILL.md file in either .agents/skills/mework/ or .claude/skills/mework/.
+
+**Files typically involved**:
+- `.agents/skills/mework/SKILL.md`
+- `.claude/skills/mework/SKILL.md`
+
+**Example commit sequence**:
+```
+Create or update the SKILL.md file in either .agents/skills/mework/ or .claude/skills/mework/.
+```
+
+### Add Codex Agent Configuration
+
+Adds or updates agent configuration TOML files for Codex agents.
 
 **Frequency**: ~5 times per month
 
 **Steps**:
-1. Create or update a .toml file in .codex/agents/ for the specific agent.
+1. Create or update the .codex/agents/{agent}.toml file.
 
 **Files typically involved**:
 - `.codex/agents/docs-researcher.toml`
@@ -253,35 +305,17 @@ Adds or updates agent configuration files for various agents.
 
 **Example commit sequence**:
 ```
-Create or update a .toml file in .codex/agents/ for the specific agent.
+Create or update the .codex/agents/{agent}.toml file.
 ```
 
-### Add Skill Documentation
+### Update Identity Or Tools Metadata
 
-Adds or updates documentation for a skill in the agents or Claude skills directories.
+Updates project identity or ECC tools metadata.
 
 **Frequency**: ~4 times per month
 
 **Steps**:
-1. Create or update SKILL.md in the appropriate skills directory.
-
-**Files typically involved**:
-- `.agents/skills/mework/SKILL.md`
-- `.claude/skills/mework/SKILL.md`
-
-**Example commit sequence**:
-```
-Create or update SKILL.md in the appropriate skills directory.
-```
-
-### Update Identity Or Tools Json
-
-Updates identity or ECC tools configuration for Claude.
-
-**Frequency**: ~4 times per month
-
-**Steps**:
-1. Edit .claude/identity.json or .claude/ecc-tools.json with new configuration.
+1. Create or update .claude/identity.json or .claude/ecc-tools.json.
 
 **Files typically involved**:
 - `.claude/identity.json`
@@ -289,7 +323,7 @@ Updates identity or ECC tools configuration for Claude.
 
 **Example commit sequence**:
 ```
-Edit .claude/identity.json or .claude/ecc-tools.json with new configuration.
+Create or update .claude/identity.json or .claude/ecc-tools.json.
 ```
 
 
