@@ -63,8 +63,8 @@ ON CONFLICT (park_id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS games (
     game_id          VARCHAR(20) PRIMARY KEY,
     game_date        DATE NOT NULL,
-    home_team_id     VARCHAR(10) REFERENCES teams(team_id),
-    away_team_id     VARCHAR(10) REFERENCES teams(team_id),
+    home_team_id     VARCHAR(10) REFERENCES teams(team_id) NOT NULL,
+    away_team_id     VARCHAR(10) REFERENCES teams(team_id) NOT NULL,
     park_id          VARCHAR(10) REFERENCES park_factors(park_id),
     weather_wind_mph FLOAT,
     weather_wind_dir VARCHAR(20),

@@ -9,7 +9,11 @@ const auth = process.env.REDIS_PASSWORD ? `:${encodeURIComponent(process.env.RED
 const redisUrl = `redis://${auth}redis:6379`;
 
 const client = redis.createClient({
-  url: redisUrl
+  url: redisUrl,
+  socket: {
+    connectTimeout: 5000,
+    reconnectStrategy: false
+  }
 });
 
 client.on('error', (err) => console.error('[Redis] Connection error:', err));
