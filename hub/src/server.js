@@ -24,3 +24,6 @@ const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {
   console.log(`⚾ PropIQ Hub listening on :${PORT}`);
 });
+
+// Start the background sync worker
+require('./sync');
