@@ -3,12 +3,16 @@
 
 const express = require('express');
 const cors = require('cors');
+const slatesRouter = require('./routes/slates');
 
 const app = express();
 app.use(cors({
   origin: ['http://localhost:8501', 'http://localhost:3000']
 }));
 app.use(express.json());
+
+// Register routes
+app.use('/api/slates', slatesRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
