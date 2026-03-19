@@ -2,6 +2,7 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.engine import URL
 
 # Construct the async PostgreSQL URL from environment variables
 DB_USER = os.getenv("POSTGRES_USER", "propiq_admin")
@@ -9,7 +10,14 @@ DB_PASS = os.getenv("POSTGRES_PASSWORD", "dev_password")
 DB_NAME = os.getenv("POSTGRES_DB", "propiq_db")
 DB_HOST = os.getenv("POSTGRES_HOST", "postgres")  # Docker service name
 
-SQLALCHEMY_DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/{DB_NAME}"
+SQLALCHEMY_DATABASE_URL = URL.create(
+    drivername="postgresql+asyncpg",
+    username=DB_USER,
+    password=DB_PASS,
+    host=DB_HOST,
+    port=5432,
+    database=DB_NAME
+)
 
 engine = create_async_engine(SQLALCHEMY_DATABASE_URL, echo=False)
 

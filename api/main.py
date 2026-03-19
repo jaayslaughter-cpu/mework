@@ -25,5 +25,5 @@ async def health_check():
     return {
         "status": "healthy",
         "uptime": int(time.time() - start_time),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": int(time.time() * 1000)
     }

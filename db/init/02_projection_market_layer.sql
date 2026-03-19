@@ -3,6 +3,9 @@
 -- File: 02_projection_market_layer.sql
 -- ============================================================
 
+-- Update live_projections.market_id column width on existing tables
+ALTER TABLE IF EXISTS live_projections ALTER COLUMN market_id TYPE VARCHAR(100);
+
 -- ── Live Projections (Hot Table — updated every 60 seconds) ─
 CREATE TABLE IF NOT EXISTS live_projections (
     market_id            VARCHAR(100) PRIMARY KEY,
