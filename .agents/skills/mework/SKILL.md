@@ -27,7 +27,7 @@ Activate this skill when:
 
 ## Commit Conventions
 
-Follow these commit message conventions based on 47 analyzed commits.
+Follow these commit message conventions based on 58 analyzed commits.
 
 ### Commit Style: Conventional Commits
 
@@ -38,7 +38,7 @@ Follow these commit message conventions based on 47 analyzed commits.
 
 ### Message Guidelines
 
-- Average message length: ~58 characters
+- Average message length: ~59 characters
 - Keep first line concise and descriptive
 - Use imperative mood ("Add feature" not "Added feature")
 
@@ -76,12 +76,6 @@ feat: add mework ECC bundle (.claude/commands/database-migration.md)
 *Commit message example*
 
 ```text
-feat: add mework ECC bundle (.claude/homunculus/instincts/inherited/mework-instincts.yaml)
-```
-
-*Commit message example*
-
-```text
 feat: add mework ECC bundle (.codex/agents/docs-researcher.toml)
 ```
 
@@ -89,6 +83,12 @@ feat: add mework ECC bundle (.codex/agents/docs-researcher.toml)
 
 ```text
 feat: add mework ECC bundle (.codex/agents/reviewer.toml)
+```
+
+*Commit message example*
+
+```text
+feat: add mework ECC bundle (.codex/agents/explorer.toml)
 ```
 
 ## Architecture
@@ -152,7 +152,7 @@ These workflows were detected from analyzing commit patterns.
 
 Database schema changes with migration files
 
-**Frequency**: ~6 times per month
+**Frequency**: ~5 times per month
 
 **Steps**:
 1. Create migration file
@@ -164,16 +164,16 @@ Database schema changes with migration files
 
 **Example commit sequence**:
 ```
-fix: CI bot feedback - placeholder files, security, and schema fixes
-fix: change npm ci to npm install, reorder USER before EXPOSE
-fix: pin dependencies, fix Streamlit placeholder, add hub package.json
+fix: market ID split, betting_markets table, worker gating, fail-fast
+fix: COALESCE for over/under odds, graceful degradation for missing API key
+feat(hub): add ESPN public scoreboard fetcher
 ```
 
 ### Feature Development
 
 Standard feature implementation workflow
 
-**Frequency**: ~26 times per month
+**Frequency**: ~28 times per month
 
 **Steps**:
 1. Add feature implementation
@@ -185,43 +185,46 @@ Standard feature implementation workflow
 
 **Example commit sequence**:
 ```
-feat(infra): scaffold Docker Compose v3.8 full stack orchestration
-Initial commit
-fix: CI bot feedback - placeholder files, security, and schema fixes
+feat(hub): add The Odds API fetcher module
+feat(hub): add aggregator endpoint /api/slates/today
+fix: rolling window rate limiter, sportsdata fetcher, Redis password encoding
 ```
 
 ### Add Api Service Module
 
-Adds a new analytics or logic module to the API service and integrates it with the main predictor logic.
+Adds a new API service module or feature to the backend, often including analytics engines or new endpoints.
+
+**Frequency**: ~4 times per month
+
+**Steps**:
+1. Create new module in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
+2. Update api/services/predictor.py to integrate new logic (import, call, add response fields)
+3. If needed, update or create corresponding router in api/routers/
+4. Document or update requirements in api/requirements.txt if new dependencies are added
+
+**Files typically involved**:
+- `api/services/*.py`
+- `api/services/predictor.py`
+
+**Example commit sequence**:
+```
+Create new module in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
+Update api/services/predictor.py to integrate new logic (import, call, add response fields)
+If needed, update or create corresponding router in api/routers/
+Document or update requirements in api/requirements.txt if new dependencies are added
+```
+
+### Database Migration And Indexing
+
+Adds or modifies database tables, views, or indexes to support new features or improve performance.
 
 **Frequency**: ~3 times per month
 
 **Steps**:
-1. Create new module file in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
-2. Update api/services/predictor.py to import and integrate the new module
-3. Add new parameters, context, or flags to the predictor response
-
-**Files typically involved**:
-- `api/services/predictor.py`
-- `api/services/*.py`
-
-**Example commit sequence**:
-```
-Create new module file in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
-Update api/services/predictor.py to import and integrate the new module
-Add new parameters, context, or flags to the predictor response
-```
-
-### Database Schema Migration
-
-Adds or alters database tables, views, or indexes to support new features or improve performance.
-
-**Frequency**: ~6 times per month
-
-**Steps**:
 1. Create or update SQL migration file in db/init/ (e.g., 01_core_reference.sql, 02_projection_market_layer.sql, 03_bets_log_views_indexes.sql)
-2. Add ALTER TABLE statements for idempotency and backward compatibility
-3. Add or update indexes and constraints as needed
+2. Apply ALTER TABLE statements for schema changes (e.g., column type, NOT NULL constraints)
+3. Add or update indexes for performance
+4. Seed data if required (e.g., teams before games for FK constraints)
 
 **Files typically involved**:
 - `db/init/*.sql`
@@ -229,43 +232,22 @@ Adds or alters database tables, views, or indexes to support new features or imp
 **Example commit sequence**:
 ```
 Create or update SQL migration file in db/init/ (e.g., 01_core_reference.sql, 02_projection_market_layer.sql, 03_bets_log_views_indexes.sql)
-Add ALTER TABLE statements for idempotency and backward compatibility
-Add or update indexes and constraints as needed
+Apply ALTER TABLE statements for schema changes (e.g., column type, NOT NULL constraints)
+Add or update indexes for performance
+Seed data if required (e.g., teams before games for FK constraints)
 ```
 
-### Add Api Endpoint
+### Add Fetcher Or Data Aggregator Module
 
-Implements a new FastAPI router endpoint and integrates it into the main API application.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Create new router file in api/routers/ (e.g., mlb_data.py, predictions.py)
-2. Update api/main.py to include the new router
-3. Update api/requirements.txt if new dependencies are needed
-
-**Files typically involved**:
-- `api/routers/*.py`
-- `api/main.py`
-- `api/requirements.txt`
-
-**Example commit sequence**:
-```
-Create new router file in api/routers/ (e.g., mlb_data.py, predictions.py)
-Update api/main.py to include the new router
-Update api/requirements.txt if new dependencies are needed
-```
-
-### Add Hub Fetcher Module
-
-Adds a new data fetcher for external APIs to the Node.js hub, with caching and rate limiting.
+Adds a new data fetcher or aggregator module to the hub for external APIs (e.g., ESPN, OddsAPI, SportsData), and integrates it into the data aggregation pipeline.
 
 **Frequency**: ~3 times per month
 
 **Steps**:
-1. Create new fetcher file in hub/src/fetchers/ (e.g., espn.js, oddsapi.js, sportsdata.js)
-2. Update hub/src/routes/slates.js to include new fetcher in aggregation
-3. Update hub/src/server.js if new routes are exposed
+1. Create new fetcher in hub/src/fetchers/ (e.g., espn.js, oddsapi.js, sportsdata.js)
+2. Update hub/src/routes/slates.js to include new fetcher in Promise.allSettled or aggregation logic
+3. Update hub/src/server.js to register new routes or endpoints
+4. If needed, update caching logic in hub/src/cache.js
 
 **Files typically involved**:
 - `hub/src/fetchers/*.js`
@@ -274,44 +256,22 @@ Adds a new data fetcher for external APIs to the Node.js hub, with caching and r
 
 **Example commit sequence**:
 ```
-Create new fetcher file in hub/src/fetchers/ (e.g., espn.js, oddsapi.js, sportsdata.js)
-Update hub/src/routes/slates.js to include new fetcher in aggregation
-Update hub/src/server.js if new routes are exposed
-```
-
-### Architecture Fix And Refinement
-
-Applies architecture-level fixes, constraint updates, or performance/security improvements across multiple files.
-
-**Frequency**: ~5 times per month
-
-**Steps**:
-1. Update SQL migration files for constraints or indexes
-2. Update Node.js hub files for caching, rate limiting, or fetcher logic
-3. Update API files for response format or dependency pinning
-
-**Files typically involved**:
-- `db/init/*.sql`
-- `hub/src/*.js`
-- `api/*.py`
-
-**Example commit sequence**:
-```
-Update SQL migration files for constraints or indexes
-Update Node.js hub files for caching, rate limiting, or fetcher logic
-Update API files for response format or dependency pinning
+Create new fetcher in hub/src/fetchers/ (e.g., espn.js, oddsapi.js, sportsdata.js)
+Update hub/src/routes/slates.js to include new fetcher in Promise.allSettled or aggregation logic
+Update hub/src/server.js to register new routes or endpoints
+If needed, update caching logic in hub/src/cache.js
 ```
 
 ### Ml Training Pipeline Update
 
-Implements or improves the model training pipeline and saves new model artifacts.
+Implements or updates machine learning model training scripts and saves new model artifacts for prediction.
 
 **Frequency**: ~2 times per month
 
 **Steps**:
-1. Update or create scripts/train_model.py with new data sources or features
-2. Save new model artifacts to api/models/
-3. Document or log feature importances and model performance
+1. Create or update scripts/train_model.py with new data sources, feature engineering, or model logic
+2. Save trained model artifacts to api/models/ (e.g., prop_model_v1.json, hr_model_v1.json, xbh_model_v1.json)
+3. If needed, update dependencies in api/requirements.txt
 
 **Files typically involved**:
 - `scripts/train_model.py`
@@ -319,34 +279,37 @@ Implements or improves the model training pipeline and saves new model artifacts
 
 **Example commit sequence**:
 ```
-Update or create scripts/train_model.py with new data sources or features
-Save new model artifacts to api/models/
-Document or log feature importances and model performance
+Create or update scripts/train_model.py with new data sources, feature engineering, or model logic
+Save trained model artifacts to api/models/ (e.g., prop_model_v1.json, hr_model_v1.json, xbh_model_v1.json)
+If needed, update dependencies in api/requirements.txt
 ```
 
-### Docker Compose Orchestration Update
+### Ecc Command Or Skill Bundle Addition
 
-Updates Docker Compose orchestration and service configuration for the full stack.
+Adds or updates ECC (external cognitive component) command or skill bundles, typically for agent or automation frameworks.
 
-**Frequency**: ~2 times per month
+**Frequency**: ~3 times per month
 
 **Steps**:
-1. Update docker-compose.yml with new or changed services
-2. Update service Dockerfiles as needed
-3. Update .env.example for new environment variables
+1. Add or update .claude/commands/*.md for new commands
+2. Add or update .claude/skills/mework/SKILL.md or .agents/skills/mework/SKILL.md for new skills
+3. Add or update .codex/agents/*.toml for agent configuration
+4. Update .claude/ecc-tools.json or .claude/identity.json if needed
 
 **Files typically involved**:
-- `docker-compose.yml`
-- `api/Dockerfile`
-- `dashboard/Dockerfile`
-- `hub/Dockerfile`
-- `.env.example`
+- `.claude/commands/*.md`
+- `.claude/skills/mework/SKILL.md`
+- `.agents/skills/mework/SKILL.md`
+- `.codex/agents/*.toml`
+- `.claude/ecc-tools.json`
+- `.claude/identity.json`
 
 **Example commit sequence**:
 ```
-Update docker-compose.yml with new or changed services
-Update service Dockerfiles as needed
-Update .env.example for new environment variables
+Add or update .claude/commands/*.md for new commands
+Add or update .claude/skills/mework/SKILL.md or .agents/skills/mework/SKILL.md for new skills
+Add or update .codex/agents/*.toml for agent configuration
+Update .claude/ecc-tools.json or .claude/identity.json if needed
 ```
 
 
