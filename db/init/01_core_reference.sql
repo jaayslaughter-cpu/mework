@@ -50,6 +50,26 @@ CREATE TABLE IF NOT EXISTS players (
     position    VARCHAR(5)
 );
 
+CREATE TABLE IF NOT EXISTS players (
+    player_id   INT PRIMARY KEY,
+    name        VARCHAR(100) NOT NULL,
+    handedness  CHAR(1),     -- 'R', 'L', or 'S'
+    position    VARCHAR(5)
+);
+
+CREATE TABLE IF NOT EXISTS games (
+    game_id          VARCHAR(20) PRIMARY KEY,
+    game_date        DATE NOT NULL,
+    home_team_id     VARCHAR(10) REFERENCES teams(team_id),
+    away_team_id     VARCHAR(10) REFERENCES teams(team_id),
+    park_id          VARCHAR(10),
+    weather_wind_mph FLOAT,
+    weather_wind_dir VARCHAR(20),
+    umpire_id        INT,
+    roof_status      VARCHAR(15), -- 'open', 'closed', 'retractable'
+    status           VARCHAR(15)  -- 'scheduled', 'in_progress', 'final'
+);
+
 CREATE TABLE IF NOT EXISTS park_factors (
     park_id         VARCHAR(10) PRIMARY KEY,
     stadium_name    VARCHAR(100) NOT NULL,
@@ -58,9 +78,8 @@ CREATE TABLE IF NOT EXISTS park_factors (
     has_roof        BOOLEAN DEFAULT FALSE
 );
 
--- ── Seed Park Factors (2026 Savant Validated + Neutral Baselines) ──
+-- ── Seed Park Factors (2026 Savant Validated) ──────────────
 INSERT INTO park_factors (park_id, stadium_name, xwoba_factor, hr_factor, has_roof) VALUES
-    -- Validated park factors
     ('COL', 'Coors Field',          110.2, 122.1, FALSE),
     ('SF',  'Oracle Park',           91.8,  84.7, FALSE),
     ('BOS', 'Fenway Park',          107.1, 110.4, FALSE),
@@ -112,28 +131,16 @@ CREATE TABLE IF NOT EXISTS model_versions (
     version_id   VARCHAR(20) PRIMARY KEY,
     description  TEXT,
     deployed_at  TIMESTAMPTZ DEFAULT NOW()
+    ('TB',  'Tropicana Field',       98.1,  96.0, TRUE)
+ON CONFLICT (park_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS model_versions (
+    version_id   VARCHAR(20) PRIMARY KEY,
+    description  TEXT,
+    deployed_at  TIMESTAMP DEFAULT NOW()
 );
 
 -- ── Seed the locked model version ─────────────────────────
 INSERT INTO model_versions (version_id, description, deployed_at) VALUES
     ('v1.0-xgb-676', 'XGBoost hybrid model. 67.6% accuracy on 124,800-prop 2025 backtest. Weights locked.', NOW())
 ON CONFLICT (version_id) DO NOTHING;
-
--- ── Idempotent Constraint Applications ───────────────────────
-ALTER TABLE players DROP CONSTRAINT IF EXISTS players_handedness_check;
-ALTER TABLE players ADD CONSTRAINT players_handedness_check CHECK (handedness IN ('R', 'L', 'S'));
-
-ALTER TABLE games DROP CONSTRAINT IF EXISTS games_roof_status_check;
-ALTER TABLE games ADD CONSTRAINT games_roof_status_check CHECK (roof_status IN ('open', 'closed', 'retractable'));
-
-ALTER TABLE games DROP CONSTRAINT IF EXISTS games_status_check;
-ALTER TABLE games ADD CONSTRAINT games_status_check CHECK (status IN ('scheduled', 'in_progress', 'final'));
-
-ALTER TABLE games DROP CONSTRAINT IF EXISTS no_self_play;
-ALTER TABLE games ADD CONSTRAINT no_self_play CHECK (home_team_id != away_team_id);
-
-ALTER TABLE model_versions ALTER COLUMN deployed_at TYPE TIMESTAMPTZ USING deployed_at::timestamptz;
-
--- ── Enforce NOT NULL on existing games tables ────────────────
-ALTER TABLE games ALTER COLUMN home_team_id SET NOT NULL;
-ALTER TABLE games ALTER COLUMN away_team_id SET NOT NULL;
