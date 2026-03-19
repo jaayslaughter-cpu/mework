@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 from services.fatigue_logic import apply_fatigue_adjustments
+from services.usage_vacuums import evaluate_player_context
 
 # Placeholder for future trained model
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "../models")
@@ -17,11 +18,11 @@ def calculate_implied_probability(american_odds: int) -> float:
     else:
         return 100 / (american_odds + 100)
 
-def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, statcast_data: list, fatigue_context: dict = None) -> dict:
+def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, statcast_data: list, fatigue_context: dict = None, vacuum_context: dict = None) -> dict:
     """
     Core ML Evaluation Logic.
     Currently scaffolded to calculate baseline probabilities until the .xgb model is trained.
-    Applies fatigue adjustments when context is provided.
+    Applies fatigue adjustments and usage vacuum boosts when context is provided.
     """
     # 1. Calculate Vegas Implied Probabilities
     implied_over = calculate_implied_probability(over_odds)
@@ -39,15 +40,24 @@ def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, statc
     # 3. Apply Fatigue Adjustments
     if fatigue_context:
         player_type = fatigue_context.get("player_type", "batter")
-        model_projected_over_prob = apply_fatigue_adjustments(
+        adjusted_prob = apply_fatigue_adjustments(
             base_projection=base_model_prob,
             player_type=player_type,
             context=fatigue_context
         )
     else:
-        model_projected_over_prob = base_model_prob
+        adjusted_prob = base_model_prob
     
-    # 4. Calculate the Edge
+    # 4. Apply Usage Vacuum Boost
+    vacuum_multiplier = 1.0
+    if vacuum_context:
+        player_id = vacuum_context.get("player_id", "unknown")
+        vacuum_multiplier = evaluate_player_context(player_id, vacuum_context)
+        adjusted_prob = adjusted_prob * vacuum_multiplier
+    
+    model_projected_over_prob = min(adjusted_prob, 0.95)  # Cap at 95%
+    
+    # 5. Calculate the Edge
     edge_percentage = (model_projected_over_prob - true_vegas_over) * 100
     
     return {
@@ -56,5 +66,7 @@ def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, statc
         "model_projected_over": round(model_projected_over_prob * 100, 2),
         "edge_percentage": round(edge_percentage, 2),
         "is_playable": edge_percentage > 3.0,  # Threshold for a +EV bet
-        "fatigue_adjusted": fatigue_context is not None
+        "fatigue_adjusted": fatigue_context is not None,
+        "vacuum_boost_applied": vacuum_multiplier > 1.0,
+        "vacuum_multiplier": vacuum_multiplier
     }
