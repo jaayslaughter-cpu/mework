@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS games (
     weather_wind_dir VARCHAR(20),
     umpire_id        INT,
     roof_status      VARCHAR(15), -- 'open', 'closed', 'retractable'
-    status           VARCHAR(15)  -- 'scheduled', 'in_progress', 'final'
+    status           VARCHAR(15), -- 'scheduled', 'in_progress', 'final'
+    CONSTRAINT no_self_play CHECK (home_team_id != away_team_id)
 );
 
 CREATE TABLE IF NOT EXISTS model_versions (
