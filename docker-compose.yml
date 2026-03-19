@@ -83,19 +83,6 @@ services:
     networks:
       - propiq_net
 
-  # ── 5. Streamlit Dashboard ─────────────────────────────────
-  dashboard:
-    build: ./dashboard
-    container_name: propiq_dashboard
-    restart: unless-stopped
-    ports:
-      - "8501:8501"
-    depends_on:
-      - hub
-      - engine
-    networks:
-      - propiq_net
-
 volumes:
   postgres_data:
 

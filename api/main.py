@@ -12,10 +12,10 @@ app.include_router(predictions.router)
 
 start_time = time.time()
 
-# Configure CORS to allow the Streamlit dashboard and Node Hub to communicate
+# Configure CORS to allow the Node Hub and other clients to communicate
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://localhost:3000", "http://localhost:3002"],
+    allow_origins=["http://localhost:3000", "http://localhost:3002", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
