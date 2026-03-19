@@ -2,3 +2,6 @@ fastapi==0.110.0
 uvicorn==0.27.1
 sqlalchemy==2.0.28
 asyncpg==0.29.0
+pybaseball==2.2.7
+pandas==2.2.1
+lxml==5.1.0
