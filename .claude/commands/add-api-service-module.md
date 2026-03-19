@@ -10,12 +10,12 @@ Use this workflow when working on **add-api-service-module** in `mework`.
 
 ## Goal
 
-Adds a new analytics or logic module to the API service and integrates it with the main predictor logic.
+Adds a new API service module or feature to the backend, often including analytics engines or new endpoints.
 
 ## Common Files
 
-- `api/services/predictor.py`
 - `api/services/*.py`
+- `api/services/predictor.py`
 
 ## Suggested Sequence
 
@@ -26,9 +26,10 @@ Adds a new analytics or logic module to the API service and integrates it with t
 
 ## Typical Commit Signals
 
-- Create new module file in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
-- Update api/services/predictor.py to import and integrate the new module
-- Add new parameters, context, or flags to the predictor response
+- Create new module in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
+- Update api/services/predictor.py to integrate new logic (import, call, add response fields)
+- If needed, update or create corresponding router in api/routers/
+- Document or update requirements in api/requirements.txt if new dependencies are added
 
 ## Notes
 
