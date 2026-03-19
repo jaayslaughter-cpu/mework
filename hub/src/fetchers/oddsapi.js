@@ -31,8 +31,8 @@ async function getMLBEvents() {
 async function getPlayerProps(eventId, markets = 'pitcher_strikeouts,batter_total_bases,batter_home_runs,batter_hits_runs_rbis') {
   if (!KEY) throw new Error('ODDS_API_KEY is missing.');
 
-  // Cache for 15 seconds (Hot Data)
-  return getOrFetch(`propiq:oddsapi:props:${eventId}:${markets}`, 15, async () => {
+  // Cache for 60 seconds to reduce upstream requests
+  return getOrFetch(`propiq:oddsapi:props:${eventId}:${markets}`, 60, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('oddsapi');
       return axios.get(`${BASE}/events/${eventId}/odds?apiKey=${KEY}&regions=us&markets=${markets}&bookmakers=draftkings,fanduel,underdog&oddsFormat=american`).then(r => r.data);

@@ -13,14 +13,7 @@ const pool = new Pool({
   port: 5432,
 });
 
-let isRunning = false;
-
 async function syncLoop() {
-  if (isRunning) {
-    console.warn('[Sync] Previous sync still running, skipping this tick.');
-    return;
-  }
-  isRunning = true;
   try {
     // 1. Fetch ESPN Live Scores (Keeps cache piping hot for the REST API)
     await espn.getLiveScores().catch(err => console.warn('[Sync] ESPN fetch warning:', err.message));
@@ -37,7 +30,7 @@ async function syncLoop() {
         for (const book of props.bookmakers) {
           for (const market of book.markets) {
             for (const outcome of market.outcomes) {
-              const point = outcome.point || 0.5;
+              const point = outcome.point ?? 0.5;
               const marketId = `${event.id}_${book.key}_${market.key}_${outcome.description || 'base'}_${point}`.replace(/\s+/g, '_').toLowerCase();
               
               const query = `
@@ -70,15 +63,21 @@ async function syncLoop() {
     }
   } catch (error) {
     console.error('[Sync] Critical error in unified loop:', error.message);
-  } finally {
-    isRunning = false;
   }
 }
 
-function startSyncWorker() {
-  console.log('🚀 Starting Unified 15-Second Polling Loop...');
-  syncLoop(); // Run immediately on boot
-  setInterval(syncLoop, 15000); // Run every 15 seconds
+async function startSyncWorker() {
+  console.log('🚀 Starting Unified 60-Second Polling Loop...');
+  
+  async function runLoop() {
+    const start = Date.now();
+    await syncLoop();
+    const elapsed = Date.now() - start;
+    
+    setTimeout(runLoop, Math.max(0, 60000 - elapsed));
+  }
+  
+  runLoop(); // Start first run immediately
 }
 
 module.exports = { startSyncWorker };

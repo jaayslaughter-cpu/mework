@@ -3,9 +3,9 @@
 -- File: 02_projection_market_layer.sql
 -- ============================================================
 
--- ── Live Projections (Hot Table — updated every 15 seconds) ─
+-- ── Live Projections (Hot Table — updated every 60 seconds) ─
 CREATE TABLE IF NOT EXISTS live_projections (
-    market_id            VARCHAR(50) PRIMARY KEY,
+    market_id            VARCHAR(100) PRIMARY KEY,
     player_name          VARCHAR(100) NOT NULL,
     prop_type            VARCHAR(30) NOT NULL,
     line                 FLOAT NOT NULL,
