@@ -2,8 +2,13 @@ import time
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from routers import mlb_data, predictions
 
 app = FastAPI(title="PropIQ Analytics Engine", version="1.0")
+
+# Register routers
+app.include_router(mlb_data.router)
+app.include_router(predictions.router)
 
 start_time = time.time()
 
