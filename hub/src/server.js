@@ -27,6 +27,6 @@ app.listen(PORT, () => {
 
 // Start the background sync worker ONLY if explicitly enabled
 if (process.env.ENABLE_SYNC_WORKER === 'true') {
-  console.log('⚾ Background Sync Worker enabled.');
-  require('./sync');
+  const { startSyncWorker } = require('./sync');
+  startSyncWorker();
 }

@@ -1,28 +1,26 @@
 // hub/src/sync.js
-// Background worker that syncs Odds API data to PostgreSQL every 15 minutes.
+// Unified 15-second polling loop for real-time data sync.
 
 const { Pool } = require('pg');
 const oddsapi = require('./fetchers/oddsapi');
-const cron = require('node-cron');
+const espn = require('./fetchers/espn');
 
 const pool = new Pool({
   user: process.env.POSTGRES_USER,
-  host: 'postgres', // Docker service name
+  host: 'postgres',
   database: process.env.POSTGRES_DB,
   password: process.env.POSTGRES_PASSWORD,
   port: 5432,
 });
 
-async function syncMarkets() {
-  console.log('[Sync] Waking up to check for new sportsbook lines...');
-
+async function syncLoop() {
   try {
-    const events = await oddsapi.getMLBEvents();
+    // 1. Fetch ESPN Live Scores (Keeps cache piping hot for the REST API)
+    await espn.getLiveScores().catch(err => console.warn('[Sync] ESPN fetch warning:', err.message));
 
-    if (!events || events.length === 0) {
-      console.log('[Sync] No MLB events found for today.');
-      return;
-    }
+    // 2. Fetch and UPSERT Odds API lines
+    const events = await oddsapi.getMLBEvents().catch(() => []);
+    if (!events || events.length === 0) return;
 
     for (const event of events) {
       try {
@@ -32,7 +30,6 @@ async function syncMarkets() {
         for (const book of props.bookmakers) {
           for (const market of book.markets) {
             for (const outcome of market.outcomes) {
-              // Stable ID generation for tracking line movement (Over/Under share same row)
               const marketId = `${event.id}_${book.key}_${market.key}_${outcome.description || 'base'}`.replace(/\s+/g, '_').toLowerCase();
               
               const query = `
@@ -49,7 +46,6 @@ async function syncMarkets() {
                   updated_at = NOW();
               `;
               
-              // Note: We assign odds to over/under based on outcome.name
               const odds = outcome.price; 
               const point = outcome.point || 0.5;
               
@@ -62,17 +58,18 @@ async function syncMarkets() {
           }
         }
       } catch (err) {
-        console.error(`[Sync] Failed to sync props for event ${event.id}:`, err.message);
+        console.warn(`[Sync] Failed to sync props for event ${event.id}:`, err.message);
       }
     }
-
-    console.log('[Sync] Successfully synced live player props to PostgreSQL.');
   } catch (error) {
-    console.error('[Sync] Critical error in sync loop:', error.message);
+    console.error('[Sync] Critical error in unified loop:', error.message);
   }
 }
 
-// Run every 15 minutes
-cron.schedule('*/15 * * * *', syncMarkets);
+function startSyncWorker() {
+  console.log('🚀 Starting Unified 15-Second Polling Loop...');
+  syncLoop(); // Run immediately on boot
+  setInterval(syncLoop, 15000); // Run every 15 seconds
+}
 
-module.exports = { syncMarkets };
+module.exports = { startSyncWorker };
