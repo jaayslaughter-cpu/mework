@@ -10,7 +10,7 @@ Use this workflow when working on **add-command-or-workflow-documentation** in `
 
 ## Goal
 
-Adds documentation for a new command or workflow to the system.
+Adds documentation for a new command or workflow to the project.
 
 ## Common Files
 
@@ -25,7 +25,8 @@ Adds documentation for a new command or workflow to the system.
 
 ## Typical Commit Signals
 
-- Create or update a markdown file in .claude/commands/ with the command or workflow documentation.
+- Create or update a markdown documentation file for the command or workflow in .claude/commands/
+- Commit the new or updated documentation file
 
 ## Notes
 
