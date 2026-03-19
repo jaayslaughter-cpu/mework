@@ -10,7 +10,7 @@ Use this workflow when working on **add-command-or-workflow-documentation** in `
 
 ## Goal
 
-Adds documentation for a new command or workflow to the project.
+Adds documentation for a new command or workflow to the system.
 
 ## Common Files
 
