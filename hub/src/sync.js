@@ -33,19 +33,8 @@ async function syncLoop() {
             const outcomesByDesc = {};
             
             for (const outcome of market.outcomes) {
-              const desc = outcome.description || 'base';
-              if (!outcomesByDesc[desc]) {
-                outcomesByDesc[desc] = { overOdds: null, underOdds: null, point: outcome.point || 0.5 };
-              }
-              
-              if (outcome.name === 'Over') outcomesByDesc[desc].overOdds = outcome.price;
-              if (outcome.name === 'Under') outcomesByDesc[desc].underOdds = outcome.price;
-              if (outcome.point) outcomesByDesc[desc].point = outcome.point;
-            }
-
-            // 2. Execute a single UPSERT per market description
-            for (const [desc, data] of Object.entries(outcomesByDesc)) {
-              const marketId = `${event.id}_${book.key}_${market.key}_${desc}`.replace(/\s+/g, '_').toLowerCase();
+              const point = outcome.point ?? 0.5;
+              const marketId = `${event.id}_${book.key}_${market.key}_${outcome.description || 'base'}_${point}`.replace(/\s+/g, '_').toLowerCase();
               
               const query = `
                 INSERT INTO betting_markets (
@@ -60,6 +49,8 @@ async function syncLoop() {
                   under_odds = EXCLUDED.under_odds,
                   updated_at = NOW();
               `;
+              
+              const odds = outcome.price;
               
               await pool.query(query, [
                 marketId, event.id, book.key, market.key, data.point, 
@@ -77,10 +68,18 @@ async function syncLoop() {
   }
 }
 
-function startSyncWorker() {
-  console.log('🚀 Starting Unified 15-Second Polling Loop...');
-  syncLoop(); // Run immediately on boot
-  setInterval(syncLoop, 15000); // Run every 15 seconds
+async function startSyncWorker() {
+  console.log('🚀 Starting Unified 60-Second Polling Loop...');
+  
+  async function runLoop() {
+    const start = Date.now();
+    await syncLoop();
+    const elapsed = Date.now() - start;
+    
+    setTimeout(runLoop, Math.max(0, 60000 - elapsed));
+  }
+  
+  runLoop(); // Start first run immediately
 }
 
 module.exports = { startSyncWorker };

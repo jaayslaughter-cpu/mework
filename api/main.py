@@ -1,7 +1,29 @@
+import time
+from datetime import datetime
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="PropIQ API")
+app = FastAPI(title="PropIQ Analytics Engine", version="1.0")
+
+start_time = time.time()
+
+# Configure CORS to allow the Streamlit dashboard and Node Hub to communicate
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501", "http://localhost:3000", "http://localhost:3002"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "PropIQ ML Engine"}
 
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health_check():
+    return {
+        "status": "healthy",
+        "uptime": int(time.time() - start_time),
+        "timestamp": int(time.time() * 1000)
+    }

@@ -23,12 +23,18 @@ async function checkAndIncrement(source) {
   const reqId = `${now}-${Math.random().toString(36).substr(2, 5)}`;
 
   // Redis Transaction: Remove old requests, add new request, count current window, set TTL
-  const results = await client.multi()
-    .zRemRangeByScore(key, 0, windowStart) // 1. Remove requests older than 60s
-    .zAdd(key, { score: now, value: reqId }) // 2. Add current request
-    .zCard(key) // 3. Get total count in current window
-    .expire(key, 60) // 4. Set TTL so idle keys clean themselves up
-    .exec();
+  let results;
+  try {
+    results = await client.multi()
+      .zRemRangeByScore(key, 0, windowStart) // 1. Remove requests older than 60s
+      .zAdd(key, { score: now, value: reqId }) // 2. Add current request
+      .zCard(key) // 3. Get total count in current window
+      .expire(key, 60) // 4. Set TTL so idle keys clean themselves up
+      .exec();
+  } catch (err) {
+    console.error(`[RateLimit] Redis error in checkAndIncrement for ${source}:`, err);
+    return; // Allow request if Redis fails
+  }
 
   const count = results[2]; // Result of zCard
 

@@ -1,45 +1,56 @@
 // hub/src/routes/slates.js
-// Aggregator endpoint for daily slate data
+// REST API endpoint for daily slate data - serves from DB/cache for speed.
 
 const express = require('express');
 const router = express.Router();
+const { Pool } = require('pg');
 
 const sportsdata = require('../fetchers/sportsdata');
-const oddsapi = require('../fetchers/oddsapi');
 const espn = require('../fetchers/espn');
+
+const pool = new Pool({
+  user: process.env.POSTGRES_USER,
+  host: 'postgres',
+  database: process.env.POSTGRES_DB,
+  password: process.env.POSTGRES_PASSWORD,
+  port: 5432,
+});
 
 router.get('/today', async (req, res) => {
   try {
-    // Ensure timezone consistency (defaulting to current YYYY-MM-DD for West Coast)
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 
-    // Fetch core daily context concurrently
-    const results = await Promise.allSettled([
-      sportsdata.getTodaysGames(today),
-      sportsdata.getStartingLineups(today),
-      sportsdata.getInjuredPlayers(),
-      oddsapi.getMLBEvents(),
-      espn.getLiveScores()
+    // 1. Fetch Context (Served instantly from Redis Cache via our fetchers)
+    const [games, lineups, injuries, scores] = await Promise.all([
+      sportsdata.getTodaysGames(today).catch(() => []),
+      sportsdata.getStartingLineups(today).catch(() => []),
+      sportsdata.getInjuredPlayers().catch(() => []),
+      espn.getLiveScores().catch(() => null)
     ]);
 
-    const response = {
-      date: today,
-      games: results[0].status === 'fulfilled' ? results[0].value : [],
-      lineups: results[1].status === 'fulfilled' ? results[1].value : [],
-      injuries: results[2].status === 'fulfilled' ? results[2].value : [],
-      odds_events: results[3].status === 'fulfilled' ? results[3].value : [],
-      live_scores: results[4].status === 'fulfilled' ? results[4].value : [],
-      fetch_errors: results
-        .filter(r => r.status === 'rejected')
-        .map(r => r.reason?.message || 'Unknown fetch error')
-    };
+    // 2. Fetch Live Markets (Served instantly from PostgreSQL)
+    // We pull markets updated in the last 24 hours to ensure we don't serve stale, days-old lines.
+    const dbRes = await pool.query(`
+      SELECT market_id, game_id, sportsbook, prop_category, line, over_odds, under_odds, updated_at 
+      FROM betting_markets 
+      WHERE updated_at >= NOW() - INTERVAL '24 HOURS'
+    `);
 
-    // Return a 206 Partial Content if there are errors, otherwise 200 OK
-    const statusCode = response.fetch_errors.length > 0 ? 206 : 200;
-    res.status(statusCode).json(response);
+    // 3. Normalize and Return
+    res.json({
+      status: 'success',
+      date: today,
+      slate: {
+        games: games || [],
+        lineups: lineups || [],
+        injuries: injuries || [],
+        live_scores: scores || {}
+      },
+      markets: dbRes.rows
+    });
 
   } catch (error) {
-    console.error('[Slates API] Critical error building daily slate:', error);
+    console.error('[API] Error building daily slate:', error);
     res.status(500).json({ error: 'Failed to aggregate daily slate' });
   }
 });

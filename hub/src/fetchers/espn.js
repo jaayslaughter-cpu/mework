@@ -13,7 +13,7 @@ async function getLiveScores() {
   return getOrFetch(`propiq:espn:scoreboard`, 15, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('espn');
-      return axios.get(ESPN_URL).then(r => r.data);
+      return axios.get(ESPN_URL, { timeout: 5000 }).then(r => r.data);
     });
   });
 }
