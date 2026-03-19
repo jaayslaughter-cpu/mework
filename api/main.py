@@ -11,5 +11,5 @@ def health():
     return {
         "status": "ok",
         "uptime": int(time.time() - start_time),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": int(time.time() * 1000)
     }
