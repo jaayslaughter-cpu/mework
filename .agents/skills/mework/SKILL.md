@@ -27,7 +27,7 @@ Activate this skill when:
 
 ## Commit Conventions
 
-Follow these commit message conventions based on 69 analyzed commits.
+Follow these commit message conventions based on 80 analyzed commits.
 
 ### Commit Style: Conventional Commits
 
@@ -38,7 +38,7 @@ Follow these commit message conventions based on 69 analyzed commits.
 
 ### Message Guidelines
 
-- Average message length: ~59 characters
+- Average message length: ~60 characters
 - Keep first line concise and descriptive
 - Use imperative mood ("Add feature" not "Added feature")
 
@@ -46,7 +46,7 @@ Follow these commit message conventions based on 69 analyzed commits.
 *Commit message example*
 
 ```text
-feat: add mework ECC bundle (.claude/commands/add-api-service-module.md)
+feat: add mework ECC bundle (.claude/commands/add-command-or-workflow-documentation.md)
 ```
 
 *Commit message example*
@@ -148,27 +148,6 @@ try {
 
 These workflows were detected from analyzing commit patterns.
 
-### Database Migration
-
-Database schema changes with migration files
-
-**Frequency**: ~3 times per month
-
-**Steps**:
-1. Create migration file
-2. Update schema definitions
-3. Generate/update types
-
-**Files typically involved**:
-- `migrations/*`
-
-**Example commit sequence**:
-```
-fix: 5 architecture refinements from CI bot review
-feat(api): FastAPI bootstrap with async SQLAlchemy
-fix: 3 architecture fixes - market_id width, Redis fail-fast, timestamp format
-```
-
 ### Feature Development
 
 Standard feature implementation workflow
@@ -185,74 +164,97 @@ Standard feature implementation workflow
 
 **Example commit sequence**:
 ```
-feat(api): FastAPI bootstrap with async SQLAlchemy
-fix: 3 architecture fixes - market_id width, Redis fail-fast, timestamp format
-feat(api): PyBaseball/Statcast integration
+feat(api): Defensive Contrast Engine for batted-ball profile mismatches
+feat(scripts): Enhanced training pipeline with multi-source data
+chore: Remove Streamlit dashboard
 ```
 
 ### Add Command Or Workflow Documentation
 
-Adds or updates workflow documentation or command specs for mework ECC, typically as markdown files describing automated or manual workflows.
+Adds documentation for a new command or workflow to the system.
 
-**Frequency**: ~3 times per month
+**Frequency**: ~4 times per month
 
 **Steps**:
-1. Create or update a markdown file in .claude/commands/ describing the workflow or command.
-2. Commit the file with a message referencing the workflow or command name.
+1. Create or update a markdown file in .claude/commands/ describing the command or workflow.
 
 **Files typically involved**:
-- `.claude/commands/add-api-service-module.md`
-- `.claude/commands/feature-development.md`
-- `.claude/commands/database-migration.md`
+- `.claude/commands/*.md`
 
 **Example commit sequence**:
 ```
-Create or update a markdown file in .claude/commands/ describing the workflow or command.
-Commit the file with a message referencing the workflow or command name.
+Create or update a markdown file in .claude/commands/ describing the command or workflow.
 ```
 
-### Add Or Update Agent Skill Or Config
+### Add Agent Configuration
 
-Adds or updates agent skill definitions, agent configuration files, or skill documentation for mework ECC and Codex agents.
+Adds or updates agent configuration files for the Codex system.
 
-**Frequency**: ~3 times per month
+**Frequency**: ~4 times per month
 
 **Steps**:
-1. Create or update agent config files (.toml, .yaml) or skill documentation (SKILL.md) in the appropriate directory.
-2. Commit the changes with a message referencing the agent or skill.
+1. Create or update a .toml file in .codex/agents/ for the agent.
 
 **Files typically involved**:
-- `.codex/agents/docs-researcher.toml`
-- `.codex/agents/reviewer.toml`
-- `.codex/agents/explorer.toml`
-- `.agents/skills/mework/agents/openai.yaml`
+- `.codex/agents/*.toml`
+
+**Example commit sequence**:
+```
+Create or update a .toml file in .codex/agents/ for the agent.
+```
+
+### Add Skill Documentation
+
+Adds or updates SKILL.md documentation for a skill in both .agents and .claude directories.
+
+**Frequency**: ~4 times per month
+
+**Steps**:
+1. Create or update SKILL.md in .agents/skills/mework/
+2. Create or update SKILL.md in .claude/skills/mework/
+
+**Files typically involved**:
 - `.agents/skills/mework/SKILL.md`
 - `.claude/skills/mework/SKILL.md`
 
 **Example commit sequence**:
 ```
-Create or update agent config files (.toml, .yaml) or skill documentation (SKILL.md) in the appropriate directory.
-Commit the changes with a message referencing the agent or skill.
+Create or update SKILL.md in .agents/skills/mework/
+Create or update SKILL.md in .claude/skills/mework/
 ```
 
-### Add Or Update Ecc Core Config
+### Add Ecc Tools Json
 
-Adds or updates core configuration or identity files for the mework ECC system.
+Adds or updates the ECC tools configuration file.
 
-**Frequency**: ~2 times per month
+**Frequency**: ~4 times per month
 
 **Steps**:
-1. Create or update identity or tool config files in .claude/ (identity.json, ecc-tools.json).
-2. Commit the changes.
+1. Create or update .claude/ecc-tools.json with new tool definitions.
 
 **Files typically involved**:
-- `.claude/identity.json`
 - `.claude/ecc-tools.json`
 
 **Example commit sequence**:
 ```
-Create or update identity or tool config files in .claude/ (identity.json, ecc-tools.json).
-Commit the changes.
+Create or update .claude/ecc-tools.json with new tool definitions.
+```
+
+### Add Identity Json
+
+Adds or updates the identity configuration for Claude.
+
+**Frequency**: ~4 times per month
+
+**Steps**:
+1. Create or update .claude/identity.json.
+
+**Files typically involved**:
+- `.claude/identity.json`
+
+**Example commit sequence**:
+```
+Create or update .claude/identity.json.
 ```
 
 
