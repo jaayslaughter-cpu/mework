@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS teams (
 CREATE TABLE IF NOT EXISTS players (
     player_id   INT PRIMARY KEY,
     name        VARCHAR(100) NOT NULL,
-    handedness  CHAR(1) CHECK (handedness IN ('R', 'L', 'S')),
+    handedness  CHAR(1),
     position    VARCHAR(5)
 );
 
@@ -69,9 +69,8 @@ CREATE TABLE IF NOT EXISTS games (
     weather_wind_mph FLOAT,
     weather_wind_dir VARCHAR(20),
     umpire_id        INT,
-    roof_status      VARCHAR(15) CHECK (roof_status IN ('open', 'closed', 'retractable')),
-    status           VARCHAR(15) CHECK (status IN ('scheduled', 'in_progress', 'final')),
-    CONSTRAINT no_self_play CHECK (home_team_id != away_team_id)
+    roof_status      VARCHAR(15),
+    status           VARCHAR(15)
 );
 
 CREATE TABLE IF NOT EXISTS model_versions (
