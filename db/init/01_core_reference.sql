@@ -16,19 +16,6 @@ CREATE TABLE IF NOT EXISTS players (
     position    VARCHAR(5)
 );
 
-CREATE TABLE IF NOT EXISTS games (
-    game_id          VARCHAR(20) PRIMARY KEY,
-    game_date        DATE NOT NULL,
-    home_team_id     VARCHAR(10) REFERENCES teams(team_id),
-    away_team_id     VARCHAR(10) REFERENCES teams(team_id),
-    park_id          VARCHAR(10),
-    weather_wind_mph FLOAT,
-    weather_wind_dir VARCHAR(20),
-    umpire_id        INT,
-    roof_status      VARCHAR(15), -- 'open', 'closed', 'retractable'
-    status           VARCHAR(15)  -- 'scheduled', 'in_progress', 'final'
-);
-
 CREATE TABLE IF NOT EXISTS park_factors (
     park_id         VARCHAR(10) PRIMARY KEY,
     stadium_name    VARCHAR(100) NOT NULL,
@@ -51,10 +38,23 @@ INSERT INTO park_factors (park_id, stadium_name, xwoba_factor, hr_factor, has_ro
     ('TB',  'Tropicana Field',       98.1,  96.0, TRUE)
 ON CONFLICT (park_id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS games (
+    game_id          VARCHAR(20) PRIMARY KEY,
+    game_date        DATE NOT NULL,
+    home_team_id     VARCHAR(10) REFERENCES teams(team_id),
+    away_team_id     VARCHAR(10) REFERENCES teams(team_id),
+    park_id          VARCHAR(10) REFERENCES park_factors(park_id),
+    weather_wind_mph FLOAT,
+    weather_wind_dir VARCHAR(20),
+    umpire_id        INT,
+    roof_status      VARCHAR(15), -- 'open', 'closed', 'retractable'
+    status           VARCHAR(15)  -- 'scheduled', 'in_progress', 'final'
+);
+
 CREATE TABLE IF NOT EXISTS model_versions (
     version_id   VARCHAR(20) PRIMARY KEY,
     description  TEXT,
-    deployed_at  TIMESTAMP DEFAULT NOW()
+    deployed_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── Seed the locked model version ─────────────────────────

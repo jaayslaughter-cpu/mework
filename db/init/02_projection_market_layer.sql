@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS live_projections (
     lineup_position      INT,      -- 1-9 batting order slot
     pitcher_xwoba_con    FLOAT,    -- Opponent pitcher xwOBA-contact, 14-day rolling
     csw_pct_14d          FLOAT,    -- Called Strike + Whiff %, 14-day rolling
-    last_updated         TIMESTAMP DEFAULT NOW()
+    last_updated         TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── Pitcher Metrics (Updated by pybaseball slow-data job) ───
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS pitcher_metrics (
     velo_95th       FLOAT,    -- 95th percentile fastball velocity
     spin_rate_fb    FLOAT,    -- Fastball spin rate
     ttop_penalty    FLOAT,    -- Times Through Order Penalty coefficient
-    updated_at      TIMESTAMP DEFAULT NOW()
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── Immutable Projection Snapshots (Hindsight-Bias Prevention) ──
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS projections (
     game_id                VARCHAR(20) REFERENCES games(game_id),
     pitcher_id             INT REFERENCES players(player_id),
     model_version          VARCHAR(20) REFERENCES model_versions(version_id),
-    as_of_timestamp        TIMESTAMP NOT NULL,  -- CRITICAL: captured at moment of generation
+    as_of_timestamp        TIMESTAMPTZ NOT NULL,  -- CRITICAL: captured at moment of generation
     -- Model Outputs
     projected_batters_faced FLOAT,
     adjusted_k_rate         FLOAT,
@@ -51,11 +51,11 @@ CREATE TABLE IF NOT EXISTS projections (
 
 -- ── Betting Markets (Sportsbook state captured at a point in time) ──
 CREATE TABLE IF NOT EXISTS betting_markets (
-    market_id       SERIAL PRIMARY KEY,
+    market_id       VARCHAR(50) PRIMARY KEY,
     game_id         VARCHAR(20) REFERENCES games(game_id),
     pitcher_id      INT REFERENCES players(player_id),
     sportsbook      VARCHAR(50) NOT NULL,
-    recorded_at     TIMESTAMP NOT NULL,
+    recorded_at     TIMESTAMPTZ NOT NULL,
     prop_line       FLOAT NOT NULL,
     over_odds       INT NOT NULL,      -- American odds format
     under_odds      INT NOT NULL,
