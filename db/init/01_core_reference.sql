@@ -84,3 +84,18 @@ CREATE TABLE IF NOT EXISTS model_versions (
 INSERT INTO model_versions (version_id, description, deployed_at) VALUES
     ('v1.0-xgb-676', 'XGBoost hybrid model. 67.6% accuracy on 124,800-prop 2025 backtest. Weights locked.', NOW())
 ON CONFLICT (version_id) DO NOTHING;
+
+-- ── Idempotent Constraint Applications ───────────────────────
+ALTER TABLE players DROP CONSTRAINT IF EXISTS players_handedness_check;
+ALTER TABLE players ADD CONSTRAINT players_handedness_check CHECK (handedness IN ('R', 'L', 'S'));
+
+ALTER TABLE games DROP CONSTRAINT IF EXISTS games_roof_status_check;
+ALTER TABLE games ADD CONSTRAINT games_roof_status_check CHECK (roof_status IN ('open', 'closed', 'retractable'));
+
+ALTER TABLE games DROP CONSTRAINT IF EXISTS games_status_check;
+ALTER TABLE games ADD CONSTRAINT games_status_check CHECK (status IN ('scheduled', 'in_progress', 'final'));
+
+ALTER TABLE games DROP CONSTRAINT IF EXISTS no_self_play;
+ALTER TABLE games ADD CONSTRAINT no_self_play CHECK (home_team_id != away_team_id);
+
+ALTER TABLE model_versions ALTER COLUMN deployed_at TYPE TIMESTAMPTZ USING deployed_at::timestamptz;

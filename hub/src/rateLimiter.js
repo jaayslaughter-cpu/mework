@@ -20,13 +20,17 @@ async function checkAndIncrement(source) {
   const key = `propiq:hub:rate_limit:${source}`;
   const limit = RATE_LIMITS[source];
 
-  // Use Redis transaction to ensure INCR and EXPIRE are atomic
-  const results = await client.multi()
-    .incr(key)
-    .expire(key, 60)
-    .exec();
+  const count = await client.incr(key);
 
-  const count = results[0];
+  if (count === 1) {
+    await client.expire(key, 60);
+  } else {
+    // Safeguard: If a previous partial failure left a key without a TTL, fix it.
+    const ttl = await client.ttl(key);
+    if (ttl === -1) {
+      await client.expire(key, 60);
+    }
+  }
 
   if (count > limit) {
     throw new Error(`[RateLimit] ${source} limit reached (${count}/${limit}/min). Skipping request.`);
