@@ -61,3 +61,16 @@ CREATE TABLE IF NOT EXISTS betting_markets (
     under_odds      INT NOT NULL,
     implied_prob_over FLOAT NOT NULL   -- Raw (vigged) implied probability
 );
+
+-- ── Auto-update last_updated trigger for live_projections ──
+CREATE OR REPLACE FUNCTION update_modified_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.last_updated = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_live_projections_modtime
+BEFORE UPDATE ON live_projections
+FOR EACH ROW EXECUTE PROCEDURE update_modified_column();
