@@ -1,6 +1,20 @@
+// hub/src/server.js
+// PropIQ Analytics Fast-Data Hub
+
 const express = require('express');
+const cors = require('cors');
+
 const app = express();
+app.use(cors());
+app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
 
-app.listen(3002, () => console.log('PropIQ Hub listening on :3002'));
+const PORT = process.env.PORT || 3002;
+
+app.listen(PORT, () => {
+  console.log(`⚾ PropIQ Hub listening on :${PORT}`);
+});
