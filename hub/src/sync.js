@@ -44,8 +44,8 @@ async function syncMarkets() {
                 )
                 ON CONFLICT (market_id) DO UPDATE SET 
                   line = EXCLUDED.line,
-                  over_odds = EXCLUDED.over_odds,
-                  under_odds = EXCLUDED.under_odds,
+                  over_odds = COALESCE(EXCLUDED.over_odds, betting_markets.over_odds),
+                  under_odds = COALESCE(EXCLUDED.under_odds, betting_markets.under_odds),
                   updated_at = NOW();
               `;
               
