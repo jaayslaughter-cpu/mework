@@ -133,3 +133,7 @@ ALTER TABLE games DROP CONSTRAINT IF EXISTS no_self_play;
 ALTER TABLE games ADD CONSTRAINT no_self_play CHECK (home_team_id != away_team_id);
 
 ALTER TABLE model_versions ALTER COLUMN deployed_at TYPE TIMESTAMPTZ USING deployed_at::timestamptz;
+
+-- ── Enforce NOT NULL on existing games tables ────────────────
+ALTER TABLE games ALTER COLUMN home_team_id SET NOT NULL;
+ALTER TABLE games ALTER COLUMN away_team_id SET NOT NULL;

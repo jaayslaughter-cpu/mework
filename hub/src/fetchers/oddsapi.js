@@ -20,9 +20,9 @@ async function getMLBEvents() {
   return getOrFetch(`propiq:oddsapi:events:today`, 60, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('oddsapi');
-      const today = new Date().toISOString().slice(0, 10);
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
       return axios.get(`${BASE}/events?apiKey=${KEY}`).then(r => 
-        r.data.filter(e => e.commence_time.startsWith(today))
+        r.data.filter(e => new Date(e.commence_time).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }) === today)
       );
     });
   });
