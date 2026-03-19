@@ -11,12 +11,16 @@ const redisUrl = `redis://${auth}redis:6379`;
 const client = redis.createClient({
   url: redisUrl,
   socket: {
-    connectTimeout: 5000,
-    reconnectStrategy: (retries) => Math.min(retries * 50, 500)
+    connectTimeout: 1000,
+    reconnectStrategy: () => false
   }
 });
 
-client.on('error', (err) => console.error('[Redis] Connection error:', err));
+client.on('error', (err) => {
+  console.error('[Redis] Connection error:', err);
+  // Crash the process on connection failures to trigger container restarts
+  process.exit(1);
+});
 client.on('connect', () => console.log('[Redis] Connected successfully'));
 
 // Connect on module load
