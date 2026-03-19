@@ -10,13 +10,11 @@ Use this workflow when working on **add-command-or-workflow-documentation** in `
 
 ## Goal
 
-Adds or updates workflow documentation or command specs for mework ECC, typically as markdown files describing automated or manual workflows.
+Adds documentation for a new command or workflow to the system.
 
 ## Common Files
 
-- `.claude/commands/add-api-service-module.md`
-- `.claude/commands/feature-development.md`
-- `.claude/commands/database-migration.md`
+- `.claude/commands/*.md`
 
 ## Suggested Sequence
 
@@ -27,8 +25,7 @@ Adds or updates workflow documentation or command specs for mework ECC, typicall
 
 ## Typical Commit Signals
 
-- Create or update a markdown file in .claude/commands/ describing the workflow or command.
-- Commit the file with a message referencing the workflow or command name.
+- Create or update a markdown file in .claude/commands/ describing the command or workflow.
 
 ## Notes
 
