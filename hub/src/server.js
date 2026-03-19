@@ -16,7 +16,7 @@ app.use('/api/slates', slatesRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: Date.now() });
 });
 
 const PORT = process.env.PORT || 3002;
