@@ -1,0 +1,26 @@
+# Environment files (never commit secrets)
+.env
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
