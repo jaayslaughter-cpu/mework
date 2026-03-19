@@ -10,7 +10,7 @@ Use this workflow when working on **add-api-service-module** in `mework`.
 
 ## Goal
 
-Adds a new analytics or ML engine module to the Python FastAPI backend, integrating it into the main prediction pipeline.
+Adds a new analytics or logic module to the API service and integrates it with the main predictor logic.
 
 ## Common Files
 
@@ -26,11 +26,9 @@ Adds a new analytics or ML engine module to the Python FastAPI backend, integrat
 
 ## Typical Commit Signals
 
-- Create new service module in api/services (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
-- Implement core analytics logic in the new service file
+- Create new module file in api/services/ (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
 - Update api/services/predictor.py to import and integrate the new module
-- Add new parameters/context to evaluate_edge or related functions
-- Update API response to include new analytics outputs
+- Add new parameters, context, or flags to the predictor response
 
 ## Notes
 
