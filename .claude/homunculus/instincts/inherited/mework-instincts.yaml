@@ -1,0 +1,331 @@
+# Instincts generated from https://github.com/jaayslaughter-cpu/mework
+# Generated: 2026-03-19T19:55:24.113Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: mework-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, fix, chore
+
+## Evidence
+
+- 33 commits analyzed
+- Detected conventional commit pattern
+- Examples: chore: Remove Streamlit dashboard, feat(scripts): Enhanced training pipeline with multi-source data
+
+---
+id: mework-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Commit Length
+
+## Action
+
+Write moderate-length commit messages (~57 characters)
+
+## Evidence
+
+- Average commit message length: 57 chars
+- Based on 33 commits
+
+---
+id: mework-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: mework-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Export Style
+
+## Action
+
+Prefer mixed exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: mixed
+
+---
+id: mework-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: mework-workflow-database-migration
+trigger: "when modifying the database schema or adding tables"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Database Migration
+
+## Action
+
+Follow the database-migration workflow:
+1. Create migration file
+2. Update schema definitions
+3. Generate/update types
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~8x per month
+- Files: 
+
+---
+id: mework-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~25x per month
+- Files: **/api/**
+
+---
+id: mework-workflow-add-api-service-module
+trigger: "when doing add api service module"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Api Service Module
+
+## Action
+
+Follow the add-api-service-module workflow:
+1. Create new service module in api/services (e.g., fatigue_logic.py, usage_vacuums.py, defensive_contrast.py)
+2. Implement core analytics logic in the new service file
+3. Update api/services/predictor.py to import and integrate the new module
+4. Add new parameters/context to evaluate_edge or related functions
+5. Update API response to include new analytics outputs
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: api/services/predictor.py, api/services/*.py
+
+---
+id: mework-workflow-add-api-endpoint
+trigger: "when doing add api endpoint"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Api Endpoint
+
+## Action
+
+Follow the add-api-endpoint workflow:
+1. Create new router file in api/routers (e.g., predictions.py, mlb_data.py)
+2. Implement endpoint logic using FastAPI and Pydantic models
+3. Update api/main.py to include the new router
+4. Update api/requirements.txt if new dependencies are needed
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: api/main.py, api/routers/*.py, api/requirements.txt
+
+---
+id: mework-workflow-add-db-table-or-migration
+trigger: "when doing add db table or migration"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Db Table Or Migration
+
+## Action
+
+Follow the add-db-table-or-migration workflow:
+1. Create or update SQL migration file in db/init (e.g., 01_core_reference.sql, 02_projection_market_layer.sql, 03_bets_log_views_indexes.sql)
+2. Add CREATE TABLE, CREATE VIEW, CREATE INDEX, or ALTER TABLE statements as needed
+3. Ensure idempotency with DROP CONSTRAINT IF EXISTS or ALTER COLUMN
+4. Reference new/changed tables in application code if required
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: db/init/*.sql
+
+---
+id: mework-workflow-add-hub-fetcher-and-aggregator
+trigger: "when doing add hub fetcher and aggregator"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Hub Fetcher And Aggregator
+
+## Action
+
+Follow the add-hub-fetcher-and-aggregator workflow:
+1. Create new fetcher in hub/src/fetchers (e.g., espn.js, oddsapi.js, sportsdata.js)
+2. Implement caching and rate limiting in the fetcher
+3. Update hub/src/routes/slates.js to include new fetcher in aggregation
+4. Update hub/src/sync.js if background polling is required
+5. Update hub/src/server.js to register new routes or workers
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: hub/src/fetchers/*.js, hub/src/routes/slates.js, hub/src/sync.js
+
+---
+id: mework-workflow-add-ml-training-pipeline
+trigger: "when doing add ml training pipeline"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Ml Training Pipeline
+
+## Action
+
+Follow the add-ml-training-pipeline workflow:
+1. Create or update scripts/train_model.py with new data sources, features, or model logic
+2. Save trained model artifacts to api/models/*.json
+3. Update api/services/predictor.py or related code to use new models if necessary
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: scripts/train_model.py, api/models/*.json
+
+---
+id: mework-workflow-infrastructure-orchestration-update
+trigger: "when doing infrastructure orchestration update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Infrastructure Orchestration Update
+
+## Action
+
+Follow the infrastructure-orchestration-update workflow:
+1. Update docker-compose.yml with new/removed services or environment variables
+2. Update Dockerfiles for services (hub, api, dashboard) as needed
+3. Update .env.example and .gitignore if new env vars are required
+4. Update service ports or network configuration
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: docker-compose.yml, hub/Dockerfile, api/Dockerfile
+
+---
+id: mework-workflow-architecture-fix-and-refinement
+trigger: "when doing architecture fix and refinement"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Architecture Fix And Refinement
+
+## Action
+
+Follow the architecture-fix-and-refinement workflow:
+1. Update SQL schema files for constraint or column fixes
+2. Patch caching, rate limiting, or polling logic in hub/src
+3. Fix API response formats or timestamp handling
+4. Apply security or environment variable handling improvements
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: db/init/*.sql, hub/src/*.js, api/main.py
+
