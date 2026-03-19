@@ -14,7 +14,7 @@ Adds documentation for a new API service module.
 
 ## Common Files
 
-- `.claude/commands/add-api-service-module.md`
+- `.claude/commands/add-api-service-module-documentation.md`
 
 ## Suggested Sequence
 
