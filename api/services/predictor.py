@@ -22,17 +22,17 @@ def _load_model(model_name: str) -> xgb.XGBClassifier | None:
 
     path = os.path.join(MODEL_DIR, f"{model_name}.json")
     if not os.path.exists(path):
-        logger.warning(f"[Predictor] Model file not found: {path}. Using scaffold probability.")
+        logger.warning("[Predictor] Model file not found: %s. Using scaffold probability.", path)
         return None
 
     try:
         model = xgb.XGBClassifier()
         model.load_model(path)
         _models[model_name] = model
-        logger.info(f"[Predictor] Loaded model: {model_name}")
+        logger.info("[Predictor] Loaded model: %s", model_name)
         return model
     except Exception as e:
-        logger.error(f"[Predictor] Failed to load {model_name}: {e}")
+        logger.error("[Predictor] Failed to load %s: %s", model_name, e)
         return None
 
 
@@ -145,7 +145,7 @@ def evaluate_edge(
             base_model_prob = float(model.predict_proba(feature_vec)[0][1])
             model_source = f"xgboost:{model_name}"
         except Exception as e:
-            logger.warning(f"[Predictor] Model inference failed: {e}. Using scaffold.")
+            logger.warning("[Predictor] Model inference failed: %s. Using scaffold.", e)
             base_model_prob = 0.55
             model_source = "scaffold:fallback"
     else:

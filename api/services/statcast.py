@@ -4,7 +4,7 @@ import pandas as pd
 # Enable caching to prevent redundant network calls and rate limiting
 pyb.cache.enable()
 
-def get_player_id(first_name: str, last_name: str) -> int:
+def get_player_id(first_name: str, last_name: str) -> Optional[int]:
     """Lookup the MLBAM ID for a specific player."""
     try:
         df = pyb.playerid_lookup(last_name.lower(), first_name.lower())
