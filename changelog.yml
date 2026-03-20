@@ -1,0 +1,64 @@
+name: Auto Changelog
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update-changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get merge info
+        id: merge_info
+        run: |
+          COMMIT_SHA=$(git rev-parse HEAD)
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          COMMIT_AUTHOR=$(git log -1 --pretty=%an)
+          COMMIT_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '(?<=Merge pull request #)\d+' || echo "")
+          PR_TITLE=$(echo "$COMMIT_MSG" | tail -n 1 | xargs)
+
+          echo "sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
+          echo "date=$COMMIT_DATE" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+
+      - name: Prepend to CHANGELOG.md
+        run: |
+          SHA="${{ steps.merge_info.outputs.sha }}"
+          AUTHOR="${{ steps.merge_info.outputs.author }}"
+          DATE="${{ steps.merge_info.outputs.date }}"
+          PR_NUM="${{ steps.merge_info.outputs.pr_number }}"
+          PR_TITLE="${{ steps.merge_info.outputs.pr_title }}"
+
+          if [ -n "$PR_NUM" ]; then
+            ENTRY="## [${DATE}] PR #${PR_NUM} — ${PR_TITLE}\n\n- **Author:** ${AUTHOR}\n- **Commit:** \`${SHA:0:7}\`\n- **PR:** [#${PR_NUM}](https://github.com/jaayslaughter-cpu/mework/pull/${PR_NUM})\n"
+          else
+            ENTRY="## [${DATE}] ${PR_TITLE}\n\n- **Author:** ${AUTHOR}\n- **Commit:** \`${SHA:0:7}\`\n"
+          fi
+
+          if [ -f CHANGELOG.md ]; then
+            EXISTING=$(cat CHANGELOG.md)
+          else
+            EXISTING="# PropIQ Changelog\n\nAll notable changes to this project will be documented here.\n"
+          fi
+
+          printf "%b\n\n---\n\n%s" "$ENTRY" "$EXISTING" > CHANGELOG.md
+
+      - name: Commit updated changelog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git diff --cached --quiet || git commit -m "chore: auto-update CHANGELOG.md [skip ci]"
+          git push
