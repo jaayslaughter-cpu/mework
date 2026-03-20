@@ -1,8 +1,8 @@
-version: "3.8"
+version: "3.9"
 
 services:
 
-  # ── 1. PostgreSQL 15 Database ──────────────────────────────
+  # ─── 1. PostgreSQL 15 Database ──────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: propiq_postgres
@@ -13,7 +13,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d   # mounts schema SQL files
+      - ./db/init:/docker-entrypoint-initdb.d
     ports:
       - "5432:5432"
     networks:
@@ -24,7 +24,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── 2. Redis 7 Cache ───────────────────────────────────────
+  # ─── 2. Redis 7 Cache ────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: propiq_redis
@@ -40,7 +40,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── 3. Fast-Data Hub (Node.js) ─────────────────────────────
+  # ─── 3. Fast-Data Hub (Node.js) ─────────────────────────────
   hub:
     build: ./hub
     container_name: propiq_hub
@@ -65,8 +65,13 @@ services:
         condition: service_healthy
     networks:
       - propiq_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # ── 4. FastAPI ML Backend (Engine) ──────────────────────────
+  # ─── 4. FastAPI ML Engine ───────────────────────────────────
   engine:
     build: ./api
     container_name: propiq_engine
@@ -78,11 +83,38 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_HOST=postgres
+      - SPORTSBLAZE_API_KEY=${SPORTSBLAZE_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - propiq_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── 5. Next.js Frontend ───────────────────────────────────────
+  frontend:
+    build: ./frontend
+    container_name: propiq_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_HUB_URL=http://localhost:3002
+      - NEXT_PUBLIC_ENGINE_URL=http://localhost:8000
+    depends_on:
+      - hub
+      - engine
+    networks:
+      - propiq_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:
