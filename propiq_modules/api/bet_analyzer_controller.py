@@ -21,6 +21,7 @@ from tasklets.bet_analyzer_tasklet import (
     submit_bet_for_analysis,
     is_spring_training,
     OPENING_DAY,
+    SPRING_TRAINING_WEIGHT,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ app = FastAPI(title="PropIQ Bet Analyzer API", version="2.0")
 
 _redis = redis.Redis(
     host=os.getenv("REDIS_HOST", "redis"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
+    port=int(os.getenv("REDIS_PORT", "6379")),
     decode_responses=True,
 )
 
@@ -51,7 +52,6 @@ class ParlayBetRequest(BaseModel):
     odds: dict = {}
     parlay_odds: str = "+300"
     timestamp: Optional[str] = None
-
 
 # ── POST /analyze/bet ──────────────────────────────────────────────────────
 @app.post("/analyze/bet")
@@ -75,7 +75,7 @@ def analyze_bet(req: SingleBetRequest):
         return {"request_id": rid, "status": "queued", "poll": f"/analyze/result/{rid}"}
 
     # synchronous path
-    result = _tasklet._analyze(payload)
+    result = _tasklet.analyze(payload)
     result["request_id"] = "sync"
     return result
 
@@ -99,7 +99,7 @@ def analyze_parlay(req: ParlayBetRequest):
         "parlay":      True,
         "parlay_odds": req.parlay_odds,
     }
-    result = _tasklet._analyze(payload)
+    result = _tasklet.analyze(payload)
     result["request_id"] = "sync"
     return result
 

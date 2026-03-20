@@ -16,7 +16,6 @@ Tasklet Schedule:
 import os
 import time
 import logging
-import datetime
 import threading
 import schedule
 import uvicorn
@@ -97,9 +96,9 @@ def setup_schedules():
 # ── REST API server (separate thread) ─────────────────────────────────────
 def start_api_server():
     """Run FastAPI on port 8081 (nginx proxies /analyze → 8081)."""
-    port = int(os.getenv("API_PORT", 8081))
+    port = int(os.getenv("API_PORT", "8081"))
     logger.info("Starting Bet Analyzer API on port %d", port)
-    uvicorn.run(analyzer_api, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(analyzer_api, host="127.0.0.1", port=port, log_level="warning")
 
 
 # ── main ───────────────────────────────────────────────────────────────────

@@ -55,11 +55,12 @@ class SpringTrainingSeeder:
     def __init__(self):
         self.r = redis.Redis(
             host=os.getenv("REDIS_HOST", "redis"),
-            port=int(os.getenv("REDIS_PORT", 6379)),
+            port=int(os.getenv("REDIS_PORT", "6379")),
             decode_responses=True,
         )
 
-    def is_spring_training(self) -> bool:
+    @staticmethod
+    def is_spring_training() -> bool:
         return datetime.date.today() < OPENING_DAY
 
     def seed_all(self):
@@ -77,7 +78,7 @@ class SpringTrainingSeeder:
             self._pull_spring_training_stats()
 
         # 4. Write meta
-        meta = {
+        seeded_meta = {
             "seeded_at":       datetime.datetime.utcnow().isoformat(),
             "mode":            "spring_training" if self.is_spring_training() else "regular_season",
             "all_records":     "0-0",
@@ -85,9 +86,9 @@ class SpringTrainingSeeder:
             "opening_day":     str(OPENING_DAY),
             "days_remaining":  max(0, (OPENING_DAY - datetime.date.today()).days),
         }
-        self.r.set("spring_training_meta", json.dumps(meta))
-        logger.info("✅ Seeding complete. Mode=%s", meta["mode"])
-        return meta
+        self.r.set("spring_training_meta", json.dumps(seeded_meta))
+        logger.info("✅ Seeding complete. Mode=%s", seeded_meta["mode"])
+        return seeded_meta
 
     # ── team records ───────────────────────────────────────────────────────
     def _seed_team_records(self):

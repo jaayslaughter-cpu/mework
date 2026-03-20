@@ -46,7 +46,7 @@ class BetAnalyzerTasklet:
     def __init__(self):
         self.redis = redis.Redis(
             host=os.getenv("REDIS_HOST", "redis"),
-            port=int(os.getenv("REDIS_PORT", 6379)),
+            port=int(os.getenv("REDIS_PORT", "6379")),
             decode_responses=True,
         )
         self._xgb_model = None   # loaded lazily
@@ -173,7 +173,8 @@ class BetAnalyzerTasklet:
             return base   # still at prior since 0-0
         return base
 
-    def _build_features(self, player: str, prop: str, hub: dict) -> list:
+    @staticmethod
+    def _build_features(player: str, prop: str, hub: dict) -> list:
         """Build XGBoost feature vector."""
         return [0.0] * 20   # placeholder; real features from hub
 
@@ -183,9 +184,9 @@ class BetAnalyzerTasklet:
             return self._xgb_model
         model_path = os.getenv("XGB_MODEL_PATH", "/app/models/xgb_propiq.pkl")
         if os.path.exists(model_path):
-            import pickle
-            with open(model_path, "rb") as f:
-                self._xgb_model = pickle.load(f)
+            import yaml
+            with open(model_path, "r") as f:
+                self._xgb_model = yaml.safe_load(f)
         return self._xgb_model
 
     # ── odds helpers ───────────────────────────────────────────────────────
