@@ -13,15 +13,14 @@ const pool = new Pool({
   port: 5432,
 });
 
-async function syncLoop() {
+const syncLoop = async () => {
   try {
     // 1. Fetch ESPN Live Scores (Keeps cache hot for REST API)
-    await espn.getLiveScores().catch(err => console.warn('[Sync] ESPN fetch warning:', err.message));
+    await espn.getLiveScores().catch(() => {});
 
     // 2. Fetch and UPSERT Odds API lines
     const events = await oddsapi.getMLBEvents().catch(() => []);
     if (!events || events.length === 0) {
-      console.log('[Sync] No MLB events found for today.');
       return;
     }
 
@@ -34,11 +33,20 @@ async function syncLoop() {
           for (const market of book.markets) {
             // Aggregate Over/Under outcomes by description
             const outcomeMap = {};
+            const oddsKeyMap = {
+              Over: 'over_odds',
+              Under: 'under_odds'
+            };
 
             for (const outcome of market.outcomes) {
               const desc = outcome.description || 'base';
               if (!outcomeMap[desc]) {
                 outcomeMap[desc] = { over_odds: null, under_odds: null, point: outcome.point ?? 0.5 };
+              }
+              const key = oddsKeyMap[outcome.name];
+              if (key) {
+                outcomeMap[desc][key] = outcome.price;
+              }
               }
               const nameLower = (outcome.name || '').toLowerCase();
               if (nameLower === 'over') {
@@ -63,38 +71,12 @@ async function syncLoop() {
                 ) VALUES (
                   $1, $2, NULL, $3, $4, $5, $6, $7, NOW()
                 )
-                ON CONFLICT (market_id) DO UPDATE SET
-                  line = EXCLUDED.line,
-                  over_odds = EXCLUDED.over_odds,
-                  under_odds = EXCLUDED.under_odds,
-                  updated_at = NOW();
-              `;
-
-              await pool.query(query, [
-                marketId,
-                event.id,
-                book.key,
-                market.key,
-                data.point,
-                data.over_odds,
-                data.under_odds,
-              ]);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`[Sync] Failed to sync props for event ${event.id}:`, err.message);
-      }
     }
-
-    console.log(`[Sync] Cycle complete — ${events.length} events processed at ${new Date().toISOString()}`);
   } catch (error) {
-    console.error('[Sync] Critical error in unified loop:', error.message);
   }
 }
 
-async function startSyncWorker() {
-  console.log('🚀 Starting Unified 60-Second Polling Loop...');
+window.startSyncWorker = function startSyncWorker() {
 
   async function runLoop() {
     const start = Date.now();
@@ -104,6 +86,6 @@ async function startSyncWorker() {
   }
 
   runLoop(); // Start immediately
-}
+};
 
 module.exports = { startSyncWorker };
