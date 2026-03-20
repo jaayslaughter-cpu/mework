@@ -71,17 +71,56 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
     },
     spreads: (mkt, bm) => {
       const home = mkt.outcomes.find((o: any) => o.name === event.home_team);
-      const away = mkt.outcomes.find((o: any) => o.name === event.away_team);
+      const away = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.away_team);
+      if (home && away) {
+        return {
+          home: { point: home.point, price: home.price },
+          away: { point: away.point, price: away.price },
+          book: bm.title,
+        };
+      }
+      return null;
+    },
+    totals: (mkt, bm) => {
+      const over = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Over');
+      const under = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Under');
+      if (over && under) {
+        return {
+          over: { total: over.point, price: over.price },
+          under: { total: under.point, price: under.price },
+          book: bm.title,
+        };
+      }
+      return null;
+    },
+  };
+
+  for (const bm of data.bookmakers) {
+    for (const mkt of bm.markets) {
+      const mapKey = keyMap[mkt.key as keyof typeof keyMap];
+      const handler = handlers[mkt.key];
+      if (mapKey && handler) {
+        result[mapKey] = handler(mkt, bm);
+      }
+    }
+  }
+
+  return result;
+}
+      const home = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.home_team);
+      const away = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.away_team);
       if (home && away) {
         return { home: home.price, away: away.price, line: home.point ?? 0, book: bm.title };
       }
+      return null;
     },
     totals: (mkt, bm) => {
-      const over = mkt.outcomes.find((o: any) => o.name === 'Over');
-      const under = mkt.outcomes.find((o: any) => o.name === 'Under');
+      const over = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Over');
+      const under = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Under');
       if (over && under) {
         return { over: over.price, under: under.price, line: over.point ?? 0, book: bm.title };
       }
+      return null;
     },
   };
 

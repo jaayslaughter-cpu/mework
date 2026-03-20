@@ -49,6 +49,10 @@ const App: React.FC = () => {
       setters[view](data);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+  const loadData = async () => {
+    try {
+      // ...previous data fetching logic...
+      setLoading(false);
     } finally {
       setLoading(false);
     }
@@ -63,43 +67,43 @@ const App: React.FC = () => {
 
 export default App;
 
-      setGames(loadedGames);
+    setGames(loadedGames);
 
-      // Try to fetch props for first 3 events
-      const propResults = await Promise.allSettled(
-        events.slice(0, 3).map(e => fetchPlayerProps(e.id))
-      );
-      const gathered: PlayerProp[] = [];
-      for (const r of propResults) {
-        if (r.status === 'fulfilled') gathered.push(...r.value);
-      }
-      setAllProps(gathered);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Unknown error';
-      console.error('Failed to load data:', e);
-      setError(msg);
-    } finally {
-      setLoading(false);
+    // Try to fetch props for first 3 events
+    const propResults = await Promise.allSettled(
+      events.slice(0, 3).map(e => fetchPlayerProps(e.id))
+    );
+    const gathered: PlayerProp[] = [];
+    for (const r of propResults) {
+      if (r.status === 'fulfilled') gathered.push(...r.value);
     }
-  };
+    setAllProps(gathered);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Unknown error';
+    console.error('Failed to load data:', e);
+    setError(msg);
+  } finally {
+    setLoading(false);
+  }
+};
 
-  useEffect(() => {
-    loadData();
-  }, []);
+useEffect(() => {
+  loadData();
+}, []);
 
-  return (
-    <div className="min-h-screen bg-base-100 text-base-content p-4 flex flex-col gap-4 max-w-lg mx-auto">
-      <Header
-        view={view}
-        onViewChange={setView}
-        onRefresh={loadData}
-        loading={loading}
-        eventCount={games.length}
-        propCount={allProps.length}
-      />
+return (
+  <div className="min-h-screen bg-base-100 text-base-content p-4 flex flex-col gap-4 max-w-lg mx-auto">
+    <Header
+      view={view}
+      onViewChange={setView}
+      onRefresh={loadData}
+      loading={loading}
+      eventCount={games.length}
+      propCount={allProps.length}
+    />
 
-      {error && (
-        <div className="alert alert-error">
+    {error && (
+      <div className="alert alert-error">
           <AlertTriangle size={16} />
           <span className="text-sm">{error}</span>
         </div>
