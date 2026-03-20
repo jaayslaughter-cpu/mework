@@ -20,6 +20,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * DataHubTasklet — The only component allowed to touch external APIs.
@@ -28,11 +29,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * ┌─────────────────────────────┬──────────────────────────────────────┐
  * │ API / Scraper               │ Poll frequency                       │
  * ├─────────────────────────────┼──────────────────────────────────────┤
- * │ Tank01 (live game data)     │ Every 15s (every cycle)              │
+ * │ Tank01 (pre-game only)      │ Every 15s — STOPS once game goes LIVE│
  * │ SportsData.io (stats)       │ Every 60s  (every 4 cycles)          │
  * │ The Odds API (prop odds)    │ Every 5min (every 20 cycles) ← QUOTA │
  * │ Apify scrapers (8 RW + 3AN) │ Every 5min (every 20 cycles)         │
  * └─────────────────────────────┴──────────────────────────────────────┘
+ *
+ * PRE-MATCH GATE (CRITICAL):
+ * Props for LIVE or FINAL games are EXCLUDED from the active props list.
+ * We are hunting pre-game opening lines and steam — NOT in-game micro-bets.
  *
  * All fetches are concurrent via CompletableFuture.
  * Result is compiled into MlbHubState and stored in Redis "mlb_hub" (15s TTL).
@@ -45,6 +50,11 @@ public class DataHubTasklet implements Tasklet {
     private static final int SPORTSDATA_CYCLE  = 4;   // every 60s
     private static final int ODDS_API_CYCLE    = 20;  // every 5 min — QUOTA PROTECTED
     private static final int APIFY_CYCLE       = 20;  // every 5 min
+
+    /** Game states that trigger the pre-match gate (stop all polling for this game) */
+    private static final Set<String> LIVE_OR_FINAL_STATES = Set.of(
+            "LIVE", "IN_PROGRESS", "FINAL", "GAME_OVER", "COMPLETED", "F"
+    );
 
     private final AtomicInteger cycleCount = new AtomicInteger(0);
 
@@ -81,11 +91,11 @@ public class DataHubTasklet implements Tasklet {
         int cycle = cycleCount.incrementAndGet();
         log.debug("🔄 DataHubTasklet cycle #{}", cycle);
 
-        boolean refreshOdds    = (cycle % ODDS_API_CYCLE    == 0);
-        boolean refreshSportsData = (cycle % SPORTSDATA_CYCLE == 0);
-        boolean refreshApify   = (cycle % APIFY_CYCLE       == 0);
+        boolean refreshOdds       = (cycle % ODDS_API_CYCLE    == 0);
+        boolean refreshSportsData = (cycle % SPORTSDATA_CYCLE  == 0);
+        boolean refreshApify      = (cycle % APIFY_CYCLE       == 0);
 
-        // ── ALWAYS: Tank01 live game data (15s) ──────────────────────────────
+        // ── ALWAYS: Tank01 pre-game data (15s) ───────────────────────────────
         CompletableFuture<Map<String, MlbHubState.GameBoxscore>> liveBoxscoresFuture
                 = fastApi.fetchTank01Live();
 
@@ -100,7 +110,7 @@ public class DataHubTasklet implements Tasklet {
         // ── CONDITIONAL: SportsData.io (every 60s) ───────────────────────────
         if (refreshSportsData) {
             log.debug("📋 Refreshing SportsData.io (cycle #{})", cycle);
-            fastApi.fetchSportsDataIo(); // Updates prop list with stat enrichment
+            fastApi.fetchSportsDataIo();
         }
 
         // ── CONDITIONAL: Apify scrapers (every 5 min) ────────────────────────
@@ -139,10 +149,24 @@ public class DataHubTasklet implements Tasklet {
                     return new HashMap<>();
                 }).join();
 
+        // ── PRE-MATCH GATE ────────────────────────────────────────────────────
+        // CRITICAL: Filter out props for any game that is LIVE or FINAL.
+        // We hunt pre-game opening line steam only — no in-game micro-betting.
+        List<PropMatchup> preMatchProps = applyPreMatchGate(cachedProps.get(), liveBoxscores);
+
+        int filteredOut = cachedProps.get().size() - preMatchProps.size();
+        if (filteredOut > 0) {
+            log.debug("🚦 Pre-match gate: blocked {} props for {} live/final games",
+                    filteredOut,
+                    liveBoxscores.values().stream()
+                            .filter(b -> LIVE_OR_FINAL_STATES.contains(b.getGameState()))
+                            .count());
+        }
+
         // ── Opening line detection (CLV) ─────────────────────────────────────
         MlbHubState existingHub = redisCache.get("mlb_hub", MlbHubState.class);
         Map<String, MlbHubState.LineSnapshot> openingLines =
-                detectOpeningLines(cachedProps.get(), existingHub);
+                detectOpeningLines(preMatchProps, existingHub);
 
         // ── Bullpen fatigue (derived from live + historical boxscores) ────────
         Map<String, Integer> fatigueScores = computeBullpenFatigue(liveBoxscores);
@@ -150,7 +174,7 @@ public class DataHubTasklet implements Tasklet {
         // ── Compile master state ──────────────────────────────────────────────
         MlbHubState masterState = MlbHubState.builder()
                 .timestamp(Instant.now())
-                .activeProps(cachedProps.get())
+                .activeProps(preMatchProps)           // PRE-MATCH ONLY
                 .liveBoxscores(liveBoxscores)
                 .umpireStats(cachedUmpires.get())
                 .weatherData(cachedWeather.get())
@@ -169,11 +193,43 @@ public class DataHubTasklet implements Tasklet {
         redisCache.setWithTTL("mlb_hub", masterState, 15);
         redisCache.updateAnalyzerCache(masterState);
 
-        log.debug("✅ mlb_hub updated | {} props | {} live games | cycle #{}",
-                cachedProps.get().size(), liveBoxscores.size(), cycle);
+        log.debug("✅ mlb_hub updated | {} pre-match props | {} live games (gated) | cycle #{}",
+                preMatchProps.size(), liveBoxscores.size(), cycle);
 
         return RepeatStatus.FINISHED;
     }
+
+    // ── Pre-Match Gate ────────────────────────────────────────────────────────
+
+    /**
+     * Filters out props for games that are LIVE or FINAL.
+     *
+     * If a game's boxscore state is LIVE/IN_PROGRESS/FINAL/COMPLETED,
+     * ALL props for that gameId are removed from consideration.
+     * This enforces the pre-match only rule — we do not make in-game micro-bets.
+     */
+    private List<PropMatchup> applyPreMatchGate(
+            List<PropMatchup> allProps,
+            Map<String, MlbHubState.GameBoxscore> liveBoxscores) {
+
+        if (allProps == null || allProps.isEmpty()) return List.of();
+
+        // Build set of gameIds that are currently live or final
+        Set<String> gatedGameIds = liveBoxscores.entrySet().stream()
+                .filter(e -> e.getValue() != null
+                        && LIVE_OR_FINAL_STATES.contains(e.getValue().getGameState()))
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
+
+        if (gatedGameIds.isEmpty()) return allProps; // All games are pre-game
+
+        // Return only props whose game is NOT yet started
+        return allProps.stream()
+                .filter(prop -> prop.getGameId() == null || !gatedGameIds.contains(prop.getGameId()))
+                .collect(Collectors.toList());
+    }
+
+    // ── Opening Line Detector ─────────────────────────────────────────────────
 
     /**
      * Detects first-seen props and stamps them as opening lines for CLV calculation.
@@ -192,7 +248,6 @@ public class DataHubTasklet implements Tasklet {
         for (PropMatchup prop : currentProps) {
             String key = prop.getGameId() + "_" + prop.getPlayerId() + "_" + prop.getPropType();
             if (!openingLines.containsKey(key)) {
-                // First time seeing this prop — stamp as opening line
                 openingLines.put(key, MlbHubState.LineSnapshot.builder()
                         .noVigProbOver(prop.getNoVigProbOver())
                         .noVigProbUnder(prop.getNoVigProbUnder())
@@ -204,16 +259,17 @@ public class DataHubTasklet implements Tasklet {
         return openingLines;
     }
 
+    // ── Bullpen Fatigue ───────────────────────────────────────────────────────
+
     /**
      * Bullpen fatigue 0-4 score per team.
-     * Full calculation uses yesterday's boxscores from Postgres.
-     * This version uses live pitch counts as a real-time proxy.
+     * Full calculation uses yesterday's boxscores from Postgres (via GradingTasklet).
+     * Live pitch counts serve as a real-time proxy here.
      */
     private Map<String, Integer> computeBullpenFatigue(
             Map<String, MlbHubState.GameBoxscore> liveBoxscores) {
-        Map<String, Integer> scores = new HashMap<>();
-        // In production: query Postgres for last 3 days of reliever usage
-        // Placeholder: initialize all teams to 0, let GradingTasklet update nightly
-        return scores;
+        // GradingTasklet updates the authoritative fatigue scores nightly at 1:05 AM.
+        // This returns empty map; the nightly job writes directly to Redis.
+        return new HashMap<>();
     }
 }

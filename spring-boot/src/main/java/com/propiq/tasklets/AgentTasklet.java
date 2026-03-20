@@ -115,8 +115,10 @@ public class AgentTasklet implements Tasklet {
                             .withUnitSizing(hedgeAmount)
                             .build();
                     kafkaTemplate.send("bet_queue", hedgeBet);
-                    log.info("🛡️ HEDGE: {} prob degraded to {}%. Hedging {} units.", finalLeg.getPlayer(),
-                            String.format("%.1f", liveProb), String.format("%.2f", hedgeAmount));
+                    log.info("🛡️ HEDGE: {} prob degraded to {}%. Hedging {} units.",
+                            finalLeg.getPlayer(),
+                            String.format("%.1f", liveProb),
+                            String.format("%.2f", hedgeAmount));
                 }
             }
         }
@@ -140,64 +142,76 @@ public class AgentTasklet implements Tasklet {
 
             // ── AGENT 1: EV Hunter (EV > 5%) ─────────────────────────────────
             if (trueEv > evThreshold) {
-                dispatchBet("EV_Hunter", prop, xgbProb, decimalOdds, 1);
+                dispatchBet("EV_Hunter", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 2: Under Machine (FIP < 3.50, xgbProb > 58%, under) ───
             if (prop.isUnder() && xgbProb > 58.0 && pitcherFip < 3.50 && bullpen < 3) {
-                dispatchBet("Under_Machine", prop, xgbProb, decimalOdds, 1);
+                dispatchBet("Under_Machine", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 3: Three-Leg Correlated Parlay ─────────────────────────
             double correlation = xgboostService.checkCorrelation(prop, hub);
             if (correlation > 0.72 && trueEv > 8.0) {
-                dispatchBet("Three_Leg_Correlated", prop, xgbProb, decimalOdds, 3);
+                dispatchBet("Three_Leg_Correlated", prop, xgbProb, noVigProb, decimalOdds, trueEv, 3,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 4: Standard Parlay (game outcome + props, 2-4 legs) ────
             double gameProb = xgboostService.getGameOutcomeProb(prop.getGameId());
             if (trueEv > 3.5 && gameProb > 60.0) {
-                dispatchBet("Standard_Parlay", prop, xgbProb, decimalOdds, 2);
+                dispatchBet("Standard_Parlay", prop, xgbProb, noVigProb, decimalOdds, trueEv, 2,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 5: Live Agent (line movement > 5%, XGBoost disagrees) ─
             double lineMove = hub.getLineMovement(prop.getId());
             if (lineMove > 5.0 && xgbProb > 65.0 && prop.isLive()) {
-                dispatchBet("Live_Agent", prop, xgbProb, decimalOdds, 1);
+                dispatchBet("Live_Agent", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 6: Arb Agent (guaranteed > 1% cross-book) ─────────────
             double arbEdge = noVigCalc.calculateArbEdge(prop.getMarketOdds());
             if (arbEdge > 1.0) {
-                dispatchBet("Arb_Agent", prop, 100.0 - (arbEdge / 2), decimalOdds, 2);
+                dispatchBet("Arb_Agent", prop, 100.0 - (arbEdge / 2), noVigProb, decimalOdds, arbEdge, 2,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 7: Fade Agent (public > 70% → opposite + RLM) ──────────
             boolean isRlm = isReverseLm(hub, prop);
             if (publicPct > maxPublicPct && xgbProb > 55.0 && isRlm) {
-                double fadedEv = trueEv + 2.5; // Synthetic RLM boost
-                dispatchBet("Fade_Agent", prop, xgbProb, decimalOdds, 1);
-                log.info("🔄 FADE: {} public={:.0f}% with RLM detected", prop.getPlayer(), publicPct);
+                dispatchBet("Fade_Agent", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
+                log.info("🔄 FADE: {} public={}% with RLM detected",
+                        prop.getPlayer(), String.format("%.0f", publicPct));
             }
 
             // ── AGENT 8: Umpire Agent (called K% > 22% + FIP < 3.80) ─────────
             if (umpireKPct > minUmpKPct && pitcherFip < minFip
                     && "Strikeouts".equals(prop.getPropType()) && xgbProb > 58.0) {
-                dispatchBet("Umpire_Agent", prop, xgbProb, decimalOdds, 1);
-                log.info("🎯 UMPIRE: Ump K%={:.1f}% | FIP={:.2f} | Firing K over for {}",
-                        umpireKPct, pitcherFip, prop.getPlayer());
+                dispatchBet("Umpire_Agent", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
+                log.info("🎯 UMPIRE: Ump K%={}% | FIP={} | Firing K over for {}",
+                        String.format("%.1f", umpireKPct),
+                        String.format("%.2f", pitcherFip),
+                        prop.getPlayer());
             }
 
             // ── AGENT 9: F5 Agent (first 5 innings unders, FIP < 3.50) ───────
             if (prop.isUnder() && pitcherFip < 3.50 && isF5Prop(prop) && xgbProb > 55.0) {
-                dispatchBet("F5_Agent", prop, xgbProb, decimalOdds, 1);
+                dispatchBet("F5_Agent", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                        pitcherFip, umpireKPct, publicPct, bullpen);
             }
 
             // ── AGENT 10: Live Micro Agent (pitcher > 95 pitches → batter hit over)
             if (prop.isLive() && "Hits".equals(prop.getPropType()) && xgbProb > 55.0) {
                 int pitchCount = hub.getPitcherPitchCount(prop.getOpposingPitcherId());
                 if (pitchCount > 95) {
-                    dispatchBet("Live_Micro_Agent", prop, xgbProb, decimalOdds, 1);
+                    dispatchBet("Live_Micro_Agent", prop, xgbProb, noVigProb, decimalOdds, trueEv, 1,
+                            pitcherFip, umpireKPct, publicPct, bullpen);
                     log.info("🔥 FATIGUE EXPLOIT: {} at {} pitches. Live over on {} Hits.",
                             prop.getOpposingPitcher(), pitchCount, prop.getPlayer());
                 }
@@ -211,34 +225,61 @@ public class AgentTasklet implements Tasklet {
     // ── Dispatch ─────────────────────────────────────────────────────────────
 
     private void dispatchBet(String agentName, PropMatchup prop,
-                              double xgbProb, double decimalOdds, int legs) {
-        double kellyFraction = noVigCalc.calculateQuarterKelly(xgbProb, decimalOdds);
+                              double xgbProb, double noVigProb, double decimalOdds,
+                              double ev, int legs,
+                              double pitcherFip, double umpireKPct,
+                              double publicPct, int bullpen) {
+
+        double kellyFraction   = noVigCalc.calculateQuarterKelly(xgbProb, decimalOdds);
         double agentMultiplier = redisCache.getAgentCapitalWeight(agentName);
-        double finalUnits = kellyFraction * agentMultiplier * 100.0;
+        double finalUnits      = kellyFraction * agentMultiplier * 100.0;
 
         if (finalUnits < 0.1) return; // Ignore sub-threshold plays
+
+        String propKey = prop.getPlayer() + "_" + prop.getPropType()
+                + "_" + (prop.isUnder() ? "UNDER" : "OVER")
+                + "_" + prop.getLine();
 
         Bet bet = new Bet.Builder()
                 .withAgent(agentName)
                 .withPlayer(prop.getPlayer())
+                .withPropKey(propKey)
                 .withPropType(prop.getPropType())
                 .withTargetLine(prop.getLine())
                 .withDirection(prop.isUnder() ? "UNDER" : "OVER")
                 .withOdds(prop.getBestOdds())
+                .withBestOddsBook(prop.getBestOddsBook())
+                .withMarketOdds(prop.getMarketOdds())
                 .withXgboostProb(xgbProb)
+                .withNoVigProb(noVigProb * 100.0)
+                .withEdgePct(ev)
                 .withKellyFraction(kellyFraction)
+                .withKellySizePct(kellyFraction * 100.0)
                 .withUnitSizing(finalUnits)
                 .withRequiredLegs(legs)
                 .withDfsPlatform(prop.getDfsPlatform() != null ? prop.getDfsPlatform() : "PrizePicks")
+                .withPitcherFip(pitcherFip)
+                .withUmpireKPct(umpireKPct)
+                .withPublicBetPct(publicPct)
+                .withBullpenFatigue(bullpen)
+                // 7-point checklist
+                .withChecklistFlag("pitcher", pitcherFip < 3.80)
+                .withChecklistFlag("umpire",  umpireKPct > 22.0)
+                .withChecklistFlag("public",  publicPct < 70.0 || isReverseLm(redisCache.get("mlb_hub", MlbHubState.class), prop))
+                .withChecklistFlag("lineup",  prop.isLineupConfirmed())
+                .withChecklistFlag("bullpen", bullpen < 3)
                 .build();
 
         kafkaTemplate.send("bet_queue", bet);
         redisCache.addPendingBet(bet);
 
-        log.info("🎯 {} | {} {} {} | xgb={:.1f}% | EV={:.1f}% | {:.2f}u × {}x | {}",
+        log.info("🎯 {} | {} {} {} | xgb={}% | EV={}% | {}u × {}x | {}",
                 agentName, prop.getPlayer(), prop.getPropType(), prop.getLine(),
-                xgbProb, noVigCalc.calculateEv(xgbProb, decimalOdds),
-                kellyFraction, agentMultiplier, prop.getDfsPlatform());
+                String.format("%.1f", xgbProb),
+                String.format("%.1f", ev),
+                String.format("%.2f", kellyFraction),
+                agentMultiplier,
+                prop.getDfsPlatform());
     }
 
     // ── Helper methods ────────────────────────────────────────────────────────
@@ -250,7 +291,7 @@ public class AgentTasklet implements Tasklet {
     }
 
     private boolean isReverseLm(MlbHubState hub, PropMatchup prop) {
-        if (hub.getPublicBettingData() == null) return false;
+        if (hub == null || hub.getPublicBettingData() == null) return false;
         MlbHubState.PublicBettingData pd = hub.getPublicBettingData().get(prop.getTeam());
         if (pd == null) return false;
         // Reverse Line Movement: public > 70% but money < 50% = sharp on opposite
@@ -258,7 +299,6 @@ public class AgentTasklet implements Tasklet {
     }
 
     private boolean isF5Prop(PropMatchup prop) {
-        // F5 props are tagged in the prop type or description
         return prop.getPropType() != null && prop.getPropType().toLowerCase().contains("f5");
     }
 }
