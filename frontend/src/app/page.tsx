@@ -10,6 +10,14 @@ interface PropCard {
   propType: string
   line: number
   overOdds: number
+interface PropCard {
+  id: string
+  player: string
+  team: string
+  opponent: string
+  propType: string
+  line: number
+  overOdds: number
   underOdds: number
   modelOver: number
   vegasOver: number
@@ -30,40 +38,54 @@ const MOCK_PROPS: PropCard[] = [
 const confidenceColor = { HIGH: '#10b981', MEDIUM: '#f59e0b', LOW: '#6b7280' }
 const confidenceBg = { HIGH: 'bg-emerald-500/20 text-emerald-400', MEDIUM: 'bg-amber-500/20 text-amber-400', LOW: 'bg-zinc-700 text-zinc-400' }
 
+function CardHeader({ prop }: { prop: PropCard }) {
+  return (
+    <div className="flex items-start justify-between mb-4">
+      <div>
+        <p className="text-xs font-semibold text-zinc-400 uppercase tracking-widest mb-1">{prop.propType}</p>
+        <h3 className="text-white font-bold text-lg leading-tight">{prop.player}</h3>
+        <p className="text-zinc-500 text-sm">{prop.team} vs {prop.opponent}</p>
+      </div>
+      <div className="flex flex-col items-end gap-2">
+        <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${confidenceBg[prop.confidence]}`}>{prop.confidence}</span>
+        {prop.isPlayable && (
+          <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center gap-1">
+            <Zap size={10} /> +EV
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function CardLineRecommendation({ prop }: { prop: PropCard }) {
+  const isOver = prop.recommendation === 'OVER'
+  return (
+    <div className="flex items-center justify-between mb-4">
+      <div className="text-center">
+        <p className="text-zinc-500 text-xs mb-1">Line</p>
+        <p className="text-white font-bold text-xl">{prop.line}</p>
+      </div>
+      <div className={`flex items-center gap-1 px-4 py-2 rounded-lg font-bold text-lg ${isOver ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+        {isOver ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+      </div>
+    </div>
+  )
+}
+
 function PropCardComponent({ prop }: { prop: PropCard }) {
   const isOver = prop.recommendation === 'OVER'
   const confColor = confidenceColor[prop.confidence]
-  const barWidth = Math.min(Math.abs(prop.edgePct) * 5, 100)
 
   return (
     <div className={`rounded-xl border p-5 transition-all duration-200 hover:scale-[1.01] ${prop.isPlayable ? 'border-emerald-500/30 bg-zinc-900/80 shadow-lg shadow-emerald-500/5' : 'border-zinc-800 bg-zinc-900/40 opacity-70'}`}>
-      <div className="flex items-start justify-between mb-4">
-        <div>
-          <p className="text-xs font-semibold text-zinc-400 uppercase tracking-widest mb-1">{prop.propType}</p>
-          <h3 className="text-white font-bold text-lg leading-tight">{prop.player}</h3>
-          <p className="text-zinc-500 text-sm">{prop.team} vs {prop.opponent}</p>
-        </div>
-        <div className="flex flex-col items-end gap-2">
-          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${confidenceBg[prop.confidence]}`}>
-            {prop.confidence}
-          </span>
-          {prop.isPlayable && (
-            <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center gap-1">
-              <Zap size={10} /> +EV
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between mb-4">
-        <div className="text-center">
-          <p className="text-zinc-500 text-xs mb-1">Line</p>
-          <p className="text-white font-bold text-xl">{prop.line}</p>
-        </div>
-        <div className={`flex items-center gap-1 px-4 py-2 rounded-lg font-bold text-lg ${isOver ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
-          {isOver ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+      <CardHeader prop={prop} />
+      <CardLineRecommendation prop={prop} />
+    </div>
+  )
+}
           {prop.recommendation}
-          <span className="text-sm ml-1">{isOver ? prop.overOdds > 0 ? '+' + prop.overOdds : prop.overOdds : prop.underOdds > 0 ? '+' + prop.underOdds : prop.underOdds}</span>
+          <span className="text-sm ml-1">{isOver ? prop.overOdds > 0 ? `+${prop.overOdds}` : prop.overOdds : prop.underOdds > 0 ? `+${prop.underOdds}` : prop.underOdds}</span>
         </div>
         <div className="text-center">
           <p className="text-zinc-500 text-xs mb-1">Edge</p>
@@ -83,6 +105,31 @@ function PropCardComponent({ prop }: { prop: PropCard }) {
         </div>
       </div>
     </div>
+  )
+}
+
+function Header({ refreshing, onRefresh }) {
+  return (
+    <header className="border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md sticky top-0 z-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center">
+            <TrendingUp size={16} className="text-black" />
+          </div>
+          <span className="font-bold text-lg tracking-tight">PropIQ</span>
+          <span className="text-xs text-zinc-500 border border-zinc-700 rounded px-1.5 py-0.5">v2.0</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1.5 text-xs text-emerald-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            Live
+          </div>
+          <button onClick={onRefresh} className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 transition-colors">
+            <RefreshCw size={14} className={refreshing ? 'animate-spin text-emerald-400' : 'text-zinc-400'} />
+          </button>
+        </div>
+      </div>
+    </header>
   )
 }
 
@@ -109,26 +156,7 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-zinc-950 text-white">
       {/* Header */}
-      <header className="border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center">
-              <TrendingUp size={16} className="text-black" />
-            </div>
-            <span className="font-bold text-lg tracking-tight">PropIQ</span>
-            <span className="text-xs text-zinc-500 border border-zinc-700 rounded px-1.5 py-0.5">v2.0</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              Live
-            </div>
-            <button onClick={handleRefresh} className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 transition-colors">
-              <RefreshCw size={14} className={refreshing ? 'animate-spin text-emerald-400' : 'text-zinc-400'} />
-            </button>
-          </div>
-        </div>
-      </header>
+      <Header refreshing={refreshing} onRefresh={handleRefresh} />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
         {/* Stats Bar */}
