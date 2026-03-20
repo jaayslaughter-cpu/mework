@@ -27,7 +27,7 @@ const MARKET_LABELS: Record<string, string> = {
   batter_walks: 'Walks',
 };
 
-async function curlJson<T>(url: string): Promise<T> {
+export async function curlJson<T>(url: string): Promise<T> {
   const res = await window.tasklet.runCommand(
     `curl -s "${url}"`,
     30
@@ -40,7 +40,7 @@ async function curlJson<T>(url: string): Promise<T> {
   }
 }
 
-export async function fetchEvents(): Promise<OddsEvent[]> {
+export function fetchEvents(): Promise<OddsEvent[]> {
   return curlJson<OddsEvent[]>(`${BASE}/events?apiKey=${API_KEY}`);
 }
 
@@ -49,37 +49,58 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
     `${BASE}/events/${event.id}/odds?apiKey=${API_KEY}&regions=us&markets=h2h,spreads,totals`
   );
 
-  let moneyline: GameOdds['moneyline'] = null;
-  let spread: GameOdds['spread'] = null;
-  let total: GameOdds['total'] = null;
+  const result: {
+    moneyline: GameOdds['moneyline'];
+    spread: GameOdds['spread'];
+    total: GameOdds['total'];
+  } = { moneyline: null, spread: null, total: null };
+
+  const keyMap = {
+    h2h: 'moneyline',
+    spreads: 'spread',
+    totals: 'total',
+  } as const;
+
+  const handlers: Record<string, (mkt: any, bm: any) => any> = {
+    h2h: (mkt, bm) => {
+      const home = mkt.outcomes.find((o: any) => o.name === event.home_team);
+      const away = mkt.outcomes.find((o: any) => o.name === event.away_team);
+      if (home && away) {
+        return { home: home.price, away: away.price, book: bm.title };
+      }
+    },
+    spreads: (mkt, bm) => {
+      const home = mkt.outcomes.find((o: any) => o.name === event.home_team);
+      const away = mkt.outcomes.find((o: any) => o.name === event.away_team);
+      if (home && away) {
+        return { home: home.price, away: away.price, line: home.point ?? 0, book: bm.title };
+      }
+    },
+    totals: (mkt, bm) => {
+      const over = mkt.outcomes.find((o: any) => o.name === 'Over');
+      const under = mkt.outcomes.find((o: any) => o.name === 'Under');
+      if (over && under) {
+        return { over: over.price, under: under.price, line: over.point ?? 0, book: bm.title };
+      }
+    },
+  };
 
   for (const bm of data.bookmakers || []) {
     for (const mkt of bm.markets) {
-      if (mkt.key === 'h2h' && !moneyline) {
-        const home = mkt.outcomes.find(o => o.name === event.home_team);
-        const away = mkt.outcomes.find(o => o.name === event.away_team);
-        if (home && away) {
-          moneyline = { home: home.price, away: away.price, book: bm.title };
-        }
-      }
-      if (mkt.key === 'spreads' && !spread) {
-        const home = mkt.outcomes.find(o => o.name === event.home_team);
-        const away = mkt.outcomes.find(o => o.name === event.away_team);
-        if (home && away) {
-          spread = { home: home.price, away: away.price, line: home.point ?? 0, book: bm.title };
-        }
-      }
-      if (mkt.key === 'totals' && !total) {
-        const over = mkt.outcomes.find(o => o.name === 'Over');
-        const under = mkt.outcomes.find(o => o.name === 'Under');
-        if (over && under) {
-          total = { over: over.price, under: under.price, line: over.point ?? 0, book: bm.title };
+      const prop = keyMap[mkt.key];
+      if (prop && result[prop] === null) {
+        const value = handlers[mkt.key]?.(mkt, bm);
+        if (value) {
+          result[prop] = value;
         }
       }
     }
+    if (result.moneyline && result.spread && result.total) {
+      break;
+    }
   }
 
-  return { event, moneyline, spread, total, props: [] };
+  return { event, moneyline: result.moneyline, spread: result.spread, total: result.total, props: [] };
 }
 
 export async function fetchPlayerProps(eventId: string): Promise<PlayerProp[]> {
@@ -89,6 +110,11 @@ export async function fetchPlayerProps(eventId: string): Promise<PlayerProp[]> {
   );
 
   const props: PlayerProp[] = [];
+  const outcomeMapping: Record<string, { priceKey: 'over' | 'under'; pointKey?: 'point' }> = {
+    Over: { priceKey: 'over', pointKey: 'point' },
+    Under: { priceKey: 'under' },
+  };
+
   for (const bm of data.bookmakers || []) {
     for (const mkt of bm.markets) {
       const label = MARKET_LABELS[mkt.key] || mkt.key;
@@ -96,10 +122,15 @@ export async function fetchPlayerProps(eventId: string): Promise<PlayerProp[]> {
       const playerMap = new Map<string, { over?: number; under?: number; point?: number }>();
       for (const o of mkt.outcomes) {
         const player = o.description || 'Unknown';
-        if (!playerMap.has(player)) playerMap.set(player, {});
-        const entry = playerMap.get(player)!;
-        if (o.name === 'Over') { entry.over = o.price; entry.point = o.point; }
-        if (o.name === 'Under') { entry.under = o.price; }
+        const entry = playerMap.get(player) || {};
+        playerMap.set(player, entry);
+        const mapping = outcomeMapping[o.name];
+        if (mapping) {
+          entry[mapping.priceKey] = o.price;
+          if (mapping.pointKey) {
+            entry.point = o.point;
+          }
+        }
       }
       for (const [player, data] of playerMap) {
         if (data.over != null && data.under != null && data.point != null) {
@@ -121,14 +152,14 @@ export async function fetchPlayerProps(eventId: string): Promise<PlayerProp[]> {
 
 export function americanOdds(decimal: number): string {
   if (decimal >= 2) {
-    return '+' + Math.round((decimal - 1) * 100);
+    return `+${Math.round((decimal - 1) * 100)}`;
   }
-  return '-' + Math.round(100 / (decimal - 1));
+  return `-${Math.round(100 / (decimal - 1))}`;
 }
 
 export function formatTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleString('en-US', {
+  const date = new Date(iso);
+  return date.toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',

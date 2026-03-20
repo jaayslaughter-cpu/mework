@@ -18,27 +18,50 @@ const App: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const events = await fetchEvents();
-      if (!Array.isArray(events)) {
-        throw new Error('Unexpected API response');
-      }
+      const loaders: Record<ViewMode, () => Promise<any[]>> = {
+        games: async () => {
+          const events = await fetchEvents();
+          if (!Array.isArray(events)) throw new Error('Unexpected API response');
+          const results = await Promise.allSettled(
+            events.map(e => fetchGameOdds(e))
+          );
+          const loaded: GameOdds[] = results
+            .filter((r): r is PromiseFulfilledResult<GameOdds> => r.status === 'fulfilled')
+            .map(r => r.value)
+            .sort(
+              (a, b) =>
+                new Date(a.event.commence_time).getTime() -
+                new Date(b.event.commence_time).getTime()
+            );
+          return loaded;
+        },
+        props: async () => {
+          const props = await fetchPlayerProps();
+          if (!Array.isArray(props)) throw new Error('Unexpected API response');
+          return props;
+        }
+      };
+      const data = await loaders[view]();
+      const setters: Record<ViewMode, (data: any[]) => void> = {
+        games: setGames,
+        props: setAllProps
+      };
+      setters[view](data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
 
-      // Fetch game odds for all events in parallel
-      const gameResults = await Promise.allSettled(
-        events.map(e => fetchGameOdds(e))
-      );
+  useEffect(() => {
+    loadData();
+  }, [view]);
 
-      const loadedGames: GameOdds[] = [];
-      for (const r of gameResults) {
-        if (r.status === 'fulfilled') loadedGames.push(r.value);
-      }
+  // ...rest of component rendering logic
+};
 
-      // Sort by game time
-      loadedGames.sort(
-        (a, b) =>
-          new Date(a.event.commence_time).getTime() -
-          new Date(b.event.commence_time).getTime()
-      );
+export default App;
 
       setGames(loadedGames);
 
@@ -129,4 +152,8 @@ const App: React.FC = () => {
   );
 };
 
-createRoot(document.getElementById('root')!).render(<App />);
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error('Failed to find root element');
+}
+createRoot(rootElement).render(<App />);

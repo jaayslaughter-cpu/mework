@@ -7,6 +7,37 @@ import { PropCard } from './PropCard';
 interface GameCardProps {
   game: GameOdds;
 }
+const TeamRow: React.FC<{ event: GameCardProps['game']['event'] }> = ({ event }) => (
+  <div className="flex items-center justify-between">
+    <div className="flex flex-col gap-1">
+      <span className="font-semibold text-sm">{event.away_team}</span>
+      <span className="text-base-content/50 text-xs">@</span>
+      <span className="font-semibold text-sm">{event.home_team}</span>
+    </div>
+    <div className="flex items-center gap-1 text-base-content/50 text-xs">
+      <Clock size={12} />
+      {formatTime(event.commence_time)}
+    </div>
+  </div>
+);
+
+const MoneylineOdds: React.FC<{ moneyline: GameCardProps['game']['moneyline'] }> = ({ moneyline }) => (
+  <div className="flex flex-col items-center bg-base-300 rounded-lg p-2">
+    <span className="text-[10px] uppercase tracking-wider text-base-content/40 mb-1">ML</span>
+    {moneyline ? (
+      <>
+        <span className={`text-sm font-mono font-bold ${moneyline.away < moneyline.home ? 'text-success' : 'text-base-content'}`}>
+          {americanOdds(moneyline.away)}
+        </span>
+        <span className={`text-sm font-mono font-bold ${moneyline.home < moneyline.away ? 'text-success' : 'text-base-content'}`}>
+          {americanOdds(moneyline.home)}
+        </span>
+      </>
+    ) : (
+      <span className="text-xs">N/A</span>
+    )}
+  </div>
+);
 
 export const GameCard: React.FC<GameCardProps> = ({ game }) => {
   const [expanded, setExpanded] = useState(false);
@@ -35,29 +66,12 @@ export const GameCard: React.FC<GameCardProps> = ({ game }) => {
     <div className="card bg-base-200 shadow-md">
       <div className="card-body p-4 gap-3">
         {/* Teams row */}
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col gap-1">
-            <span className="font-semibold text-sm">{event.away_team}</span>
-            <span className="text-base-content/50 text-xs">@</span>
-            <span className="font-semibold text-sm">{event.home_team}</span>
-          </div>
-          <div className="flex items-center gap-1 text-base-content/50 text-xs">
-            <Clock size={12} />
-            {formatTime(event.commence_time)}
-          </div>
-        </div>
+        <TeamRow event={event} />
 
         {/* Odds grid */}
         <div className="grid grid-cols-3 gap-2">
           {/* Moneyline */}
-          <div className="flex flex-col items-center bg-base-300 rounded-lg p-2">
-            <span className="text-[10px] uppercase tracking-wider text-base-content/40 mb-1">ML</span>
-            {moneyline ? (
-              <>
-                <span className={`text-sm font-mono font-bold ${moneyline.away < moneyline.home ? 'text-success' : 'text-base-content'}`}>
-                  {americanOdds(moneyline.away)}
-                </span>
-                <span className={`text-sm font-mono font-bold ${moneyline.home < moneyline.away ? 'text-success' : 'text-base-content'}`}>
+          <MoneylineOdds moneyline={moneyline} />
                   {americanOdds(moneyline.home)}
                 </span>
               </>
