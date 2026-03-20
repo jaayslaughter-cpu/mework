@@ -1,11 +1,10 @@
 {
   "name": "propiq-hub",
   "version": "1.0.0",
-  "description": "PropIQ Analytics Fast-Data Hub - JSON API polling and aggregation service",
+  "description": "PropIQ Analytics Fast-Data Hub",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "DEBUG=true node src/server.js"
+    "start": "node src/server.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
