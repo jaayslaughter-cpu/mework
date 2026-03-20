@@ -64,7 +64,12 @@ class PropIQLogger:
         self._handlers: List[Callable] = []   # alert callbacks
 
     def _write(self, filepath: Path, record: Dict):
-        with open(filepath, "a") as f:
+        allowed_files = {"error.log", "warning.log"}
+        filename = filepath.name
+        if filename not in allowed_files:
+            raise ValueError(f"Invalid file name: {filename}")
+        safe_path = Path("/var/log/prop_iq") / filename
+        with open(safe_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
     def log_error(
