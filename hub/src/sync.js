@@ -50,8 +50,8 @@ async function syncLoop() {
               `;
               
               await pool.query(query, [
-                marketId, event.id, book.key, market.key, data.point, 
-                data.overOdds, data.underOdds
+                marketId, event.id, book.key, market.key, point, 
+                outcome.overOdds, outcome.underOdds
               ]);
             }
           }
