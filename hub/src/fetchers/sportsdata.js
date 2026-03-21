@@ -46,8 +46,7 @@ async function getGameOdds(date) {
   });
 }
 
-async function getStartingLineups(date) {
-async function getStartingLineups(date) {
+const getStartingLineups = async (date) => {
   if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
   return getOrFetch(`propiq:sportsdata:lineups:${date}`, 300, async () => {
     return withBackoff(async () => {
