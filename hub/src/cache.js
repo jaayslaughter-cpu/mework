@@ -4,11 +4,6 @@
 
 const redis = require('redis');
 
-const client = redis.createClient({
-  url: `redis://:${process.env.REDIS_PASSWORD}@redis:6379`
-});
-
-client.on('error', (err) => console.error('[Redis] Connection error:', err));
 // Conditionally format Redis URL to avoid passing "undefined" as password
 const auth = process.env.REDIS_PASSWORD ? `:${encodeURIComponent(process.env.REDIS_PASSWORD)}@` : '';
 const redisUrl = `redis://${auth}redis:6379`;
