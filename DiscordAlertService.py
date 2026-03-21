@@ -176,7 +176,6 @@ class DiscordAlertService:
         sign   = "+" if total_profit >= 0 else ""
         colour = _COLOUR_GREEN if total_profit >= 0 else _COLOUR_RED
 
-        # Build line-by-line description (max ~3 000 chars Discord allows)
         lines: list[str] = []
         for r in results:
             emoji    = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(r.get("status", ""), "❓")
@@ -191,7 +190,6 @@ class DiscordAlertService:
             )
 
         description = "\n".join(lines) or "_No graded bets._"
-        # Truncate if too long
         if len(description) > 3_000:
             description = description[:2_950] + "\n…(truncated)"
 
@@ -211,11 +209,10 @@ class DiscordAlertService:
         logger.info("[Discord] Daily recap sent — %s  %s%+.2fu  %d-%d-%d",
                     date_str, sign, total_profit, wins, losses, pushes)
 
-
     def send_parlay_alert(self, parlay: dict) -> None:
         """
         Send a formatted Discord embed for a DFS parlay slip.
-        Called by AgentTasklet when The Correlated Parlay Agent builds a valid slip.
+        Called by AgentTasklet when an agent builds a valid slip.
 
         Embed shows:
           - Agent name as title
@@ -260,8 +257,7 @@ class DiscordAlertService:
             "embeds": [{
                 "title": f"🐶 {agent_name} — {leg_count}-Leg Underdog Slip",
                 "description": (
-                    "Sharp consensus confirms mispricing vs Underdog lines.
-"
+                    "Sharp consensus confirms mispricing vs Underdog lines.\n"
                     "**Open Underdog Fantasy to enter this slip.**"
                 ),
                 "color": _COLOUR_BLUE,
