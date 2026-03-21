@@ -43,8 +43,7 @@ class ThreeLeg(BaseAgent):
 
     def analyze(self, hub_data: dict) -> list[BetSlip]:
         props: list[dict] = hub_data.get("player_props", [])
-        predictions: dict = hub_data.get("model_predictions", {})
-        games_today: list[dict] = hub_data.get("games_today", [])
+        predictions: dict = hub_data.get("model_predictions", [])
 
         # Group props by game_id
         by_game: dict[str, list[dict]] = {}

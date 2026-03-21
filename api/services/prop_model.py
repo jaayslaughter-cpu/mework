@@ -225,9 +225,6 @@ class CalibrationLayer:
     def _load_calibration(self):
         """Load saved calibration from DB."""
         try:
-            rows = self.store.conn.execute(
-                "SELECT * FROM calibration_store"
-            ).fetchall()
             # Pre-load corrections from error_patterns
             patterns = self.store.conn.execute(
                 "SELECT player, prop_type, correction FROM error_patterns WHERE resolved=0"
