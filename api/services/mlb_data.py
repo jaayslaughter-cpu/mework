@@ -133,7 +133,7 @@ class MLBStatsClient:
         results = {"home": [], "away": []}
         for side in ["home", "away"]:
             players = boxscore.get("teams", {}).get(side, {}).get("players", {})
-            for pid, pdata in players.items():
+            for _, pdata in players.items():
                 batting = pdata.get("stats", {}).get("batting", {})
                 pitching = pdata.get("stats", {}).get("pitching", {})
                 if batting or pitching:
@@ -437,8 +437,6 @@ class MLBDataAggregator:
         if not log:
             return {"pitcher": pitcher_name, "player_id": player_id}
 
-        import pandas as pd
-        df = pd.DataFrame(log)
         # For pitchers the stats come back differently — use season totals
         stats_data = self.mlb.get_player_stats(player_id, stat_type="season")
         stats = {}
