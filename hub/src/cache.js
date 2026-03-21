@@ -70,7 +70,7 @@ const getOrFetch = async (key, ttl, fetchFn) => {
         if (cached) {
           return JSON.parse(cached);
         }
-      } catch (e) {
+      } catch {
         // Ignore cache read error, proceed with fetch
       }
 
