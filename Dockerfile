@@ -4,9 +4,9 @@ WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    git \
+    build-essential=13.1 \
+    curl=8.2.1-3 \
+    git=1:2.39.2-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps
