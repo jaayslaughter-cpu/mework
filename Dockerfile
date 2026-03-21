@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python deps
 COPY requirements_army.txt .
-RUN pip install --no-cache-dir -r requirements_army.txt
+RUN SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True pip install --no-cache-dir -r requirements_army.txt
 
 # Copy app
 COPY . .
