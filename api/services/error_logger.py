@@ -227,7 +227,7 @@ class SelfCorrectionEngine:
                     "correction": corrections[(player, prop_type)],
                     "samples": len(recs),
                 })
-                self.logger._fire_alert(AlertType.SYSTEMATIC_BIAS, msg, {
+                self.logger.fire_alert(AlertType.SYSTEMATIC_BIAS, msg, {
                     "player": player, "prop_type": prop_type,
                     "mean_error": mean_error, "n": len(recs),
                 })
@@ -242,7 +242,7 @@ class SelfCorrectionEngine:
                     "accuracy": round(accuracy, 4),
                     "samples": len(recs),
                 })
-                self.logger._fire_alert(AlertType.LOW_ACCURACY, msg, {
+                self.logger.fire_alert(AlertType.LOW_ACCURACY, msg, {
                     "accuracy": accuracy, "n": len(recs),
                 })
 
@@ -255,7 +255,7 @@ class SelfCorrectionEngine:
                     "avg_edge": round(avg_edge, 4),
                     "samples": len(recs),
                 })
-                self.logger._fire_alert(AlertType.EDGE_DECAY, msg, {"avg_edge": avg_edge})
+                self.logger.fire_alert(AlertType.EDGE_DECAY, msg, {"avg_edge": avg_edge})
 
         return {
             "status": "ok",
