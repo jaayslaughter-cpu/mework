@@ -108,11 +108,13 @@ propiq:
       key: ${APIFY_API_KEY}
       base-url: https://api.apify.com/v2
 
-  # ── Telegram ──────────────────────────────────────────────
-  telegram:
-    bot-token: "8713049010:AAFgh_Ab1tZZyT11rlClBaJ-OWmiJv4Gix4"
-    chat-id: "${TELEGRAM_CHAT_ID:YOUR_CHAT_ID_HERE}"
-    base-url: https://api.telegram.org/bot
+  # ── Discord ───────────────────────────────────────────────
+  # Outbound webhook — no bot token required.
+  # Set DISCORD_WEBHOOK_URL in Railway environment variables.
+  # Two-way queries (player lookups) require a full bot token
+  # and are not supported in the current webhook integration.
+  discord:
+    webhook-url: ${DISCORD_WEBHOOK_URL}
     # DFS platform label shown in every alert header
     dfs-platforms: "PrizePicks | Underdog Fantasy | Sleeper"
 
@@ -139,8 +141,8 @@ propiq:
     analyzer-cron: "*/5 * * * * *"
     # Leaderboard ROI refresh: every 60 seconds
     leaderboard-cron: "*/60 * * * * *"
-    # Grading: 1:05 AM daily (after boxscores finalize)
-    grading-cron: "0 5 1 * * *"
+    # Grading: 11:30 PM Pacific (West Coast games covered)
+    grading-cron: "0 30 23 * * ?"
     # Backtest SHAP audit: 12:01 AM daily
     backtest-cron: "0 1 0 * * *"
     # XGBoost retrain: Sunday 2:00 AM weekly
@@ -225,7 +227,7 @@ propiq:
 
   # ── Spring Training Mode ──────────────────────────────────
   # Set spring-training=true before Opening Day (March 26)
-  # Runs on historical data, no live Telegram alerts sent
+  # Runs on historical data, no live Discord alerts sent
   season:
     spring-training: false
     opening-day: "2026-03-26"
