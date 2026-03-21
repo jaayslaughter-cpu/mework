@@ -101,7 +101,7 @@ async def job_xgboost():
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
 
     # Register tasklet jobs

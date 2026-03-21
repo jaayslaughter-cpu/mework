@@ -7,7 +7,6 @@ Top 3 agents get 2x capital. Bottom 2 get 0.5x.
 from __future__ import annotations
 import json
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
 
