@@ -490,7 +490,7 @@ class PropModelWithCalibration:
             "accuracy_by_prop": self.error_store.get_recent_accuracy(days=7),
             "active_corrections": [
                 {"player": k[0], "prop_type": k[1], "correction": v}
-                for k, v in self.calibration._corrections.items()
+                for k, v in self.calibration.get_corrections().items()
             ],
             "total_logged": self.error_store.conn.execute(
                 "SELECT COUNT(*) FROM prediction_log"

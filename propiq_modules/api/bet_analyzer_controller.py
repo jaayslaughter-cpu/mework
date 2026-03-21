@@ -59,7 +59,7 @@ class ParlayBetRequest(BaseModel):
 def analyze_bet(req: SingleBetRequest):
     """
     Synchronous single-leg EV analysis.
-    Example: Judge O1.5H at DK +120 → GREEN 7.2% EV
+    Example: Judge O1.5H at DK +120  GREEN 7.2% EV
     """
     if not req.players or not req.props:
         raise HTTPException(400, "players and props required")
@@ -76,7 +76,7 @@ def analyze_bet(req: SingleBetRequest):
         return {"request_id": rid, "status": "queued", "poll": f"/analyze/result/{rid}"}
 
     # synchronous path
-    result = _tasklet._analyze(payload)
+    result = _tasklet.analyze(payload)
     result["request_id"] = "sync"
     return result
 
@@ -100,7 +100,7 @@ def analyze_parlay(req: ParlayBetRequest):
         "parlay":      True,
         "parlay_odds": req.parlay_odds,
     }
-    result = _tasklet._analyze(payload)
+    result = _tasklet.analyze(payload)
     result["request_id"] = "sync"
     return result
 
