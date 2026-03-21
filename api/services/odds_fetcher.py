@@ -21,6 +21,28 @@
     from typing import Any, Dict, List, Optional, Tuple
 
     import requests
+"""
+PropIQ Analytics — OddsFetcher
+Rate-limited, cached, multi-key fetcher for The Odds API v4.
+- Exponential backoff with jitter
+- Per-minute + per-day quota tracking
+- In-memory cache with TTL
+- Both API keys with automatic rotation
+- Player prop batching (one event at a time per API rules)
+
+Drop this into: api/services/odds_fetcher.py
+"""
+
+import os
+import time
+import json
+import random
+import logging
+import hashlib
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 logger = logging.getLogger(__name__)
 
