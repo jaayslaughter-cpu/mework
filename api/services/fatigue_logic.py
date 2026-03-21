@@ -66,7 +66,7 @@ def apply_fatigue_adjustments(base_projection: float, player_type: str, context:
         
     # Apply travel fatigue to batters and pitchers
     final_multiplier *= calculate_travel_fatigue(
-        home_team=context.get("home_team", "UNK"),
+        _home_team=context.get("home_team", "UNK"),
         away_team=context.get("away_team", "UNK"),
         away_team_previous_city=context.get("previous_city", "UNK"),
         rest_days=context.get("team_rest_days", 1)
