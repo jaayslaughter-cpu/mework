@@ -90,6 +90,7 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
           under: { total: under.point, price: under.price },
           book: bm.title,
         };
+      spread: (mkt, bm) => {
       }
       return null;
     },
