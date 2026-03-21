@@ -67,6 +67,7 @@ const App: React.FC = () => {
 
 export default App;
 
+const loadData = async () => {
     setGames(loadedGames);
 
     // Try to fetch props for first 3 events

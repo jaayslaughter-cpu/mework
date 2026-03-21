@@ -49,6 +49,7 @@ export const GameCard: React.FC<GameCardProps> = ({ game }) => {
     setExpanded(next);
     if (next && props.length === 0 && !loadingProps) {
     const loadPlayerProps = async (game) => {
+  const loadProps = async () => {
       setLoadingProps(true);
       try {
         const fetched = await fetchPlayerProps(game.event.id);
