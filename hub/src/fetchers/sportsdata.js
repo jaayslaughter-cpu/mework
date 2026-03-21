@@ -1,5 +1,6 @@
 // hub/src/fetchers/sportsdata.js
 // SportsData.io fetcher for player props, pre-game odds, and line movement data.
+// SportsData.io fetcher for games, lineups, and injuries.
 
 const axios = require('axios');
 const { getOrFetch } = require('../cache');
@@ -15,6 +16,10 @@ if (!KEY) {
 }
 
 async function getTodaysGames(date) {
+if (!KEY) console.warn('⚠️ SPORTSDATA_API_KEY is missing. Fetchers will return errors.');
+
+async function getTodaysGames(date) {
+  if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
   return getOrFetch(`propiq:sportsdata:games:${date}`, 60, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('sportsdata');
@@ -42,6 +47,8 @@ async function getGameOdds(date) {
 }
 
 async function getStartingLineups(date) {
+async function getStartingLineups(date) {
+  if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
   return getOrFetch(`propiq:sportsdata:lineups:${date}`, 300, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('sportsdata');
@@ -51,7 +58,8 @@ async function getStartingLineups(date) {
 }
 
 async function getInjuredPlayers() {
-  return getOrFetch(`propiq:sportsdata:injuries:today`, 600, async () => {
+  if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
+  return getOrFetch('propiq:sportsdata:injuries:today', 600, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('sportsdata');
       return axios.get(`${BASE}/projections/json/InjuredPlayers?key=${KEY}`).then(r => r.data);
@@ -60,3 +68,4 @@ async function getInjuredPlayers() {
 }
 
 module.exports = { getTodaysGames, getPlayerPropsByGame, getGameOdds, getStartingLineups, getInjuredPlayers };
+module.exports = { getTodaysGames, getStartingLineups, getInjuredPlayers };
