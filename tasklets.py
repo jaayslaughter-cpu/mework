@@ -800,9 +800,9 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
     return len(set(players)) < len(players)
 
 
-def _make_parlay(legs: list[dict]) -> dict:
+def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
     return {
-        "agent":           "The Correlated Parlay Agent",
+        "agent":           agent_name,
         "legs":            legs,
         "leg_count":       len(legs),
         "combined_ev_pct": round(sum(lg["ev_pct"] for lg in legs), 2),
@@ -810,7 +810,7 @@ def _make_parlay(legs: list[dict]) -> dict:
     }
 
 
-def _build_parlays(ev_pool: list[dict],
+def _build_parlays(ev_pool: list[dict], agent_name: str = "The Correlated Parlay Agent",
                    min_legs: int = 2,
                    max_legs: int = 3,
                    max_parlays: int = 5) -> list[dict]:
@@ -830,13 +830,13 @@ def _build_parlays(ev_pool: list[dict],
             two = [top[i], top[j]]
             if _are_legs_correlated(two):
                 continue
-            parlays.append(_make_parlay(two))
+            parlays.append(_make_parlay(two, agent_name))
             # Attempt 3-leg extension
             if max_legs >= 3:
                 for k in range(j + 1, len(top)):
                     three = two + [top[k]]
                     if not _are_legs_correlated(three):
-                        parlays.append(_make_parlay(three))
+                        parlays.append(_make_parlay(three, agent_name))
                         break
             if len(parlays) >= max_parlays * 2:
                 break
@@ -853,6 +853,53 @@ def _build_parlays(ev_pool: list[dict],
             unique.append(p)
 
     return unique[:max_parlays]
+
+
+
+def _build_agent_parlays(hits: list[dict], agent_name: str,
+                          min_legs: int = 2, max_legs: int = 3,
+                          max_parlays: int = 3) -> list[dict]:
+    """
+    Build 2-leg and 3-leg Underdog slips for one specific agent from its own
+    hit list.  Avoids same-player correlation.  Returns up to max_parlays
+    slips sorted by combined EV descending, each branded with agent_name.
+    """
+    if len(hits) < min_legs:
+        return []
+
+    top = sorted(hits, key=lambda x: x["ev_pct"], reverse=True)[:10]
+    parlays: list[dict] = []
+    seen: set[str] = set()
+
+    for i in range(len(top)):
+        if len(parlays) >= max_parlays:
+            break
+        for j in range(i + 1, len(top)):
+            if len(parlays) >= max_parlays:
+                break
+            two = [top[i], top[j]]
+            if _are_legs_correlated(two):
+                continue
+
+            # Try to extend to 3 legs first (higher combined EV)
+            if max_legs >= 3:
+                for k in range(j + 1, len(top)):
+                    three = two + [top[k]]
+                    if not _are_legs_correlated(three):
+                        key = "|".join(sorted(lg["player"] for lg in three))
+                        if key not in seen:
+                            seen.add(key)
+                            parlays.append(_make_parlay(three, agent_name))
+                        break
+
+            # Also capture the 2-leg version
+            key2 = "|".join(sorted(lg["player"] for lg in two))
+            if key2 not in seen:
+                seen.add(key2)
+                parlays.append(_make_parlay(two, agent_name))
+
+    return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
+
 
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
@@ -893,45 +940,47 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
 
 def run_agent_tasklet() -> None:
     """
-    Run all 10 agents against live Underdog Fantasy props.
+    Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
 
-    Pipeline:
-      1. Extract Underdog lines (Underdog is the baseline DFS platform).
-      2. Fetch sharp consensus (DraftKings/Pinnacle/Circa) from hub.market.odds.
-      3. Edge = sharp_implied_prob − Underdog_implied_prob.  Skip if < MIN_EV_THRESH.
-      4. Collect qualifying picks → ev_pool.
-      5. Package ev_pool into 2-leg / 3-leg DFS parlays (slips).
-      6. Push parlays to Kafka bet_queue (Redis fallback).
-      7. Send each parlay to Discord as a formatted embed.
+    Each agent:
+      1. Evaluates every prop using its own unique quantitative logic.
+      2. Collects qualifying picks into its own internal hit list.
+      3. When it accumulates 2-3 valid uncorrelated picks, packages them into
+         its own branded Underdog slip (e.g. "EVHunter 2-Leg Slip").
+      4. Sends the slip to Discord with the agent's own name as the title.
+
+    No shared consensus vote — each agent fires independently.
+    Sharp consensus gate still applied per-pick to confirm Underdog mispricing.
     """
     hub   = read_hub()
     model = _load_xgb_model()
 
-    # Step 1: Underdog is the baseline
+    # Underdog is the baseline DFS platform
     props = _extract_underdog_props(hub)
     if not props:
-        props = _build_synthetic_props(hub)   # fallback: all DFS platforms
+        props = _build_synthetic_props(hub)
     if not props:
         logger.info("[AgentTasklet] No Underdog props available — skipping cycle.")
         return
 
-    agents  = [cls(hub, model) for cls in _AGENT_CLASSES]
-    ev_pool: list[dict] = []
+    all_parlays: list[dict] = []
 
-    for prop in props:
-        player    = prop.get("player", "")
-        prop_type = prop.get("prop_type", "")
+    # ── Each agent runs independently ─────────────────────────────────────
+    for cls in _AGENT_CLASSES:
+        agent      = cls(hub, model)
+        agent_hits: list[dict] = []
 
-        # Steps 2 & 3: sharp-vs-Underdog gate
-        sharp_prob = _get_sharp_consensus(hub, player, prop_type)
+        for prop in props:
+            player    = prop.get("player", "")
+            prop_type = prop.get("prop_type", "")
 
-        votes: list[dict] = []
-        for agent in agents:
             try:
                 bet = agent.evaluate(prop)
                 if not bet:
                     continue
-                # Validate against sharp consensus when available
+
+                # Sharp consensus gate: confirm Underdog is mispriced
+                sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is not None:
                     side    = bet["side"]
                     ud_odds = (prop.get("over_american", -120)
@@ -939,56 +988,39 @@ def run_agent_tasklet() -> None:
                                else prop.get("under_american", -120))
                     edge = _underdog_edge(ud_odds, sharp_prob)
                     if edge < MIN_EV_THRESH * 100:
-                        continue   # Sharp books don't confirm edge
+                        continue   # sharps don't confirm — skip
                     bet["ev_pct"]          = round(edge, 2)
                     bet["model_prob"]      = round(sharp_prob, 1)
                     bet["sharp_consensus"] = True
-                votes.append(bet)
+
+                bet["underdog_line"] = prop.get("underdog_line",
+                                                prop.get("over_american", -120))
+                agent_hits.append(bet)
+
             except Exception as e:
                 logger.debug("[AgentTasklet] %s error on %s: %s",
                              agent.name, player, e)
 
-        if not votes:
+        if len(agent_hits) < 2:
+            logger.debug("[AgentTasklet] %s — %d hit(s), not enough for a slip.",
+                         agent.name, len(agent_hits))
             continue
 
-        # Consensus: ≥2 agents on same side
-        over_votes  = [v for v in votes if v["side"] == "OVER"]
-        under_votes = [v for v in votes if v["side"] == "UNDER"]
-        winning     = (over_votes if len(over_votes) >= len(under_votes)
-                       else under_votes)
-        if len(winning) < 2:
-            continue
+        # Build this agent's own branded parlays
+        agent_parlays = _build_agent_parlays(agent_hits, agent.name)
+        if agent_parlays:
+            all_parlays.extend(agent_parlays)
+            logger.info("[AgentTasklet] %s → %d slip(s) from %d hit(s).",
+                        agent.name, len(agent_parlays), len(agent_hits))
 
-        avg_ev    = sum(v["ev_pct"]      for v in winning) / len(winning)
-        avg_prob  = sum(v["model_prob"]  for v in winning) / len(winning)
-        avg_kelly = sum(v["kelly_units"] for v in winning) / len(winning)
-        consensus = winning[0].copy()
-        consensus.update({
-            "ev_pct":        round(avg_ev, 2),
-            "model_prob":    round(avg_prob, 2),
-            "kelly_units":   round(avg_kelly, 3),
-            "agent_count":   len(winning),
-            "agents":        [v["agent"] for v in winning],
-            "underdog_line": prop.get("underdog_line",
-                                      prop.get("over_american", -120)),
-        })
-        ev_pool.append(consensus)
-
-    if not ev_pool:
-        logger.info("[AgentTasklet] No qualifying legs this cycle.")
+    if not all_parlays:
+        logger.info("[AgentTasklet] No qualifying slips this cycle.")
         return
 
-    # Step 5: build parlays
-    parlays = _build_parlays(ev_pool)
-    if not parlays:
-        logger.info("[AgentTasklet] Not enough uncorrelated +EV legs for a slip "
-                    "(%d legs found).", len(ev_pool))
-        return
-
-    # Step 6: publish to Kafka / Redis
+    # ── Publish to Kafka / Redis ────────────────────────────────────────────
     producer = _kafka_producer()
     r        = _redis()
-    for parlay in parlays:
+    for parlay in all_parlays:
         payload = json.dumps(parlay)
         if producer:
             try:
@@ -1003,18 +1035,19 @@ def run_agent_tasklet() -> None:
     if producer:
         producer.flush(timeout=5)
 
-    # Step 7: Discord — one embed per parlay slip
-    for parlay in parlays:
+    # ── Discord — one embed per agent per slip ──────────────────────────────
+    for parlay in all_parlays:
         try:
             discord_alert.send_parlay_alert(parlay)
         except Exception as _disc_err:
-            logger.warning("[AgentTasklet] Discord parlay alert error: %s", _disc_err)
+            logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
-    top = max(parlays, key=lambda p: p["combined_ev_pct"])
-    logger.info("[AgentTasklet] Built %d slips from %d legs. "
-                "Best: %d legs, combined EV=%.1f%%",
-                len(parlays), len(ev_pool),
-                top["leg_count"], top["combined_ev_pct"])
+    active_agents = len(set(p["agent"] for p in all_parlays))
+    best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
+    logger.info("[AgentTasklet] Cycle complete — %d slip(s) from %d active agent(s). "
+                "Best slip: %s | %d legs | combined EV=%.1f%%",
+                len(all_parlays), active_agents,
+                best["agent"], best["leg_count"], best["combined_ev_pct"])
 
 
 def get_agents() -> dict:
