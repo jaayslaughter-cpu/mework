@@ -35,6 +35,25 @@ from typing import Any
 import requests
 import redis as redis_lib
 
+# ── Null-object fallback for when Redis is unreachable ────────────────────────
+
+class _NullRedis:
+    """
+    Silent no-op drop-in for redis.Redis.
+    Returned by _redis() when the server is unreachable so the app boots
+    successfully and degrades gracefully instead of crashing.
+    """
+    def exists(self, *a, **kw):  return False
+    def get(self, *a, **kw):     return None
+    def setex(self, *a, **kw):   return None
+    def set(self, *a, **kw):     return None
+    def lpush(self, *a, **kw):   return None
+    def ltrim(self, *a, **kw):   return None
+    def lrange(self, *a, **kw):  return []
+    def delete(self, *a, **kw):  return None
+    def ping(self, *a, **kw):    return False
+
+
 logger = logging.getLogger("propiq.tasklets")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -72,17 +91,30 @@ CAP_CEIL  = 2.0
 
 # ── Railway-safe service connections ─────────────────────────────────────────
 
-def _redis() -> redis_lib.Redis:
-    """Connect to Redis using Railway env var or explicit host/port."""
-    url = os.getenv("REDIS_URL")
-    if url:
-        return redis_lib.from_url(url, decode_responses=True)
-    return redis_lib.Redis(
-        host=os.getenv("REDIS_HOST", "redis"),
-        port=int(os.getenv("REDIS_PORT", 6379)),
-        db=int(os.getenv("REDIS_DB", 0)),
-        decode_responses=True,
-    )
+def _redis():
+    """
+    Connect to Redis using Railway env var or explicit host/port.
+    Returns _NullRedis() if the server is unreachable — allows the app
+    to boot successfully and run without cache/queue.
+    """
+    try:
+        url = os.getenv("REDIS_URL")
+        if url:
+            r = redis_lib.from_url(url, decode_responses=True,
+                                   socket_connect_timeout=3)
+        else:
+            r = redis_lib.Redis(
+                host=os.getenv("REDIS_HOST", "redis"),
+                port=int(os.getenv("REDIS_PORT", 6379)),
+                db=int(os.getenv("REDIS_DB", 0)),
+                decode_responses=True,
+                socket_connect_timeout=3,
+            )
+        r.ping()   # fail fast if server is down
+        return r
+    except Exception as e:
+        logger.warning("Redis unavailable — running without cache (app will still boot): %s", e)
+        return _NullRedis()
 
 
 def _pg_conn():
@@ -105,7 +137,13 @@ def _kafka_producer():
     try:
         from confluent_kafka import Producer
         bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-        return Producer({"bootstrap.servers": bootstrap})
+        p = Producer({
+            "bootstrap.servers": bootstrap,
+            "socket.timeout.ms": 3000,
+            "message.timeout.ms": 5000,
+            "retries": 0,
+        })
+        return p
     except Exception as e:
         logger.warning("Kafka unavailable — falling back to Redis queue: %s", e)
         return None
