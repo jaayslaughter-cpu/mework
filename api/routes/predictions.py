@@ -77,9 +77,10 @@ class ResultFeedbackRequest(BaseModel):
 
 
 
-# ─────────────────────────────────────────────
+
+# [90m─────────────────────────────────────────────[39m
 # Routes
-# ─────────────────────────────────────────────
+# [90m─────────────────────────────────────────────[39m
 @router.post("/predict", response_model=PropPredictionResponse)
 async def predict_prop(req: PropPredictionRequest):
     """
