@@ -10,11 +10,8 @@ Pulls player/team/game data from multiple sources:
 Drop this into: api/services/mlb_data.py
 """
 
-import os
-import time
-import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import Dict, List, Optional, Any
 
 import requests

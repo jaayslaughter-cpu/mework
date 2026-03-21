@@ -7,7 +7,6 @@ Books: DraftKings, FanDuel, BetMGM, bet365.
 """
 from __future__ import annotations
 import logging
-from itertools import combinations
 from .base_agent import BaseAgent, BetSlip, Leg
 
 logger = logging.getLogger("propiq.agent.arb")

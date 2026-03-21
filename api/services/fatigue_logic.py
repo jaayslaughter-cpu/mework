@@ -1,6 +1,3 @@
-from datetime import datetime, timedelta
-import math
-
 def calculate_pitcher_fatigue(days_rest: int, recent_pitch_count_sum: int, is_starter: bool) -> float:
     """
     Calculates a fatigue multiplier for pitchers.

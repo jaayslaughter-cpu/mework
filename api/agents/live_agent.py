@@ -7,7 +7,6 @@ depending on game state. Single leg only. Edge: 5–8%.
 from __future__ import annotations
 import logging
 import time
-from datetime import datetime, timedelta
 from .base_agent import BaseAgent, BetSlip, Leg
 
 logger = logging.getLogger("propiq.agent.live")
