@@ -13,7 +13,6 @@ Drop this into: api/services/prop_model.py
 """
 
 import os
-import json
 import sqlite3
 import logging
 import hashlib
@@ -23,7 +22,6 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
-from scipy.special import expit  # sigmoid
 
 logger = logging.getLogger(__name__)
 
