@@ -18,7 +18,7 @@ import random
 import logging
 import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 

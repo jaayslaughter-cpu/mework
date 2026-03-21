@@ -21,6 +21,7 @@ from tasklets.bet_analyzer_tasklet import (
     submit_bet_for_analysis,
     is_spring_training,
     OPENING_DAY,
+    SPRING_TRAINING_WEIGHT,
 )
 
 logger = logging.getLogger(__name__)
