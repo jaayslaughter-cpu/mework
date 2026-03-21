@@ -2,6 +2,7 @@ package com.propiq.kafka;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.propiq.model.Bet;
+import com.propiq.model.BetRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,7 +11,10 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -128,6 +132,89 @@ public class TelegramAlertService {
             "✅ Do NOT re-enter until confirmation from PropIQ.",
             player, reason, platform, propKey
         );
+    }
+
+    // ─────────────────────────────────────────────────────────
+    //  END-OF-DAY SETTLEMENT NOTIFICATION
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Sends a nightly recap Telegram message after GradingTasklet settles all bets.
+     * Called by GradingTasklet at ~1:05 AM after the bet_ledger is fully updated.
+     *
+     * @param settledBets list of BetRecord objects graded tonight (WIN/LOSS/PUSH)
+     * @param totalProfit net units profit/loss for the day
+     */
+    public void sendDailyRecap(List<BetRecord> settledBets, double totalProfit) {
+        if (settledBets == null || settledBets.isEmpty()) {
+            logger.info("No settled bets tonight — skipping daily recap notification");
+            return;
+        }
+        String message = formatDailyRecap(settledBets, totalProfit);
+        sendTelegramMessage(defaultChatId, message);
+        logger.info("Daily recap sent — {} bets settled | net={:.2f}u",
+                settledBets.size(), totalProfit);
+    }
+
+    private String formatDailyRecap(List<BetRecord> bets, double totalProfit) {
+        long wins   = bets.stream().filter(b -> "WIN".equals(b.getStatus())).count();
+        long losses = bets.stream().filter(b -> "LOSS".equals(b.getStatus())).count();
+        long pushes = bets.stream().filter(b -> "PUSH".equals(b.getStatus())).count();
+
+        // Yesterday's date (grading runs at 1:05 AM for previous day's games)
+        String date = LocalDate.now().minusDays(1)
+                .format(DateTimeFormatter.ofPattern("MMMM d, yyyy"));
+
+        String unitsStr  = totalProfit >= 0
+                ? String.format("+%.2fu", totalProfit)
+                : String.format("%.2fu", totalProfit);
+        String unitEmoji = totalProfit >= 0 ? "📈" : "📉";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("📊 *PropIQ Daily Recap — %s*\n", date));
+        sb.append("━━━━━━━━━━━━━━━━━━━━━━\n\n");
+        sb.append(String.format("%s *Units:* %s\n", unitEmoji, unitsStr));
+        sb.append(String.format("🏆 *Record:* %d-%d-%d (W-L-P)\n\n", wins, losses, pushes));
+        sb.append("━━━━━━━━━━━━━━━━━━━━━━\n");
+
+        for (BetRecord bet : bets) {
+            String emoji = switch (bet.getStatus() != null ? bet.getStatus() : "PUSH") {
+                case "WIN"  -> "✅";
+                case "LOSS" -> "❌";
+                default     -> "➖";
+            };
+
+            String unitImpact = bet.getProfitLoss() >= 0
+                    ? String.format("+%.2fu", bet.getProfitLoss())
+                    : String.format("%.2fu",  bet.getProfitLoss());
+
+            sb.append(String.format("%s %s — %s %s %s @ %s | %s\n",
+                    emoji,
+                    bet.getPlayerName(),
+                    bet.getPropType(),
+                    bet.getDirection(),
+                    bet.getTargetLine(),
+                    formatOdds(bet.getPlacedOddsDouble()),
+                    unitImpact
+            ));
+        }
+
+        sb.append("━━━━━━━━━━━━━━━━━━━━━━\n");
+        sb.append("_Powered by PropIQ Analytics_ 🤖");
+        return sb.toString();
+    }
+
+    /**
+     * Converts decimal odds to American format for display.
+     * e.g. 1.909 → -110, 2.100 → +110
+     */
+    private String formatOdds(double decimalOdds) {
+        if (decimalOdds <= 1.0) return "-110"; // fallback
+        if (decimalOdds >= 2.0) {
+            return String.format("+%d", (int) Math.round((decimalOdds - 1.0) * 100));
+        } else {
+            return String.format("%d",  (int) Math.round(-100.0 / (decimalOdds - 1.0)));
+        }
     }
 
     // ─────────────────────────────────────────────────────────
