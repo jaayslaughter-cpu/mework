@@ -77,7 +77,7 @@ class SpringTrainingSeeder:
             self._pull_spring_training_stats()
 
         # 4. Write meta
-        meta = {
+        seed_meta = {
             "seeded_at":       datetime.datetime.utcnow().isoformat(),
             "mode":            "spring_training" if self.is_spring_training() else "regular_season",
             "all_records":     "0-0",
@@ -85,9 +85,9 @@ class SpringTrainingSeeder:
             "opening_day":     str(OPENING_DAY),
             "days_remaining":  max(0, (OPENING_DAY - datetime.date.today()).days),
         }
-        self.r.set("spring_training_meta", json.dumps(meta))
-        logger.info("✅ Seeding complete. Mode=%s", meta["mode"])
-        return meta
+        self.r.set("spring_training_meta", json.dumps(seed_meta))
+        logger.info("✅ Seeding complete. Mode=%s", seed_meta["mode"])
+        return seed_meta
 
     # ── team records ───────────────────────────────────────────────────────
     def _seed_team_records(self):
