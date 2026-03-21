@@ -117,7 +117,7 @@ class GradingAgent(BaseAgent):
                 summary["errors"] += 1
 
         # Update all agent stats after grading
-        agent_names = set(b["agent_name"] for b in pending if b["agent_name"])
+        agent_names = {b["agent_name"] for b in pending if b["agent_name"]}
         for agent_name in agent_names:
             self.db.update_agent_stats(agent_name)
 
