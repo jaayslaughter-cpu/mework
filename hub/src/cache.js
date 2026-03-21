@@ -35,9 +35,7 @@ const pendingFetches = new Map();
  * @param {number} ttl     - Cache TTL in seconds
  * @param {Function} fetchFn - Async function that fetches fresh data if cache miss
  */
-const getOrSetCache = (key, ttl, fetchFn) => {
- */
-async function getOrFetch(key, ttl, fetchFn) {
+const getOrFetch = async (key, ttl, fetchFn) => {
   // Try to get from cache first
   try {
     const cached = await client.get(key);
