@@ -62,3 +62,19 @@ cd propiq-analytics
 
 ---
 *Disclaimer: This repository contains the architecture for a sports analytics engine. It is strictly for educational and mathematical modeling purposes.*
+## 💻 Local Development & Testing
+
+If you need to test new XGBoost features, adjust the Half-Kelly sizing logic, or debug the Tasklets without affecting the live cloud deployment, you can spin up the entire isolated environment locally using Docker.
+
+### Prerequisites
+* [Docker Desktop](https://www.docker.com/products/docker-desktop) installed and running.
+* Git installed.
+
+### 1. Clone & Configure
+First, pull the repository to your local machine:
+```bash
+git clone [https://github.com/YOUR_USERNAME/propiq-analytics.git](https://github.com/YOUR_USERNAME/propiq-analytics.git)
+cd propiq-analytics
+docker-compose up -d --build
+docker-compose logs -f propiq-spring-boot
+docker-compose down
