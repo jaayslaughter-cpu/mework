@@ -4,6 +4,8 @@ import com.propiq.model.Bet;
 import com.propiq.model.BetRecord;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.*;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
@@ -39,6 +41,18 @@ public class DiscordAlertService {
     private String webhookUrl;
 
     private final RestTemplate restTemplate = new RestTemplate();
+
+    // ── Startup Connectivity Test ─────────────────────────────────────────────
+
+    /**
+     * Fires the instant Spring Boot finishes loading — sends a single test POST
+     * to confirm the webhook URL is reachable and the token is valid.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void onApplicationReady() {
+        log.info("PropIQ engine online — firing Discord startup ping...");
+        postToWebhook("🚨 PropIQ Analytics Engine Online: Webhook successfully connected!");
+    }
 
     // ── Kafka Listeners ───────────────────────────────────────────────────────
 
