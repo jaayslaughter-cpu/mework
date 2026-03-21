@@ -1,6 +1,6 @@
 package com.propiq.tasklets;
 
-import com.propiq.kafka.TelegramAlertService;
+import com.propiq.discord.DiscordAlertService;
 import com.propiq.model.BetRecord;
 import com.propiq.model.MlbHubState;
 import com.propiq.service.PostgresService;
@@ -42,7 +42,7 @@ public class GradingTasklet implements Tasklet {
 
     private final PostgresService      postgresService;
     private final XGBoostModelService  xgboostService;
-    private final TelegramAlertService telegramAlertService;
+    private final DiscordAlertService  discordAlertService;
 
     /**
      * Runs daily at 11:30 PM Pacific Time.
@@ -144,13 +144,13 @@ public class GradingTasklet implements Tasklet {
                 wins, losses, pushes, flagged, rolledOver, String.format("%.2f", totalProfit));
 
         // ── End-of-Day Settlement Notification ────────────────────────────────
-        // Send daily recap to Telegram only if at least one bet was settled tonight.
+        // Send daily recap to Discord only if at least one bet was settled tonight.
         // Flagged, skipped, and rolled-over bets are excluded.
         if (!settledToday.isEmpty()) {
             log.info("Sending daily recap for {} settled bets", settledToday.size());
-            telegramAlertService.sendDailyRecap(settledToday, totalProfit);
+            discordAlertService.sendDailyRecap(settledToday, totalProfit);
         } else {
-            log.info("No settled bets tonight — skipping Telegram recap");
+            log.info("No settled bets tonight — skipping Discord recap");
         }
 
         return RepeatStatus.FINISHED;
