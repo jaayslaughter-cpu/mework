@@ -43,7 +43,7 @@ def _ensure_backtest_schema():
                 notes TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_backtest_agent ON backtest_results(agent_name, game_date);
-        """)
+        """  
     conn.close()
 
 
@@ -68,8 +68,8 @@ def _fetch_historical_props(game_date: str) -> list[dict]:
 def _simulate_agent_bets(
     agent_name: str,
     game_date: str,
-    player_stats: list[dict],
-    prop_lines: list[dict]
+    _player_stats: list[dict],
+    _prop_lines: list[dict]
 ) -> dict:
     """
     Simulate what the agent would have bet and whether it won.
@@ -95,6 +95,7 @@ def _simulate_agent_bets(
         "live": 1.95,
         "arb": 1.02,
         "grading": 1.0,
+    }
     }
     AGENT_BET_FREQ = {  # Average bets per day
         "ev_hunter": 4,

@@ -130,7 +130,7 @@ def _fetch_games_today() -> list[dict]:
         return []
 
 
-def _fetch_player_props(event_ids: list[str]) -> list[dict]:
+def _fetch_player_props(_event_ids: list[str]) -> list[dict]:
     """Fetch player props from The Odds API per event."""
     all_props = []
     regions = "us"

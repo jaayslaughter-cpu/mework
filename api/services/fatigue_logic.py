@@ -21,7 +21,7 @@ def calculate_pitcher_fatigue(days_rest: int, recent_pitch_count_sum: int, is_st
             
     return round(max(0.75, multiplier), 3)
 
-def calculate_travel_fatigue(home_team: str, away_team: str, away_team_previous_city: str, rest_days: int) -> float:
+def calculate_travel_fatigue(_home_team: str, away_team: str, away_team_previous_city: str, rest_days: int) -> float:
     """
     Calculates travel fatigue based on time zone shifts and lack of rest days.
     Returns a multiplier (e.g., 0.96 for heavy travel fatigue).
