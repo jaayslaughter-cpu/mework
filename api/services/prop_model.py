@@ -220,7 +220,7 @@ class CalibrationLayer:
 
     def _key_hash(self, player: str, prop_type: str, line_bucket: float) -> str:
         raw = f"{player}|{prop_type}|{line_bucket:.2f}"
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def _load_calibration(self):
         """Load saved calibration from DB."""
