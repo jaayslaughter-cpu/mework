@@ -43,7 +43,7 @@ def _ensure_backtest_schema():
                 notes TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_backtest_agent ON backtest_results(agent_name, game_date);
-        """  
+        """)
     conn.close()
 
 
