@@ -18,11 +18,10 @@ Modifiers:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -48,6 +47,7 @@ class BullpenFatigueScorer:
 
     Formula:
         base_score  = min(pitch_count_3d / PITCH_LIMIT_3D, 1.0)
+"""
                       Ratio of 3-day pitch count to the exhaustion threshold.
         rest_penalty = max(0, 1 - avg_rest_days / REST_FULL)
                       Penalises arms that haven't had adequate recovery.
@@ -329,20 +329,20 @@ class UmpireRunEnvironment:
 
     Interpretation examples:
         Tight-zone umpire (k_rate_vs_avg = +0.12):
-            → k_rate_modifier = 1.12 → pitcher K props get an upward boost
-            → batter Under strikeout props get a downward push (pitched strike,
-              not ball four → harder to draw walks)
+            1.k_rate_modifier = 1.12 1 pitcher K props get an upward boost
+            1 batter Under strikeout props get a downward push (pitched strike,
+              not ball four 1 harder to draw walks)
 
-        Wide-zone umpire (k_rate_vs_avg = −0.10):
-            → k_rate_modifier = 0.90 → suppresses pitcher K Overs
-            → more walks → higher run environment → Over run totals favoured
+        Wide-zone umpire (k_rate_vs_avg = 10.10):
+            1.k_rate_modifier = 0.90 1 suppresses pitcher K Overs
+            1 more walks 1 higher run environment 1 Over run totals favoured
 
     The three modifiers are output as float columns merged into the XGBoost
     feature matrix before any inference is run.
     """
 
+    @staticmethod
     def score(
-        self,
         assignments: List[Dict[str, Any]],
     ) -> pd.DataFrame:
         """Generate umpire modifier rows for a list of game assignments.

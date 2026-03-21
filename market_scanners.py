@@ -524,7 +524,8 @@ class FadeScanner:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _best_sharp_under(self, sharp_odds: Dict[str, int]) -> Optional[int]:
+    @staticmethod
+    def _best_sharp_under(sharp_odds: Dict[str, int]) -> Optional[int]:
         """Find the most aggressively priced Under across sharp books.
 
         Returns the most negative (cheapest to the house = most confident)
@@ -545,7 +546,7 @@ class FadeScanner:
 
 # ---------------------------------------------------------------------------
 # RabbitMQ Publisher
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 class MarketEdgePublisher:
     """Publishes scanner edge payloads to the ``alerts.market_edges`` routing key."""
@@ -780,6 +781,6 @@ class MarketScannerOrchestrator:
                 )
                 self.process_snapshot(snapshot)
             ch.basic_ack(delivery_tag=method.delivery_tag)
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             logger.error("MarketScannerOrchestrator: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
