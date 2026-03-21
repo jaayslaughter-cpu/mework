@@ -56,8 +56,6 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
 try:
@@ -856,7 +854,8 @@ class PlayerPropXGBoost:
         calibrated.fit(X, y)
         return calibrated
 
-    def _default_params(self) -> Dict:
+    @staticmethod
+    def _default_params() -> Dict:
         """Conservative defaults that generalize well for MLB prop data."""
         return {
             "n_estimators":     300,
@@ -1484,7 +1483,7 @@ def demo() -> None:
     print("\n" + "═" * 70)
     print("  ✅ Pipeline demo complete.")
     print("  P(over) is calibrated — safe for EV Agent consumption.")
-    print(f"  Routing key: mlb.projections.strikeouts")
+    print("  Routing key: mlb.projections.strikeouts")
     print("═" * 70 + "\n")
 
     pipeline.close()
