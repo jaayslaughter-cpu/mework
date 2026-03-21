@@ -33,7 +33,7 @@ async function getStartingLineups(date) {
 
 async function getInjuredPlayers() {
   if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
-  return getOrFetch(`propiq:sportsdata:injuries:today`, 600, async () => {
+  return getOrFetch('propiq:sportsdata:injuries:today', 600, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('sportsdata');
       return axios.get(`${BASE}/projections/json/InjuredPlayers?key=${KEY}`).then(r => r.data);
