@@ -96,7 +96,6 @@ def _simulate_agent_bets(
         "arb": 1.02,
         "grading": 1.0,
     }
-    }
     AGENT_BET_FREQ = {  # Average bets per day
         "ev_hunter": 4,
         "under_machine": 2,
