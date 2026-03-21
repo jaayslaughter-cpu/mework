@@ -35,6 +35,7 @@ from tasklets import (
     run_grading_tasklet,
     run_xgboost_tasklet,
 )
+from DiscordAlertService import discord_alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,6 +114,12 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(job_xgboost, CronTrigger(day_of_week="sun", hour=2), id="xgboost")
 
     scheduler.start()
+
+    # Discord startup ping — fires the second the app is ready
+    try:
+        discord_alert.send_startup_ping()
+    except Exception as _disc_err:
+        logger.warning("Discord startup ping failed: %s", _disc_err)
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
