@@ -46,6 +46,19 @@ PropIQ acts as a two-way quantitative assistant via Telegram.
 * **Fractional Kelly Criterion:** Bankroll allocation is strictly governed by Half-Kelly/Quarter-Kelly math with a hard 5% maximum cap per play to protect against variance.
 * **Emergency Abort Protocol:** Listens for late scratches and injury news, pushing abort signals to Kafka to cancel pending evaluations.
 * **OOS Auditing:** The `BacktestTasklet` runs weekly Out-of-Sample SHAP audits, automatically dropping variables that push accuracy below 77.7%.
+* ## 💻 Local Development & Testing
+
+If you need to test new XGBoost features, adjust the Half-Kelly sizing logic, or debug the Tasklets without affecting the live cloud deployment, you can spin up the entire isolated environment locally using Docker.
+
+### Prerequisites
+* [Docker Desktop](https://www.docker.com/products/docker-desktop) installed and running.
+* Git installed.
+
+### 1. Clone & Configure
+First, pull the repository to your local machine:
+```bash
+git clone [https://github.com/YOUR_USERNAME/propiq-analytics.git](https://github.com/YOUR_USERNAME/propiq-analytics.git)
+cd propiq-analytics
 
 ---
 *Disclaimer: This repository contains the architecture for a sports analytics engine. It is strictly for educational and mathematical modeling purposes.*
