@@ -34,6 +34,7 @@ from typing import Any
 
 import requests
 import redis as redis_lib
+from DiscordAlertService import discord_alert
 
 # ── Null-object fallback for when Redis is unreachable ────────────────────────
 
@@ -847,6 +848,13 @@ def run_agent_tasklet() -> None:
     if producer:
         producer.flush(timeout=5)
 
+    # ── Discord alerts: one embed per queued bet ──────────────────────────
+    for bet in queue_out:
+        try:
+            discord_alert.send_bet_alert(bet)
+        except Exception as _disc_err:
+            logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
+
     logger.info("[AgentTasklet] Queued %d bets. Top EV: %.1f%%  (%s %s %s)",
                 len(queue_out), queue_out[0]["ev_pct"],
                 queue_out[0]["player"], queue_out[0]["prop_type"], queue_out[0]["side"])
@@ -1169,8 +1177,11 @@ def run_grading_tasklet() -> None:
     logger.info("[GradingTasklet] Graded %d bets — W:%d L:%d P:%d  Profit: %+.2fu",
                 len(results), wins, losses, pushes, total_profit)
 
-    # Send daily recap via Telegram
-    _send_telegram_recap(results, total_profit, today)
+    # Send daily recap via Discord webhook
+    try:
+        discord_alert.send_daily_recap(results, total_profit, today)
+    except Exception as _disc_err:
+        logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
 
 
 def _get_stat(stats: dict, prop_type: str) -> float | None:
