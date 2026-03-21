@@ -4,8 +4,10 @@ WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl git \
-    && rm -rf /var/lib/apt/lists/*
+        build-essential \
+        curl \
+        git \
+        && rm -rf /var/lib/apt/lists/*
 
 # Python deps
 COPY requirements_army.txt .
