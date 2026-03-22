@@ -96,22 +96,9 @@ class BetAnalyzerTasklet:
         # 4. EV calculation
         ev_pct = self._calc_ev(model_prob, implied_prob)
 
-        # 5. Matchup context
-        matchup = self._matchup_context(player, prop, hub)
-
-        # 6. Agent consensus
-        agents_agree = self._agent_consensus(player, prop, ev_pct)
-
         # 7. Fair odds
         fair_decimal = 1 / (model_prob / 100) if model_prob > 0 else 1
         fair_american = self._decimal_to_american(fair_decimal)
-
-        # 8. Status
-        status = self._status(ev_pct, model_prob, implied_prob)
-
-        spring_note = ""
-        if is_spring_training():
-            spring_note = f" [ST Mode — {SPRING_TRAINING_WEIGHT*100:.0f}% weight, records 0-0]"
 
         return {
             "request_id": None,
