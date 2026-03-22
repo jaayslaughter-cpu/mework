@@ -58,14 +58,14 @@ _last_leaderboard_run: str | None = None
 async def _safe_run(name: str, fn, *args, **kwargs):
     """Run a tasklet with error logging."""
     try:
-        logger.info(f"[orchestrator] Running {name}...")
+        logger.info("[orchestrator] Running %s...", name)
         start = time.time()
         result = fn(*args, **kwargs)
         elapsed = time.time() - start
-        logger.info(f"[orchestrator] {name} done in {elapsed:.2f}s")
+        logger.info("[orchestrator] %s done in %.2fs", name, elapsed)
         return result
     except Exception as e:
-        logger.error(f"[orchestrator] {name} FAILED: {e}", exc_info=True)
+        logger.error("[orchestrator] %s FAILED: %s", name, e, exc_info=True)
         return None
 
 

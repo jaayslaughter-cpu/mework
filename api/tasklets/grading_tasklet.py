@@ -28,13 +28,16 @@ def run_grading_tasklet(game_date: str | None = None) -> dict:
     Runs at 1:05AM to allow box scores to fully finalize.
     """
     target_date = game_date or (date.today() - timedelta(days=1)).isoformat()
-    logger.info(f"[grading] Starting grading for {target_date}")
+    logger.info("[grading] Starting grading for %s", target_date)
 
     agent = _get_grading_agent()
     summary = agent.grade_all_pending(game_date=target_date)
 
     logger.info(
-        f"[grading] Done — {summary.get('graded', 0)} bets settled | "
-        f"W:{summary.get('wins', 0)} L:{summary.get('losses', 0)} P:{summary.get('pushes', 0)}"
+        "[grading] Done — %s bets settled | W:%s L:%s P:%s",
+        summary.get('graded', 0),
+        summary.get('wins', 0),
+        summary.get('losses', 0),
+        summary.get('pushes', 0)
     )
     return summary

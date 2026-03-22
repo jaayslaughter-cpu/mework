@@ -293,7 +293,7 @@ class PropBacktester:
         with open(BACKTEST_RESULTS_FILE, "w") as f:
             json.dump(results, f, indent=2)
 
-        logger.info(f"Backtest: {total_bets} bets, {wins} wins ({wins/total_bets:.1%}), ROI {roi:.1f}%")
+        logger.info("Backtest: %d bets, %d wins (%.1f%%), ROI %.1f%%", total_bets, wins, wins/total_bets * 100, roi)
         return results
 
     def kelly_criterion(self, model_prob: float, book_prob: float, max_fraction: float = 0.25) -> float:
