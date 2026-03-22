@@ -42,15 +42,24 @@ class _NullRedis:
     Returned by _redis() when the server is unreachable so the app boots
     successfully and degrades gracefully instead of crashing.
     """
-    def exists(self, *a, **kw):  return False
-    def get(self, *a, **kw):     return None
-    def setex(self, *a, **kw):   return None
-    def set(self, *a, **kw):     return None
-    def lpush(self, *a, **kw):   return None
-    def ltrim(self, *a, **kw):   return None
-    def lrange(self, *a, **kw):  return []
-    def delete(self, *a, **kw):  return None
-    def ping(self, *a, **kw):    return False
+    @staticmethod
+    def exists(*a, **kw):  return False
+    @staticmethod
+    def get(*a, **kw):     return None
+    @staticmethod
+    def setex(*a, **kw):   return None
+    @staticmethod
+    def set(*a, **kw):     return None
+    @staticmethod
+    def lpush(*a, **kw):   return None
+    @staticmethod
+    def ltrim(*a, **kw):   return None
+    @staticmethod
+    def lrange(*a, **kw):  return []
+    @staticmethod
+    def delete(*a, **kw):  return None
+    @staticmethod
+    def ping(*a, **kw):    return False
 
 logger = logging.getLogger("propiq.tasklets")
 
@@ -482,7 +491,8 @@ class _BaseAgent:
             "bullpen_ok":  True,
         }
 
-    def _confidence(self, ev_pct: float) -> int:
+    @staticmethod
+    def _confidence(ev_pct: float) -> int:
         if ev_pct >= 10: return 9
         if ev_pct >= 7:  return 8
         if ev_pct >= 5:  return 7
@@ -507,7 +517,6 @@ class _EVHunter(_BaseAgent):
 
 
 class _UnderMachine(_BaseAgent):
-    name = "UnderMachine"
 
     def evaluate(self, prop: dict) -> dict | None:
         under_odds = prop.get("under_american", -110)

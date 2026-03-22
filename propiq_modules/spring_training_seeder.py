@@ -34,23 +34,6 @@ LEAGUE_AVG_PRIORS = {
     "strikeout_rate":     0.225,
     "era":                4.20,
     "whip":               1.28,
-    "k_per_9":            9.1,
-    "bb_per_9":           3.1,
-}
-
-# Key players to seed (expanded at runtime from SportsData roster)
-STAR_PLAYERS = [
-    "Aaron Judge", "Rafael Devers", "Juan Soto", "Shohei Ohtani",
-    "Fernando Tatis Jr.", "Mookie Betts", "Freddie Freeman",
-    "Yordan Alvarez", "Vladimir Guerrero Jr.", "Bo Bichette",
-    "Pete Alonso", "Austin Riley", "Matt Olson", "Trea Turner",
-    "Bryce Harper", "Kyle Tucker", "Jose Altuve", "Jeremy Pena",
-    "Gerrit Cole", "Spencer Strider", "Corbin Burnes",
-    "Dylan Cease", "Zack Wheeler", "Kevin Gausman",
-    "Logan Webb", "Framber Valdez", "Tyler Glasnow",
-]
-
-
 class SpringTrainingSeeder:
     def __init__(self):
         self.r = redis.Redis(
@@ -59,7 +42,8 @@ class SpringTrainingSeeder:
             decode_responses=True,
         )
 
-    def is_spring_training(self) -> bool:
+    @staticmethod
+    def is_spring_training() -> bool:
         return datetime.date.today() < OPENING_DAY
 
     def seed_all(self):

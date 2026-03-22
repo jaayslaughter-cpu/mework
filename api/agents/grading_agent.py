@@ -171,7 +171,8 @@ class GradingAgent(BaseAgent):
         logger.info(f"[grading] Loaded {len(results)} stat lines from boxscores")
         return results
 
-    def _parse_mlb_boxscore(self, game: dict, results: dict):
+    @staticmethod
+    def _parse_mlb_boxscore(game: dict, results: dict):
         """Parse MLB Stats API boxscore into results dict."""
         try:
             boxscore = game.get("boxscore", {})

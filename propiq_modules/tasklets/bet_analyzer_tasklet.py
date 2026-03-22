@@ -148,7 +148,8 @@ class BetAnalyzerTasklet:
         except Exception:
             return self._fallback_prob(player, prop, hub)
 
-    def _fallback_prob(self, player: str, prop: str, hub: dict) -> float:
+    @staticmethod
+    def _fallback_prob(player: str, prop: str, hub: dict) -> float:
         """
         Heuristic fallback when XGBoost not yet trained.
         Spring Training: start at league-average (all 0-0 records).

@@ -45,7 +45,8 @@ class SimpleCache:
         self._store: Dict[str, Tuple[float, Any]] = {}
         self.ttl = ttl
 
-    def _cache_key(self, url: str, params: Dict) -> str:
+    @staticmethod
+    def _cache_key(url: str, params: Dict) -> str:
         raw = url + json.dumps(params, sort_keys=True)
         return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -83,7 +84,8 @@ class RateLimiter:
         self._remaining: Dict[str, int] = {k: per_day for k in API_KEYS}
         self._day_reset: Dict[str, datetime] = {k: datetime.utcnow() + timedelta(days=1) for k in API_KEYS}
 
-    def _minute_bucket(self) -> int:
+    @staticmethod
+    def _minute_bucket() -> int:
         return int(time.time() // 60)
 
     def can_request(self, api_key: str) -> bool:
