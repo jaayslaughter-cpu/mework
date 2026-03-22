@@ -151,9 +151,8 @@ class PropIQLogger:
                 try:
                     r = json.loads(line.strip())
                     ts = datetime.fromisoformat(r["ts"])
-                    if ts >= cutoff:
-                        if severity is None or r["severity"] == severity.value:
-                            records.append(r)
+                    if ts >= cutoff and (severity is None or r["severity"] == severity.value):
+                        records.append(r)
                 except (json.JSONDecodeError, KeyError):
                     continue
         return records
