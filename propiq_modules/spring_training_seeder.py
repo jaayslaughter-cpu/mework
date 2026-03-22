@@ -59,7 +59,8 @@ class SpringTrainingSeeder:
             decode_responses=True,
         )
 
-    def is_spring_training(self) -> bool:
+    @staticmethod
+    def is_spring_training() -> bool:
         return datetime.date.today() < OPENING_DAY
 
     def seed_all(self):

@@ -123,10 +123,6 @@ class BetAnalyzerTasklet:
             "model_prob": round(model_prob, 1),
             "ev_percent": round(ev_pct, 1),
             "fair_odds": fair_american,
-            "edge": f"{'BUY' if ev_pct > 0 else 'PASS'} ({best_odds} > fair {fair_american})",
-            "matchup": matchup + spring_note,
-            "agents_agree": agents_agree,
-            "status": status,
             "spring_training": is_spring_training(),
         }
 
@@ -148,7 +144,8 @@ class BetAnalyzerTasklet:
         except Exception:
             return self._fallback_prob(player, prop, hub)
 
-    def _fallback_prob(self, player: str, prop: str, hub: dict) -> float:
+    @staticmethod
+    def _fallback_prob(player: str, prop: str, hub: dict) -> float:
         """
         Heuristic fallback when XGBoost not yet trained.
         Spring Training: start at league-average (all 0-0 records).
