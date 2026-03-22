@@ -34,6 +34,8 @@ LEAGUE_AVG_PRIORS = {
     "strikeout_rate":     0.225,
     "era":                4.20,
     "whip":               1.28,
+}
+
 class SpringTrainingSeeder:
     def __init__(self):
         self.r = redis.Redis(
