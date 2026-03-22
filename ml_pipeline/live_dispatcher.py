@@ -64,7 +64,7 @@ logger = logging.getLogger("propiq.live")
 
 MIN_EV_PCT   = 3.0     # minimum EV gate
 MIN_PROB     = 0.52    # minimum implied win probability per leg
-MAX_LEGS     = 6       # max legs per parlay
+MAX_LEGS     = 4       # hard cap — no parlay may exceed 4 legs
 MIN_LEGS     = 2       # min legs to send alert
 HALF_KELLY   = 0.5     # Kelly fraction multiplier
 MAX_KELLY    = 0.10    # bankroll cap
@@ -98,7 +98,7 @@ AGENT_CONFIGS: list[dict] = [
     {
         "name": "EVHunter",
         "emoji": "🎯",
-        "max_legs": 5,
+        "max_legs": 4,
         "entry_type": "FLEX",
         "filter": lambda r: r.implied_prob >= 0.54,
         "note": "Top-EV generalist — all prop types",
@@ -202,7 +202,7 @@ AGENT_CONFIGS: list[dict] = [
     {
         "name": "LineupAgent",
         "emoji": "📋",
-        "max_legs": 5,
+        "max_legs": 4,
         "entry_type": "FLEX",
         "filter": lambda r: r.prop_type in ("hits", "rbis", "runs",
                                              "hits_runs_rbis", "fantasy_hitter")
@@ -624,24 +624,36 @@ class PropLeg:
 def build_parlay(
     legs: list[PropLeg],
     agent: dict,
+    excluded_keys: set[tuple] | None = None,
 ) -> dict | None:
     """
     From a list of candidate legs, apply agent filter and build a parlay dict
     ready for DiscordAlertService.send_parlay_alert().
-    """
-    filtered = [l for l in legs if agent["filter"](
-        # Build a minimal SelectionResult for the filter lambda
-        type("SR", (), {
-            "side": l.side,
-            "prop_type": l.prop_type,
-            "implied_prob": l.implied_prob,
-            "fantasy_pts_edge": l.fantasy_pts,
-        })()
-    )]
 
-    # Sort by implied prob desc, cap at agent max_legs
+    excluded_keys: set of (player_name, prop_type, side) tuples already claimed
+                   by a higher-priority agent — these legs are off-limits.
+    """
+    if excluded_keys is None:
+        excluded_keys = set()
+
+    filtered = [
+        l for l in legs
+        if agent["filter"](
+            type("SR", (), {
+                "side": l.side,
+                "prop_type": l.prop_type,
+                "implied_prob": l.implied_prob,
+                "fantasy_pts_edge": l.fantasy_pts,
+            })()
+        )
+        # Hard exclusion: leg already used by a previous agent
+        and (l.player_name, l.prop_type, l.side) not in excluded_keys
+    ]
+
+    # Sort by implied prob desc, cap at min(agent max_legs, global MAX_LEGS)
     filtered.sort(key=lambda x: -x.implied_prob)
-    selected = filtered[:agent["max_legs"]]
+    cap = min(agent["max_legs"], MAX_LEGS)
+    selected = filtered[:cap]
 
     if len(selected) < MIN_LEGS:
         return None
@@ -730,9 +742,12 @@ class LiveDispatcher:
             return
 
         # 4. Per-agent parlay building + Discord dispatch
+        # global_used: tracks (player_name, prop_type, side) already claimed.
+        # Once a leg is in a sent parlay it cannot appear in any subsequent one.
+        global_used: set[tuple] = set()
         sent = 0
         for agent in AGENT_CONFIGS:
-            parlay = build_parlay(leg_pool, agent)
+            parlay = build_parlay(leg_pool, agent, excluded_keys=global_used)
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
                 continue
@@ -754,6 +769,11 @@ class LiveDispatcher:
                 "[%s] %d-leg parlay EV=%.1f%% conf=%.1f/10 → SEND",
                 agent["name"], n, ev, conf,
             )
+
+            # Claim these legs — no subsequent agent may reuse them
+            for leg in parlay["legs"]:
+                global_used.add((leg["player_name"], leg["prop_type"], leg["side"]))
+
             if not self.dry_run:
                 discord_alert.send_parlay_alert(parlay)
                 time.sleep(1.5)   # rate-limit Discord webhook (25 req/s global)
