@@ -42,13 +42,13 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
 
-from platform_selector import PlatformSelector, SelectionResult
+from platform_selector import PlatformSelector
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
@@ -586,7 +586,6 @@ def implied_prob_from_odds(odds: float) -> float:
 def calc_ev(true_prob: float, odds: float = -110.0) -> float:
     """Return EV percentage given true probability and American odds."""
     dec     = american_to_decimal(odds)
-    implied = implied_prob_from_odds(odds)
     no_vig  = true_prob
     ev_pct  = (no_vig * (dec - 1) - (1 - no_vig)) * 100
     return ev_pct
@@ -745,7 +744,8 @@ class LiveDispatcher:
 
     # ── private ───────────────────────────────────────────────────────────────
 
-    def _evaluate_props(self, raw_props: list[dict]) -> list[PropLeg]:
+    @staticmethod
+    def _evaluate_props(raw_props: list[dict]) -> list[PropLeg]:
         """
         Normalise raw props, compare platforms, apply EV gate.
 
@@ -825,13 +825,11 @@ class LiveDispatcher:
                 return 0.50
             xs = [r[0] for r in rates]
             ys = [r[1] for r in rates]
-            # Clamp
             if line <= xs[0]:
                 p_over = ys[0]
             elif line >= xs[-1]:
                 p_over = ys[-1]
             else:
-                # Linear interpolation
                 for i in range(len(xs) - 1):
                     if xs[i] <= line <= xs[i + 1]:
                         t = (line - xs[i]) / (xs[i + 1] - xs[i])
@@ -841,10 +839,8 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
-        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")

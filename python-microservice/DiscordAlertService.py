@@ -254,7 +254,8 @@ class DiscordAlertService:
             }]
         })
 
-    def _format_leg(self, idx: int, leg: dict) -> str:
+    @staticmethod
+    def _format_leg(idx: int, leg: dict) -> str:
         """Format a single parlay leg as a Discord-friendly string."""
         player    = leg.get("player_name", "Unknown")
         prop_raw  = leg.get("prop_type", "")
