@@ -1,6 +1,3 @@
-import xgboost as xgb
-import pandas as pd
-import numpy as np
 import os
 from services.fatigue_logic import apply_fatigue_adjustments
 from services.usage_vacuums import evaluate_player_context
@@ -19,7 +16,7 @@ def calculate_implied_probability(american_odds: int) -> float:
     else:
         return 100 / (american_odds + 100)
 
-def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, statcast_data: list, fatigue_context: dict = None, vacuum_context: dict = None, contrast_context: dict = None, prop_category: str = "") -> dict:
+def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, _statcast_data: list, fatigue_context: dict = None, vacuum_context: dict = None, contrast_context: dict = None, prop_category: str = "") -> dict:
     """
     Core ML Evaluation Logic.
     Currently scaffolded to calculate baseline probabilities until the .xgb model is trained.

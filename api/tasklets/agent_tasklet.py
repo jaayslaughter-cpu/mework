@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .data_hub_tasklet import read_hub
-from ..agents import ALL_AGENTS, EVHunter, UnderMachine, ThreeLeg, ParlayAgent, LiveAgent, ArbAgent, GradingAgent
+from ..agents import EVHunter, UnderMachine, ThreeLeg, ParlayAgent, LiveAgent, ArbAgent, GradingAgent
 
 logger = logging.getLogger("propiq.tasklet.agent")
 

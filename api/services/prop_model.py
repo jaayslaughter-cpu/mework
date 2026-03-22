@@ -13,7 +13,6 @@ Drop this into: api/services/prop_model.py
 """
 
 import os
-import json
 import sqlite3
 import logging
 import hashlib
@@ -23,7 +22,6 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
-from scipy.special import expit  # sigmoid
 
 logger = logging.getLogger(__name__)
 
@@ -222,14 +220,11 @@ class CalibrationLayer:
 
     def _key_hash(self, player: str, prop_type: str, line_bucket: float) -> str:
         raw = f"{player}|{prop_type}|{line_bucket:.2f}"
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def _load_calibration(self):
         """Load saved calibration from DB."""
         try:
-            rows = self.store.conn.execute(
-                "SELECT * FROM calibration_store"
-            ).fetchall()
             # Pre-load corrections from error_patterns
             patterns = self.store.conn.execute(
                 "SELECT player, prop_type, correction FROM error_patterns WHERE resolved=0"
@@ -492,7 +487,7 @@ class PropModelWithCalibration:
             "accuracy_by_prop": self.error_store.get_recent_accuracy(days=7),
             "active_corrections": [
                 {"player": k[0], "prop_type": k[1], "correction": v}
-                for k, v in self.calibration._corrections.items()
+                for k, v in self.calibration.get_corrections().items()
             ],
             "total_logged": self.error_store.conn.execute(
                 "SELECT COUNT(*) FROM prediction_log"

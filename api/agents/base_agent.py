@@ -292,16 +292,15 @@ class BaseAgent(abc.ABC):
             # Validate constraints
             valid = []
             for slip in slips:
-                if self.min_legs <= slip.num_legs <= self.max_legs:
-                    if slip.expected_value >= self.ev_threshold:
-                        slip.agent_name = self.name
-                        slip.strategy = self.strategy
-                        self.db.save_bet(slip)
-                        valid.append(slip)
-                        self.log.info(
-                            f"[{self.name}] Queued {slip.num_legs}-leg bet | "
-                            f"EV={slip.expected_value:.1%} | odds={slip.combined_odds:.2f}"
-                        )
+                if self.min_legs <= slip.num_legs <= self.max_legs and slip.expected_value >= self.ev_threshold:
+                    slip.agent_name = self.name
+                    slip.strategy = self.strategy
+                    self.db.save_bet(slip)
+                    valid.append(slip)
+                    self.log.info(
+                        f"[{self.name}] Queued {slip.num_legs}-leg bet | "
+                        f"EV={slip.expected_value:.1%} | odds={slip.combined_odds:.2f}"
+                    )
             elapsed = time.time() - start
             self.log.info(f"[{self.name}] {len(valid)} bets queued in {elapsed:.2f}s")
             return valid
