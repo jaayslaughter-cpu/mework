@@ -1,19 +1,21 @@
-"""
-SpringTrainingSeeder
-Initializes all player/team records at 0-0 for the 2026 season.
-Pulls Spring Training stats from SportsData.io and weights them at 30%
-against 2025 full-season priors until Opening Day (2026-03-26).
+    """
+    SpringTrainingSeeder
+    Initializes all player/team records at 0-0 for the 2026 season.
+    Pulls Spring Training stats from SportsData.io and weights them at 30%
+    against 2025 full-season priors until Opening Day (2026-03-26).
 
-Run once on startup. Re-runs every Sunday 2AM alongside XGBoostTasklet
-to incorporate new ST at-bats/innings.
-"""
+    Run once on startup. Re-runs every Sunday 2AM alongside XGBoostTasklet
+    to incorporate new ST at-bats/innings.
+    """
 
-import os
-import json
-import redis
-import logging
-import datetime
-import requests
+    import os
+    import json
+    import redis
+    import logging
+    import datetime
+    import requests
+
+    from .spring_training_constants import STAR_PLAYERS, LEAGUE_AVG_PRIORS, ST_WEIGHT, PRIOR_WEIGHT
 
 logger = logging.getLogger(__name__)
 
