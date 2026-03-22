@@ -170,7 +170,7 @@ class PropIQLogger:
             try:
                 fn(alert_type, message, data)
             except Exception as e:
-                logger.error(f"Alert handler error: {e}")
+                logger.error("Alert handler error: %s", e)
 
 
 # ─────────────────────────────────────────────

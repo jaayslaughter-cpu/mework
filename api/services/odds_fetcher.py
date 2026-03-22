@@ -182,7 +182,7 @@ class OddsFetcher:
         if use_cache:
             cached = self.cache.get(url, params)
             if cached is not None:
-                logger.debug(f"Cache hit: {endpoint}")
+                logger.debug("Cache hit: %s", endpoint)
                 return cached
 
         # Get best available API key
@@ -206,12 +206,12 @@ class OddsFetcher:
                     return data
 
                 elif resp.status_code == 422:
-                    logger.error(f"Odds API 422 Unprocessable: {resp.text}")
+                    logger.error("Odds API 422 Unprocessable: %s", resp.text)
                     return None
 
                 elif resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after}s then rotating key.")
+                    logger.warning("Rate limited. Waiting %ss then rotating key.", retry_after)
                     time.sleep(retry_after)
                     # Try next key
                     new_key = self.limiter.best_available_key()
@@ -221,21 +221,21 @@ class OddsFetcher:
                     continue
 
                 else:
-                    logger.warning(f"HTTP {resp.status_code} on attempt {attempt + 1}: {resp.text[:200]}")
+                    logger.warning("HTTP %s on attempt %s: %s", resp.status_code, attempt + 1, resp.text[:200])
 
             except requests.exceptions.Timeout:
-                logger.warning(f"Timeout on attempt {attempt + 1}")
+                logger.warning("Timeout on attempt %s", attempt + 1)
             except requests.exceptions.ConnectionError as e:
-                logger.warning(f"Connection error on attempt {attempt + 1}: {e}")
+                logger.warning("Connection error on attempt %s: %s", attempt + 1, e)
             except Exception as e:
-                logger.error(f"Unexpected error: {e}")
+                logger.error("Unexpected error: %s", e)
 
             # Exponential backoff with jitter
             wait = BASE_BACKOFF ** (attempt + 1) + random.uniform(0, 1)
-            logger.info(f"Backing off {wait:.1f}s before retry {attempt + 2}")
+            logger.info("Backing off %0.1fs before retry %s", wait, attempt + 2)
             time.sleep(wait)
 
-        logger.error(f"All {MAX_RETRIES} attempts failed for {endpoint}")
+        logger.error("All %s attempts failed for %s", MAX_RETRIES, endpoint)
         return None
 
     # ── Public methods ──────────────────────
@@ -266,7 +266,7 @@ class OddsFetcher:
                 game["bookmakers"][book["title"]] = book_data
             games.append(game)
 
-        logger.info(f"Fetched {len(games)} MLB games")
+        logger.info("Fetched %s MLB games", len(games))
         return games
 
     def get_mlb_events(self) -> List[Dict]:
@@ -324,7 +324,7 @@ class OddsFetcher:
             # Polite delay between chunks
             time.sleep(0.5)
 
-        logger.info(f"Fetched {len(all_props)} prop lines for event {event_id}")
+        logger.info("Fetched %s prop lines for event %s", len(all_props), event_id)
         return all_props
 
     def get_all_mlb_props(
