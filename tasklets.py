@@ -466,7 +466,6 @@ class _BaseAgent:
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.utcnow().isoformat(),
         }
-
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
         dfs = self.hub.get("dfs", {})
         matched = []

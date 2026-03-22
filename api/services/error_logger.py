@@ -100,7 +100,6 @@ class PropIQLogger:
             Severity.CRITICAL: logger.critical,
         }.get(severity, logger.info)
         log_fn(f"[{error_type}] {message}")
-
     def log_prediction_outcome(
         self,
         player: str,
