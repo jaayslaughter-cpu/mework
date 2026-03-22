@@ -18,8 +18,7 @@ import random
 import logging
 import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -48,7 +47,7 @@ class SimpleCache:
 
     def _cache_key(self, url: str, params: Dict) -> str:
         raw = url + json.dumps(params, sort_keys=True)
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def get(self, url: str, params: Dict) -> Optional[Any]:
         key = self._cache_key(url, params)

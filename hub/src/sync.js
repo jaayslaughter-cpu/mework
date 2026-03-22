@@ -30,8 +30,7 @@ async function syncLoop() {
         for (const book of props.bookmakers) {
           for (const market of book.markets) {
             // 1. Aggregate Over/Under outcomes in JavaScript memory first
-            const outcomesByDesc = {};
-            
+
             for (const outcome of market.outcomes) {
               const point = outcome.point ?? 0.5;
               const marketId = `${event.id}_${book.key}_${market.key}_${outcome.description || 'base'}_${point}`.replace(/\s+/g, '_').toLowerCase();
@@ -50,11 +49,9 @@ async function syncLoop() {
                   updated_at = NOW();
               `;
               
-              const odds = outcome.price;
-              
               await pool.query(query, [
-                marketId, event.id, book.key, market.key, data.point, 
-                data.overOdds, data.underOdds
+                marketId, event.id, book.key, market.key, point, 
+                outcome.overOdds, outcome.underOdds
               ]);
             }
           }

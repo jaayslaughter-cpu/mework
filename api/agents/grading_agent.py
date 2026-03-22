@@ -7,10 +7,9 @@ and SportsData.io, grades all pending bets, updates agent stats + calibration.
 from __future__ import annotations
 import logging
 import os
-import time
 import requests
-from datetime import date, datetime
-from .base_agent import BaseAgent, BetSlip, Leg
+from datetime import date
+from .base_agent import BaseAgent, BetSlip
 
 logger = logging.getLogger("propiq.agent.grading")
 
@@ -118,7 +117,7 @@ class GradingAgent(BaseAgent):
                 summary["errors"] += 1
 
         # Update all agent stats after grading
-        agent_names = set(b["agent_name"] for b in pending if b["agent_name"])
+        agent_names = {b["agent_name"] for b in pending if b["agent_name"]}
         for agent_name in agent_names:
             self.db.update_agent_stats(agent_name)
 
