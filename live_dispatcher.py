@@ -911,12 +911,13 @@ class LiveDispatcher:
             return
 
         # 4. Per-agent parlay building + Discord dispatch
-        # global_used: tracks (player_name, prop_type, side) already claimed.
-        # Once a leg is in a sent parlay it cannot appear in any subsequent one.
-        global_used: set[tuple] = set()
+        # Each agent picks independently from the full filtered pool.
+        # Shared legs across parlays are acceptable — consensus across agents
+        # is a positive signal, not a risk. Each parlay is a separate $20 bet
+        # with its own thesis.
         sent = 0
         for agent in AGENT_CONFIGS:
-            parlay = build_parlay(leg_pool, agent, excluded_keys=global_used)
+            parlay = build_parlay(leg_pool, agent)
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
                 continue
@@ -939,10 +940,6 @@ class LiveDispatcher:
                 agent["name"], n, ev, conf,
             )
 
-            # Claim these legs — no subsequent agent may reuse them
-            for leg in parlay["legs"]:
-                global_used.add((leg["player_name"], leg["prop_type"], leg["side"]))
-
             if not self.dry_run:
                 # Attach live season record for this agent before sending
                 parlay["season_stats"] = get_agent_season_stats(agent["name"])
@@ -961,8 +958,8 @@ class LiveDispatcher:
                             json.dumps(parlay, indent=2)[:400])
             sent += 1
 
-        # ── OmegaStack (18th agent) — runs last, uses remaining unclaimed legs ──
-        omega = build_omega_parlay(leg_pool, excluded_keys=global_used)
+        # ── OmegaStack (18th agent) — triple-confirmation ensemble ──
+        omega = build_omega_parlay(leg_pool)
         if omega:
             ev_o   = omega.get("ev_pct", 0)
             conf_o = omega.get("confidence", 0)
@@ -971,8 +968,6 @@ class LiveDispatcher:
                     "[OmegaStack] %d-leg ensemble parlay EV=%.1f%% conf=%.1f/10 → SEND",
                     len(omega["legs"]), ev_o, conf_o,
                 )
-                for leg in omega["legs"]:
-                    global_used.add((leg["player_name"], leg["prop_type"], leg["side"]))
                 if not self.dry_run:
                     omega["season_stats"] = get_agent_season_stats("OmegaStack")
                     discord_alert.send_parlay_alert(omega)
