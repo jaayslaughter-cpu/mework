@@ -671,7 +671,6 @@ def implied_prob_from_odds(odds: float) -> float:
 def calc_ev(true_prob: float, odds: float = -110.0) -> float:
     """Return EV percentage given true probability and American odds."""
     dec     = american_to_decimal(odds)
-    implied = implied_prob_from_odds(odds)
     no_vig  = true_prob
     ev_pct  = (no_vig * (dec - 1) - (1 - no_vig)) * 100
     return ev_pct
@@ -1011,31 +1010,6 @@ class LiveDispatcher:
                         confidence=conf_o,
                         ev_pct=ev_o,
                         legs=[
-                            {
-                                "player_name": l["player"],
-                                "prop_type":   l["prop_type"],
-                                "side":        l["side"],
-                                "line":        l["line"],
-                            }
-                            for l in omega["legs"]
-                        ],
-                    )
-                else:
-                    logger.info("[DRY-RUN] OmegaStack would send: %s",
-                                json.dumps(omega, indent=2)[:400])
-                sent += 1
-            else:
-                logger.info(
-                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 — below gate, skipped.",
-                    ev_o, conf_o,
-                )
-        else:
-            logger.info("[OmegaStack] No triple-confirmation legs today.")
-
-        logger.info("Dispatch complete — %d parlays sent for %s", sent, date)
-
-    # ── private ───────────────────────────────────────────────────────────────
-
     def _evaluate_props(self, raw_props: list[dict]) -> list[PropLeg]:
         """
         Normalise raw props, compare platforms, apply EV gate.
@@ -1058,10 +1032,38 @@ class LiveDispatcher:
         # Format: {prop_type: [(line_threshold, over_prob), ...]}
         # Interpolated linearly between thresholds.
         _BASE_RATES: dict[str, list[tuple[float, float]]] = {
-            # Hitter: H ≥ X
+            # Hitter:  H ≥ X
             "hits":           [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
             # HR ≥ X
             "home_runs":      [(0.5, 0.22), (1.5, 0.04)],
+        }
+        # Group props by player and prop_type
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for prop in raw_props:
+            key = (prop['player_name'].lower(), prop['prop_type'])
+            groups.setdefault(key, []).append(prop)
+        result: list[PropLeg] = []
+        for (player, ptype), items in groups.items():
+            # Select best platform line
+            best = min(items, key=lambda x: x['line']) if items[0]['side'] == 'Over' else max(items, key=lambda x: x['line'])
+            line = best['line']
+            # Interpolate base rate
+            rates = _BASE_RATES.get(ptype, [])
+            prob = 0.0
+            for (thr, p) in rates:
+                if line >= thr:
+                    prob = p
+                else:
+                    break
+            # Apply EV and probability gates
+            ev = (prob - best['market_prob']) * 100
+            if prob >= self.min_prob and ev >= self.ev_gate:
+                leg = PropLeg(
+                    player_name=best['player_name'], prop_type=ptype,
+                    side=best['side'], line=line, ev=ev, prob=prob
+                )
+                result.append(leg)
+        return result
             # RBI ≥ X
             "rbis":           [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
             # R ≥ X

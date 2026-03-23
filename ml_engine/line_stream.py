@@ -3,7 +3,7 @@ line_stream.py
 ==============
 Real-time line streaming pipeline.
 
-Runs every 30 minutes, 10 AM – 10 PM ET, via a scheduled trigger.
+Runs every 30 minutes, 10 AM  10 PM ET, via a scheduled trigger.
 
 Three phases per run:
 
@@ -17,8 +17,8 @@ Runs every 30 minutes, 10 AM 	6 PM ET, via a scheduled trigger.
 Three phases per run:
 
   PRE-GAME   Snapshot current PrizePicks + Underdog player prop lines.
-             Compare to previous 30-min snapshot 60 detect steam moves
-             (line shift 9 0.5 units). Post Discord alert for each move.
+             Compare to previous 30-min snapshot 60 detect steam moves
+             (line shift 9 0.5 units). Post Discord alert for each move.
              Mark first snapshot of day as opening lines.
 
   IN-GAME    Fetch live ESPN box scores for games currently in progress.
