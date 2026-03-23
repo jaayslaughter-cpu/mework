@@ -942,6 +942,10 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
     return props
 
 
+def _get_props(hub) -> list[dict]:
+    return _extract_underdog_props(hub) or _build_synthetic_props(hub)
+
+
 def run_agent_tasklet() -> None:
     """
     Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
@@ -959,10 +963,7 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
-    # Underdog is the baseline DFS platform
-    props = _extract_underdog_props(hub)
-    if not props:
-        props = _build_synthetic_props(hub)
+    props = _get_props(hub)
     if not props:
         logger.info("[AgentTasklet] No Underdog props available — skipping cycle.")
         return
@@ -1046,7 +1047,7 @@ def run_agent_tasklet() -> None:
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
-    active_agents = len(set(p["agent"] for p in all_parlays))
+    active_agents = len({p["agent"] for p in all_parlays})
     best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
     logger.info("[AgentTasklet] Cycle complete — %d slip(s) from %d active agent(s). "
                 "Best slip: %s | %d legs | combined EV=%.1f%%",
