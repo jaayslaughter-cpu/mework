@@ -1064,6 +1064,8 @@ class LiveDispatcher:
                 )
                 result.append(leg)
         return result
+
+        _PROP_PROB_RANGES: dict[str, list[tuple[float, float]]] = {
             # RBI ≥ X
             "rbis":           [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
             # R ≥ X
