@@ -944,6 +944,10 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
     return props
 
 
+def _get_props(hub) -> list[dict]:
+    return _extract_underdog_props(hub) or _build_synthetic_props(hub)
+
+
 def run_agent_tasklet() -> None:
     """
     Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
@@ -961,10 +965,7 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
-    # Underdog is the baseline DFS platform
-    props = _extract_underdog_props(hub)
-    if not props:
-        props = _build_synthetic_props(hub)
+    props = _get_props(hub)
     if not props:
         logger.info("[AgentTasklet] No Underdog props available — skipping cycle.")
         return
