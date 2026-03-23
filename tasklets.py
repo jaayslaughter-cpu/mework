@@ -505,7 +505,7 @@ class _EVHunter(_BaseAgent):
     def evaluate(self, prop: dict) -> dict | None:
         over_odds  = prop.get("over_american",  -110)
         under_odds = prop.get("under_american", -110)
-        fair_over, _ = _no_vig(over_odds, under_odds)
+        _, _ = _no_vig(over_odds, under_odds)
         model_prob   = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied      = _american_to_implied(over_odds) / 100
         ev_pct       = (model_prob / 100 - implied) / implied
@@ -520,7 +520,6 @@ class _UnderMachine(_BaseAgent):
 
     def evaluate(self, prop: dict) -> dict | None:
         under_odds = prop.get("under_american", -110)
-        _, fair_under = _no_vig(prop.get("over_american", -110), under_odds)
         model_prob    = 100 - self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied       = _american_to_implied(under_odds) / 100
         ev_pct        = (model_prob / 100 - implied) / implied
@@ -560,7 +559,6 @@ class _F5Agent(_BaseAgent):
         """Targets first-5-innings run props."""
         if "f5" not in prop.get("prop_type", "").lower():
             return None
-        starters = self.hub.get("context", {}).get("projected_starters", [])
         model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
@@ -1308,7 +1306,7 @@ def run_grading_tasklet() -> None:
         conn = _pg_conn()
         with conn.cursor() as cur:
             for row in open_bets:
-                bid, player, ptype, line, side, odds, units, model_prob, ev_pct, agent = row
+                bid, player, ptype, line, side, odds, units, model_prob, _, agent = row
                 stats = stat_lookup.get(player, {})
                 actual = _get_stat(stats, ptype)
 
@@ -1420,7 +1418,7 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
         for game in odds_list:
             if not isinstance(game, dict):
                 continue
-            for market_key, outcomes in game.get("bookmakers", [{}])[0].get("markets", [{}]):
+            for _ in game.get("bookmakers", [{}])[0].get("markets", [{}]):
                 pass
     except Exception:
         pass
