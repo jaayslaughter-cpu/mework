@@ -356,7 +356,7 @@ class OddsFetcher:
     ) -> Optional[Dict]:
         """
         Get consensus (average) book line for a specific player prop.
-        Returns: {line, avg_over_prob, avg_under_prob, books}
+        # Returns: {line, avg_over_prob, avg_under_prob, books}
         market_key = self._prop_type_to_market(prop_type)
         props = self.get_player_props(event_id, markets=[market_key])
 
