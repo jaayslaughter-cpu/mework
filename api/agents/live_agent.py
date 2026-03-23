@@ -64,7 +64,8 @@ class LiveAgent(BaseAgent):
             new_prob = 1 / newest["decimal"] if newest["decimal"] > 0 else 0
             delta = new_prob - old_prob
             if abs(delta) >= MOVEMENT_THRESHOLD:
-                movements.append((dk, delta))
+                direction = "up" if delta > 0 else "down"
+                movements.append((dk, direction, delta))
         return movements
 
     def analyze(self, hub_data: dict) -> list[BetSlip]:
@@ -149,5 +150,5 @@ class LiveAgent(BaseAgent):
                 }
             ))
 
-        logger.info(f"[live] {len(movements)} movements → {len(slips)} live slips")
+        logger.info("[live] %d movements → %d live slips", len(movements), len(slips))
         return slips
