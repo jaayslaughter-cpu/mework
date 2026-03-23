@@ -140,7 +140,8 @@ class DFSScorer:
 
         return round(pts, 2)
 
-    def salary_value(self, dfs_points: float, salary: int) -> float:
+    @staticmethod
+    def salary_value(dfs_points: float, salary: int) -> float:
         """Value = points per $1000 salary."""
         return round(dfs_points / (salary / 1000), 2) if salary else 0.0
 
@@ -293,10 +294,11 @@ class PropBacktester:
         with open(BACKTEST_RESULTS_FILE, "w") as f:
             json.dump(results, f, indent=2)
 
-        logger.info(f"Backtest: {total_bets} bets, {wins} wins ({wins/total_bets:.1%}), ROI {roi:.1f}%")
+        logger.info("Backtest: %d bets, %d wins (%.1f%%), ROI %.1f%%", total_bets, wins, wins/total_bets * 100, roi)
         return results
 
-    def kelly_criterion(self, model_prob: float, book_prob: float, max_fraction: float = 0.25) -> float:
+    @staticmethod
+    def kelly_criterion(model_prob: float, book_prob: float, max_fraction: float = 0.25) -> float:
         """
         Full Kelly Criterion bet size (as fraction of bankroll).
         Capped at max_fraction for safety.

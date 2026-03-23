@@ -40,7 +40,7 @@ class MLBStatsClient:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            logger.error(f"MLB Stats API error {path}: {e}")
+            logger.error("MLB Stats API error %s: %s", path, e)
             return None
 
     def get_schedule(self, game_date: Optional[str] = None) -> List[Dict]:
@@ -133,7 +133,7 @@ class MLBStatsClient:
         results = {"home": [], "away": []}
         for side in ["home", "away"]:
             players = boxscore.get("teams", {}).get(side, {}).get("players", {})
-            for pid, pdata in players.items():
+            for _, pdata in players.items():
                 batting = pdata.get("stats", {}).get("batting", {})
                 pitching = pdata.get("stats", {}).get("pitching", {})
                 if batting or pitching:
@@ -180,7 +180,7 @@ class ESPNClient:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            logger.error(f"ESPN API error {path}: {e}")
+            logger.error("ESPN API error %s: %s", path, e)
             return None
 
     def get_scoreboard(self, game_date: Optional[str] = None) -> List[Dict]:
@@ -314,7 +314,7 @@ class StatcastClient:
             player_id = int(lkup.iloc[0]["key_mlbam"])
             return statcast_batter(start_dt, end_dt, player_id)
         except Exception as e:
-            logger.error(f"Statcast batter error: {e}")
+            logger.error("Statcast batter error: %s", e)
             return None
 
     def get_pitcher_statcast(self, player_name: str, start_dt: str, end_dt: str) -> Optional[Any]:
@@ -329,7 +329,7 @@ class StatcastClient:
             player_id = int(lkup.iloc[0]["key_mlbam"])
             return statcast_pitcher(start_dt, end_dt, player_id)
         except Exception as e:
-            logger.error(f"Statcast pitcher error: {e}")
+            logger.error("Statcast pitcher error: %s", e)
             return None
 
     def get_sprint_speed(self, season: int = None) -> Optional[Any]:
@@ -339,7 +339,7 @@ class StatcastClient:
             from pybaseball import statcast_sprint_speed
             return statcast_sprint_speed(season or datetime.now().year)
         except Exception as e:
-            logger.error(f"Sprint speed error: {e}")
+            logger.error("Sprint speed error: %s", e)
             return None
 
 
@@ -437,8 +437,6 @@ class MLBDataAggregator:
         if not log:
             return {"pitcher": pitcher_name, "player_id": player_id}
 
-        import pandas as pd
-        df = pd.DataFrame(log)
         # For pitchers the stats come back differently — use season totals
         stats_data = self.mlb.get_player_stats(player_id, stat_type="season")
         stats = {}
