@@ -7,14 +7,23 @@ Runs every 30 minutes, 10 AM – 10 PM ET, via a scheduled trigger.
 
 Three phases per run:
 
+"""
+line_stream.py
+==============
+Real-time line streaming pipeline.
+
+Runs every 30 minutes, 10 AM 	6 PM ET, via a scheduled trigger.
+
+Three phases per run:
+
   PRE-GAME   Snapshot current PrizePicks + Underdog player prop lines.
-             Compare to previous 30-min snapshot → detect steam moves
-             (line shift ≥ 0.5 units). Post Discord alert for each move.
+             Compare to previous 30-min snapshot 60 detect steam moves
+             (line shift 9 0.5 units). Post Discord alert for each move.
              Mark first snapshot of day as opening lines.
 
   IN-GAME    Fetch live ESPN box scores for games currently in progress.
              Check PENDING parlay leg survival vs. live stats.
-             Post informational Discord update (data only — no new bets).
+             Post informational Discord update (data only 	6 no new bets).
              Mark last pre-game snapshot as closing lines.
 
   CLV        Once closing lines are recorded, compute CLV for every
@@ -32,7 +41,6 @@ No in-game bet signals are generated. In-game phase is monitoring only.
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import time
@@ -760,6 +768,26 @@ def post_clv_report(date_str: str, clv_results: list[dict]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _get_game_counts(games):
+    mapping = {"SCHEDULED": 0, "IN_PROGRESS": 0, "FINAL": 0}
+    for g in games:
+        mapping[g["status"]] = mapping.get(g["status"], 0) + 1
+    return mapping["SCHEDULED"], mapping["IN_PROGRESS"], mapping["FINAL"]
+
+
+def _log_game_state(pre, live, final):
+    logger.info("[State] %d scheduled | %d in-progress | %d final", pre, live, final)
+
+
+def _phase1(conn, today):
+    props = fetch_all_props()
+    is_first = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM line_snapshots WHERE game_date = ?",
+        (today,),
+    ).fetchone()["cnt"] == 0
+    return props, is_first
+
+
 def main() -> None:
     """Main entry point — called every 30 min by the scheduled trigger."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -770,22 +798,12 @@ def main() -> None:
 
     # ── Phase 0: ESPN game states ───────────────────────────────────────
     games = get_game_states(today)
-    pre_count = sum(1 for g in games if g["status"] == "SCHEDULED")
-    live_count = sum(1 for g in games if g["status"] == "IN_PROGRESS")
-    final_count = sum(1 for g in games if g["status"] == "FINAL")
-    logger.info(
-        "[State] %d scheduled | %d in-progress | %d final",
-        pre_count, live_count, final_count,
-    )
+    pre_count, live_count, final_count = _get_game_counts(games)
+    _log_game_state(pre_count, live_count, final_count)
 
     # ── Phase 1: Pre-game snapshot + steam detection ────────────────────
-    if pre_count > 0 or live_count > 0:
-        props = fetch_all_props()
-
-        is_first = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM line_snapshots WHERE game_date = ?",
-            (today,),
-        ).fetchone()["cnt"] == 0
+    if pre_count or live_count:
+        props, is_first = _phase1(conn, today)
 
         previous_snap = get_previous_snapshot(conn, today, now_ts)
         store_snapshot(conn, today, props, now_ts, is_opening=is_first)

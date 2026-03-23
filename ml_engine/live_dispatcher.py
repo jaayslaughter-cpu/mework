@@ -40,9 +40,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -54,10 +53,10 @@ try:
     _SEASON_RECORD_AVAILABLE = True
 except ImportError:
     _SEASON_RECORD_AVAILABLE = False
-    def record_parlay(*a, **kw): return False            # noqa: E704
-    def get_agent_season_stats(agent): return {}         # noqa: E704
+    def record_parlay(*_args, **_kwargs): return False            # noqa: E704
+    def get_agent_season_stats(_agent): return {}         # noqa: E704
 
-from platform_selector import PlatformSelector, SelectionResult
+from platform_selector import PlatformSelector
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
