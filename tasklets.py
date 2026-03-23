@@ -1048,7 +1048,7 @@ def run_agent_tasklet() -> None:
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
-    active_agents = len(set(p["agent"] for p in all_parlays))
+    active_agents = len({p["agent"] for p in all_parlays})
     best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
     logger.info("[AgentTasklet] Cycle complete — %d slip(s) from %d active agent(s). "
                 "Best slip: %s | %d legs | combined EV=%.1f%%",
