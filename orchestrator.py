@@ -35,6 +35,7 @@ from tasklets import (
     run_grading_tasklet,
     run_xgboost_tasklet,
 )
+from DiscordAlertService import discord_alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,14 +58,14 @@ _last_leaderboard_run: str | None = None
 async def _safe_run(name: str, fn, *args, **kwargs):
     """Run a tasklet with error logging."""
     try:
-        logger.info(f"[orchestrator] Running {name}...")
+        logger.info("[orchestrator] Running %s...", name)
         start = time.time()
         result = fn(*args, **kwargs)
         elapsed = time.time() - start
-        logger.info(f"[orchestrator] {name} done in {elapsed:.2f}s")
+        logger.info("[orchestrator] %s done in %.2fs", name, elapsed)
         return result
     except Exception as e:
-        logger.error(f"[orchestrator] {name} FAILED: {e}", exc_info=True)
+        logger.error("[orchestrator] %s FAILED: %s", name, e, exc_info=True)
         return None
 
 
@@ -101,7 +102,7 @@ async def job_xgboost():
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
 
     # Register tasklet jobs
@@ -113,6 +114,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_xgboost, CronTrigger(day_of_week="sun", hour=2), id="xgboost")
 
     scheduler.start()
+
+    # Discord startup ping — fires the second the app is ready
+    try:
+        discord_alert.send_startup_ping()
+    except Exception as _disc_err:
+        logger.warning("Discord startup ping failed: %s", _disc_err)
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())

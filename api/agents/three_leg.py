@@ -22,55 +22,54 @@ CORRELATION_MAP = {
 }
 
 
-def _correlation_bonus(legs: list[Leg]) -> float:
-    """Estimate correlation adjustment for a set of legs from the same game."""
-    if len(legs) != 3:
-        return 1.0
-    bonus = 1.0
-    for a, b in itertools.combinations(legs, 2):
-        key = tuple(sorted([a.prop_type, b.prop_type]))
-        corr = CORRELATION_MAP.get(key, 0.0)
-        bonus += abs(corr) * 0.03   # Each positive correlation adds 3%
-    return round(bonus, 4)
+ def _correlation_bonus(legs: list[Leg]) -> float:
+     """Estimate correlation adjustment for a set of legs from the same game."""
+     if len(legs) != 3:
+         return 1.0
+     bonus = 1.0
+     for a, b in itertools.combinations(legs, 2):
+         key = tuple(sorted([a.prop_type, b.prop_type]))
+         corr = CORRELATION_MAP.get(key, 0.0)
+         bonus += abs(corr) * 0.03   # Each positive correlation adds 3%
+     return round(bonus, 4)
 
 
-class ThreeLeg(BaseAgent):
-    name = "three_leg"
-    strategy = "Correlated 3-Leg"
-    max_legs = 3
-    min_legs = 3        # EXACTLY 3 legs — no exceptions
-    ev_threshold = 0.08  # 8% minimum (higher bar for parlays)
+ class ThreeLeg(BaseAgent):
+     name = "three_leg"
+     strategy = "Correlated 3-Leg"
+     max_legs = 3
+     min_legs = 3        # EXACTLY 3 legs — no exceptions
+     ev_threshold = 0.08  # 8% minimum (higher bar for parlays)
 
-    def analyze(self, hub_data: dict) -> list[BetSlip]:
-        props: list[dict] = hub_data.get("player_props", [])
-        predictions: dict = hub_data.get("model_predictions", {})
-        games_today: list[dict] = hub_data.get("games_today", [])
+     def analyze(self, hub_data: dict) -> list[BetSlip]:
+         props: list[dict] = hub_data.get("player_props", [])
+         predictions: dict = hub_data.get("model_predictions", [])
 
-        # Group props by game_id
-        by_game: dict[str, list[dict]] = {}
-        for prop in props:
-            gid = prop.get("game_id", "unknown")
-            by_game.setdefault(gid, []).append(prop)
+         # Group props by game_id
+         by_game: dict[str, list[dict]] = {}
+         for prop in props:
+             gid = prop.get("game_id", "unknown")
+             by_game.setdefault(gid, []).append(prop)
 
-        slips: list[BetSlip] = []
+         slips: list[BetSlip] = []
 
-        for game_id, game_props in by_game.items():
-            # Build qualified legs for this game
-            candidate_legs: list[Leg] = []
-            for prop in game_props:
-                for direction in ("over", "under"):
-                    american = prop.get(f"{direction}_odds")
-                    if not american:
-                        continue
-                    decimal = self.american_to_decimal(int(american))
-                    if decimal < 1.50:
-                        continue
+         for game_id, game_props in by_game.items():
+             # Build qualified legs for this game
+             candidate_legs: list[Leg] = []
+             for prop in game_props:
+                 for direction in ("over", "under"):
+                     american = prop.get(f"{direction}_odds")
+                     if not american:
+                         continue
+                     decimal = self.american_to_decimal(int(american))
+                     if decimal < 1.50:
+                         continue
 
-                    book_prob = self.decimal_to_prob(decimal)
-                    line = prop.get("line", 0.0)
-                    player = prop.get("player_name", "")
-                    prop_type = prop.get("prop_type", "")
-                    book = prop.get("bookmaker", "draftkings")
+                     book_prob = self.decimal_to_prob(decimal)
+                     line = prop.get("line", 0.0)
+                     player = prop.get("player_name", "")
+                     prop_type = prop.get("prop_type", "")
+                     book = prop.get("bookmaker", "draftkings")
 
                     key = f"{player}|{prop_type}|{line}|{direction}"
                     model_prob = predictions.get(key, {}).get("calibrated_prob")
