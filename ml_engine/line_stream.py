@@ -11,7 +11,7 @@ line_stream.py
 ==============
 Real-time line streaming pipeline.
 
-Runs every 30 minutes, 10 AM 	6 PM ET, via a scheduled trigger.
+"""Runs every 30 minutes, 10 AM 	6 PM ET, via a scheduled trigger.
 
 Three phases per run:
 
@@ -34,7 +34,6 @@ APIs / sources (all free, no new keys):
   - api.prizepicks.com          (no key, same as live_dispatcher.py)
   - api.underdogfantasy.com     (no key, same as live_dispatcher.py)
   - site.api.espn.com           (no key, no quota)
-"""
 
 No in-game bet signals are generated. In-game phase is monitoring only.
 """
