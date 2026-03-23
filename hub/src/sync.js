@@ -31,12 +31,7 @@ const syncLoop = async () => {
 
         for (const book of props.bookmakers) {
           for (const market of book.markets) {
-            // Aggregate Over/Under outcomes by description
-            const outcomeMap = {};
-            const oddsKeyMap = {
-              Over: 'over_odds',
-              Under: 'under_odds'
-            };
+            // 1. Aggregate Over/Under outcomes in JavaScript memory first
 
             for (const outcome of market.outcomes) {
               const desc = outcome.description || 'base';
@@ -71,6 +66,23 @@ const syncLoop = async () => {
                 ) VALUES (
                   $1, $2, NULL, $3, $4, $5, $6, $7, NOW()
                 )
+                ON CONFLICT (market_id) DO UPDATE SET 
+                  line = EXCLUDED.line,
+                  over_odds = EXCLUDED.over_odds,
+                  under_odds = EXCLUDED.under_odds,
+                  updated_at = NOW();
+              `;
+              
+              await pool.query(query, [
+                marketId, event.id, book.key, market.key, point, 
+                outcome.overOdds, outcome.underOdds
+              ]);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[Sync] Failed to sync props for event ${event.id}:`, err.message);
+      }
     }
   } catch (error) {
   }

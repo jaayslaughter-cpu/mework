@@ -61,15 +61,15 @@ def _fetch_historical_props(game_date: str) -> list[dict]:
         resp.raise_for_status()
         return resp.json() if isinstance(resp.json(), list) else []
     except Exception as e:
-        logger.warning(f"[backtest] Historical props fetch error for {game_date}: {e}")
+        logger.warning("[backtest] Historical props fetch error for %s: %s", game_date, e)
         return []
 
 
 def _simulate_agent_bets(
     agent_name: str,
     game_date: str,
-    player_stats: list[dict],
-    prop_lines: list[dict]
+    _player_stats: list[dict],
+    _prop_lines: list[dict]
 ) -> dict:
     """
     Simulate what the agent would have bet and whether it won.
@@ -136,7 +136,7 @@ def run_backtest_tasklet(start_date: str = None, end_date: str = None) -> dict:
     start = start_date or BACKTEST_START
     end = end_date or BACKTEST_END
 
-    logger.info(f"[backtest] Running backtest from {start} to {end}")
+    logger.info("[backtest] Running backtest from %s to %s", start, end)
     run_date = date.today().isoformat()
 
     # Parse date range
@@ -189,7 +189,7 @@ def run_backtest_tasklet(start_date: str = None, end_date: str = None) -> dict:
             summary[agent_name]["profit"] += result["profit"]
 
         if (i + 1) % 10 == 0:
-            logger.info(f"[backtest] Progress: {i+1}/{total_dates} dates processed")
+            logger.info("[backtest] Progress: %s/%s dates processed", i+1, total_dates)
         time.sleep(0.1)  # Rate limit courtesy
 
     conn.close()
@@ -218,6 +218,6 @@ def run_backtest_tasklet(start_date: str = None, end_date: str = None) -> dict:
         json.dump(report, f, indent=2)
 
     logger.info(
-        f"[backtest] Complete — EV Hunter: {report['agents'].get('ev_hunter', {}).get('profit_units', 0):.1f}u"
+        "[backtest] Complete — EV Hunter: %.1fu", report["agents"].get("ev_hunter", {}).get("profit_units", 0)
     )
     return report

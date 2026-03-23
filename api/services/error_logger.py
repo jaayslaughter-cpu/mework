@@ -63,8 +63,14 @@ class PropIQLogger:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self._handlers: List[Callable] = []   # alert callbacks
 
-    def _write(self, filepath: Path, record: Dict):
-        with open(filepath, "a") as f:
+    @staticmethod
+    def _write(filepath: Path, record: Dict):
+        allowed_files = {"error.log", "warning.log"}
+        filename = filepath.name
+        if filename not in allowed_files:
+            raise ValueError(f"Invalid file name: {filename}")
+        safe_path = Path("/var/log/prop_iq") / filename
+        with open(safe_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
     def log_error(
@@ -94,7 +100,6 @@ class PropIQLogger:
             Severity.CRITICAL: logger.critical,
         }.get(severity, logger.info)
         log_fn(f"[{error_type}] {message}")
-
     def log_prediction_outcome(
         self,
         player: str,
@@ -119,7 +124,8 @@ class PropIQLogger:
         }
         self._write(PREDICTION_LOG_FILE, record)
 
-    def read_prediction_log(self, days: int = 30) -> List[Dict]:
+    @staticmethod
+    def read_prediction_log(days: int = 30) -> List[Dict]:
         """Read recent prediction outcomes."""
         if not PREDICTION_LOG_FILE.exists():
             return []
@@ -135,7 +141,8 @@ class PropIQLogger:
                     continue
         return records
 
-    def read_error_log(self, days: int = 7, severity: Optional[Severity] = None) -> List[Dict]:
+    @staticmethod
+    def read_error_log(days: int = 7, severity: Optional[Severity] = None) -> List[Dict]:
         """Read recent errors."""
         if not ERROR_LOG_FILE.exists():
             return []
@@ -146,9 +153,8 @@ class PropIQLogger:
                 try:
                     r = json.loads(line.strip())
                     ts = datetime.fromisoformat(r["ts"])
-                    if ts >= cutoff:
-                        if severity is None or r["severity"] == severity.value:
-                            records.append(r)
+                    if ts >= cutoff and (severity is None or r["severity"] == severity.value):
+                        records.append(r)
                 except (json.JSONDecodeError, KeyError):
                     continue
         return records
@@ -163,7 +169,7 @@ class PropIQLogger:
             try:
                 fn(alert_type, message, data)
             except Exception as e:
-                logger.error(f"Alert handler error: {e}")
+                logger.error("Alert handler error: %s", e)
 
 
 # ─────────────────────────────────────────────
@@ -222,7 +228,7 @@ class SelfCorrectionEngine:
                     "correction": corrections[(player, prop_type)],
                     "samples": len(recs),
                 })
-                self.logger._fire_alert(AlertType.SYSTEMATIC_BIAS, msg, {
+                self.logger.fire_alert(AlertType.SYSTEMATIC_BIAS, msg, {
                     "player": player, "prop_type": prop_type,
                     "mean_error": mean_error, "n": len(recs),
                 })
@@ -237,7 +243,7 @@ class SelfCorrectionEngine:
                     "accuracy": round(accuracy, 4),
                     "samples": len(recs),
                 })
-                self.logger._fire_alert(AlertType.LOW_ACCURACY, msg, {
+                self.logger.fire_alert(AlertType.LOW_ACCURACY, msg, {
                     "accuracy": accuracy, "n": len(recs),
                 })
 
@@ -250,7 +256,7 @@ class SelfCorrectionEngine:
                     "avg_edge": round(avg_edge, 4),
                     "samples": len(recs),
                 })
-                self.logger._fire_alert(AlertType.EDGE_DECAY, msg, {"avg_edge": avg_edge})
+                self.logger.fire_alert(AlertType.EDGE_DECAY, msg, {"avg_edge": avg_edge})
 
         return {
             "status": "ok",
