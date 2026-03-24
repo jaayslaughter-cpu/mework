@@ -356,6 +356,12 @@ _HEADERS = {
     "Connection": "keep-alive",
 }
 
+# PrizePicks needs its own referer/origin to avoid 403
+_PP_HEADERS = {
+    **_HEADERS,
+    "Referer": "https://app.prizepicks.com/",
+    "Origin":  "https://app.prizepicks.com",
+}
 # PrizePicks session — warm up by visiting the app home page first so
 # Cloudflare + DataDome issue valid cookies, then use those cookies for
 # the API call.  The session is module-level so the warm-up only fires
@@ -486,6 +492,13 @@ def fetch_player_season_stats(player_id: int) -> dict[str, float]:
 # Live prop fetchers (both platforms)
 # ---------------------------------------------------------------------------
 
+# Baseball-specific stat types used to identify MLB props on PrizePicks
+# (PrizePicks API v3 does not return league in projection attributes)
+_PP_MLB_STAT_TYPES = {
+    "hits", "home runs", "strikeouts", "rbis", "rbi", "runs",
+    "total bases", "stolen bases", "hits+runs+rbis", "hits + runs + rbis",
+    "hitter fantasy score", "pitcher fantasy score",
+    "earned runs", "walks", "doubles", "triples",
 # Baseball-specific stat types used to identify MLB props on PrizePicks.
 # Updated to match actual API responses (live-probed Mar 2026):
 #   "pitcher strikeouts" replaced bare "strikeouts"
@@ -528,6 +541,13 @@ _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
 def fetch_prizepicks_props() -> list[dict]:
+    """
+    Fetch PrizePicks MLB projections.
+    Filters by baseball-specific stat types (API v3 does not expose league
+    on projection attributes — filtering by sport keyword is the only
+    reliable approach without authentication).
+    Returns raw list of dicts.
+    """
 def _get_prizepicks_data(pp_session):
     """
     Helper to fetch PrizePicks MLB projections with retry logic.
@@ -563,6 +583,10 @@ def fetch_prizepicks_props(pp_session) -> list[dict]:
         for attempt in range(3):
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
+            resp = requests.get(
+                "https://api.prizepicks.com/projections",
+                params={"per_page": 250, "single_stat": True, "league_id": 2},
+                headers=_PP_HEADERS,
                 # Force a fresh session on retry so we get new cookies
                 _pp_session = None
             sess = _get_pp_session()
@@ -671,15 +695,6 @@ def fetch_underdog_props() -> list[dict]:
         resp = requests.get(
             "https://api.underdogfantasy.com/v1/over_under_lines",
             headers=_HEADERS, timeout=20,
-        _ud_headers = {
-            "User-Agent": "Underdog Fantasy/3.0 (iPhone; iOS 17.0) CFNetwork/1474 Darwin/23.0.0",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "x-api-key": "KeepItSecret",
-        }
-        resp = requests.get(
-            "https://api.underdogfantasy.com/beta/v5/over_under_lines",
-            headers=_ud_headers, timeout=20,
         )
         if resp.status_code != 200:
             logger.warning("[UD] HTTP %d", resp.status_code)
@@ -794,6 +809,11 @@ _STAT_TYPE_MAP: dict[str, str] = {
     "pitcher fantasy score":"fantasy_pitcher",
     "fantasy_points_hitter":"fantasy_hitter",
     "fantasy_points_pitcher":"fantasy_pitcher",
+    # Earned runs
+    "earned runs":          "earned_runs",
+    "earned_runs":          "earned_runs",
+    # Walks (pitcher)
+    "walks":                "walks",
     # Earned runs (PrizePicks uses "earned runs allowed" as of 2026)
     "earned runs":          "earned_runs",
     "earned_runs":          "earned_runs",
@@ -1268,23 +1288,6 @@ class LiveDispatcher:
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self._log_header(date)
-
-        if not self._has_games(date):
-            return
-
-        all_raw = self._get_raw_props()
-        if not all_raw:
-            logger.warning("No props fetched from either platform — aborting.")
-            return
-
-        if _DE_AVAILABLE:
-            all_raw = self._enrich_draft_edge(all_raw)
-        all_raw = self._enrich_statcast(all_raw)
-
-        # ... continue with subsequent steps
-
-    def _log_header(self, date: str) -> None:
         logger.info("=" * 60)
         logger.info("PropIQ LiveDispatcher — %s", date)
         logger.info("=" * 60)
@@ -1309,33 +1312,6 @@ class LiveDispatcher:
         # Step 1: DraftEdge projections (name-based, adds de_* fields)
         if _DE_AVAILABLE:
             try:
-    def _has_games(self, date: str) -> bool:
-        games = fetch_today_schedule(date)
-        if not games:
-            logger.warning("No MLB games found for %s — no alerts sent.", date)
-            return False
-        logger.info("%d games scheduled", len(games))
-        return True
-
-    def _get_raw_props(self) -> list:
-        pp_props = fetch_prizepicks_props()
-        ud_props = fetch_underdog_props()
-        return pp_props + ud_props
-
-    def _enrich_draft_edge(self, props: list) -> list:
-        try:
-            return apply_draft_edge_projections(props)
-        except Exception as exc:
-            logger.warning("DraftEdge enrichment failed: %s — skipping", exc)
-            return props
-
-    def _enrich_statcast(self, props: list) -> list:
-        for platform, roster in [("pp", roster_pp), ("ud", roster_ud)]:
-            try:
-                props = apply_statcast_std(props, roster)
-            except Exception as exc:
-                logger.warning("Statcast enrichment failed (%s): %s — skipping", platform, exc)
-        return props
                 all_raw = _de_enrich(all_raw)
                 logger.info("[Phase27] DraftEdge enrichment applied to %d props",
                             len(all_raw))
@@ -1429,7 +1405,6 @@ class LiveDispatcher:
                     legs=[
                         {
                             "player_name": l["player"],
-                            "player_name": l.get("player_name", l.get("player", "")),
                             "prop_type":   l["prop_type"],
                             "side":        l["side"],
                             "line":        l["line"],
@@ -1465,7 +1440,6 @@ class LiveDispatcher:
                         legs=[
                             {
                                 "player_name": l["player"],
-                                "player_name": l.get("player_name", l.get("player", "")),
                                 "prop_type":   l["prop_type"],
                                 "side":        l["side"],
                                 "line":        l["line"],
@@ -1620,8 +1594,10 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
+        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
+        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
