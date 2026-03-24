@@ -7,15 +7,14 @@ Runs every 30 minutes, 10 AM – 10 PM ET, via a scheduled trigger.
 
 Three phases per run:
 
-"""
   PRE-GAME   Snapshot current PrizePicks + Underdog player prop lines.
-             Compare to previous 30-min snapshot 10; detect steam moves
-             (line shift 61 0.5 units). Post Discord alert for each move.
+             Compare to previous 30-min snapshot  10; detect steam moves
+             (line shift  61 0.5 units). Post Discord alert for each move.
              Mark first snapshot of day as opening lines.
 
   IN-GAME    Fetch live ESPN box scores for games currently in progress.
              Check PENDING parlay leg survival vs. live stats.
-             Post informational Discord update (data only 10; no new bets).
+             Post informational Discord update (data only  10; no new bets).
              Mark last pre-game snapshot as closing lines.
 
   CLV        Once closing lines are recorded, compute CLV for every
