@@ -247,7 +247,6 @@ def _fetch_underdog() -> list[dict]:
         )
         logger.info("[UD] %d props fetched", len(props))
         return props
-
     except Exception as exc:
         logger.warning("[UD] fetch failed: %s", exc)
         return []
