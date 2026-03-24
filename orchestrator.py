@@ -115,7 +115,7 @@ async def lifespan(_app: FastAPI):
 
     scheduler.start()
 
-    # Discord startup ping — fires the second the app is ready
+    # Discord startup ping
     try:
         discord_alert.send_startup_ping()
     except Exception as _disc_err:
@@ -153,16 +153,16 @@ async def root():
         "version": "2.0.0",
         "date": date.today().isoformat(),
         "status": "running",
-        "endpoints": ["/props", "/insights", "/leaderboard", "/backtest/latest", "/health"],
+        "endpoints": ["/props", "/insights", "/leaderboard", "/backtest/latest", "/health",
+                      "/propiq/dispatch", "/propiq/settle", "/propiq/status", "/propiq/record"],
     }
 
 
 @app.get("/props")
 async def get_props():
-    """Live player props — 50+ lines from DK/FD/BetMGM/bet365."""
+    """Live player props."""
     hub = read_hub()
     props = hub.get("player_props", [])
-    # Format for display
     formatted = []
     for p in props[:60]:
         over_odds = p.get("over_odds")
@@ -184,13 +184,11 @@ async def get_insights():
     lb = read_leaderboard()
     hub = read_hub()
     agents = get_agents()
-
     agent_status = {}
     for name, agent in agents.items():
         stats = agent.stats
         pending = len(agent.db.get_pending_bets(name))
         agent_status[name] = {**stats, "pending_bets": pending}
-
     return JSONResponse({
         "leaderboard": lb.get("leaderboard", []),
         "agent_status": agent_status,
@@ -201,47 +199,41 @@ async def get_insights():
 
 @app.get("/leaderboard")
 async def get_leaderboard():
-    """Full leaderboard with capital allocation."""
     return JSONResponse(read_leaderboard())
 
 
 @app.get("/leaderboard/live")
 async def get_leaderboard_live():
-    """Force-refresh the leaderboard now."""
     result = run_leaderboard_tasklet()
     return JSONResponse(result)
 
 
 @app.get("/backtest/latest")
 async def get_backtest():
-    """Latest backtest results."""
     from pathlib import Path
     import json, glob
     data_dir = Path(__file__).parent / "data"
     files = sorted(glob.glob(str(data_dir / "backtest_*.json")), reverse=True)
     if not files:
-        return JSONResponse({"status": "no_data", "message": "No backtest data. Run /backtest/run first."})
+        return JSONResponse({"status": "no_data", "message": "No backtest data."})
     with open(files[0]) as f:
         return JSONResponse(json.load(f))
 
 
 @app.post("/backtest/run")
 async def trigger_backtest(start_date: str = None, end_date: str = None):
-    """Manually trigger a backtest."""
     asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet, start_date, end_date))
     return JSONResponse({"status": "started", "message": "Backtest running in background"})
 
 
 @app.post("/grade")
 async def trigger_grading(game_date: str = None):
-    """Manually trigger grading for a specific date."""
     result = run_grading_tasklet(game_date=game_date)
     return JSONResponse(result)
 
 
 @app.post("/xgboost/retrain")
 async def trigger_xgboost():
-    """Manually trigger XGBoost retraining."""
     asyncio.create_task(_safe_run("XGBoostTasklet", run_xgboost_tasklet))
     return JSONResponse({"status": "started", "message": "XGBoost retraining in background"})
 
@@ -261,6 +253,120 @@ async def health():
         "last_leaderboard_run": _last_leaderboard_run,
         "scheduler_running": scheduler.running,
     })
+
+
+# ── PropIQ HTTP endpoints (consumed by Spring Boot PropIQHttpClient) ──────────
+
+@app.post("/propiq/dispatch")
+async def trigger_dispatch():
+    """Trigger the live dispatcher — called by Spring Boot HTTP client.
+
+    Runs live_dispatcher.py as a background subprocess.
+    No RabbitMQ required — pure HTTP.
+    """
+    async def _run():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "/app/live_dispatcher.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("[dispatch] live_dispatcher.py failed: %s", stderr.decode()[-500:])
+        else:
+            logger.info("[dispatch] live_dispatcher.py completed successfully")
+
+    asyncio.create_task(_run())
+    return JSONResponse({"status": "started", "message": "Live dispatcher triggered in background"})
+
+
+@app.post("/propiq/settle")
+async def trigger_settle():
+    """Trigger nightly settlement engine — called by Spring Boot HTTP client.
+
+    Runs nightly_recap.py as a background subprocess.
+    No RabbitMQ required — pure HTTP.
+    """
+    async def _run():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "/app/nightly_recap.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("[settle] nightly_recap.py failed: %s", stderr.decode()[-500:])
+        else:
+            logger.info("[settle] nightly_recap.py completed successfully")
+
+    asyncio.create_task(_run())
+    return JSONResponse({"status": "started", "message": "Settlement engine triggered in background"})
+
+
+@app.get("/propiq/status")
+async def get_propiq_status():
+    """Full system status — polled by Spring Boot health checks."""
+    hub = read_hub()
+    lb = read_leaderboard()
+    return JSONResponse({
+        "service": "PropIQ Agent Army",
+        "version": "2.0.0",
+        "status": "healthy",
+        "scheduler_running": scheduler.running,
+        "hub_props": len(hub.get("player_props", [])),
+        "hub_games": len(hub.get("games_today", [])),
+        "leaderboard_agents": len(lb.get("leaderboard", [])),
+        "last_hub_run": _last_hub_run,
+        "last_agent_run": _last_agent_run,
+        "last_leaderboard_run": _last_leaderboard_run,
+    })
+
+
+@app.get("/propiq/record")
+async def get_season_record():
+    """Season W/L record from Postgres — queried by Spring Boot."""
+    import os
+    import psycopg2  # noqa: PLC0415
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return JSONResponse({"error": "DATABASE_URL not set"}, status_code=503)
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'WIN')     AS wins,
+                COUNT(*) FILTER (WHERE status = 'LOSS')    AS losses,
+                COUNT(*) FILTER (WHERE status = 'PUSH')    AS pushes,
+                COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+                COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
+                COALESCE(SUM(stake),  0)                   AS total_staked
+            FROM propiq_season_record
+            """
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        wins, losses, pushes, pending, total_payout, total_staked = row
+        roi = (
+            (float(total_payout) - float(total_staked)) / float(total_staked) * 100
+            if total_staked and float(total_staked) > 0
+            else 0.0
+        )
+        return JSONResponse({
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "pending": pending,
+            "total_staked": float(total_staked),
+            "total_payout": float(total_payout),
+            "roi_pct": round(roi, 2),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[record] Postgres query failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 if __name__ == "__main__":
