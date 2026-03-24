@@ -49,6 +49,8 @@ export const GameCard: React.FC<GameCardProps> = ({ game }) => {
     setExpanded(next);
     if (next && props.length === 0 && !loadingProps) {
     const loadPlayerProps = async (game) => {
+  const loadProps = async () => {
+    const loadPlayerProps = async (game) => {
       setLoadingProps(true);
       try {
         const fetched = await fetchPlayerProps(game.event.id);
@@ -58,8 +60,7 @@ export const GameCard: React.FC<GameCardProps> = ({ game }) => {
       } finally {
         setLoadingProps(false);
       }
-    }
-  };
+    };
 
   const { event, moneyline, spread, total } = game;
 

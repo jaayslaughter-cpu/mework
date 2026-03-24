@@ -8,7 +8,6 @@ Saves model to disk + updates hub predictions cache.
 from __future__ import annotations
 import json
 import logging
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -46,7 +45,7 @@ def _load_training_data(days: int = 90) -> tuple:
         """, (cutoff,)).fetchall()
         conn.close()
     except Exception as e:
-        logger.warning(f"[xgboost] DB read error: {e}")
+        logger.warning("[xgboost] DB read error: %s", e)
         return None, None
 
     if not rows:
@@ -91,17 +90,17 @@ def _train_xgboost(X: np.ndarray, y: np.ndarray) -> object:
         # Cross-validate
         scores = cross_val_score(model, X, y, cv=5, scoring="accuracy")
         accuracy = scores.mean()
-        logger.info(f"[xgboost] Model accuracy: {accuracy:.3f} (5-fold CV) on {len(y)} samples")
+        logger.info("[xgboost] Model accuracy: %.3f (5-fold CV) on %d samples", accuracy, len(y))
         return model, accuracy
     except ImportError:
-        logger.warning("[xgboost] xgboost not installed — using sklearn GBM")
+        logger.warning("[xgboost] xgboost not installed  using sklearn GBM")
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.model_selection import cross_val_score
         model = GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=42)
         model.fit(X, y)
         scores = cross_val_score(model, X, y, cv=5, scoring="accuracy")
         accuracy = scores.mean()
-        logger.info(f"[xgboost] GBM accuracy: {accuracy:.3f} on {len(y)} samples")
+        logger.info("[xgboost] GBM accuracy: %.3f on %d samples", accuracy, len(y))
         return model, accuracy
 
 
@@ -110,7 +109,7 @@ def _save_model(model: object, accuracy: float):
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(MODEL_PATH, "wb") as f:
         pickle.dump({"model": model, "accuracy": accuracy, "trained_at": date.today().isoformat()}, f)
-    logger.info(f"[xgboost] Model saved to {MODEL_PATH}")
+    logger.info("[xgboost] Model saved to %s", MODEL_PATH)
 
 
 def load_model() -> tuple[object, float]:
@@ -152,7 +151,7 @@ def run_xgboost_tasklet() -> dict:
     _save_model(model, accuracy)
 
     elapsed = time.time() - start
-    logger.info(f"[xgboost] Retrain complete in {elapsed:.1f}s — accuracy: {accuracy:.3f}")
+    logger.info("[xgboost] Retrain complete in %.1fs — accuracy: %.3f", elapsed, accuracy)
 
     # Update the DB with new accuracy benchmark
     conn = sqlite3.connect(DB_PATH)

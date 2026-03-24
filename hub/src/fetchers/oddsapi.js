@@ -17,7 +17,7 @@ async function getMLBEvents() {
   if (!KEY) throw new Error('ODDS_API_KEY is missing.');
 
   // Cache for 60 seconds
-  return getOrFetch(`propiq:oddsapi:events:today`, 60, async () => {
+  return getOrFetch('propiq:oddsapi:events:today', 60, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('oddsapi');
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
