@@ -224,31 +224,6 @@ def _fetch_prizepicks() -> list[dict]:
             if stat_raw not in _PP_MLB_STAT_TYPES or "inning" in stat_raw:
                 continue
             line_val = attrs.get("line_score")
-            if line_val is None:
-                continue
-            pid = (
-                proj.get("relationships", {})
-                    .get("new_player", {})
-                    .get("data", {})
-                    .get("id", "")
-            )
-            pname = player_map.get(pid, "")
-            if not pname:
-                continue
-            props.append({
-                "player_name": pname,
-                "prop_type":   stat_raw,
-                "platform":    "prizepicks",
-                "line":        float(line_val),
-            })
-
-        logger.info("[PP] %d props fetched", len(props))
-        return props
-    except Exception as exc:
-        logger.warning("[PP] fetch failed: %s", exc)
-        return []
-
-
 def _fetch_underdog() -> list[dict]:
     """Fetch active Underdog Fantasy MLB props."""
     try:
@@ -265,16 +240,65 @@ def _fetch_underdog() -> list[dict]:
         players_map = {p["id"]: p for p in data.get("players", [])}
         appearances_map = {a["id"]: a for a in data.get("appearances", [])}
 
-        props: list[dict] = []
-        seen: set[str] = set()
+        props = _process_underdog_lines(
+            data.get("over_under_lines", []),
+            players_map,
+            appearances_map,
+        )
+        logger.info("[UD] %d props fetched", len(props))
+        return props
 
-        for line in data.get("over_under_lines", []):
-            if line.get("status") != "active":
-                continue
-            stable_id = line.get("stable_id", line.get("id", ""))
-            if stable_id in seen:
-                continue
-            seen.add(stable_id)
+    except Exception as exc:
+        logger.warning("[UD] fetch failed: %s", exc)
+        return []
+
+def _process_underdog_lines(
+    lines: list[dict],
+    players_map: dict[str, dict],
+    appearances_map: dict[str, dict]
+) -> list[dict]:
+    props: list[dict] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        if not _is_active_line(line):
+            continue
+
+        stable_id = line.get("stable_id", line.get("id", ""))
+        if stable_id in seen:
+            continue
+        seen.add(stable_id)
+
+        prop = _create_underdog_prop(line, players_map, appearances_map)
+        if prop:
+            props.append(prop)
+
+    return props
+
+def _is_active_line(line: dict) -> bool:
+    return line.get("status") == "active"
+
+def _create_underdog_prop(
+    line: dict,
+    players_map: dict[str, dict],
+    appearances_map: dict[str, dict]
+) -> dict | None:
+    player_id = line.get("player_id")
+    appearance_id = line.get("appearance_id")
+    player = players_map.get(player_id)
+    appearance = appearances_map.get(appearance_id)
+    line_val = line.get("line")
+
+    if not player or not appearance or line_val is None:
+        return None
+
+    return {
+        "player_name": player.get("full_name", ""),
+        "prop_type": line.get("over_under", ""),
+        "platform": "underdog",
+        "line": float(line_val),
+        "game_time": appearance.get("game_time", ""),
+    }
 
             ou = line.get("over_under") or {}
             app_stat = ou.get("appearance_stat") or {}
@@ -814,17 +838,17 @@ def handle_pre_game_phase(conn, today):
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Main entry point — called every 30 min by the scheduled trigger."""
+    """Main entry point  called every 30 min by the scheduled trigger."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     now_ts = datetime.now(timezone.utc).isoformat()
     logger.info("=== PropIQ Line Stream | %s ===", now_ts)
 
     conn = _get_db()
 
-    # ── Phase 0: ESPN game states ───────────────────────────────────────
-    games, pre_count, live_count, final_count = log_espn_game_states(today)
+    #  Phase 0: ESPN game states 
+    games, pre_count, live_count, _ = log_espn_game_states(today)
 
-    # ── Phase 1: Pre-game snapshot + steam detection ────────────────────
+    #  Phase 1: Pre-game snapshot + steam detection 
     if pre_count > 0 or live_count > 0:
         props, is_first = handle_pre_game_phase(conn, today)
 
@@ -841,7 +865,7 @@ def main() -> None:
         else:
             logger.info("[Steam] No previous snapshot to compare — first run of day")
 
-    # ── Phase 2: In-game leg tracking ──────────────────────────────────
+    #  Phase 2: In-game leg tracking 
     if live_count > 0:
         # Mark closing lines (first time a game goes IN_PROGRESS)
         newly_marked = mark_closing_lines(conn, today, now_ts)
