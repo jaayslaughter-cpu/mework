@@ -42,7 +42,6 @@ const syncLoop = async () => {
               if (key) {
                 outcomeMap[desc][key] = outcome.price;
               }
-              }
               const nameLower = (outcome.name || '').toLowerCase();
               if (nameLower === 'over') {
                 outcomeMap[desc].over_odds = outcome.price;
@@ -50,6 +49,16 @@ const syncLoop = async () => {
                 outcomeMap[desc].under_odds = outcome.price;
               }
             }
+          }
+        }
+      } catch (error) {
+        // handle error
+      }
+    }
+  } catch (error) {
+    // handle error
+  }
+};
 
             // Now insert each aggregated market row
             for (const [desc, data] of Object.entries(outcomeMap)) {
