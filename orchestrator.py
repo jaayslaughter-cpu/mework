@@ -227,7 +227,7 @@ async def trigger_backtest(start_date: str = None, end_date: str = None):
 
 @app.post("/grade")
 async def trigger_grading(game_date: str = None):
-    result = await run_grading_tasklet(game_date=game_date)
+    result = await run_grading_tasklet(date=game_date)
     return JSONResponse(result)
 
 
