@@ -43,44 +43,6 @@ Discord alerts:
   • Streak milestones  : 5/11 and 8/11 celebration pings
 
 Standalone run:
-  python streak_agent.py [--date 2026-04-01] [--dry-run] [--entry 1|5|10]
-"""
-
-from __future__ import annotations
-
-import argparse
-import json
-import logging
-import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
-
-import requests
-
-Pick selection algorithm:
-  1. Fetch live Underdog Fantasy MLB props (with team enrichment)
-  2. Evaluate each prop using MLB historical base rates (same as dispatcher)
-  3. Run all 18 AGENT_CONFIGS filters to count cross-agent "signals"
-  4. Score each prop: streak_confidence() = prob_score + ev_bonus + signal_bonus
-  5. Filter: conf >= 8.0, prob >= 0.62, ev_pct >= 5.0%
-  6. Apply team-diversity rule for picks 1 & 2
-  7. Select top-ranked prop; skip day if nothing qualifies (better than a bad pick)
-
-State persistence:
-  • Postgres tables: streak_state (one row per active streak),
-                     streak_picks (one row per pick)
-  • DB connection via POSTGRES_URL env var (same as the rest of the stack)
-
-Discord alerts:
-  • Pick announcement  : 11 AM alongside the main dispatcher
-  • Settlement update  : 2 AM alongside nightly_recap.py
-  • Streak milestones  : 5/11 and 8/11 celebration pings
-
-Standalone run:
-  python streak_agent.py [--date 2026-04-01] [--dry-run] [--entry 1|5|10]
-"""
-
 from __future__ import annotations
 
 import argparse
