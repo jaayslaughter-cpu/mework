@@ -204,8 +204,7 @@ async def get_leaderboard():
 
 @app.get("/leaderboard/live")
 async def get_leaderboard_live():
-    result = run_leaderboard_tasklet()
-    return JSONResponse(result)
+    return JSONResponse(run_leaderboard_tasklet())
 
 
 @app.get("/backtest/latest")
@@ -228,7 +227,7 @@ async def trigger_backtest(start_date: str = None, end_date: str = None):
 
 @app.post("/grade")
 async def trigger_grading(game_date: str = None):
-    result = run_grading_tasklet(game_date=game_date)
+    result = await run_grading_tasklet(date=game_date)
     return JSONResponse(result)
 
 
@@ -270,7 +269,7 @@ async def trigger_dispatch():
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        _, stderr = await proc.communicate()
         if proc.returncode != 0:
             logger.error("[dispatch] live_dispatcher.py failed: %s", stderr.decode()[-500:])
         else:
@@ -293,7 +292,7 @@ async def trigger_settle():
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        _, stderr = await proc.communicate()
         if proc.returncode != 0:
             logger.error("[settle] nightly_recap.py failed: %s", stderr.decode()[-500:])
         else:
