@@ -73,7 +73,7 @@ def generate_ticket(date: str, projections: list) -> dict | None:
                 }
 
     if best_ticket:
-        logger.info(f"[Agent2Leg] Ticket generated: {best_ticket['joint_probability']}% joint prob")
+        logger.info("[Agent2Leg] Ticket generated: %s%% joint prob", best_ticket['joint_probability'])
         _save_ticket(best_ticket)
 
     return best_ticket
@@ -98,4 +98,4 @@ def _save_ticket(ticket: dict) -> None:
         cur.close()
         conn.close()
     except Exception as e:
-        logger.error(f"[Agent2Leg] Failed to save ticket: {e}")
+        logger.error("[Agent2Leg] Failed to save ticket: %s", e)

@@ -8,7 +8,6 @@ import logging
 import argparse
 import psycopg2
 import pandas as pd
-from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ def _query_df(sql: str, params=None) -> pd.DataFrame:
         conn.close()
         return df
     except Exception as e:
-        logger.error(f"[Backtest] DB error: {e}")
+        logger.error("[Backtest] DB error: %s", e)
         return pd.DataFrame()
 
 
@@ -37,7 +36,7 @@ def run_agent_army_backtest(start_date: str, end_date: str) -> dict:
     Evaluates all agent bets over the date range.
     Compares model_projected_over vs actual outcome.
     """
-    logger.info(f"[Backtest] Running backtest {start_date} → {end_date}")
+    logger.info("[Backtest] Running backtest %s → %s", start_date, end_date)
 
     df = _query_df("""
         SELECT bl.agent, bl.bet_date, bl.joint_probability, bl.estimated_odds,
@@ -51,23 +50,23 @@ def run_agent_army_backtest(start_date: str, end_date: str) -> dict:
         logger.warning("[Backtest] No bets found in date range.")
         return {}
 
-    results = {}
-    for agent in df["agent"].unique():
-        agent_df = df[df["agent"] == agent].copy()
+    backtest_results = {}
+    for agent_name in df["agent"].unique():
+        agent_df = df[df["agent"] == agent_name].copy()
         total = len(agent_df)
-        wins = len(agent_df[agent_df["result"] == "win"])
+        wins = len(agent_df[agent_df["result"] == "win"] )
         total_pl = agent_df["profit_loss"].sum() if "profit_loss" in agent_df.columns else 0.0
 
-        results[agent] = {
+        backtest_results[agent_name] = {
             "total_bets": total,
             "wins": wins,
             "win_rate": round(wins / total * 100, 2) if total > 0 else 0,
             "total_profit_loss": round(float(total_pl), 2),
             "roi": round(float(total_pl) / total * 100, 2) if total > 0 else 0,
         }
-        logger.info(f"[Backtest] {agent}: {wins}/{total} wins, ROI={results[agent]['roi']}%")
+        logger.info("[Backtest] %s: %s/%s wins, ROI=%s%%", agent_name, wins, total, backtest_results[agent_name]['roi'])
 
-    return results
+    return backtest_results
 
 
 def run_model_calibration(start_date: str, end_date: str) -> dict:

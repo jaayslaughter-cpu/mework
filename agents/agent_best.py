@@ -4,7 +4,6 @@ Agent Best: Finds the single highest-edge prop on the board each day.
 Targets: Highest edge_percentage overall, any prop category.
 """
 import logging
-import psycopg2
 import os
 from datetime import datetime
 
@@ -41,5 +40,5 @@ def generate_ticket(date: str, projections: list) -> dict | None:
         "generated_at": datetime.utcnow().isoformat(),
     }
 
-    logger.info(f"[AgentBest] Best prop: {best.get('prop_category')} edge={best['edge_percentage']}%")
+    logger.info("[AgentBest] Best prop: %s edge=%s%%", best.get('prop_category'), best['edge_percentage'])
     return ticket

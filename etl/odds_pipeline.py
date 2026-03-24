@@ -34,7 +34,7 @@ def _get_events() -> list:
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        logger.error(f"[OddsETL] Failed to fetch events: {e}")
+        logger.error("[OddsETL] Failed to fetch events: %s", e)
         return []
 
 
@@ -49,8 +49,18 @@ def _get_props(event_id: str) -> dict:
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        logger.warning(f"[OddsETL] Props fetch failed for {event_id}: {e}")
+        logger.warning("[OddsETL] Props fetch failed for %s: %s", event_id, e)
         return {}
+
+
+def _ensure_date(date: str = None) -> str:
+    if date:
+        return date
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _filter_events_by_date(events: list, date: str) -> list:
+    return [e for e in events if e.get("commence_time", "")[:10] == date]
 
 
 def run_odds_etl(date: str = None) -> int:
@@ -58,21 +68,16 @@ def run_odds_etl(date: str = None) -> int:
     Main ETL entry point. Fetches and upserts all MLB prop markets for today.
     Returns number of markets upserted.
     """
-    if not date:
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = _ensure_date(date)
 
-    logger.info(f"[OddsETL] Starting odds ETL for {date}")
+    logger.info("[OddsETL] Starting odds ETL for %s", date)
     events = _get_events()
     if not events:
         logger.warning("[OddsETL] No events found. Exiting.")
         return 0
 
-    # Filter to today's games
-    today_events = [
-        e for e in events
-        if e.get("commence_time", "")[:10] == date
-    ]
-    logger.info(f"[OddsETL] Found {len(today_events)} games for {date}")
+    today_events = _filter_events_by_date(events, date)
+    logger.info("[OddsETL] Found %s games for %s", len(today_events), date)
 
     upsert_count = 0
     try:
@@ -129,7 +134,7 @@ def run_odds_etl(date: str = None) -> int:
         cur.close()
         conn.close()
     except Exception as e:
-        logger.error(f"[OddsETL] Database error: {e}")
+        logger.error("[OddsETL] Database error: %s", e)
 
-    logger.info(f"[OddsETL] Upserted {upsert_count} markets for {date}")
+    logger.info("[OddsETL] Upserted %s markets for %s", upsert_count, date)
     return upsert_count

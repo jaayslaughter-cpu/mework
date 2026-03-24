@@ -16,7 +16,7 @@ def generate_ticket(date: str, projections: list) -> dict | None:
     qualifying = [p for p in projections if p.get("edge_percentage", 0) >= MIN_EDGE]
 
     if len(qualifying) < TARGET_LEGS:
-        logger.info(f"[Agent5Leg] Only {len(qualifying)} qualifying props, need {TARGET_LEGS}.")
+        logger.info("[Agent5Leg] Only %s qualifying props, need %s.", len(qualifying), TARGET_LEGS)
         return None
 
     # Pick 5 with highest edge, prefer diversity across games
@@ -46,5 +46,5 @@ def generate_ticket(date: str, projections: list) -> dict | None:
         "generated_at": datetime.utcnow().isoformat(),
     }
 
-    logger.info(f"[Agent5Leg] 5-leg ticket: {joint * 100:.1f}% joint prob")
+    logger.info("[Agent5Leg] 5-leg ticket: %.1f%% joint prob", joint * 100)
     return ticket

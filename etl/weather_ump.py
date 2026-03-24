@@ -42,7 +42,7 @@ def _fetch_games(date: str) -> list:
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        logger.error(f"[WeatherUmp] Failed to fetch games: {e}")
+        logger.error("[WeatherUmp] Failed to fetch games: %s", e)
         return []
 
 
@@ -54,7 +54,7 @@ def update_weather_ump(date: str) -> None:
     """
     games = _fetch_games(date)
     if not games:
-        logger.warning(f"[WeatherUmp] No games found for {date}")
+        logger.warning("[WeatherUmp] No games found for %s", date)
         return
 
     try:
@@ -92,6 +92,6 @@ def update_weather_ump(date: str) -> None:
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"[WeatherUmp] Updated {len(games)} games for {date}")
+        logger.info("[WeatherUmp] Updated %s games for %s", len(games), date)
     except Exception as e:
-        logger.error(f"[WeatherUmp] DB error: {e}")
+        logger.error("[WeatherUmp] DB error: %s", e)

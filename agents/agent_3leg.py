@@ -3,7 +3,6 @@ agents/agent_3leg.py
 Agent 3-Leg: Builds a 3-leg correlated parlay — requires all 3 legs from same game or same team stack.
 """
 import logging
-import os
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -47,6 +46,6 @@ def generate_ticket(date: str, projections: list) -> dict | None:
             }
 
     if best_ticket:
-        logger.info(f"[Agent3Leg] Ticket: {best_ticket['joint_probability']}% joint prob")
+        logger.info("[Agent3Leg] Ticket: %s%% joint prob", best_ticket['joint_probability'])
 
     return best_ticket

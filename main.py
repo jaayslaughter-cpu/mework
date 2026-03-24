@@ -25,18 +25,18 @@ def run_daily_pipeline():
     today = datetime.today().strftime("%Y-%m-%d")
     yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    logger.info(f"=== PropIQ Daily Pipeline — {today} ===")
+    logger.info("=== PropIQ Daily Pipeline — %s ===", today)
 
     # 1. ETL: Fetch odds and weather/ump data
     logger.info("[Pipeline] Step 1: Running ETL...")
     markets_count = run_odds_etl(today)
     update_weather_ump(today)
-    logger.info(f"[Pipeline] ETL complete: {markets_count} markets loaded")
+    logger.info("[Pipeline] ETL complete: %s markets loaded", markets_count)
 
     # 2. Generate projections via ML Engine API
     logger.info("[Pipeline] Step 2: Fetching live projections from ML Engine...")
     projections = _fetch_projections()
-    logger.info(f"[Pipeline] {len(projections)} projections fetched")
+    logger.info("[Pipeline] %s projections fetched", len(projections))
 
     # 3. Run Agent Army
     logger.info("[Pipeline] Step 3: Generating Agent Army tickets...")
@@ -49,15 +49,15 @@ def run_daily_pipeline():
     for name, ticket in tickets.items():
         if ticket:
             legs = ticket.get("legs", [])
-            logger.info(f"[Pipeline] {name}: {len(legs)}-leg ticket, joint_prob={ticket.get('joint_probability', 'N/A')}%")
+            logger.info("[Pipeline] %s: %s-leg ticket, joint_prob=%s%%", name, len(legs), ticket.get("joint_probability", "N/A"))
         else:
-            logger.info(f"[Pipeline] {name}: No qualifying ticket today")
+            logger.info("[Pipeline] %s: No qualifying ticket today", name)
 
     # 4. Backtest yesterday's bets
-    logger.info(f"[Pipeline] Step 4: Backtesting {yesterday}...")
+    logger.info("[Pipeline] Step 4: Backtesting %s...", yesterday)
     backtest_results = run_agent_army_backtest(yesterday, yesterday)
     for agent, stats in backtest_results.items():
-        logger.info(f"[Pipeline] Backtest {agent}: {stats}")
+        logger.info("[Pipeline] Backtest %s: %s", agent, stats)
 
     logger.info("[Pipeline] Daily pipeline complete!")
     return {"date": today, "markets": markets_count, "tickets": tickets, "backtest": backtest_results}
@@ -72,7 +72,7 @@ def _fetch_projections() -> list:
         if r.status_code == 200:
             return r.json().get("projections", [])
     except Exception as e:
-        logger.warning(f"[Pipeline] Could not fetch projections: {e}")
+        logger.warning("[Pipeline] Could not fetch projections: %s", e)
     return []
 
 
