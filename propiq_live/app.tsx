@@ -364,8 +364,7 @@ const LeaderboardPanel: React.FC = () => {
     </div>
   );
 };
-              }`}>
-                {agent.status}
+              }`">                {agent.status}
               </span>
             </div>
 
@@ -390,6 +389,7 @@ const LeaderboardPanel: React.FC = () => {
                 <div className={`text-xs font-mono font-bold ${profitColor}`}> 
                   {agent.profit >= 0 ? '+' : ''}{agent.profit}u
                 </div>
+              </div>
               </div>
             </div>
 
