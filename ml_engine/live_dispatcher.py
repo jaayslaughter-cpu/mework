@@ -1009,7 +1009,9 @@ class LiveDispatcher:
                         num_legs=len(omega["legs"]),
                         confidence=conf_o,
                         ev_pct=ev_o,
-                        legs=[
+                        legs=omega["legs"],
+                    )
+
     def _evaluate_props(self, raw_props: list[dict]) -> list[PropLeg]:
         """
         Normalise raw props, compare platforms, apply EV gate.
@@ -1043,7 +1045,7 @@ class LiveDispatcher:
             key = (prop['player_name'].lower(), prop['prop_type'])
             groups.setdefault(key, []).append(prop)
         result: list[PropLeg] = []
-        for (player, ptype), items in groups.items():
+        for (_, ptype), items in groups.items():
             # Select best platform line
             best = min(items, key=lambda x: x['line']) if items[0]['side'] == 'Over' else max(items, key=lambda x: x['line'])
             line = best['line']
@@ -1064,33 +1066,6 @@ class LiveDispatcher:
                 )
                 result.append(leg)
         return result
-
-        _PROP_PROB_RANGES: dict[str, list[tuple[float, float]]] = {
-            # RBI ≥ X
-            "rbis":           [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
-            # R ≥ X
-            "runs":           [(0.5, 0.55), (1.5, 0.23), (2.5, 0.09)],
-            # TB ≥ X
-            "total_bases":    [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
-            # SB ≥ X
-            "stolen_bases":   [(0.5, 0.14), (1.5, 0.03)],
-            # H+R+RBI ≥ X
-            "hits_runs_rbis": [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
-            # Pitcher K ≥ X
-            "strikeouts":     [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
-            # ER ≤ X (Under is typically the bet)
-            "earned_runs":    [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
-            # Fantasy hitter score
-            "fantasy_hitter": [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
-            # Fantasy pitcher score
-            "fantasy_pitcher":[(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
-            # Walks (pitcher)
-            "walks":          [(0.5, 0.68), (1.5, 0.42), (2.5, 0.22)],
-        }
-
-        # ── Per-game line range validation ────────────────────────────────
-        # Lines outside these ranges are season-long or special markets.
-        # We ONLY bet per-game props. These are realistic MLB per-game ranges.
         _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
             "hits":           (0.5, 4.5),
             "home_runs":      (0.5, 2.5),
@@ -1136,10 +1111,8 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
-        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
