@@ -1,5 +1,9 @@
 import os
 import logging
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from xgboost import XGBClassifier
 from services.fatigue_logic import apply_fatigue_adjustments
 from services.usage_vacuums import evaluate_player_context
 from services.defensive_contrast import evaluate_defensive_contrast
@@ -33,7 +37,7 @@ def _load_model(model_name: str) -> xgb.XGBClassifier | None:
         return None
 
 
-def _select_model_for_prop(prop_category: str) -> tuple[str, xgb.XGBClassifier | None]:
+def _select_model_for_prop(prop_category: str) -> tuple[str, XGBClassifier | None]:
     """Map a prop category to the correct model."""
     category_lower = prop_category.lower()
     if "home_run" in category_lower or "hr" in category_lower:
