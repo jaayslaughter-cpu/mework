@@ -18,6 +18,10 @@ Flow
   6. Calculate fantasy-points expected value (hitter + pitcher scoring)
   7. Apply 15 agent filters to build per-agent parlays
   8. Validate EV gate (≥3%) and Kelly cap (≤10%)
+  5. Run platform_selector for each prop 1 pick PrizePicks or Underdog
+  6. Calculate fantasy-points expected value (hitter + pitcher scoring)
+  7. Apply 15 agent filters to build per-agent parlays
+  8. Validate EV gate (6ge;3%) and Kelly cap (6le;10%)
   9. Fire Discord alerts via DiscordAlertService
 
 Supported prop types (innings_pitched REMOVED per Phase 19):
@@ -30,6 +34,7 @@ Platform rules:
   - Pick platform with higher implied win probability for that specific leg
   - $20 hard-cap stake per parlay
   - If fantasy points leg has EV edge ≥ 3% over the offered line → include
+  - If fantasy points leg has EV edge 6ge; 3% over the offered line 1 include
 
 Run standalone:
   python live_dispatcher.py [--date 2026-03-22] [--dry-run]
@@ -44,6 +49,9 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
+import os
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -59,6 +67,10 @@ except ImportError:
     def get_agent_season_stats(agent): return {}         # noqa: E704
 
 from platform_selector import PlatformSelector, SelectionResult
+    def record_parlay(*_, **__): return False            # noqa: E704
+    def get_agent_season_stats(_agent): return {}         # noqa: E704
+
+from platform_selector import PlatformSelector
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
@@ -79,6 +91,7 @@ try:
 except ImportError:
     _SC_AVAILABLE = False
     def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -88,6 +101,7 @@ try:
 except ImportError:
     _SBD_AVAILABLE = False
     def _get_fade_signal(*a, **kw):  # noqa: E302, E704
+    def _get_fade_signal(*_, **__):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -354,6 +368,11 @@ def _get_pp_session() -> requests.Session:
     global _pp_session
     if _pp_session is not None:
         return _pp_session
+
+def _get_pp_session(_session_holder=[None]) -> requests.Session:
+    """Return a warmed-up PrizePicks session, creating one if needed."""
+    if _session_holder[0] is not None:
+        return _session_holder[0]
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -376,7 +395,8 @@ def _get_pp_session() -> requests.Session:
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
     })
-    _pp_session = s
+    _session_holder[0] = s
+    return s
     return s
 
 
@@ -481,8 +501,8 @@ _PP_MLB_STAT_TYPES = {
     # Pitcher props (actual PP label as of 2026)
     "pitcher strikeouts", "strikeouts",   # keep bare form as fallback
     "earned runs allowed", "earned runs",  # keep old form as fallback
-    "hits allowed", "walks allowed", "pitching outs",
-    "walks",
+"hits allowed", "walks allowed", "pitching outs",
+"walks",
 }
 
 # Underdog stat → our internal prop_type
@@ -508,6 +528,25 @@ _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
 def fetch_prizepicks_props() -> list[dict]:
+def _get_prizepicks_data(pp_session):
+    """
+    Helper to fetch PrizePicks MLB projections with retry logic.
+    """
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 ** attempt)
+            pp_session = None
+        sess = _get_pp_session(pp_session)
+        resp = sess.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        resp.raise_for_status()
+
+def fetch_prizepicks_props(pp_session) -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -558,6 +597,32 @@ def fetch_prizepicks_props() -> list[dict]:
             # Filter to baseball stat types
             if stat_raw.lower() not in _PP_MLB_STAT_TYPES:
                 continue
+    try:
+        data = _get_prizepicks_data(pp_session)
+    except Exception:
+        return []
+    return data
+
+    if data is None:
+        return []
+
+    # Build player id  12 name map from included resources
+    player_map: dict[str, str] = {}
+    for item in data.get("included", []):
+        if item.get("type") == "new_player":
+            pid  = item["id"]
+            name = item.get("attributes", {}).get("display_name", "")
+            if name:
+                player_map[pid] = name
+
+    props = []
+    for proj in data.get("data", []):
+        attrs    = proj.get("attributes", {})
+        stat_raw = str(attrs.get("stat_type", "") or "")
+
+        # Filter to baseball stat types
+        if stat_raw.lower() not in _PP_MLB_STAT_TYPES:
+            continue
 
             # Skip innings pitched (removed in Phase 19)
             if "inning" in stat_raw.lower():
@@ -606,6 +671,15 @@ def fetch_underdog_props() -> list[dict]:
         resp = requests.get(
             "https://api.underdogfantasy.com/v1/over_under_lines",
             headers=_HEADERS, timeout=20,
+        _ud_headers = {
+            "User-Agent": "Underdog Fantasy/3.0 (iPhone; iOS 17.0) CFNetwork/1474 Darwin/23.0.0",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "x-api-key": "KeepItSecret",
+        }
+        resp = requests.get(
+            "https://api.underdogfantasy.com/beta/v5/over_under_lines",
+            headers=_ud_headers, timeout=20,
         )
         if resp.status_code != 200:
             logger.warning("[UD] HTTP %d", resp.status_code)
@@ -743,6 +817,155 @@ def normalise_stat(raw: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# ArbitrageAgent — module-level base-rate helpers
+# ---------------------------------------------------------------------------
+
+_ARB_BASE_RATES: dict[str, list[tuple[float, float]]] = {
+    "hits":            [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
+    "home_runs":       [(0.5, 0.22), (1.5, 0.04)],
+    "rbis":            [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
+    "runs":            [(0.5, 0.55), (1.5, 0.23), (2.5, 0.09)],
+    "total_bases":     [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
+    "stolen_bases":    [(0.5, 0.14), (1.5, 0.03)],
+    "hits_runs_rbis":  [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
+    "strikeouts":      [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
+    "earned_runs":     [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
+    "fantasy_hitter":  [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
+    "fantasy_pitcher": [(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
+    "walks":           [(0.5, 0.68), (1.5, 0.42), (2.5, 0.22)],
+}
+
+_ARB_MIN_MARGIN:   float = 0.005   # 0.5% guaranteed margin minimum
+_ARB_MIN_LEG_PROB: float = 0.54    # each individual leg must clear this gate
+_ARB_MAX_PICKS:    int   = 3       # maximum arb opportunities per day
+_ARB_MIN_GAP:      float = 0.5     # minimum line gap between PP and UD to qualify
+
+
+def _arb_base_prob(prop_type: str, line: float, side: str) -> float:
+    """Interpolate MLB base-rate probability for ArbitrageAgent calculations."""
+    rates = _ARB_BASE_RATES.get(prop_type, [])
+    if not rates:
+        return 0.50
+    xs = [r[0] for r in rates]
+    ys = [r[1] for r in rates]
+    if line <= xs[0]:
+        p_over = ys[0]
+    elif line >= xs[-1]:
+        p_over = ys[-1]
+    else:
+        p_over = 0.50
+        for i in range(len(xs) - 1):
+            if xs[i] <= line <= xs[i + 1]:
+                t = (line - xs[i]) / (xs[i + 1] - xs[i])
+                p_over = ys[i] + t * (ys[i + 1] - ys[i])
+                break
+    return p_over if side == "Over" else (1.0 - p_over)
+
+
+def build_arbitrage_picks(all_raw: list[dict]) -> list[dict]:
+    """
+    ArbitrageAgent (16th agent): find same player+stat where PP and UD
+    have meaningfully different lines.
+
+    When PP_line < UD_line:
+      → Over  on PrizePicks (lower line, easier to clear)
+      → Under on Underdog   (higher line, more room to stay under)
+
+    Arb margin = P(Over lower_line) + P(Under higher_line) − 1.0
+               = P(lower_line < actual ≤ upper_line)
+               → guaranteed both-leg win zone.
+
+    Gates:
+      - line gap  ≥ 0.5 units
+      - arb margin ≥ 0.5%
+      - each leg's base probability ≥ 0.54
+
+    Returns up to _ARB_MAX_PICKS arb dicts sorted by margin desc.
+    """
+    from collections import defaultdict
+
+    by_player: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
+    for raw in all_raw:
+        pname    = raw.get("player_name", "").strip()
+        raw_stat = raw.get("stat_type", "")
+        line_val = float(raw.get("line") or 0)
+        source   = raw.get("source", "")
+        etype    = raw.get("entry_type", "FLEX")
+
+        prop_type = normalise_stat(raw_stat)
+        if not prop_type or line_val <= 0:
+            continue
+        if source not in ("prizepicks", "underdog"):
+            continue
+
+        key = (pname.lower(), prop_type)
+        existing = by_player[key].get(source)
+        # Keep the entry with the largest line per platform (rarest dupe case)
+        if existing is None or line_val > existing["line"]:
+            by_player[key][source] = {
+                "player_name": pname,
+                "prop_type":   prop_type,
+                "line":        line_val,
+                "entry_type":  etype,
+            }
+
+    candidates: list[dict] = []
+    for (_pname_lower, prop_type), platforms in by_player.items():
+        if "prizepicks" not in platforms or "underdog" not in platforms:
+            continue
+
+        pp_data = platforms["prizepicks"]
+        ud_data = platforms["underdog"]
+        pp_line = pp_data["line"]
+        ud_line = ud_data["line"]
+        gap     = abs(pp_line - ud_line)
+
+        if gap < _ARB_MIN_GAP:
+            continue
+
+        # Over on lower line, Under on higher line
+        if pp_line < ud_line:
+            over_line, over_plat, over_etype   = pp_line, "PrizePicks", pp_data["entry_type"]
+            under_line, under_plat, under_etype = ud_line, "Underdog",   ud_data["entry_type"]
+            display_name = pp_data["player_name"]
+        else:
+            over_line, over_plat, over_etype   = ud_line, "Underdog",   ud_data["entry_type"]
+            under_line, under_plat, under_etype = pp_line, "PrizePicks", pp_data["entry_type"]
+            display_name = ud_data["player_name"]
+
+        p_over  = _arb_base_prob(prop_type, over_line,  "Over")
+        p_under = _arb_base_prob(prop_type, under_line, "Under")
+        margin  = p_over + p_under - 1.0
+
+        if margin < _ARB_MIN_MARGIN:
+            continue
+        if p_over < _ARB_MIN_LEG_PROB or p_under < _ARB_MIN_LEG_PROB:
+            continue
+
+        # Confidence: 7.0 at 0.5% margin → 9.0 at 5% margin
+        conf = round(min(10.0, 7.0 + (margin - 0.005) / 0.045 * 2.0), 1)
+
+        candidates.append({
+            "player_name":  display_name,
+            "prop_type":    prop_type,
+            "over_line":    over_line,
+            "over_plat":    over_plat,
+            "over_etype":   over_etype,
+            "under_line":   under_line,
+            "under_plat":   under_plat,
+            "under_etype":  under_etype,
+            "p_over":       round(p_over,  4),
+            "p_under":      round(p_under, 4),
+            "arb_margin":   round(margin,  4),
+            "confidence":   conf,
+            "gap":          round(gap, 2),
+        })
+
+    candidates.sort(key=lambda x: -x["arb_margin"])
+    return candidates[:_ARB_MAX_PICKS]
+
+
+# ---------------------------------------------------------------------------
 # EV & Kelly math
 # ---------------------------------------------------------------------------
 
@@ -780,6 +1003,8 @@ def kelly_fraction(prob: float, odds: float = -110.0) -> float:
 # ---------------------------------------------------------------------------
 # Parlay builder
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Parlay builder
 
 @dataclass
 class PropLeg:
@@ -1043,6 +1268,23 @@ class LiveDispatcher:
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._log_header(date)
+
+        if not self._has_games(date):
+            return
+
+        all_raw = self._get_raw_props()
+        if not all_raw:
+            logger.warning("No props fetched from either platform — aborting.")
+            return
+
+        if _DE_AVAILABLE:
+            all_raw = self._enrich_draft_edge(all_raw)
+        all_raw = self._enrich_statcast(all_raw)
+
+        # ... continue with subsequent steps
+
+    def _log_header(self, date: str) -> None:
         logger.info("=" * 60)
         logger.info("PropIQ LiveDispatcher — %s", date)
         logger.info("=" * 60)
@@ -1067,6 +1309,33 @@ class LiveDispatcher:
         # Step 1: DraftEdge projections (name-based, adds de_* fields)
         if _DE_AVAILABLE:
             try:
+    def _has_games(self, date: str) -> bool:
+        games = fetch_today_schedule(date)
+        if not games:
+            logger.warning("No MLB games found for %s — no alerts sent.", date)
+            return False
+        logger.info("%d games scheduled", len(games))
+        return True
+
+    def _get_raw_props(self) -> list:
+        pp_props = fetch_prizepicks_props()
+        ud_props = fetch_underdog_props()
+        return pp_props + ud_props
+
+    def _enrich_draft_edge(self, props: list) -> list:
+        try:
+            return apply_draft_edge_projections(props)
+        except Exception as exc:
+            logger.warning("DraftEdge enrichment failed: %s — skipping", exc)
+            return props
+
+    def _enrich_statcast(self, props: list) -> list:
+        for platform, roster in [("pp", roster_pp), ("ud", roster_ud)]:
+            try:
+                props = apply_statcast_std(props, roster)
+            except Exception as exc:
+                logger.warning("Statcast enrichment failed (%s): %s — skipping", platform, exc)
+        return props
                 all_raw = _de_enrich(all_raw)
                 logger.info("[Phase27] DraftEdge enrichment applied to %d props",
                             len(all_raw))
@@ -1160,6 +1429,7 @@ class LiveDispatcher:
                     legs=[
                         {
                             "player_name": l["player"],
+                            "player_name": l.get("player_name", l.get("player", "")),
                             "prop_type":   l["prop_type"],
                             "side":        l["side"],
                             "line":        l["line"],
@@ -1195,6 +1465,7 @@ class LiveDispatcher:
                         legs=[
                             {
                                 "player_name": l["player"],
+                                "player_name": l.get("player_name", l.get("player", "")),
                                 "prop_type":   l["prop_type"],
                                 "side":        l["side"],
                                 "line":        l["line"],
@@ -1349,10 +1620,8 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
-        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
