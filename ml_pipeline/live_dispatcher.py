@@ -14,36 +14,16 @@ Flow
   2. Fetch live props from PrizePicks and Underdog Fantasy APIs
   3. Merge and deduplicate player lines across both platforms
   4. Fetch baseline stat projections from MLB Stats API (season averages)
-  5. Run platform_selector for each prop → pick PrizePicks or Underdog
-  6. Calculate fantasy-points expected value (hitter + pitcher scoring)
-  7. Apply 15 agent filters to build per-agent parlays
-  8. Validate EV gate (≥3%) and Kelly cap (≤10%)
-  9. Fire Discord alerts via DiscordAlertService
-
-Supported prop types (innings_pitched REMOVED per Phase 19):
-  Hitter:  hits, home_runs, rbis, runs, total_bases, stolen_bases,
-           hits_runs_rbis, fantasy_hitter
-  Pitcher: strikeouts (labelled "Pitcher Ks"), earned_runs, fantasy_pitcher
-
-Platform rules:
-  - Compare PP vs Underdog line per prop
-  - Pick platform with higher implied win probability for that specific leg
-  - $20 hard-cap stake per parlay
-  - If fantasy points leg has EV edge ≥ 3% over the offered line → include
-
-Run standalone:
-  python live_dispatcher.py [--date 2026-03-22] [--dry-run]
-"""
-
+  5. Run platform_selector for each prop 
+ pick PrizePicks or Underdog
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -55,14 +35,15 @@ try:
     _SEASON_RECORD_AVAILABLE = True
 except ImportError:
     _SEASON_RECORD_AVAILABLE = False
-    def record_parlay(*a, **kw): return False            # noqa: E704
-    def get_agent_season_stats(agent): return {}         # noqa: E704
+    def record_parlay(*_a, **_kw): return False            # noqa: E704
+    def get_agent_season_stats(_agent): return {}         # noqa: E704
 
-from platform_selector import PlatformSelector, SelectionResult
+from platform_selector import PlatformSelector
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
-# ── Phase 27: Enhancement layer imports (all optional — graceful fallback) ──
+#  Phase 27: Enhancement layer imports (all optional 
+ graceful fallback) 
 try:
     from draftedge_scraper import enrich_props_with_draftedge as _de_enrich
     _DE_AVAILABLE = True
@@ -78,7 +59,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -87,12 +68,12 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
+    def _get_fade_signal(*_a, **_kw):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 logger = logging.getLogger("propiq.live")
 
@@ -102,7 +83,7 @@ logger = logging.getLogger("propiq.live")
 
 MIN_EV_PCT   = 3.0     # minimum EV gate
 MIN_PROB     = 0.52    # minimum implied win probability per leg
-MAX_LEGS     = 4       # hard cap — no parlay may exceed 4 legs
+MAX_LEGS     = 4       # hard cap  no parlay may exceed 4 legs
 MIN_LEGS     = 2       # min legs to send alert
 HALF_KELLY   = 0.5     # Kelly fraction multiplier
 MAX_KELLY    = 0.10    # bankroll cap
@@ -326,34 +307,15 @@ AGENT_CONFIGS: list[dict] = [
 ]
 
 # ---------------------------------------------------------------------------
-# MLB Stats API helpers
-# ---------------------------------------------------------------------------
-
-_MLBAPI_BASE = "https://statsapi.mlb.com/api/v1"
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
-
 # PrizePicks session — warm up by visiting the app home page first so
 # Cloudflare + DataDome issue valid cookies, then use those cookies for
-# the API call.  The session is module-level so the warm-up only fires
+# the API call.  The session is passed in so the warm-up only fires
 # once per process (the daily 11 AM dispatch is a single process).
-_pp_session: requests.Session | None = None
 
-
-def _get_pp_session() -> requests.Session:
+def _get_pp_session(pp_session: requests.Session | None = None) -> requests.Session:
     """Return a warmed-up PrizePicks session, creating one if needed."""
-    global _pp_session
-    if _pp_session is not None:
-        return _pp_session
+    if pp_session is not None:
+        return pp_session
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -376,7 +338,7 @@ def _get_pp_session() -> requests.Session:
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
     })
-    _pp_session = s
+    return s
     return s
 
 
@@ -506,8 +468,22 @@ _UD_STAT_MAP: dict[str, str] = {
 
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
+def _fetch_prizepicks_response(pp_session):
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 ** attempt)
+            pp_session = None
+        sess = _get_pp_session(pp_session)
+        resp = sess.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("data", [])
+    raise RuntimeError("Failed to fetch PrizePicks projections after retries")
 
-def fetch_prizepicks_props() -> list[dict]:
+def fetch_prizepicks_props(pp_session) -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -518,26 +494,15 @@ def fetch_prizepicks_props() -> list[dict]:
 
     Returns raw list of dicts.
     """
-    global _pp_session
     try:
-        data = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2 ** attempt)   # 2s, 4s back-off
-                # Force a fresh session on retry so we get new cookies
-                _pp_session = None
-            sess = _get_pp_session()
-            resp = sess.get(
-                "https://api.prizepicks.com/projections",
-                params={"per_page": 250, "single_stat": True, "league_id": 2},
-                timeout=15,
-            )
-            if resp.status_code == 200:
+        return _fetch_prizepicks_response(pp_session)
+    except RuntimeError:
+        return []
                 data = resp.json()
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                _pp_session = None   # force re-warm on next attempt
+                pp_session = None   # force re-warm on next attempt
         if data is None:
             return []
 
@@ -564,31 +529,6 @@ def fetch_prizepicks_props() -> list[dict]:
                 continue
 
             line_val = attrs.get("line_score")
-            if line_val is None:
-                continue
-
-            pid   = (proj.get("relationships", {})
-                        .get("new_player", {})
-                        .get("data", {})
-                        .get("id", ""))
-            pname = player_map.get(pid, "")
-            if not pname:
-                continue
-
-            props.append({
-                "source":      "prizepicks",
-                "player_name": pname,
-                "stat_type":   stat_raw,
-                "line":        float(line_val),
-            })
-
-        logger.info("[PP] Fetched %d MLB props", len(props))
-        return props
-    except Exception as exc:
-        logger.warning("[PP] Fetch failed: %s", exc)
-        return []
-
-
 def fetch_underdog_props() -> list[dict]:
     """
     Fetch Underdog Fantasy MLB over/under lines.
@@ -615,6 +555,48 @@ def fetch_underdog_props() -> list[dict]:
         )
         if resp.status_code != 200:
             logger.warning("[UD] HTTP %d", resp.status_code)
+            return []
+
+        data = resp.json()
+        over_under_lines = data.get("over_under_lines", [])
+        appearances_map = {
+            item["appearance_stat"]["appearance_id"]: item["appearance_stat"]
+            for item in data.get("appearances", [])
+        }
+        players_map = {player["id"]: player for player in data.get("players", [])}
+
+        def is_valid_line(line_info: dict) -> bool:
+            stat_info = line_info.get("over_under", {}).get("appearance_stat", {})
+            appearance_id = stat_info.get("appearance_id")
+            player_id = appearances_map.get(appearance_id, {}).get("player_id")
+            player = players_map.get(player_id, {})
+            line_val = line_info.get("over_under", {}).get("line")
+            return all([
+                player_id,
+                player.get("sport_id") == "MLB",
+                not line_info.get("inactive", False),
+                stat_info.get("stat"),
+                line_val is not None,
+            ])
+
+        def build_prop(line_info: dict) -> dict:
+            stat_info = line_info["over_under"]["appearance_stat"]
+            appearance_id = stat_info["appearance_id"]
+            player_id = appearances_map[appearance_id]["player_id"]
+            return {
+                "source": "underdog",
+                "player_name": players_map[player_id]["name"],
+                "stat_type": stat_info["stat"]["name"],
+                "line": float(line_info["over_under"]["line"]),
+            }
+
+        props = [build_prop(line) for line in over_under_lines if is_valid_line(line)]
+
+        logger.info("[UD] Fetched %d MLB props", len(props))
+        return props
+    except Exception as exc:
+        logger.warning("[UD] Fetch failed: %s", exc)
+        return []
             return []
         data = resp.json()
 
@@ -742,6 +724,7 @@ _STAT_TYPE_MAP: dict[str, str] = {
 }
 
 
+
 def normalise_stat(raw: str) -> str | None:
     """Return PROP_CONFIG key for a raw stat_type string, or None if unknown."""
     key = raw.strip().lower().replace("-", " ")
@@ -766,7 +749,6 @@ def implied_prob_from_odds(odds: float) -> float:
 def calc_ev(true_prob: float, odds: float = -110.0) -> float:
     """Return EV percentage given true probability and American odds."""
     dec     = american_to_decimal(odds)
-    implied = implied_prob_from_odds(odds)
     no_vig  = true_prob
     ev_pct  = (no_vig * (dec - 1) - (1 - no_vig)) * 100
     return ev_pct
@@ -1022,20 +1004,6 @@ def _build_mlbam_lookup() -> dict:
             return {}
         lookup: dict = {}
         for person in resp.json().get("people", []):
-            full_name = person.get("fullName", "")
-            pid = person.get("id")
-            if full_name and pid:
-                lookup[full_name.lower()] = int(pid)
-                parts = full_name.split()
-                if len(parts) >= 2:
-                    lookup[parts[-1].lower()] = int(pid)  # last-name fallback
-        logger.info("[MLBAM] Lookup built: %d players", len(lookup))
-        return lookup
-    except Exception as exc:
-        logger.warning("[MLBAM] Lookup failed: %s — Statcast enrichment skipped", exc)
-        return {}
-
-
 # ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
@@ -1046,6 +1014,11 @@ class LiveDispatcher:
     def __init__(self, dry_run: bool = False) -> None:
         self.dry_run   = dry_run
         self.selector  = platform_selector
+
+    def _fetch_raw_props(self) -> list:
+        pp_props = fetch_prizepicks_props()
+        ud_props = fetch_underdog_props()
+        return pp_props + ud_props
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1061,9 +1034,7 @@ class LiveDispatcher:
         logger.info("%d games scheduled", len(games))
 
         # 2. Fetch live props from both platforms
-        pp_props = fetch_prizepicks_props()
-        ud_props = fetch_underdog_props()
-        all_raw  = pp_props + ud_props
+        all_raw = self._fetch_raw_props()
 
         if not all_raw:
             logger.warning("No props fetched from either platform — aborting.")
@@ -1254,8 +1225,8 @@ class LiveDispatcher:
 
     # ── private ───────────────────────────────────────────────────────────────
 
+    @staticmethod
     def _evaluate_props(
-        self,
         raw_props: list[dict],
         sbd_game_df=None,
         sbd_prop_df=None,
@@ -1355,10 +1326,8 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
-        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")

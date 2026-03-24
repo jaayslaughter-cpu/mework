@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -51,7 +52,8 @@ logger = logging.getLogger(__name__)
 # Connection helpers — Postgres primary, SQLite fallback
 # ---------------------------------------------------------------------------
 
-_SQLITE_FALLBACK = Path("/tmp/propiq_season.db")
+_named_temp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_SQLITE_FALLBACK = Path(_named_temp.name)
 
 _PG_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS propiq_season_record (
@@ -148,7 +150,7 @@ def _get_conn():
     return _get_sqlite_conn(), False
 
 
-def _dict_rows(conn, is_pg: bool, rows) -> list[dict]:
+def _dict_rows(_conn, is_pg: bool, rows) -> list[dict]:
     """Normalise rows to list of plain dicts regardless of driver."""
     if is_pg:
         import psycopg2.extras  # noqa: F401
