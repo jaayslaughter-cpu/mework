@@ -512,14 +512,14 @@ def _get_prizepicks_data(pp_session):
             time.sleep(2 ** attempt)
             pp_session = None
         sess = _get_pp_session(pp_session)
-   resp = sess.get(
-       "https://api.prizepicks.com/projections",
-       params={"per_page": 250, "single_stat": True, "league_id": 2},
-       timeout=15,
-   )
-   if resp.status_code == 200:
-       return resp.json()
-   resp.raise_for_status()
+        resp = sess.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        resp.raise_for_status()
 
 def fetch_prizepicks_props(pp_session) -> list[dict]:
     """
