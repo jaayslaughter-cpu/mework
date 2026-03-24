@@ -15,6 +15,7 @@ Flow
   3. Merge and deduplicate player lines across both platforms
   4. Fetch baseline stat projections from MLB Stats API (season averages)
   5. Run platform_selector for each prop → pick PrizePicks or Underdog
+"""
   6. Calculate fantasy-points expected value (hitter + pitcher scoring)
   7. Apply 15 agent filters to build per-agent parlays
   8. Validate EV gate (≥3%) and Kelly cap (≤10%)
@@ -40,10 +41,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -55,10 +55,10 @@ try:
     _SEASON_RECORD_AVAILABLE = True
 except ImportError:
     _SEASON_RECORD_AVAILABLE = False
-    def record_parlay(*a, **kw): return False            # noqa: E704
-    def get_agent_season_stats(agent): return {}         # noqa: E704
+    def record_parlay(*_, **__): return False            # noqa: E704
+    def get_agent_season_stats(_agent): return {}         # noqa: E704
 
-from platform_selector import PlatformSelector, SelectionResult
+from platform_selector import PlatformSelector
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
@@ -78,7 +78,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -87,7 +87,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
+    def _get_fade_signal(*_, **__):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -346,14 +346,11 @@ _HEADERS = {
 # Cloudflare + DataDome issue valid cookies, then use those cookies for
 # the API call.  The session is module-level so the warm-up only fires
 # once per process (the daily 11 AM dispatch is a single process).
-_pp_session: requests.Session | None = None
 
-
-def _get_pp_session() -> requests.Session:
+def _get_pp_session(_session_holder=[None]) -> requests.Session:
     """Return a warmed-up PrizePicks session, creating one if needed."""
-    global _pp_session
-    if _pp_session is not None:
-        return _pp_session
+    if _session_holder[0] is not None:
+        return _session_holder[0]
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -376,7 +373,8 @@ def _get_pp_session() -> requests.Session:
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
     })
-    _pp_session = s
+    _session_holder[0] = s
+    return s
     return s
 
 
@@ -481,8 +479,8 @@ _PP_MLB_STAT_TYPES = {
     # Pitcher props (actual PP label as of 2026)
     "pitcher strikeouts", "strikeouts",   # keep bare form as fallback
     "earned runs allowed", "earned runs",  # keep old form as fallback
-    "hits allowed", "walks allowed", "pitching outs",
-    "walks",
+"hits allowed", "walks allowed", "pitching outs",
+"walks",
 }
 
 # Underdog stat → our internal prop_type
@@ -506,8 +504,25 @@ _UD_STAT_MAP: dict[str, str] = {
 
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
+def _get_prizepicks_data(pp_session):
+    """
+    Helper to fetch PrizePicks MLB projections with retry logic.
+    """
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 ** attempt)
+            pp_session = None
+        sess = _get_pp_session(pp_session)
+        resp = sess.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    resp.raise_for_status()
 
-def fetch_prizepicks_props() -> list[dict]:
+def fetch_prizepicks_props(pp_session) -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -518,30 +533,20 @@ def fetch_prizepicks_props() -> list[dict]:
 
     Returns raw list of dicts.
     """
-    global _pp_session
     try:
-        data = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2 ** attempt)   # 2s, 4s back-off
-                # Force a fresh session on retry so we get new cookies
-                _pp_session = None
-            sess = _get_pp_session()
-            resp = sess.get(
-                "https://api.prizepicks.com/projections",
-                params={"per_page": 250, "single_stat": True, "league_id": 2},
-                timeout=15,
-            )
-            if resp.status_code == 200:
+        data = _get_prizepicks_data(pp_session)
+    except Exception:
+        return []
+    return data
                 data = resp.json()
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                _pp_session = None   # force re-warm on next attempt
+                pp_session = None   # force re-warm on next attempt
         if data is None:
             return []
 
-        # Build player id → name map from included resources
+        # Build player id 12 name map from included resources
         player_map: dict[str, str] = {}
         for item in data.get("included", []):
             if item.get("type") == "new_player":
@@ -915,7 +920,6 @@ def implied_prob_from_odds(odds: float) -> float:
 def calc_ev(true_prob: float, odds: float = -110.0) -> float:
     """Return EV percentage given true probability and American odds."""
     dec     = american_to_decimal(odds)
-    implied = implied_prob_from_odds(odds)
     no_vig  = true_prob
     ev_pct  = (no_vig * (dec - 1) - (1 - no_vig)) * 100
     return ev_pct
@@ -931,10 +935,8 @@ def kelly_fraction(prob: float, odds: float = -110.0) -> float:
     k = (b * prob - q) / b
     return max(0.0, min(k * HALF_KELLY, MAX_KELLY))
 
-
 # ---------------------------------------------------------------------------
 # Parlay builder
-# ---------------------------------------------------------------------------
 
 @dataclass
 class PropLeg:
@@ -1171,20 +1173,6 @@ def _build_mlbam_lookup() -> dict:
             return {}
         lookup: dict = {}
         for person in resp.json().get("people", []):
-            full_name = person.get("fullName", "")
-            pid = person.get("id")
-            if full_name and pid:
-                lookup[full_name.lower()] = int(pid)
-                parts = full_name.split()
-                if len(parts) >= 2:
-                    lookup[parts[-1].lower()] = int(pid)  # last-name fallback
-        logger.info("[MLBAM] Lookup built: %d players", len(lookup))
-        return lookup
-    except Exception as exc:
-        logger.warning("[MLBAM] Lookup failed: %s — Statcast enrichment skipped", exc)
-        return {}
-
-
 # ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
@@ -1198,30 +1186,54 @@ class LiveDispatcher:
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        logger.info("=" * 60)
-        logger.info("PropIQ LiveDispatcher — %s", date)
-        logger.info("=" * 60)
+        self._log_header(date)
 
-        # 1. Schedule check
-        games = fetch_today_schedule(date)
-        if not games:
-            logger.warning("No MLB games found for %s — no alerts sent.", date)
+        if not self._has_games(date):
             return
-        logger.info("%d games scheduled", len(games))
 
-        # 2. Fetch live props from both platforms
-        pp_props = fetch_prizepicks_props()
-        ud_props = fetch_underdog_props()
-        all_raw  = pp_props + ud_props
-
+        all_raw = self._get_raw_props()
         if not all_raw:
             logger.warning("No props fetched from either platform — aborting.")
             return
 
-        # ── Phase 27: Enrich raw props with enhancement layers ────────────
-        # Step 1: DraftEdge projections (name-based, adds de_* fields)
         if _DE_AVAILABLE:
+            all_raw = self._enrich_draft_edge(all_raw)
+        all_raw = self._enrich_statcast(all_raw)
+
+        # ... continue with subsequent steps
+
+    def _log_header(self, date: str) -> None:
+        logger.info("=" * 60)
+        logger.info("PropIQ LiveDispatcher — %s", date)
+        logger.info("=" * 60)
+
+    def _has_games(self, date: str) -> bool:
+        games = fetch_today_schedule(date)
+        if not games:
+            logger.warning("No MLB games found for %s — no alerts sent.", date)
+            return False
+        logger.info("%d games scheduled", len(games))
+        return True
+
+    def _get_raw_props(self) -> list:
+        pp_props = fetch_prizepicks_props()
+        ud_props = fetch_underdog_props()
+        return pp_props + ud_props
+
+    def _enrich_draft_edge(self, props: list) -> list:
+        try:
+            return apply_draft_edge_projections(props)
+        except Exception as exc:
+            logger.warning("DraftEdge enrichment failed: %s — skipping", exc)
+            return props
+
+    def _enrich_statcast(self, props: list) -> list:
+        for platform, roster in [("pp", roster_pp), ("ud", roster_ud)]:
             try:
+                props = apply_statcast_std(props, roster)
+            except Exception as exc:
+                logger.warning("Statcast enrichment failed (%s): %s — skipping", platform, exc)
+        return props
                 all_raw = _de_enrich(all_raw)
                 logger.info("[Phase27] DraftEdge enrichment applied to %d props",
                             len(all_raw))
@@ -1503,8 +1515,8 @@ class LiveDispatcher:
 
     # ── private ───────────────────────────────────────────────────────────────
 
+    @staticmethod
     def _evaluate_props(
-        self,
         raw_props: list[dict],
         sbd_game_df=None,
         sbd_prop_df=None,
@@ -1588,13 +1600,11 @@ class LiveDispatcher:
                 return 0.50
             xs = [r[0] for r in rates]
             ys = [r[1] for r in rates]
-            # Clamp
             if line <= xs[0]:
                 p_over = ys[0]
             elif line >= xs[-1]:
                 p_over = ys[-1]
             else:
-                # Linear interpolation
                 for i in range(len(xs) - 1):
                     if xs[i] <= line <= xs[i + 1]:
                         t = (line - xs[i]) / (xs[i + 1] - xs[i])
@@ -1604,10 +1614,8 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
-        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
@@ -1631,7 +1639,6 @@ class LiveDispatcher:
                 groups[key][platform] = {
                     "line": line_val, "entry_type": etype,
                     "player_name": pname, "position": position,
-                    # Phase 27: preserve enrichment fields through grouping
                     "de_hit_pct":   float(raw.get("de_hit_pct",  0.0) or 0.0),
                     "de_hr_pct":    float(raw.get("de_hr_pct",   0.0) or 0.0),
                     "de_k_pct":     float(raw.get("de_k_pct",    0.0) or 0.0),
