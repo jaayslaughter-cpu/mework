@@ -1009,7 +1009,9 @@ class LiveDispatcher:
                         num_legs=len(omega["legs"]),
                         confidence=conf_o,
                         ev_pct=ev_o,
-                        legs=[
+                        legs=omega["legs"],
+                    )
+
     def _evaluate_props(self, raw_props: list[dict]) -> list[PropLeg]:
         """
         Normalise raw props, compare platforms, apply EV gate.

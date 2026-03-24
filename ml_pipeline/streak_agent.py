@@ -63,7 +63,7 @@ Pick selection algorithm:
   2. Evaluate each prop using MLB historical base rates (same as dispatcher)
   3. Run all 18 AGENT_CONFIGS filters to count cross-agent "signals"
   4. Score each prop: streak_confidence() = prob_score + ev_bonus + signal_bonus
-  5. Filter: conf ≥ 8.0, prob ≥ 0.62, ev_pct ≥ 5.0%
+  5. Filter: conf >= 8.0, prob >= 0.62, ev_pct >= 5.0%
   6. Apply team-diversity rule for picks 1 & 2
   7. Select top-ranked prop; skip day if nothing qualifies (better than a bad pick)
 
