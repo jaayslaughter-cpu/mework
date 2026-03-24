@@ -23,7 +23,7 @@ async function checkAndIncrement(source) {
   const reqId = `${now}-${Math.random().toString(36).substr(2, 5)}`;
 
   // Redis Transaction: Remove old requests, add new request, count current window, set TTL
-  let results;
+  let results = [];
   try {
     results = await client.multi()
       .zRemRangeByScore(key, 0, windowStart) // 1. Remove requests older than 60s
