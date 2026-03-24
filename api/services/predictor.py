@@ -1,6 +1,3 @@
-import xgboost as xgb
-import pandas as pd
-import numpy as np
 import os
 import logging
 from services.fatigue_logic import apply_fatigue_adjustments
@@ -123,6 +120,7 @@ def evaluate_edge(
     contrast_context: dict = None,
     prop_category: str = "",
 ) -> dict:
+def evaluate_edge(sportsbook_line: float, over_odds: int, under_odds: int, _statcast_data: list, fatigue_context: dict = None, vacuum_context: dict = None, contrast_context: dict = None, prop_category: str = "") -> dict:
     """
     Core ML Evaluation Logic.
     1. De-vig to get true Vegas probability

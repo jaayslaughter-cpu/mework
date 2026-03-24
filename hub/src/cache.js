@@ -34,9 +34,8 @@ const pendingFetches = new Map();
  * @param {string} key     - Redis cache key (see key schema below)
  * @param {number} ttl     - Cache TTL in seconds
  * @param {Function} fetchFn - Async function that fetches fresh data if cache miss
- * @returns {Promise<any>} - Cached or freshly fetched data
  */
-async function getOrFetch(key, ttl, fetchFn) {
+const getOrFetch = async (key, ttl, fetchFn) => {
   // Try to get from cache first
   try {
     const cached = await client.get(key);
@@ -71,7 +70,7 @@ async function getOrFetch(key, ttl, fetchFn) {
         if (cached) {
           return JSON.parse(cached);
         }
-      } catch (e) {
+      } catch {
         // Ignore cache read error, proceed with fetch
       }
 

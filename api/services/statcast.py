@@ -1,6 +1,6 @@
 import pybaseball as pyb
 import pandas as pd
-
+from typing import Optional
 # Enable caching to prevent redundant network calls and rate limiting
 pyb.cache.enable()
 
