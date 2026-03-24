@@ -44,7 +44,9 @@ const CORRECTIONS = [
 // ── Tier badge ─────────────────────────────────────────────────────────────
 const TierBadge: React.FC<{ tier: string }> = ({ tier }) => {
   const cfg: Record<string, { bg: string; text: string; label: string }> = {
-    'A':       { bg: 'bg-success/20', text: 'text-success', label: '🔥 STRONG PLAY' },
+    'A':       { bg: 'bg-success/20', text: 'text-success', label: '🔥 STRONG PLAY' }
+  };
+
 // ── Calibration row ────────────────────────────────────────────────────────
 
 type CalibrationData = {
