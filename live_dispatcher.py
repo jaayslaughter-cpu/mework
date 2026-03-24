@@ -40,8 +40,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,10 +55,10 @@ try:
     _SEASON_RECORD_AVAILABLE = True
 except ImportError:
     _SEASON_RECORD_AVAILABLE = False
-    def record_parlay(*_args, **_kwargs): return False            # noqa: E704
-    def get_agent_season_stats(_agent): return {}         # noqa: E704
+    def record_parlay(*a, **kw): return False            # noqa: E704
+    def get_agent_season_stats(agent): return {}         # noqa: E704
 
-from platform_selector import PlatformSelector
+from platform_selector import PlatformSelector, SelectionResult
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
@@ -671,6 +673,7 @@ def implied_prob_from_odds(odds: float) -> float:
 def calc_ev(true_prob: float, odds: float = -110.0) -> float:
     """Return EV percentage given true probability and American odds."""
     dec     = american_to_decimal(odds)
+    implied = implied_prob_from_odds(odds)
     no_vig  = true_prob
     ev_pct  = (no_vig * (dec - 1) - (1 - no_vig)) * 100
     return ev_pct
@@ -1009,8 +1012,61 @@ class LiveDispatcher:
                         num_legs=len(omega["legs"]),
                         confidence=conf_o,
                         ev_pct=ev_o,
-                        legs=omega["legs"],
+                        legs=[
+                            {
+                                "player_name": l["player"],
+                                "prop_type":   l["prop_type"],
+                                "side":        l["side"],
+                                "line":        l["line"],
+                            }
+                            for l in omega["legs"]
+                        ],
                     )
+                else:
+                    logger.info("[DRY-RUN] OmegaStack would send: %s",
+                                json.dumps(omega, indent=2)[:400])
+                sent += 1
+            else:
+                logger.info(
+                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 — below gate, skipped.",
+                    ev_o, conf_o,
+                )
+        else:
+            logger.info("[OmegaStack] No triple-confirmation legs today.")
+
+        logger.info("Dispatch complete — %d parlays sent for %s", sent, date)
+
+        # ── StreakAgent (19th agent) — runs after the main 18-agent dispatch ──
+        # Single best pick per day for Underdog Streaks format (11 consecutive
+        # correct picks → $1K/$5K/$10K prize). Confidence gate ≥ 8/10.
+        try:
+            from streak_agent import run_streak_pick
+            streak_entry = int(os.getenv("STREAK_ENTRY_AMOUNT", "1"))
+            streak_result = run_streak_pick(
+                date_str     = date,
+                entry_amount = streak_entry,
+                dry_run      = self.dry_run,
+            )
+            if streak_result:
+                logger.info(
+                    "[StreakAgent] Pick #%d/%d sent — %s %s %.1f %s "
+                    "| conf=%.1f | prob=%.1f%%",
+                    streak_result["pick_number"], 11,
+                    streak_result["player_name"],
+                    streak_result["prop_type"],
+                    streak_result["line"],
+                    streak_result["direction"],
+                    streak_result["confidence"],
+                    streak_result["probability"] * 100,
+                )
+            else:
+                logger.info("[StreakAgent] No qualifying pick today (conf ≥ 8.0 gate not met).")
+        except ImportError:
+            logger.debug("[StreakAgent] streak_agent.py not found — skipping.")
+        except Exception as _streak_err:
+            logger.warning("[StreakAgent] Error during streak pick: %s", _streak_err)
+
+    # ── private ───────────────────────────────────────────────────────────────
 
     def _evaluate_props(self, raw_props: list[dict]) -> list[PropLeg]:
         """
@@ -1034,38 +1090,35 @@ class LiveDispatcher:
         # Format: {prop_type: [(line_threshold, over_prob), ...]}
         # Interpolated linearly between thresholds.
         _BASE_RATES: dict[str, list[tuple[float, float]]] = {
-            # Hitter:  H ≥ X
+            # Hitter: H ≥ X
             "hits":           [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
             # HR ≥ X
             "home_runs":      [(0.5, 0.22), (1.5, 0.04)],
+            # RBI ≥ X
+            "rbis":           [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
+            # R ≥ X
+            "runs":           [(0.5, 0.55), (1.5, 0.23), (2.5, 0.09)],
+            # TB ≥ X
+            "total_bases":    [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
+            # SB ≥ X
+            "stolen_bases":   [(0.5, 0.14), (1.5, 0.03)],
+            # H+R+RBI ≥ X
+            "hits_runs_rbis": [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
+            # Pitcher K ≥ X
+            "strikeouts":     [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
+            # ER ≤ X (Under is typically the bet)
+            "earned_runs":    [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
+            # Fantasy hitter score
+            "fantasy_hitter": [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
+            # Fantasy pitcher score
+            "fantasy_pitcher":[(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
+            # Walks (pitcher)
+            "walks":          [(0.5, 0.68), (1.5, 0.42), (2.5, 0.22)],
         }
-        # Group props by player and prop_type
-        groups: dict[tuple[str, str], list[dict]] = {}
-        for prop in raw_props:
-            key = (prop['player_name'].lower(), prop['prop_type'])
-            groups.setdefault(key, []).append(prop)
-        result: list[PropLeg] = []
-        for (_, ptype), items in groups.items():
-            # Select best platform line
-            best = min(items, key=lambda x: x['line']) if items[0]['side'] == 'Over' else max(items, key=lambda x: x['line'])
-            line = best['line']
-            # Interpolate base rate
-            rates = _BASE_RATES.get(ptype, [])
-            prob = 0.0
-            for (thr, p) in rates:
-                if line >= thr:
-                    prob = p
-                else:
-                    break
-            # Apply EV and probability gates
-            ev = (prob - best['market_prob']) * 100
-            if prob >= self.min_prob and ev >= self.ev_gate:
-                leg = PropLeg(
-                    player_name=best['player_name'], prop_type=ptype,
-                    side=best['side'], line=line, ev=ev, prob=prob
-                )
-                result.append(leg)
-        return result
+
+        # ── Per-game line range validation ────────────────────────────────
+        # Lines outside these ranges are season-long or special markets.
+        # We ONLY bet per-game props. These are realistic MLB per-game ranges.
         _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
             "hits":           (0.5, 4.5),
             "home_runs":      (0.5, 2.5),
@@ -1111,8 +1164,10 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
+        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
+        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
