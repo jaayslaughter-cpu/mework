@@ -589,15 +589,15 @@ def fetch_prizepicks_props(pp_session) -> list[dict]:
         return []
 
 
-def fetch_underdog_props() -> list[dict]:
+def fetch_underdog_props():
     """
     Fetch Underdog Fantasy MLB over/under lines.
 
     Correct join chain (confirmed from Phase 18 UnderdogLinesFetcher):
       over_under_lines[n]["over_under"]["appearance_stat"]["stat"]
                                        ["appearance_stat"]["appearance_id"]
-        → appearances_map[appearance_id]["player_id"]
-        → players_map[player_id]["sport_id"] == "MLB"
+         appearances_map[appearance_id]["player_id"]
+         players_map[player_id]["sport_id"] == "MLB"
 
     Filters out innings (removed Phase 19) and inactive lines.
     Returns raw list of dicts.
