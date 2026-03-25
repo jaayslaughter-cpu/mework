@@ -39,6 +39,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pika
 import pika.exceptions
+from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
 from odds_math import MIN_EV_THRESHOLD, calculate_no_vig_ev  # noqa: E402
 from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
 from apify_scrapers import DataEnricher  # noqa: E402
@@ -331,6 +332,13 @@ class BaseSlipBuilder(ABC):
                 continue
             if slip_eval.total_ev <= self.min_ev:
                 continue
+            payload = self._format_payload(list(combo), slip_eval)
+            self.publisher.publish(payload)
+            published.append(payload)
+
+        best_ev = max((p["total_ev"] for p in published), default=0.0)
+        logger.info(
+            "%s: %d props → %d slips published (best EV: %.2f%%)",
 
             # ------------------------------------------------------------------
             # No-vig EV gate — compare XGBoost model probability against the
@@ -469,6 +477,9 @@ class BaseSlipBuilder(ABC):
         """Serialise a validated slip into the standard Discord-bound JSON.
 
         Args:
+            legs:      Validated list of :class:`PropEdge` objects.
+            slip_eval: :class:`SlipEvaluation` from
+                       :meth:`UnderdogMathEngine.evaluate_slip`.
             legs:        Validated list of :class:`PropEdge` objects.
             slip_eval:   :class:`SlipEvaluation` from
                          :meth:`UnderdogMathEngine.evaluate_slip`.
@@ -498,6 +509,14 @@ class BaseSlipBuilder(ABC):
                     "side": leg.side,
                     "true_prob": round(leg.true_prob, 4),
                     "edge_pct": round(leg.edge_pct, 4),
+                }
+                for leg in legs
+            ],
+            # EV breakdown for Discord embed
+            "total_ev": slip_eval.total_ev,
+            "flex_ev": slip_eval.flex_ev,
+            "standard_ev": slip_eval.standard_ev,
+            # Probability breakdown
                     # No-vig EV for this leg: (model_prob / true_no_vig_prob) - 1
                     # This is the number shown on the Discord message per leg.
                     "no_vig_ev": round(ev, 4),
@@ -813,6 +832,7 @@ class UmpireAgent(BaseSlipBuilder):
     UMPIRE_PROP_TYPES: frozenset = frozenset({
         "strikeouts", "ks", "walks", "bb", "earned_runs", "er",
     })
+    MIN_PROB: float = 0.54
     PITCHER_ZONE_PROPS: frozenset = frozenset({"strikeouts", "ks"})
     HITTER_ZONE_PROPS: frozenset = frozenset({"walks", "bb"})
     TOTAL_PROPS: frozenset = frozenset({"earned_runs", "er", "total", "runs_scored"})
@@ -829,6 +849,14 @@ class UmpireAgent(BaseSlipBuilder):
         return "UmpireAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Retain umpire-source props and umpire-sensitive ML props.
+
+        Criteria:
+            1. ``source == "umpire"`` — explicit umpire context signal.
+            2. ``source == "ml_engine"`` + ``prop_type`` is strikeout, walk,
+               or earned-run — umpire environment already baked into the
+               XGBoost probability.
+            3. ``true_prob >= MIN_PROB`` and positive ``edge_pct``.
         """Retain umpire-relevant props with directional zone validation.
 
         Strategy mirrors the Environment Dictator spec:
@@ -856,6 +884,18 @@ class UmpireAgent(BaseSlipBuilder):
         Returns:
             Umpire-relevant props sorted by ``edge_pct`` descending.
         """
+        eligible = [
+            p for p in props
+            if p.edge_pct > 0
+            and p.true_prob >= self.MIN_PROB
+            and (
+                p.source == "umpire"
+                or (
+                    p.source == "ml_engine"
+                    and p.prop_type.lower() in self.UMPIRE_PROP_TYPES
+                )
+            )
+        ]
         eligible: List[PropEdge] = []
         for p in props:
             if p.edge_pct <= 0 or p.true_prob < self.MIN_PROB:
@@ -922,6 +962,7 @@ class FadeAgent(BaseSlipBuilder):
         return "FadeAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Retain only FadeScanner contrarian props.
         """Retain contrarian props where public tickets diverge from sharp money.
 
         Core contrarian gauge logic:
@@ -944,6 +985,16 @@ class FadeAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
+            Fade props with ``edge_pct > 0`` and ``true_prob >= 0.52``,
+            sorted by ``edge_pct`` descending.
+        """
+        fade_props = [
+            p for p in props
+            if p.source == "fade"
+            and p.edge_pct > 0
+            and p.true_prob >= self.MIN_PROB
+        ]
+        fade_props.sort(key=lambda p: p.edge_pct, reverse=True)
             Contrarian fade props sorted by ``fade_signal`` descending
             (strongest divergence first).
         """
@@ -1037,6 +1088,13 @@ class BullpenAgent(BaseSlipBuilder):
         return "BullpenAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Retain bullpen-source props and bullpen-sensitive full-game ML props.
+
+        Criteria:
+            1. ``source == "bullpen"`` — explicit fatigue signal.
+            2. ``source == "ml_engine"`` + prop_type is bullpen-sensitive
+               + ``is_f5 == False`` (full-game props only).
+            3. ``true_prob >= MIN_PROB`` and positive ``edge_pct``.
         """Retain props where bullpen fatigue creates late-inning value.
 
         Rest & Usage Tracker logic:
@@ -1057,6 +1115,22 @@ class BullpenAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
+            Bullpen-relevant props sorted by ``edge_pct`` descending.
+        """
+        eligible = [
+            p for p in props
+            if p.edge_pct > 0
+            and p.true_prob >= self.MIN_PROB
+            and not p.is_f5
+            and (
+                p.source == "bullpen"
+                or (
+                    p.source == "ml_engine"
+                    and p.prop_type.lower() in self.BULLPEN_SENSITIVE_PROPS
+                )
+            )
+        ]
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
             Bullpen-relevant props sorted by ``fatigue_index`` descending
             (most fatigued bullpen first), then by ``edge_pct``.
         """
@@ -1106,6 +1180,7 @@ class WeatherAgent(BaseSlipBuilder):
         "home_runs", "total_bases", "hits", "runs_scored",
         "singles", "doubles", "xbh",
     })
+    MIN_PROB: float = 0.54
     POWER_PROPS: frozenset = frozenset({"home_runs", "total_bases", "xbh", "doubles"})
     MIN_PROB: float = 0.54
     #: Wind speed (MPH) that triggers strong wind adjustments.
@@ -1120,6 +1195,12 @@ class WeatherAgent(BaseSlipBuilder):
         return "WeatherAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Retain weather-source props and weather-sensitive ML props.
+
+        Criteria:
+            1. ``source == "weather"`` — explicit park/weather signal.
+            2. ``source == "ml_engine"`` + prop_type is weather-sensitive.
+            3. ``true_prob >= MIN_PROB`` and positive ``edge_pct``.
         """Retain props where atmospheric conditions create measurable edge.
 
         Atmospheric Adjuster logic:
@@ -1141,6 +1222,21 @@ class WeatherAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
+            Weather-relevant props sorted by ``edge_pct`` descending.
+        """
+        eligible = [
+            p for p in props
+            if p.edge_pct > 0
+            and p.true_prob >= self.MIN_PROB
+            and (
+                p.source == "weather"
+                or (
+                    p.source == "ml_engine"
+                    and p.prop_type.lower() in self.WEATHER_SENSITIVE_PROPS
+                )
+            )
+        ]
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
             Weather-relevant props sorted by wind speed descending,
             then by ``edge_pct``.
         """
@@ -1217,6 +1313,7 @@ class SteamAgent(BaseSlipBuilder):
         return "SteamAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Retain only SteamScanner props with a 4%+ edge gap.
         """Retain props where rapid uniform line movement signals sharp action.
 
         Velocity Tracker logic:
@@ -1243,6 +1340,14 @@ class SteamAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
+            Steam props sorted by ``edge_pct`` descending.
+        """
+        steam_props = [
+            p for p in props
+            if p.source == "steam"
+            and p.edge_pct >= self.MIN_EDGE_PCT
+        ]
+        steam_props.sort(key=lambda p: p.edge_pct, reverse=True)
             Steam props sorted by velocity descending (fastest-moving first),
             then by book count for tie-breaking.  Max 3 legs enforced at
             combination stage.
