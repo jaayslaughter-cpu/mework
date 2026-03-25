@@ -191,8 +191,9 @@ class MLBFormLayer:
                 logger.debug("[Form] Game log p%d/%s/%d: %s", player_id, group, season, exc)
         return []
 
+    @staticmethod
     def _fetch_season_per_game(
-        self, player_id: int, group: str
+        player_id: int, group: str
     ) -> dict[str, float]:
         """
         Fetch season totals for a player and return per-game averages.

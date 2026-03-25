@@ -392,10 +392,13 @@ _HEADERS = {
 _pp_session: requests.Session | None = None
 
 
+_pp_session = None
+
 def _get_pp_session() -> requests.Session:
     """Return a warmed-up PrizePicks session, creating one if needed."""
-    if getattr(_get_pp_session, "_pp_session", None) is not None:
-        return _get_pp_session._pp_session
+    global _pp_session
+    if _pp_session is not None:
+        return _pp_session
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -418,7 +421,7 @@ def _get_pp_session() -> requests.Session:
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
     })
-    _get_pp_session._pp_session = s
+    _pp_session = s
     return s
 
 
