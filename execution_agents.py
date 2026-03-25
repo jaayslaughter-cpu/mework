@@ -41,6 +41,7 @@ import pika
 import pika.exceptions
 from odds_math import MIN_EV_THRESHOLD, calculate_no_vig_ev  # noqa: E402
 from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
+from apify_scrapers import DataEnricher  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class SlipPublisher:
 
     def __init__(self, amqp_url: Optional[str] = None) -> None:
         self._amqp_url = amqp_url
+        self._enricher: DataEnricher = DataEnricher()
         self._connection: Optional[pika.BlockingConnection] = None
         self._channel: Any = None
 
@@ -434,6 +436,23 @@ class BaseSlipBuilder(ABC):
             return False
 
         # TODO: add game_id-based correlation check when PropEdge carries game_id
+        # game_id correlation: block if ≥4 legs from the same game.
+        # Same-game parlays carry high leg-to-leg correlation that understates
+        # true combined probability, especially when all props belong to the
+        # same pitcher / offensive lineup.
+        populated_game_ids = [leg.game_id for leg in combo if leg.game_id]
+        if populated_game_ids:
+            from collections import Counter  # noqa: PLC0415
+            counts = Counter(populated_game_ids)
+            if max(counts.values()) >= 4:
+                logger.debug(
+                    "%s: correlation filter rejected combo "
+                    "(≥4 legs from same game_id '%s').",
+                    self.agent_name,
+                    max(counts, key=counts.__getitem__),
+                )
+                return False
+
         return True
 
     # ------------------------------------------------------------------
@@ -514,6 +533,15 @@ class EVHunter(BaseSlipBuilder):
     Market Scanner (LineValue, Steam, Fade) alerts.  Selects the top-N
     props by edge percentage across the entire MLB slate and constructs
     every valid 3/4/5-leg combination.
+    Market Scanner (LineValue, Steam, Fade) alerts.  Also ingests
+    market_fusion CLV edges and dislocation-scored props from the
+    multi-provider OddsFetcher pipeline.
+
+    Prop ranking uses a composite score:
+        composite = edge_pct + (dislocation_score * DISLOCATION_WEIGHT)
+
+    This ensures props with confirmed Pinnacle/soft-book gaps are
+    ranked above props with the same raw edge but no sharp consensus.
 
     Strategy:
         Pure expected-value maximisation — no filters on Over/Under bias,
@@ -522,6 +550,11 @@ class EVHunter(BaseSlipBuilder):
     """
 
     TOP_N: int = 10
+    TOP_N: int              = 10
+    DISLOCATION_WEIGHT: float = 0.5   # weight applied to dislocation_score bonus
+    CLV_SOURCES: frozenset  = frozenset({
+        "market_fusion", "linevalue", "dislocation", "arbitrage",
+    })
 
     @property
     def agent_name(self) -> str:
@@ -539,7 +572,83 @@ class EVHunter(BaseSlipBuilder):
         """
         eligible = [p for p in props if p.edge_pct > 0]
         eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+    def _composite_score(self, p: "PropEdge") -> float:
+        """Composite ranking score blending edge_pct + CLV dislocation bonus."""
+        dis_score = getattr(p, "dislocation_score", 0.0) or 0.0
+        return p.edge_pct + (dis_score * self.DISLOCATION_WEIGHT)
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Select the top-N props by composite EV score.
+
+        Promotes props from CLV-sourced feeds (market_fusion, linevalue,
+        dislocation) with a dislocation_score bonus on top of raw edge_pct.
+
+        Args:
+            props: Full unfiltered prop pool from all inbound sources.
+
+        Returns:
+            Top :attr:`TOP_N` props ranked by composite score descending,
+            requiring positive edge.
+        """
+        eligible = [p for p in props if p.edge_pct > 0]
+        eligible.sort(key=self._composite_score, reverse=True)
         return eligible[: self.TOP_N]
+
+
+# ---------------------------------------------------------------------------
+# Agent 1b — ArbitrageAgent (True Cross-Book Arbitrage)
+# ---------------------------------------------------------------------------
+
+class ArbitrageAgent(BaseSlipBuilder):
+    """
+    Identifies and builds slips from true cross-book arbitrage opportunities.
+
+    Consumes PropEdges with ``source == "arbitrage"`` from the
+    MarketFusionEngine.arbitrage_scan() pipeline.  These are props where
+    the best available Over on one book + best Under on another book
+    combine to a total implied probability < 1.0 — a guaranteed edge
+    regardless of outcome.
+
+    Filters:
+        - source == "arbitrage"
+        - arb_margin ≥ ARB_GATE (0.5 % guaranteed return)
+        - min_providers ≥ 2 (confirmed cross-book, not a data artefact)
+
+    Slip construction:
+        - MAX_LEGS = 3  (keeps arb slips tight; wider slips dilute the edge)
+        - Builds Over legs only; the guaranteed margin is captured on the
+          over side where the dislocation is largest.
+    """
+
+    MAX_LEGS: int  = 3
+    ARB_GATE: float = 0.005   # 0.5 % minimum guaranteed margin
+
+    @property
+    def agent_name(self) -> str:
+        return "ArbitrageAgent"
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Filter to confirmed arbitrage edges with positive margin.
+
+        Args:
+            props: Full prop pool from all inbound sources.
+
+        Returns:
+            Arbitrage props sorted by ``arb_margin`` descending.
+        """
+        arb_props = [
+            p for p in props
+            if getattr(p, "source", "") == "arbitrage"
+            and getattr(p, "arb_margin", 0.0) >= self.ARB_GATE
+            and len(getattr(p, "providers_sampled", [])) >= 2
+        ]
+        arb_props.sort(
+            key=lambda p: getattr(p, "arb_margin", 0.0),
+            reverse=True,
+        )
+        return arb_props
 
 
 # ---------------------------------------------------------------------------
@@ -1672,6 +1781,7 @@ class ExecutionSquad:
         self._last_flush: float = time.time()
         self._agents: List[BaseSlipBuilder] = [
             EVHunter(amqp_url=amqp_url),
+            ArbitrageAgent(amqp_url=amqp_url),
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
             MLEdgeAgent(amqp_url=amqp_url),
@@ -1792,6 +1902,7 @@ class ExecutionSquad:
 
     @staticmethod
     def _parse_prop_edge(data: Dict[str, Any]) -> Optional[PropEdge]:
+    def _parse_prop_edge(self, data: Dict[str, Any]) -> Optional[PropEdge]:
         """Convert a raw RabbitMQ message dict into a :class:`PropEdge`.
 
         Required fields: ``player_id``, ``prop_type``, ``side``,
@@ -1812,6 +1923,20 @@ class ExecutionSquad:
             return None
 
         raw_source: str = data.get("scanner_type", "ml_engine")
+
+        # ── Redis enrichment: merge cache data over sparse broker fields ──
+        enrichment = self._enricher.enrich(
+            player_id=data.get("player_id", ""),
+            player_name=data.get("player_name", ""),
+            team_abbr=data.get("team_abbr", ""),
+            game_id=data.get("game_id", ""),
+            game_date=data.get("game_date", ""),
+            pitcher_id=data.get("pitcher_id", ""),
+            is_pitcher=data.get("prop_type", "").startswith("pitcher_"),
+            catcher_id=data.get("catcher_id", ""),
+        )
+        # Broker fields take precedence: broker > enrichment > PropEdge default
+        merged = {**enrichment, **{k: v for k, v in data.items() if v not in (None, "", {}, [])}}
         # Normalise scanner_type strings to short source labels
         source = (
             raw_source.lower()
@@ -1872,4 +1997,55 @@ class ExecutionSquad:
             hours_rest=float(data.get("hours_rest", 24.0)),
             time_zone_change=int(data.get("time_zone_change", 0)),
             previous_game_innings=int(data.get("previous_game_innings", 9)),
+            player_id=merged["player_id"],
+            player_name=merged.get("player_name", merged["player_id"]),
+            prop_type=merged["prop_type"],
+            line=float(merged.get("underdog_line", 0.0)),
+            side=merged["side"],
+            true_prob=float(merged["true_prob"]),
+            edge_pct=float(merged["edge_percentage"]),
+            source=source,
+            is_f5=bool(merged.get("is_f5", False)),
+            # --- Sportsbook odds for no-vig EV calculation ---
+            odds_over=float(merged.get("odds_over", -110.0)),
+            odds_under=float(merged.get("odds_under", -110.0)),
+            # --- UmpireAgent ---
+            umpire_cs_pct=float(merged.get("umpire_cs_pct", 0.0)),
+            # --- FadeAgent ---
+            ticket_pct=float(merged.get("ticket_pct", 0.0)),
+            money_pct=float(merged.get("money_pct", 0.0)),
+            # --- BullpenAgent ---
+            fatigue_index=float(merged.get("fatigue_index", 0.0)),
+            # --- WeatherAgent ---
+            wind_speed=float(merged.get("wind_speed", 0.0)),
+            wind_direction=str(merged.get("wind_direction", "")),
+            # --- SteamAgent ---
+            steam_velocity=float(merged.get("steam_velocity", 0.0)),
+            steam_book_count=int(merged.get("steam_book_count", 0)),
+            # --- ArsenalAgent ---
+            pitcher_arsenal_json=str(merged.get("pitcher_arsenal_json", "{}")),
+            batter_whiff_json=str(merged.get("batter_whiff_json", "{}")),
+            # --- PlatoonAgent ---
+            wrc_plus_vl=float(merged.get("wrc_plus_vl", 100.0)),
+            wrc_plus_vr=float(merged.get("wrc_plus_vr", 100.0)),
+            wrc_plus_overall=float(merged.get("wrc_plus_overall", 100.0)),
+            batter_handedness=str(merged.get("batter_handedness", "")),
+            pitcher_handedness=str(merged.get("pitcher_handedness", "")),
+            pa_starter=float(merged.get("pa_starter", 2.5)),
+            pa_total=float(merged.get("pa_total", 4.0)),
+            p_lhp_bullpen=float(merged.get("p_lhp_bullpen", 0.30)),
+            p_rhp_bullpen=float(merged.get("p_rhp_bullpen", 0.70)),
+            pinch_hit_risk=float(merged.get("pinch_hit_risk", 0.0)),
+            # --- CatcherAgent ---
+            catcher_framing_runs=float(merged.get("catcher_framing_runs", 0.0)),
+            catcher_pop_time=float(merged.get("catcher_pop_time", 1.90)),
+            pitcher_time_to_plate=float(merged.get("pitcher_time_to_plate", 1.30)),
+            # --- LineupAgent ---
+            lineup_position=int(merged.get("lineup_position", 5)),
+            team_total_runs=float(merged.get("team_total_runs", 4.5)),
+            pa_average=float(merged.get("pa_average", 3.8)),
+            # --- GetawayAgent ---
+            hours_rest=float(merged.get("hours_rest", 24.0)),
+            time_zone_change=int(merged.get("time_zone_change", 0)),
+            previous_game_innings=int(merged.get("previous_game_innings", 9)),
         )
