@@ -1,4 +1,13 @@
 """
+PropIQ Analytics — OddsFetcher
+Rate-limited, cached, multi-key fetcher for The Odds API v4.
+- Exponential backoff with jitter
+- Per-minute + per-day quota tracking
+- In-memory cache with TTL
+- Both API keys with automatic rotation
+- Player prop batching (one event at a time per API rules)
+
+Drop this into: api/services/odds_fetcher.py
 api/services/odds_fetcher.py
 Multi-provider odds ingestion with SportsBooksReview + The Odds API.
 Merges odds across providers, strips vig, and surfaces top CLV opportunities.
@@ -1112,6 +1121,15 @@ class OddsFetcher:
 
     def fetch_aggregated_odds(
         self,
+        player: str,
+        prop_type: str,
+        event_id: str,
+    ) -> Optional[Dict]:
+        """
+        Get consensus (average) book line for a specific player prop.
+        # Returns: {line, avg_over_prob, avg_under_prob, books}
+        market_key = self._prop_type_to_market(prop_type)
+        props = self.get_player_props(event_id, markets=[market_key])
         n: int = 50,
         min_clv_pct: float = 0.02,
         min_dislocation_pct: float = 0.03,
