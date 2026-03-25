@@ -56,7 +56,7 @@ const getStartingLineups = async (date) => {
   });
 }
 
-async function getInjuredPlayers() {
+const getInjuredPlayers = async () => {
   if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
   return getOrFetch('propiq:sportsdata:injuries:today', 600, async () => {
     return withBackoff(async () => {
