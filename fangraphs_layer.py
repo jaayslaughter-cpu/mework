@@ -1,34 +1,64 @@
 """
 fangraphs_layer.py
 ------------------
+Phase 34 - FanGraphs season statistics via pybaseball.
+
+Provides per-agent signal enhancement for all 19 agents:
+
+  Pitchers
+  --------
+  csw_pct    : Called Strikes + Whiffs % (best single K predictor)
+  swstr_pct  : Swinging Strike %
+  k_bb_pct   : K% minus BB% (true command metric)
+  xfip       : Expected FIP - strips HR variance (true skill ERA)
+  siera      : Skill-Interactive ERA (sequence-adjusted skill metric)
+  fip        : Fielding Independent Pitching
+  hr_fb_pct  : Home run per fly ball rate
+  lob_pct    : Left-on-base strand rate (regression flag)
+  babip      : Pitcher BABIP (luck normaliser)
+
+  Batters
+  -------
+  wrc_plus   : Park/league-adjusted hitting value
+  woba       : Weighted on-base average
+  iso        : Isolated power (SLG - AVG)
+  babip      : Batter BABIP (luck/regression flag)
+  o_swing    : O-Swing% (chase rate)
+  z_contact  : Z-Contact% (contact rate in zone)
+  hr_fb_pct  : HR per fly ball rate
+  k_pct      : Strikeout rate
+  bb_pct     : Walk rate
 """
 from __future__ import annotations
-import tempfile
-from .utils import _normalise_name, _safe_float
-from .settings import cache_path
-
-# Phase 34 - FanGraphs season statistics via pybaseball.
-#
-# Provides per-agent signal enhancement for all 19 agents:
-#
-#   Pitchers
-#   --------
-#   csw_pct    : Called Strikes + Whiffs % (best single K predictor)
-#   swstr_pct  : Swinging Strike %
-#   k_bb_pct   : K% minus BB% (true command metric)
-#   xfip       : Expected FIP - strips HR variance (true skill ERA)
-#   siera      : Skill-Interactive ERA (sequence-adjusted skill metric)
-#   fip        : Fielding Independent Pitching
-#   hr_fb_pct  : Home run per fly ball rate
-#   lob_pct    : Left-on-base strand rate (regression flag)
-#   babip      : Pitcher BABIP (luck normaliser)
 
 import json
 import logging
+import os
+import re
 from datetime import date
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Inline helpers (replaces broken relative imports from Phase 34)
+# ---------------------------------------------------------------------------
+
+def _normalise_name(s: str) -> str:
+    """Lowercase, strip non-alpha characters, collapse whitespace."""
+    return re.sub(r"[^a-z ]", "", s.lower()).strip()
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Convert *val* to float; return *default* on failure."""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+# Daily JSON cache stored in /tmp (ephemeral, fine — reloads once per process)
+cache_path: str = os.path.join("/tmp", "propiq_fg_cache.json")
 
 # ─── Module-level caches ──────────────────────────────────────────────────────
 _BATTER_CACHE: dict[str, dict[str, float]] = {}
@@ -60,14 +90,17 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
         "bb_pct":    0.085,
     },
 }
+
+
 def _load() -> None:
     """Fetch or load from daily cache.  Sets _loaded = True on completion."""
+    global _BATTER_CACHE, _PITCHER_CACHE, _loaded
 
-    # ── Try cache first ──────────────────────────────────────────────────────
-    with tempfile.TemporaryFile(mode='w+') as tmp:
+    # ── Try disk cache first ─────────────────────────────────────────────────
+    if os.path.exists(cache_path):
         try:
-            tmp.seek(0)
-            data = json.load(tmp)
+            with open(cache_path) as fh:
+                data = json.load(fh)
             _BATTER_CACHE  = data.get("batters", {})
             _PITCHER_CACHE = data.get("pitchers", {})
             logger.info(
@@ -147,6 +180,7 @@ def _load() -> None:
 
 def get_batter(name: str) -> dict[str, float]:
     """Return FanGraphs batting stats for *name*.  Empty dict if not found."""
+    global _loaded
     if not _loaded:
         _load()
     return _BATTER_CACHE.get(_normalise_name(name), {})
@@ -154,6 +188,7 @@ def get_batter(name: str) -> dict[str, float]:
 
 def get_pitcher(name: str) -> dict[str, float]:
     """Return FanGraphs pitching stats for *name*.  Empty dict if not found."""
+    global _loaded
     if not _loaded:
         _load()
     return _PITCHER_CACHE.get(_normalise_name(name), {})
@@ -181,6 +216,7 @@ _PROP_GROUPS: dict[str, list[str]] = {
 def _in_group(prop_type: str, group: str) -> bool:
     return prop_type in _PROP_GROUPS.get(group, [])
 
+
 def fangraphs_adjustment(
     prop_type: str,
     direction: str,           # "Over" or "Under"
@@ -189,17 +225,6 @@ def fangraphs_adjustment(
 ) -> float:
     """
     Compute a probability nudge from FanGraphs season stats.
-
-    Signal routing per agent specialty:
-      UmpireAgent / ArsenalAgent  → CSW%, SwStr%, K-BB%   (K props)
-      MLEdgeAgent / F5Agent       → xFIP, SIERA            (pitcher quality)
-      BullpenAgent / VultureStack → FIP                    (bullpen arms)
-      UnderMachine / OmegaStack   → xFIP                   (Under pitcher props)
-      LineupAgent / PlatoonAgent  → wRC+, wOBA             (hitting volume)
-      WeatherAgent                → ISO, HR/FB%            (power + wind)
-      GetawayAgent                → BABIP                  (regression flag)
-      FadeAgent                   → LOB%, BABIP            (public overvaluation)
-      EVHunter / StreakAgent      → full signal set
 
     Returns float in [-0.030, +0.030].  Returns 0.0 if fg is empty.
     """
@@ -210,16 +235,15 @@ def fangraphs_adjustment(
     ld_p = LEAGUE_DEFAULTS["pitcher"]
     ld_b = LEAGUE_DEFAULTS["batter"]
 
-    is_over  = direction.lower() == "over"
-    flip     = -1.0 if not is_over else 1.0
+    is_over = direction.lower() == "over"
+    flip    = -1.0 if not is_over else 1.0
 
     if player_type == "pitcher":
         # ── K props: CSW% (primary) + SwStr% (secondary) + K-BB% (tertiary) ──
         if _in_group(prop_type, "k_props"):
-            csw     = fg.get("csw_pct",   ld_p["csw_pct"])
-            swstr   = fg.get("swstr_pct", ld_p["swstr_pct"])
-            k_bb    = fg.get("k_bb_pct",  ld_p["k_bb_pct"])
-            # CSW% 0.28 = avg; elite ≥0.32; terrible ≤0.24
+            csw   = fg.get("csw_pct",   ld_p["csw_pct"])
+            swstr = fg.get("swstr_pct", ld_p["swstr_pct"])
+            k_bb  = fg.get("k_bb_pct",  ld_p["k_bb_pct"])
             csw_adj   = (csw   - 0.280) / 0.040 * 0.014
             swstr_adj = (swstr - 0.108) / 0.030 * 0.008
             k_bb_adj  = (k_bb  - 0.130) / 0.050 * 0.006
@@ -227,25 +251,20 @@ def fangraphs_adjustment(
 
         # ── ER allowed: xFIP primary + SIERA secondary ───────────────────────
         elif _in_group(prop_type, "er_props"):
-            xfip = fg.get("xfip",  ld_p["xfip"])
+            xfip  = fg.get("xfip",  ld_p["xfip"])
             siera = fg.get("siera", ld_p["siera"])
-            # Low xFIP → elite pitcher → Under ER is more likely
             xfip_adj  = (4.20 - xfip)  / 0.70 * 0.015
             siera_adj = (4.20 - siera) / 0.70 * 0.008
-            # For Under ER: positive adj when pitcher is good
             adj += flip * (xfip_adj + siera_adj)
 
         # ── Hits/walks allowed: SwStr% + BABIP luck flag ─────────────────────
         elif _in_group(prop_type, "hits_allow"):
             swstr = fg.get("swstr_pct", ld_p["swstr_pct"])
             babip = fg.get("babip",     ld_p["babip"])
-            # High SwStr → more misses → fewer hits allowed (Under signal)
             swstr_adj = (swstr - 0.108) / 0.030 * 0.012
-            # Low BABIP pitcher is due to regress → Over hits allowed signal
             babip_adj = (0.300 - babip) / 0.030 * 0.008
             adj += flip * swstr_adj
-            # BABIP regression is direction-agnostic — always nudge toward reversion
-            adj -= babip_adj  # positive BABIP gap always nudges toward more hits
+            adj -= babip_adj
 
     else:  # batter
         # ── Hitting props (hits/singles/doubles): wRC+ + wOBA ────────────────
@@ -258,9 +277,9 @@ def fangraphs_adjustment(
 
         # ── Power props (HR/TB): ISO + HR/FB% + wRC+ ─────────────────────────
         elif _in_group(prop_type, "power_props"):
-            iso    = fg.get("iso",     ld_b["iso"])
-            hr_fb  = fg.get("hr_fb_pct", ld_b["hr_fb_pct"])
-            wrc    = fg.get("wrc_plus", ld_b["wrc_plus"])
+            iso   = fg.get("iso",     ld_b["iso"])
+            hr_fb = fg.get("hr_fb_pct", ld_b["hr_fb_pct"])
+            wrc   = fg.get("wrc_plus", ld_b["wrc_plus"])
             iso_adj   = (iso   - 0.150) / 0.070 * 0.014
             hr_fb_adj = (hr_fb - 0.120) / 0.050 * 0.010
             wrc_adj   = (wrc   - 100.0) / 30.0  * 0.006
@@ -270,13 +289,15 @@ def fangraphs_adjustment(
         elif _in_group(prop_type, "rbi_run"):
             wrc  = fg.get("wrc_plus", ld_b["wrc_plus"])
             woba = fg.get("woba",     ld_b["woba"])
-            adj += flip * ((wrc - 100.0) / 30.0 * 0.012 + (woba - 0.320) / 0.060 * 0.010)
+            adj += flip * (
+                (wrc - 100.0) / 30.0 * 0.012
+                + (woba - 0.320) / 0.060 * 0.010
+            )
 
         # ── Batter strikeouts: O-Swing% + K% ─────────────────────────────────
         elif _in_group(prop_type, "batter_k"):
             o_swing = fg.get("o_swing", ld_b["o_swing"])
             k_pct   = fg.get("k_pct",   ld_b["k_pct"])
-            # High chase rate → more Ks
             o_adj = (o_swing - 0.310) / 0.100 * 0.015
             k_adj = (k_pct   - 0.230) / 0.050 * 0.012
             adj += flip * (o_adj + k_adj)
