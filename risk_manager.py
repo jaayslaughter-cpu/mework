@@ -24,6 +24,7 @@ import os
 
 import psycopg2
 import yaml
+from datetime import date, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [RISK] %(message)s")
 logger = logging.getLogger(__name__)

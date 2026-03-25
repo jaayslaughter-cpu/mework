@@ -240,16 +240,17 @@ def store_metrics(metrics: dict[str, dict], config_version: str, days: int) -> N
 # ---------------------------------------------------------------------------
 # Discord alert for degraded agents
 # ---------------------------------------------------------------------------
-    f"{'Agent':<18} {'Brier':>7} {'ECE':>7} {'Win%':>7} {'Legs':>6}",
-    "-" * 50,
-]
-for agent, m in sorted(metrics.items(), key=lambda x: x[1]["brier"]):
-    flag = " ⚠️" if m["brier"] > brier_alert and m["n_legs"] >= min_n else ""
-    lines.append(
-        f"{agent:<18} {m['brier']:>7.4f} {m['ece']:>7.4f} "
-        f"{m['actual_win_rate']:>6.1%} {m['n_legs']:>6}{flag}"
-    )
-lines.append("
+    lines = [
+        f"{'Agent':<18} {'Brier':>7} {'ECE':>7} {'Win%':>7} {'Legs':>6}",
+        "-" * 50,
+    ]
+    for agent, m in sorted(metrics.items(), key=lambda x: x[1]["brier"]):
+        flag = " ⚠️" if m["brier"] > brier_alert and m["n_legs"] >= min_n else ""
+        lines.append(
+            f"{agent:<18} {m['brier']:>7.4f} {m['ece']:>7.4f} "
+            f"{m['actual_win_rate']:>6.1%} {m['n_legs']:>6}{flag}"
+        )
+    lines.append("")
 
 
 # ---------------------------------------------------------------------------

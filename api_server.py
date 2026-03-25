@@ -539,7 +539,7 @@ def replay_decisions(
             log_date=replay_date,
             agent_name=agent or None,
             player_name=player or None,
-            decision_filter=decision or None,
+            decision=decision or None,
         )
         parlays = fetch_posted_parlays(replay_date)
         return {

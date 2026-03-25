@@ -597,6 +597,7 @@ _UD_STAT_MAP: dict[str, str] = {
     "fantasy_points_pitcher": "fantasy_pitcher",
 }
 
+
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
@@ -618,7 +619,7 @@ def fetch_prizepicks_props(pp_session=None) -> list[dict]:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
                 pp_session = None
-            sess = _get_pp_session(pp_session)
+            sess = _get_pp_session()
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
                 params={"per_page": 250, "single_stat": True, "league_id": 2},

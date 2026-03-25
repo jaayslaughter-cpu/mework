@@ -279,11 +279,11 @@ for agent, m in sorted(metrics.items(), key=lambda x: x[1]["z_score"]):
     )
     combined[agent] = {**m, "clv_30d": agent_clv}
 
-lines.append("
-
+lines.append("""
 
 # ---------------------------------------------------------------------------
 # Main
+""")
 # ---------------------------------------------------------------------------
 def run(days: int = 30, quiet: bool = False) -> dict[str, dict]:
     cfg = _load_config()
