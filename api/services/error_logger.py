@@ -63,7 +63,8 @@ class PropIQLogger:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self._handlers: List[Callable] = []   # alert callbacks
 
-    def _write(self, filepath: Path, record: Dict):
+    @staticmethod
+    def _write(filepath: Path, record: Dict):
         allowed_files = {"error.log", "warning.log"}
         filename = filepath.name
         if filename not in allowed_files:
@@ -99,7 +100,6 @@ class PropIQLogger:
             Severity.CRITICAL: logger.critical,
         }.get(severity, logger.info)
         log_fn(f"[{error_type}] {message}")
-
     def log_prediction_outcome(
         self,
         player: str,
@@ -124,7 +124,8 @@ class PropIQLogger:
         }
         self._write(PREDICTION_LOG_FILE, record)
 
-    def read_prediction_log(self, days: int = 30) -> List[Dict]:
+    @staticmethod
+    def read_prediction_log(days: int = 30) -> List[Dict]:
         """Read recent prediction outcomes."""
         if not PREDICTION_LOG_FILE.exists():
             return []
@@ -140,7 +141,8 @@ class PropIQLogger:
                     continue
         return records
 
-    def read_error_log(self, days: int = 7, severity: Optional[Severity] = None) -> List[Dict]:
+    @staticmethod
+    def read_error_log(days: int = 7, severity: Optional[Severity] = None) -> List[Dict]:
         """Read recent errors."""
         if not ERROR_LOG_FILE.exists():
             return []
@@ -167,7 +169,7 @@ class PropIQLogger:
             try:
                 fn(alert_type, message, data)
             except Exception as e:
-                logger.error(f"Alert handler error: {e}")
+                logger.error("Alert handler error: %s", e)
 
 
 # ─────────────────────────────────────────────

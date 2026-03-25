@@ -298,16 +298,16 @@ class BaseAgent(abc.ABC):
                     self.db.save_bet(slip)
                     valid.append(slip)
                     self.log.info(
-                        f"[{self.name}] Queued {slip.num_legs}-leg bet | "
-                        f"EV={slip.expected_value:.1%} | odds={slip.combined_odds:.2f}"
+                        "[%s] Queued %d-leg bet | EV=%.1f%% | odds=%.2f",
+                        self.name, slip.num_legs, slip.expected_value * 100, slip.combined_odds
                     )
             elapsed = time.time() - start
-            self.log.info(f"[{self.name}] {len(valid)} bets queued in {elapsed:.2f}s")
+            self.log.info("[%s] %d bets queued in %.2fs", self.name, len(valid), elapsed)
             return valid
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
-            self.log.error(f"[{self.name}] AGENT ERROR: {e}")
+            self.log.error("[%s] AGENT ERROR: %s", self.name, e)
             self.db.log_error(self.name, type(e).__name__, str(e), tb)
             return []
 
