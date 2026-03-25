@@ -35,7 +35,7 @@ class GradingAgent(BaseAgent):
         Returns settlement summary.
         """
         target_date = game_date or date.today().isoformat()
-        logger.info(f"[grading] Grading pending bets for {target_date}")
+        logger.info("[grading] Grading pending bets for %s", target_date)
 
         # Fetch all pending bets
         pending = self.db.get_pending_bets()
@@ -46,7 +46,7 @@ class GradingAgent(BaseAgent):
         # Fetch actual results
         results = self._fetch_boxscores(target_date)
         if not results:
-            logger.warning(f"[grading] No boxscores found for {target_date}")
+            logger.warning("[grading] No boxscores found for %s", target_date)
             return {"graded": 0, "wins": 0, "losses": 0, "pushes": 0}
 
         summary = {"graded": 0, "wins": 0, "losses": 0, "pushes": 0, "errors": 0}
@@ -113,7 +113,7 @@ class GradingAgent(BaseAgent):
                 summary["graded"] += 1
 
             except Exception as e:
-                logger.error(f"[grading] Error grading bet {bet.get('bet_id')}: {e}")
+                logger.error("[grading] Error grading bet %s: %s", bet.get("bet_id"), e)
                 summary["errors"] += 1
 
         # Update all agent stats after grading
@@ -121,10 +121,7 @@ class GradingAgent(BaseAgent):
         for agent_name in agent_names:
             self.db.update_agent_stats(agent_name)
 
-        logger.info(
-            f"[grading] Settled {summary['graded']} bets — "
-            f"W:{summary['wins']} L:{summary['losses']} P:{summary['pushes']}"
-        )
+        logger.info("[grading] Settled %s bets — W:%s L:%s P:%s", summary["graded"], summary["wins"], summary["losses"], summary["pushes"])
         return summary
 
     def _fetch_boxscores(self, game_date: str) -> dict:
@@ -144,7 +141,7 @@ class GradingAgent(BaseAgent):
                     for game in date_entry.get("games", []):
                         self._parse_mlb_boxscore(game, results)
         except Exception as e:
-            logger.warning(f"[grading] MLB Stats API error: {e}")
+            logger.warning("[grading] MLB Stats API error: %s", e)
 
         # --- SportsData.io fallback ---
         if not results:
@@ -166,12 +163,13 @@ class GradingAgent(BaseAgent):
                         results[f"{player}|batter_total_bases"] = stat.get("TotalBases", 0)
                         results[f"{player}|batter_runs_batted_in"] = stat.get("RunsBattedIn", 0)
             except Exception as e:
-                logger.warning(f"[grading] SportsData.io boxscore error: {e}")
+                logger.warning("[grading] SportsData.io boxscore error: %s", e)
 
-        logger.info(f"[grading] Loaded {len(results)} stat lines from boxscores")
+        logger.info("[grading] Loaded %s stat lines from boxscores", len(results))
         return results
 
-    def _parse_mlb_boxscore(self, game: dict, results: dict):
+    @staticmethod
+    def _parse_mlb_boxscore(game: dict, results: dict):
         """Parse MLB Stats API boxscore into results dict."""
         try:
             boxscore = game.get("boxscore", {})
@@ -194,4 +192,4 @@ class GradingAgent(BaseAgent):
                         results[f"{name}|batter_strikeouts"] = int(batting.get("strikeOuts", 0))
                         results[f"{name}|batter_runs_batted_in"] = int(batting.get("rbi", 0))
         except Exception as e:
-            logger.debug(f"[grading] Boxscore parse error: {e}")
+            logger.debug("[grading] Boxscore parse error: %s", e)
