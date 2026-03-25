@@ -78,58 +78,6 @@ def _fetch_json(url: str, cache_key: str) -> Optional[dict]:
 # Public: Scoreboard
 # ---------------------------------------------------------------------------
 
-def get_game_states(date_str: str) -> list[dict]:
-    """
-    Return a list of today's MLB games with their current ESPN status.
-
-    Each dict:
-        game_id    (str)   ESPN event ID
-        name       (str)   "Team A at Team B"
-        status     (str)   "SCHEDULED" | "IN_PROGRESS" | "FINAL"
-        away_score (int)
-        home_score (int)
-        start_time (str)   ISO timestamp
-
-    date_str: "YYYY-MM-DD" format.
-    """
-    date_compact = date_str.replace("-", "")
-    url = _BASE_SCOREBOARD.format(date=date_compact)
-    data = _fetch_json(url, f"scoreboard_{date_compact}")
-    if data is None:
-        return []
-
-    games: list[dict] = []
-    for event in data.get("events", []):
-        raw_status = event.get("status", {}).get("type", {}).get("name", "")
-        if "IN_PROGRESS" in raw_status or "PROGRESS" in raw_status:
-            phase = "IN_PROGRESS"
-        elif "FINAL" in raw_status or "POST" in raw_status:
-            phase = "FINAL"
-        else:
-            phase = "SCHEDULED"
-
-        comps = event.get("competitions", [{}])[0]
-        away_score = home_score = 0
-        for competitor in comps.get("competitors", []):
-            score = int(competitor.get("score", 0) or 0)
-            if competitor.get("homeAway") == "home":
-                home_score = score
-            else:
-                away_score = score
-
-        games.append({
-            "game_id":    event.get("id", ""),
-            "name":       event.get("name", ""),
-            "status":     phase,
-            "away_score": away_score,
-            "home_score": home_score,
-            "start_time": event.get("date", ""),
-        })
-
-    logger.info("[ESPN] get_game_states: %d games for %s", len(games), date_str)
-    return games
-
-
 def get_game_ids(date_str: str) -> list[str]:
     """
     Return a list of ESPN game IDs for all MLB games on date_str (YYYYMMDD).

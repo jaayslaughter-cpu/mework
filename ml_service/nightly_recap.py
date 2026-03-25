@@ -29,7 +29,6 @@ from season_record import (
     settle_parlay_record,
     get_overall_season_stats,
 )
-from clv_tracker import get_daily_clv_summary
 
 # ---------------------------------------------------------------------------
 # Config
@@ -98,7 +97,6 @@ def _build_recap_embed(
     date_str: str,
     results: list[dict],
     season_stats: dict,
-    clv_summary: dict | None = None,
 ) -> dict:
     """Build the nightly recap Discord embed."""
     wins   = sum(1 for r in results if r["outcome"] == "WIN")
@@ -140,21 +138,6 @@ def _build_recap_embed(
         fields.append({
             "name":   f"{outcome_emoji} {emoji} {r['agent_name']} — {profit_str}",
             "value":  "\n".join(leg_lines) or "No leg details available",
-            "inline": False,
-        })
-
-    # Optional CLV summary field
-    if clv_summary and clv_summary.get("available"):
-        beat_pct = clv_summary["beat_pct"]
-        avg_clv = clv_summary["avg_clv_pts"]
-        clv_icon = "📈" if beat_pct >= 55 else ("➡️" if beat_pct >= 45 else "📉")
-        fields.append({
-            "name": f"{clv_icon} Closing Line Value",
-            "value": (
-                f"Beat close on **{clv_summary['beat_close']}/{clv_summary['total_legs']} legs "
-                f"({beat_pct:.0f}%)** · "
-                f"Avg CLV: **{'+' if avg_clv >= 0 else ''}{avg_clv:.2f}**"
-            ),
             "inline": False,
         })
 
@@ -208,8 +191,7 @@ def run(settle_date: Optional[str] = None) -> None:
         logger.info("No PENDING parlays for %s — nothing to settle", settle_date)
         # Still post a recap showing no action today
         season_stats = get_overall_season_stats()
-        clv_summary = get_daily_clv_summary(settle_date)
-        embed = _build_recap_embed(settle_date, [], season_stats, clv_summary)
+        embed = _build_recap_embed(settle_date, [], season_stats)
         _send_discord_embed(embed)
         return
 
@@ -276,11 +258,8 @@ def run(settle_date: Optional[str] = None) -> None:
     # 4. Fetch updated season stats
     season_stats = get_overall_season_stats()
 
-    # 5. Fetch CLV summary (available if line_stream ran today)
-    clv_summary = get_daily_clv_summary(settle_date)
-
-    # 6. Post Discord recap
-    embed = _build_recap_embed(settle_date, settled_results, season_stats, clv_summary)
+    # 5. Post Discord recap
+    embed = _build_recap_embed(settle_date, settled_results, season_stats)
     ok = _send_discord_embed(embed)
     if ok:
         logger.info("Recap sent to Discord for %s", settle_date)
