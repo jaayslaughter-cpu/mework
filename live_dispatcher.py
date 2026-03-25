@@ -84,7 +84,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -93,7 +93,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*_, **__):  # noqa: E302, E704
+    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -113,12 +113,8 @@ except ImportError:
     _FORM_LAYER_AVAILABLE = False
 
     class _DummyFormLayer:  # noqa: D101
-        @staticmethod
-        def prefetch_form_data(*_, **__) -> None:  # noqa: E704
-            """Intentionally does nothing; dummy implementation."""
-            pass  # no form data to prefetch
-        @staticmethod
-        def get_form_adjustment(*_, **__) -> float: return 0.0  # noqa: E704
+        def prefetch_form_data(self, *a, **kw) -> None: pass       # noqa: E704
+        def get_form_adjustment(self, *a, **kw) -> float: return 0.0  # noqa: E704
 
     _form_layer = _DummyFormLayer()  # type: ignore[assignment]
     logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
@@ -602,7 +598,7 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
-def fetch_prizepicks_props(pp_session=None):
+def fetch_prizepicks_props() -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -611,17 +607,17 @@ def fetch_prizepicks_props(pp_session=None):
     CDN issues valid cookies, then hit the API on the same session.
     Without the warm-up visit every direct API call returns 403.
 
-    Returns raw list of dicts and the session used.
+    Returns raw list of dicts.
     """
+    global _pp_session
     try:
         data = None
         for attempt in range(3):
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
-                pp_session = None
+                _pp_session = None
             sess = _get_pp_session()
-            pp_session = sess
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
                 params={"per_page": 250, "single_stat": True, "league_id": 2},
@@ -632,9 +628,9 @@ def fetch_prizepicks_props(pp_session=None):
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                pp_session = None   # force re-warm on next attempt
+                _pp_session = None   # force re-warm on next attempt
         if data is None:
-            return [], pp_session
+            return []
 
         # Build player id → name map from included resources
         player_map: dict[str, str] = {}
@@ -1384,18 +1380,20 @@ class LiveDispatcher:
             logger.warning("No legs passed EV/prob gates — no alerts today.")
             return
 
-        # 4. Per-agent parlay building + Discord dispatch
-        # Each agent picks independently from the full filtered pool.
-        # Shared legs across parlays are acceptable — consensus across agents
-        # is a positive signal, not a risk. Each parlay is a separate $20 bet
-        # with its own thesis.
+        # 4. Build all candidate parlays — exclusive pick claiming pass
+        # Rule: each (player_name, prop_type, side) may appear in at most ONE
+        # parlay across the entire dispatch. Highest-confidence parlay wins any
+        # contested pick. Parlays that lose enough legs to fall below MIN_LEGS
+        # are dropped entirely. Parlays with 1–4 legs are all valid.
         # Phase 35: active agent gate — respects config toggles + auto cool-down
         _active_agents = (
             set(_risk_manager.get_active_agents())
             if _risk_manager else None
         )
 
-        sent = 0
+        candidate_parlays: list[dict] = []
+
+        # ── 19 specialist agents — collect without sending ─────────────────
         for agent in AGENT_CONFIGS:
             if _active_agents is not None and agent["name"] not in _active_agents:
                 logger.info("[RISK] %s — skipped (disabled or in cool-down)", agent["name"])
@@ -1406,7 +1404,6 @@ class LiveDispatcher:
                 continue
             ev   = parlay.get("ev_pct", 0)
             conf = parlay.get("confidence", 0)
-
             if ev < MIN_EV_PCT:
                 logger.info("[%s] EV %.1f%% below gate — skipped.", agent["name"], ev)
                 continue
@@ -1416,23 +1413,131 @@ class LiveDispatcher:
                     agent["name"], conf,
                 )
                 continue
+            parlay["_agent_meta"] = agent  # stash for risk manager
+            candidate_parlays.append(parlay)
 
-            n = len(parlay["legs"])
+        # ── OmegaStack — triple-confirmation ensemble ──────────────────────
+        omega = build_omega_parlay(leg_pool)
+        if omega:
+            ev_o   = omega.get("ev_pct", 0)
+            conf_o = omega.get("confidence", 0)
+            if ev_o >= MIN_EV_PCT and conf_o >= 7.0:
+                omega["_agent_meta"] = None
+                candidate_parlays.append(omega)
+            else:
+                logger.info(
+                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 — below gate, skipped.",
+                    ev_o, conf_o,
+                )
+        else:
+            logger.info("[OmegaStack] No triple-confirmation legs today.")
+
+        # ── ArbitrageAgent — collect before claim pass ─────────────────────
+        try:
+            arb_picks = build_arbitrage_picks(all_raw)
+            if arb_picks:
+                logger.info("[ArbitrageAgent] %d arb opportunities found", len(arb_picks))
+                for arb in arb_picks:
+                    arb_conf       = arb["confidence"]
+                    arb_margin_pct = arb["arb_margin"] * 100
+                    if arb_conf < 7.0:
+                        logger.info(
+                            "[ArbitrageAgent] %s %s margin=%.2f%% conf=%.1f/10 — below gate",
+                            arb["player_name"], arb["prop_type"],
+                            arb_margin_pct, arb_conf,
+                        )
+                        continue
+                    arb_parlay = {
+                        "agent_name":  "ArbitrageAgent",
+                        "agent_emoji": "🔄",
+                        "entry_type":  "FLEX",
+                        "ev_pct":      round(arb_margin_pct, 2),
+                        "confidence":  arb_conf,
+                        "_agent_meta": None,
+                        "_arb_meta":   arb,
+                        "notes": (
+                            f"Cross-platform split — {arb['gap']:.1f}-unit line gap. "
+                            f"Both legs win when result lands between the two lines."
+                        ),
+                        "legs": [
+                            {
+                                "player_name":  arb["player_name"],
+                                "prop_type":    arb["prop_type"],
+                                "side":         "Over",
+                                "line":         arb["over_line"],
+                                "platform":     arb["over_plat"],
+                                "implied_prob": arb["p_over"],
+                                "entry_type":   arb["over_etype"],
+                                "fantasy_pts":  0.0,
+                            },
+                            {
+                                "player_name":  arb["player_name"],
+                                "prop_type":    arb["prop_type"],
+                                "side":         "Under",
+                                "line":         arb["under_line"],
+                                "platform":     arb["under_plat"],
+                                "implied_prob": arb["p_under"],
+                                "entry_type":   arb["under_etype"],
+                                "fantasy_pts":  0.0,
+                            },
+                        ],
+                    }
+                    candidate_parlays.append(arb_parlay)
+            else:
+                logger.info("[ArbitrageAgent] No qualifying cross-platform discrepancies today.")
+        except Exception as _arb_err:
+            logger.warning("[ArbitrageAgent] Build error: %s", _arb_err, exc_info=True)
+
+        # ── Exclusive pick claiming pass ───────────────────────────────────
+        # Sort highest confidence first — that agent wins any contested pick.
+        # Each (player_name, prop_type, side) may appear in exactly ONE parlay.
+        # Parlays that lose too many legs to fall below MIN_LEGS are dropped.
+        candidate_parlays.sort(key=lambda p: -p.get("confidence", 0))
+        claimed_keys: set[tuple[str, str, str]] = set()
+        final_parlays: list[dict] = []
+
+        for parlay in candidate_parlays:
+            original_legs = parlay["legs"]
+            available = [
+                leg for leg in original_legs
+                if (leg["player_name"].lower(), leg["prop_type"], leg["side"])
+                not in claimed_keys
+            ]
+            if len(available) < MIN_LEGS:
+                logger.info(
+                    "[%s] Dropped after pick exclusion — %d/%d legs unclaimed (need ≥ %d)",
+                    parlay["agent_name"], len(available), len(original_legs), MIN_LEGS,
+                )
+                continue
+            for leg in available:
+                claimed_keys.add((leg["player_name"].lower(), leg["prop_type"], leg["side"]))
+            parlay["legs"] = available
+            final_parlays.append(parlay)
+
+        logger.info(
+            "Claim pass: %d/%d parlays survived | %d unique picks claimed",
+            len(final_parlays), len(candidate_parlays), len(claimed_keys),
+        )
+
+        # ── Send all surviving parlays ─────────────────────────────────────
+        sent = 0
+        for parlay in final_parlays:
+            agent_name = parlay["agent_name"]
+            ev         = parlay.get("ev_pct", 0)
+            conf       = parlay.get("confidence", 0)
+            n          = len(parlay["legs"])
             logger.info(
                 "[%s] %d-leg parlay EV=%.1f%% conf=%.1f/10 → SEND",
-                agent["name"], n, ev, conf,
+                agent_name, n, ev, conf,
             )
-
             if not self.dry_run:
-                # Attach live season record for this agent before sending
-                parlay["season_stats"] = get_agent_season_stats(agent["name"])
+                parlay["season_stats"] = get_agent_season_stats(agent_name)
                 discord_alert.send_parlay_alert(parlay)
-                time.sleep(1.5)   # rate-limit Discord webhook (25 req/s global)
-                # Record parlay in DB as PENDING (settled nightly by nightly_recap.py)
+                time.sleep(1.5)
                 record_parlay(
                     date=date,
-                    agent=agent["name"],
-                    num_legs=len(parlay["legs"]),
+                    agent=agent_name,
+                    num_legs=n,
                     confidence=conf,
                     ev_pct=ev,
                     legs=[
@@ -1446,54 +1551,16 @@ class LiveDispatcher:
                     ],
                 )
             else:
-                logger.info("[DRY-RUN] Would send: %s",
-                            json.dumps(parlay, indent=2)[:400])
-            # Phase 35: record exposure for daily cap tracking
+                logger.info(
+                    "[DRY-RUN] Would send: %s",
+                    json.dumps(
+                        {k: v for k, v in parlay.items() if not k.startswith("_")},
+                        indent=2,
+                    )[:400],
+                )
             if _risk_manager and not self.dry_run:
-                _risk_manager.record_stake(agent["name"], 20.0)
+                _risk_manager.record_stake(agent_name, 20.0)
             sent += 1
-
-        # ── OmegaStack (18th agent) — triple-confirmation ensemble ──
-        omega = build_omega_parlay(leg_pool)
-        if omega:
-            ev_o   = omega.get("ev_pct", 0)
-            conf_o = omega.get("confidence", 0)
-            if ev_o >= MIN_EV_PCT and conf_o >= 7.0:
-                logger.info(
-                    "[OmegaStack] %d-leg ensemble parlay EV=%.1f%% conf=%.1f/10 → SEND",
-                    len(omega["legs"]), ev_o, conf_o,
-                )
-                if not self.dry_run:
-                    omega["season_stats"] = get_agent_season_stats("OmegaStack")
-                    discord_alert.send_parlay_alert(omega)
-                    time.sleep(1.5)
-                    record_parlay(
-                        date=date,
-                        agent="OmegaStack",
-                        num_legs=len(omega["legs"]),
-                        confidence=conf_o,
-                        ev_pct=ev_o,
-                        legs=[
-                            {
-                                "player_name": l.get("player_name", l.get("player", "")),
-                                "prop_type":   l["prop_type"],
-                                "side":        l["side"],
-                                "line":        l["line"],
-                            }
-                            for l in omega["legs"]
-                        ],
-                    )
-                else:
-                    logger.info("[DRY-RUN] OmegaStack would send: %s",
-                                json.dumps(omega, indent=2)[:400])
-                sent += 1
-            else:
-                logger.info(
-                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 — below gate, skipped.",
-                    ev_o, conf_o,
-                )
-        else:
-            logger.info("[OmegaStack] No triple-confirmation legs today.")
 
         logger.info("Dispatch complete — %d parlays sent for %s", sent, date)
 
@@ -1526,106 +1593,6 @@ class LiveDispatcher:
             logger.debug("[StreakAgent] streak_agent.py not found — skipping.")
         except Exception as _streak_err:
             logger.warning("[StreakAgent] Error during streak pick: %s", _streak_err)
-
-        # ── ArbitrageAgent (16th agent) ─────────────────────────────────────
-        # Cross-platform line discrepancy finder.  Scans the combined PP + UD
-        # raw prop pool for the same player+stat where the two platforms quote
-        # different lines.  Plays Over on the lower line and Under on the higher
-        # line — both legs win if the actual result lands in the gap.
-        # Gates: ≥ 0.5-unit gap · ≥ 0.5% arb margin · each leg ≥ 0.54 base prob.
-        try:
-            arb_picks = build_arbitrage_picks(all_raw)
-            if arb_picks:
-                logger.info("[ArbitrageAgent] %d arb opportunities found", len(arb_picks))
-                for arb in arb_picks:
-                    arb_conf       = arb["confidence"]
-                    arb_margin_pct = arb["arb_margin"] * 100
-
-                    if arb_conf < 7.0:
-                        logger.info(
-                            "[ArbitrageAgent] %s %s margin=%.2f%% conf=%.1f/10 — below gate",
-                            arb["player_name"], arb["prop_type"],
-                            arb_margin_pct, arb_conf,
-                        )
-                        continue
-
-                    arb_parlay = {
-                        "agent_name":  "ArbitrageAgent",
-                        "agent_emoji": "🔄",
-                        "entry_type":  "FLEX",
-                        "ev_pct":      round(arb_margin_pct, 2),
-                        "confidence":  arb_conf,
-                        "notes": (
-                            f"Cross-platform split — {arb['gap']:.1f}-unit line gap. "
-                            f"Both legs win when result lands between the two lines."
-                        ),
-                        "legs": [
-                            {
-                                "player_name":  arb["player_name"],
-                                "prop_type":    arb["prop_type"],
-                                "side":         "Over",
-                                "line":         arb["over_line"],
-                                "platform":     arb["over_plat"],
-                                "implied_prob": arb["p_over"],
-                                "entry_type":   arb["over_etype"],
-                                "fantasy_pts":  0.0,
-                            },
-                            {
-                                "player_name":  arb["player_name"],
-                                "prop_type":    arb["prop_type"],
-                                "side":         "Under",
-                                "line":         arb["under_line"],
-                                "platform":     arb["under_plat"],
-                                "implied_prob": arb["p_under"],
-                                "entry_type":   arb["under_etype"],
-                                "fantasy_pts":  0.0,
-                            },
-                        ],
-                    }
-
-                    logger.info(
-                        "[ArbitrageAgent] %s %s gap=%.1f margin=%.2f%% conf=%.1f/10 → SEND",
-                        arb["player_name"], arb["prop_type"],
-                        arb["gap"], arb_margin_pct, arb_conf,
-                    )
-
-                    if not self.dry_run:
-                        arb_parlay["season_stats"] = get_agent_season_stats("ArbitrageAgent")
-                        discord_alert.send_parlay_alert(arb_parlay)
-                        time.sleep(1.5)
-                        record_parlay(
-                            date=date,
-                            agent="ArbitrageAgent",
-                            num_legs=2,
-                            confidence=arb_conf,
-                            ev_pct=arb_margin_pct,
-                            legs=[
-                                {
-                                    "player_name": arb["player_name"],
-                                    "prop_type":   arb["prop_type"],
-                                    "side":        "Over",
-                                    "line":        arb["over_line"],
-                                },
-                                {
-                                    "player_name": arb["player_name"],
-                                    "prop_type":   arb["prop_type"],
-                                    "side":        "Under",
-                                    "line":        arb["under_line"],
-                                },
-                            ],
-                        )
-                        sent += 1
-                    else:
-                        logger.info(
-                            "[DRY-RUN] ArbitrageAgent: %s %s Over %.1f (%s) + Under %.1f (%s)",
-                            arb["player_name"], arb["prop_type"],
-                            arb["over_line"], arb["over_plat"],
-                            arb["under_line"], arb["under_plat"],
-                        )
-            else:
-                logger.info("[ArbitrageAgent] No qualifying cross-platform discrepancies today.")
-        except Exception as _arb_err:
-            logger.warning("[ArbitrageAgent] Error: %s", _arb_err, exc_info=True)
 
         # Phase 35: flush decision log buffer (batch write all leg decisions)
         if _DL_AVAILABLE:
