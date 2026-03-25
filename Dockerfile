@@ -3,11 +3,16 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
     RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
         git \
         && rm -rf /var/lib/apt/lists/*
+
+# Python deps
+COPY requirements_army.txt .
+RUN SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True pip install --no-cache-dir -r requirements_army.txt
 
     # Python deps
     COPY requirements_army.txt .
