@@ -33,6 +33,7 @@ from typing import Any
 import requests
 import redis as redis_lib
 from DiscordAlertService import discord_alert
+from public_trends_scraper import PublicTrendsScraper, get_fade_signal
 
 # ── Null-object fallback for when Redis is unreachable ────────────────────────
 
@@ -208,6 +209,24 @@ def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
         return []
 
 
+def _fetch_sbd_public_trends() -> dict:
+    """Fetch SportsBettingDime public betting splits (replaces Apify ActionNetwork call).
+
+    Returns dict with keys: game_df, prop_df (pandas DataFrames as dicts for JSON storage).
+    Caches via PublicTrendsScraper daily Parquet cache — zero re-hits after first fetch.
+    """
+    try:
+        scraper = PublicTrendsScraper()
+        game_df, prop_df = scraper.fetch()
+        return {
+            "game_df": game_df.to_dict(orient="records") if not game_df.empty else [],
+            "prop_df": prop_df.to_dict(orient="records") if not prop_df.empty else [],
+        }
+    except Exception as exc:
+        logger.warning("[DataHub] SBD public trends fetch failed: %s", exc)
+        return {"game_df": [], "prop_df": []}
+
+
 def _sportsdata_get(path: str) -> Any:
     """Call SportsData.io MLB v3 API."""
     key = os.getenv("SPORTSDATA_API_KEY", os.getenv("SPORTSDATA_KEY", "c2abf26f55714d228c7c311290f956d7"))
@@ -352,10 +371,7 @@ def run_data_hub_tasklet() -> None:
     if not r.exists(market_key):
         logger.info("[DataHub] Scraping market / steam data…")
         market = {
-            "public_betting": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.actionnetwork.com/mlb/public-betting"}],
-                "maxCrawlingDepth": 0,
-            }),
+            "public_betting": _fetch_sbd_public_trends(),
             "sharp_report": _fetch_apify("apify/web-scraper", {
                 "startUrls": [{"url": "https://www.actionnetwork.com/mlb/sharp-report"}],
                 "maxCrawlingDepth": 0,
@@ -505,7 +521,7 @@ class _EVHunter(_BaseAgent):
     def evaluate(self, prop: dict) -> dict | None:
         over_odds  = prop.get("over_american",  -110)
         under_odds = prop.get("under_american", -110)
-        fair_over, _ = _no_vig(over_odds, under_odds)
+        _, _ = _no_vig(over_odds, under_odds)
         model_prob   = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied      = _american_to_implied(over_odds) / 100
         ev_pct       = (model_prob / 100 - implied) / implied
@@ -520,7 +536,6 @@ class _UnderMachine(_BaseAgent):
 
     def evaluate(self, prop: dict) -> dict | None:
         under_odds = prop.get("under_american", -110)
-        _, fair_under = _no_vig(prop.get("over_american", -110), under_odds)
         model_prob    = 100 - self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied       = _american_to_implied(under_odds) / 100
         ev_pct        = (model_prob / 100 - implied) / implied
@@ -560,7 +575,6 @@ class _F5Agent(_BaseAgent):
         """Targets first-5-innings run props."""
         if "f5" not in prop.get("prop_type", "").lower():
             return None
-        starters = self.hub.get("context", {}).get("projected_starters", [])
         model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
@@ -575,20 +589,40 @@ class _FadeAgent(_BaseAgent):
     name = "FadeAgent"
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Fades heavy public action (>70 % public on one side)."""
-        market    = self.hub.get("market", {})
-        public    = market.get("public_betting", [])
-        player    = prop.get("player", "")
-        pub_pct   = 0
-        for rec in public:
-            if isinstance(rec, dict) and player.lower() in str(rec).lower():
-                pub_pct = float(rec.get("over_public_pct", 0) or 0)
-                break
-        if pub_pct < 70:
+        """Fades heavy public action using SportsBettingDime real BET%/MONEY% data.
+
+        Signal precedence:
+          1. Player-level prop bets% from SBD player-props API (most precise)
+          2. Game-level total Over bets% from SBD sport-event API (fallback)
+        Threshold: 65% (down from 70% — SBD data is more precise than Apify estimates).
+        """
+        SBD_THRESHOLD = 65.0          # % public tickets on Over → fade signal
+        market   = self.hub.get("market", {})
+        pub_data = market.get("public_betting", {})
+        player   = prop.get("player", "")
+        team     = prop.get("team", "")
+        prop_type = prop.get("prop_type", "")
+
+        # Build lightweight DataFrames from cached SBD data stored in hub
+        import pandas as pd
+        game_records = pub_data.get("game_df", []) if isinstance(pub_data, dict) else []
+        prop_records = pub_data.get("prop_df", []) if isinstance(pub_data, dict) else []
+        game_df = pd.DataFrame(game_records) if game_records else pd.DataFrame()
+        prop_df = pd.DataFrame(prop_records) if prop_records else pd.DataFrame()
+
+        pub_pct, signal_src = get_fade_signal(
+            player, team, prop_type, game_df, prop_df, threshold=SBD_THRESHOLD
+        )
+
+        if pub_pct < SBD_THRESHOLD:
             return None
+
         # Fade the public → take UNDER
-        model_prob = self._model_prob(player, prop.get("prop_type", ""))
-        fade_prob  = 100 - model_prob + 5.0   # boost by 5 pp for fade logic
+        # Stronger fade when both bets% AND money% are lopsided (squares + whale action)
+        model_prob = self._model_prob(player, prop_type)
+        # Apply stronger boost when signal comes from precise player-level data
+        fade_boost = 6.0 if signal_src == "player_prop" else 5.0
+        fade_prob  = 100 - model_prob + fade_boost
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (fade_prob / 100 - implied) / implied
@@ -944,6 +978,10 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
     return props
 
 
+def _get_props(hub) -> list[dict]:
+    return _extract_underdog_props(hub) or _build_synthetic_props(hub)
+
+
 def run_agent_tasklet() -> None:
     """
     Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
@@ -961,10 +999,7 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
-    # Underdog is the baseline DFS platform
-    props = _extract_underdog_props(hub)
-    if not props:
-        props = _build_synthetic_props(hub)
+    props = _get_props(hub)
     if not props:
         logger.info("[AgentTasklet] No Underdog props available — skipping cycle.")
         return
@@ -1048,7 +1083,7 @@ def run_agent_tasklet() -> None:
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
-    active_agents = len(set(p["agent"] for p in all_parlays))
+    active_agents = len({p["agent"] for p in all_parlays})
     best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
     logger.info("[AgentTasklet] Cycle complete — %d slip(s) from %d active agent(s). "
                 "Best slip: %s | %d legs | combined EV=%.1f%%",
@@ -1308,7 +1343,7 @@ def run_grading_tasklet() -> None:
         conn = _pg_conn()
         with conn.cursor() as cur:
             for row in open_bets:
-                bid, player, ptype, line, side, odds, units, model_prob, ev_pct, agent = row
+                bid, player, ptype, line, side, odds, units, model_prob, _, agent = row
                 stats = stat_lookup.get(player, {})
                 actual = _get_stat(stats, ptype)
 
@@ -1420,7 +1455,7 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
         for game in odds_list:
             if not isinstance(game, dict):
                 continue
-            for market_key, outcomes in game.get("bookmakers", [{}])[0].get("markets", [{}]):
+            for _ in game.get("bookmakers", [{}])[0].get("markets", [{}]):
                 pass
     except Exception:
         pass
