@@ -157,5 +157,5 @@ class ArbAgent(BaseAgent):
 
         # Sort by arb_pct
         slips.sort(key=lambda x: x.metadata.get("arb_pct", 0), reverse=True)
-        logger.info(f"[arb] Found {len(slips)} arbitrage opportunities")
+        logger.info("[arb] Found %s arbitrage opportunities", len(slips))
         return slips[:10]
