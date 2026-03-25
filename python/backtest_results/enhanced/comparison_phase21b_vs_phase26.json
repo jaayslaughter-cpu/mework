@@ -1,0 +1,80 @@
+{
+  "title": "PropIQ Backtest Comparison: Phase 21b Baseline vs Phase 26 Enhanced",
+  "generated": "2026-03-23",
+  "baseline": {
+    "label": "Phase 21b (10-season, 2016-2025)",
+    "total_bets": 7614992,
+    "win_rate_pct": 59.98,
+    "overall_roi_pct": 14.51,
+    "agents": {
+      "OmegaStack":    {"win_rate": 68.53, "roi_pct": 30.82, "sharpe": 34.25},
+      "VultureStack":  {"win_rate": 67.11, "roi_pct": 28.11, "sharpe": 34.95},
+      "UmpireAgent":   {"win_rate": 63.60, "roi_pct": 21.42, "sharpe": 27.80},
+      "GetawayAgent":  {"win_rate": 62.58, "roi_pct": 19.47, "sharpe": 72.80},
+      "UnderMachine":  {"win_rate": 62.49, "roi_pct": 19.30, "sharpe": 75.60},
+      "FadeAgent":     {"win_rate": 62.10, "roi_pct": 18.56, "sharpe": 78.10},
+      "SteamAgent":    {"win_rate": 61.06, "roi_pct": 16.58, "sharpe": 73.00},
+      "MLEdgeAgent":   {"win_rate": 60.87, "roi_pct": 16.21, "sharpe": 67.60},
+      "StreakAgent":   null
+    }
+  },
+  "enhanced": {
+    "label": "Phase 26 (3-season focus, 2023-2025) — Statcast + DraftEdge + SBD + StreakAgent",
+    "total_bets": 2359547,
+    "win_rate_pct": 59.88,
+    "overall_roi_pct": 14.32,
+    "agents": {
+      "StreakAgent":   {"win_rate": 75.62, "roi_pct": 44.36, "sharpe": 15.36, "new": true},
+      "OmegaStack":   {"win_rate": 68.42, "roi_pct": 30.62, "sharpe": 31.85},
+      "VultureStack": {"win_rate": 67.19, "roi_pct": 28.28, "sharpe": 33.88},
+      "UmpireAgent":  {"win_rate": 63.76, "roi_pct": 21.73, "sharpe": 28.43},
+      "UnderMachine": {"win_rate": 62.38, "roi_pct": 19.09, "sharpe": 70.11},
+      "GetawayAgent": {"win_rate": 62.32, "roi_pct": 18.98, "sharpe": 78.60},
+      "FadeAgent":    {"win_rate": 62.05, "roi_pct": 18.46, "sharpe": 73.61},
+      "SteamAgent":   {"win_rate": 61.32, "roi_pct": 17.07, "sharpe": 63.70},
+      "MLEdgeAgent":  {"win_rate": 60.80, "roi_pct": 16.08, "sharpe": 59.84}
+    }
+  },
+  "delta": {
+    "note": "Positive delta = improvement. 3-season vs 10-season comparison — tighter K-prop markets in 2023-25 suppress some agents slightly.",
+    "OmegaStack":   {"roi_delta": -0.20, "wr_delta": -0.11},
+    "VultureStack": {"roi_delta": +0.17, "wr_delta": +0.08},
+    "UmpireAgent":  {"roi_delta": +0.31, "wr_delta": +0.16},
+    "UnderMachine": {"roi_delta": -0.21, "wr_delta": -0.11},
+    "GetawayAgent": {"roi_delta": -0.49, "wr_delta": -0.26},
+    "FadeAgent":    {"roi_delta": -0.10, "wr_delta": -0.05},
+    "SteamAgent":   {"roi_delta": +0.49, "wr_delta": +0.26},
+    "MLEdgeAgent":  {"roi_delta": -0.13, "wr_delta": -0.07}
+  },
+  "enhancements": {
+    "statcast_xgboost": {
+      "phase": 24,
+      "agents_impacted": ["MLEdgeAgent", "ArsenalAgent", "CatcherAgent", "UmpireAgent"],
+      "k_prop_boost": 0.018,
+      "power_prop_boost": 0.012,
+      "note": "Velocity/spin/whiff/exit_velo features improve K and power prop calibration"
+    },
+    "draftedge_projections": {
+      "phase": "24b",
+      "agents_impacted": ["EVHunter", "UnderMachine", "LineupAgent", "GetawayAgent", "PlatoonAgent"],
+      "batter_boost": 0.011,
+      "note": "Per-player Hit%/HR%/SB%/Run%/RBI% probability anchoring tightens model-vs-market gap"
+    },
+    "sportsbettingdime_real_data": {
+      "phase": "24c",
+      "agents_impacted": ["FadeAgent"],
+      "old_gap_threshold": 40.0,
+      "new_gap_threshold": 28.0,
+      "note": "Real BET%/$% data allows tighter threshold — 28pp real gap = same signal as 40pp estimated"
+    },
+    "streak_agent": {
+      "phase": 25,
+      "format": "11-pick Underdog Streaks progressive",
+      "confidence_gate": 8.0,
+      "qualifying_picks_3seasons": 2030,
+      "win_rate_pct": 75.62,
+      "roi_pct": 44.36,
+      "pnl_units": 806.71
+    }
+  }
+}

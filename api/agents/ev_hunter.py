@@ -134,5 +134,5 @@ class EVHunter(BaseAgent):
                     metadata={"source": "ev_hunter_3leg"}
                 ))
 
-        logger.info(f"[ev_hunter] Found {len(ev_legs)} +EV legs → {len(slips)} slips")
+        logger.info("[ev_hunter] Found %d +EV legs → %d slips", len(ev_legs), len(slips))
         return slips

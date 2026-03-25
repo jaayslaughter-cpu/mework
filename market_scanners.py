@@ -440,6 +440,39 @@ class SteamScanner:
         # TODO: deserialise OddsTick JSON members from Redis sorted set and
         #       populate self._cache[key].
         pass
+        redis_key = f"steam:{key[0]}:{key[1]}"
+        try:
+            raw_members = redis_client.zrangebyscore(
+                redis_key, "-inf", "+inf", withscores=True
+            )
+            ticks: List[OddsTick] = []
+            for member, score in raw_members:
+                try:
+                    raw = member if isinstance(member, str) else member.decode("utf-8")
+                    data = json.loads(raw)
+                    ticks.append(
+                        OddsTick(
+                            player_id=data["player_id"],
+                            prop_type=data["prop_type"],
+                            book=data["book"],
+                            american_odds=int(data["american_odds"]),
+                            timestamp=float(score),
+                        )
+                    )
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+
+            if ticks:
+                self._cache[key] = deque(ticks)
+                logger.debug(
+                    "SteamScanner: restored %d ticks for key %s from Redis.",
+                    len(ticks),
+                    key,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "SteamScanner._seed_from_redis failed for key %s: %s", key, exc
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +559,7 @@ class FadeScanner:
 
     @staticmethod
     def _best_sharp_under(sharp_odds: Dict[str, int]) -> Optional[int]:
+    def _best_sharp_under(self, sharp_odds: Dict[str, int]) -> Optional[int]:
         """Find the most aggressively priced Under across sharp books.
 
         Returns the most negative (cheapest to the house = most confident)
@@ -547,6 +581,7 @@ class FadeScanner:
 # ---------------------------------------------------------------------------
 # RabbitMQ Publisher
 # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 class MarketEdgePublisher:
     """Publishes scanner edge payloads to the ``alerts.market_edges`` routing key."""
@@ -782,5 +817,6 @@ class MarketScannerOrchestrator:
                 self.process_snapshot(snapshot)
             ch.basic_ack(delivery_tag=method.delivery_tag)
         except (KeyError, TypeError, ValueError) as exc:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.error("MarketScannerOrchestrator: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)

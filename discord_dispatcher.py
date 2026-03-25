@@ -22,6 +22,7 @@ Expected inbound payload schema (from execution_agents.py)::
     {
         "agent_name": "EVHunter",
         "slip_type": "3-leg standard",
+        "recommended_entry_type": "FLEX",        # "FLEX" or "STANDARD"
         "legs": [
             {
                 "player": "Aaron Judge",
@@ -34,6 +35,16 @@ Expected inbound payload schema (from execution_agents.py)::
         "total_ev": 0.045,
         "recommended_unit_size": 0.5
     }
+
+Entry type is set by underdog_math_engine.py based on which payout structure
+produces the higher Expected Value for the specific combination of leg
+probabilities in the slip.
+
+  FLEX (Insured) : absorbs 1 incorrect pick (2 for 6-8 leg entries) at a
+                   reduced multiplier.  Preferred when individual leg
+                   probabilities are moderate (55–62%).
+  STANDARD       : requires all picks to be correct.  Higher multiplier.
+                   Preferred for very high-confidence slips (63%+ per leg).
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pika
+import pika.exceptions
 import requests
 
 # ---------------------------------------------------------------------------
@@ -79,6 +91,11 @@ AGENT_COLOURS: Dict[str, int] = {
     "SteamAgent": 0xE67E22,     # Amber       — steam moves
     "LineValueAgent": 0x2980B9, # Dark blue   — sharp line value
     "BullpenAgent": 0x8E44AD,   # Dark purple — bullpen fatigue
+    "ArsenalAgent": 0xD35400,   # Burnt orange — pitch-type matchup
+    "PlatoonAgent": 0x27AE60,   # Forest green — handedness splits
+    "CatcherAgent": 0x16A085,   # Dark teal    — framing & battery
+    "LineupAgent": 0x2C3E50,    # Midnight     — PA volume projection
+    "GetawayAgent": 0x7F8C8D,   # Slate grey   — schedule fatigue
 }
 DEFAULT_COLOUR: int = 0x34495E   # Charcoal fallback for unlisted agents
 
@@ -88,6 +105,23 @@ EV_HIGH_COLOUR: int = 0xF1C40F   # Gold
 
 # California DFS compliance stamp (appended to every embed)
 DFS_PLATFORM_STAMP: str = "🐶 OPEN APP: Underdog Fantasy"
+
+# Entry type display config
+ENTRY_TYPE_BADGE: dict = {
+    "FLEX": {
+        "icon": "🛡️",
+        "label": "INSURED (FLEX)",
+        "description": (
+            "1 incorrect pick still pays out at reduced multiplier. "
+            "6-8 leg entries can absorb 2 losses."
+        ),
+    },
+    "STANDARD": {
+        "icon": "⚡",
+        "label": "STANDARD",
+        "description": "All picks must be correct. Higher multiplier, no insurance.",
+    },
+}
 
 # Webhook retry configuration
 RATE_LIMIT_SLEEP: float = 5.0
@@ -115,6 +149,12 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
             One non-inline field per leg showing player, side emoji,
             prop, line, and calibrated probability.
 
+        Entry type field:
+            Prominent badge showing ``🛡️ INSURED (FLEX)`` or ``⚡ STANDARD``
+            sourced from ``recommended_entry_type`` in the payload (set by
+            ``underdog_math_engine.py``).  Displayed as the first embed field
+            so it is immediately visible before the leg breakdown.
+
         Metrics field:
             Total EV %, recommended unit size, and platform stamp.
 
@@ -137,6 +177,20 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     unit_size: float = float(payload.get("recommended_unit_size", 0.0))
 
     # Determine embed colour
+    avg_leg_ev: float = float(payload.get("avg_leg_ev", 0.0))
+    unit_size: float = float(payload.get("recommended_unit_size", 0.0))
+
+    # --- Entry type badge (set by underdog_math_engine.py) ---
+    raw_entry_type: str = str(
+        payload.get("recommended_entry_type", "FLEX")
+    ).upper()
+    # Default to FLEX for 3+ leg slips if not explicitly set
+    if raw_entry_type not in ENTRY_TYPE_BADGE:
+        n_legs = len(legs)
+        raw_entry_type = "FLEX" if n_legs >= 3 else "STANDARD"
+    entry_badge = ENTRY_TYPE_BADGE[raw_entry_type]
+
+    # --- Determine embed colour ---
     if total_ev >= EV_HIGH_THRESHOLD:
         colour = EV_HIGH_COLOUR
     else:
@@ -144,10 +198,38 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # Build one embed field per slip leg
     fields: List[Dict[str, Any]] = []
+    # --- Entry type field (first field — most prominent) ---
+    fields: List[Dict[str, Any]] = [
+        {
+            "name": f"{entry_badge['icon']} Entry Type: {entry_badge['label']}",
+            "value": entry_badge["description"],
+            "inline": False,
+        }
+    ]
+
+    # --- One embed field per slip leg ---
     for i, leg in enumerate(legs, start=1):
         side: str = leg.get("side", "?")
         side_emoji = "⬆️" if side.lower() == "over" else "⬇️"
         prob_pct = round(float(leg.get("true_prob", 0.0)) * 100, 1)
+    # --- One embed field per slip leg (ALL legs guaranteed) ---
+    # Discord hard limit: 25 fields per embed.
+    # Reserved: 1 entry-type field + 1 metrics field = 23 max legs.
+    # PropIQ max is 5 legs — well within the limit.
+    DISCORD_MAX_FIELDS: int = 25
+    reserved_fields: int = 2  # entry-type + metrics
+    max_leg_fields: int = DISCORD_MAX_FIELDS - reserved_fields  # 23
+    DISCORD_MAX_FIELD_VALUE: int = 1024  # Discord per-field char limit
+
+    for i, leg in enumerate(legs[:max_leg_fields], start=1):
+        side: str = leg.get("side", "?")
+        side_emoji = "⬆️" if side.lower() == "over" else "⬇️"
+        prob_pct = round(float(leg.get("true_prob", 0.0)) * 100, 1)
+        leg_ev = float(leg.get("no_vig_ev", 0.0))
+        leg_ev_sign = "+" if leg_ev >= 0 else ""
+        leg_ev_str = f"{leg_ev_sign}{round(leg_ev * 100, 1)}%"
+        # Colour-code the EV label: green for positive, red for negative
+        ev_label = f"✅ {leg_ev_str} EV vs no-vig" if leg_ev >= 0 else f"⚠️ {leg_ev_str} EV vs no-vig"
         fields.append({
             "name": f"Leg {i} — {leg.get('player', 'Unknown')}",
             "value": (
@@ -155,11 +237,36 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
                 f"{leg.get('prop', '?')} "
                 f"({leg.get('line', '?')}) "
                 f"| {prob_pct}% prob"
+                f"| {prob_pct}% prob | **{ev_label}**"
+        leg_value = (
+            f"{side_emoji} **{side}** "
+            f"{leg.get('prop', '?')} "
+            f"({leg.get('line', '?')}) "
+            f"| {prob_pct}% prob | **{ev_label}**"
+        )
+        # Truncate at Discord's 1024-char field-value limit (safety net)
+        if len(leg_value) > DISCORD_MAX_FIELD_VALUE:
+            leg_value = leg_value[: DISCORD_MAX_FIELD_VALUE - 3] + "..."
+        fields.append({
+            "name": f"Leg {i} — {leg.get('player', 'Unknown')}",
+            "value": leg_value,
+            "inline": False,
+        })
+
+    # Overflow notice if somehow a slip has > 23 legs (should never occur)
+    if len(legs) > max_leg_fields:
+        overflow_count = len(legs) - max_leg_fields
+        fields.append({
+            "name": f"⚠️ +{overflow_count} more legs",
+            "value": (
+                f"Discord field limit reached. Full {len(legs)}-leg slip "
+                "details in RabbitMQ payload."
             ),
             "inline": False,
         })
 
     # Metrics summary field
+    # --- Metrics summary field ---
     ev_pct = round(total_ev * 100, 2)
     ev_sign = "+" if total_ev >= 0 else ""
     fields.append({
@@ -167,6 +274,34 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
         "value": (
             f"**Total EV:** {ev_sign}{ev_pct}%\n"
             f"**Unit Size:** {unit_size} units\n"
+    avg_ev_pct = round(avg_leg_ev * 100, 2)
+    avg_ev_sign = "+" if avg_leg_ev >= 0 else ""
+    # Build agent-specific context line (helps orient users on each agent's edge)
+    _AGENT_CONTEXT: Dict[str, str] = {
+        "ArsenalAgent":   "🔬 Pitch-type matchup | Usage × Whiff rate",
+        "PlatoonAgent":   "🤲 EMV platoon delta | wRC+ LHP vs RHP split",
+        "CatcherAgent":   "🧤 Battery analysis | Framing runs + pop time",
+        "LineupAgent":    "📋 PA volume edge | Lineup position × Team total",
+        "GetawayAgent":   "✈️ Schedule fatigue | Rest hours + timezone shift",
+        "UmpireAgent":    "⚖️ Umpire zone | CS% delta vs league average",
+        "FadeAgent":      "🔄 Sharp fade | Ticket% vs money% divergence",
+        "BullpenAgent":   "💪 Fatigue index | L3-5 day bullpen workload",
+        "WeatherAgent":   "🌬️ Wind factor | MPH × direction × park",
+        "SteamAgent":     "💨 Line velocity | Pts/min × book consensus",
+        "EVHunter":       "💰 All-source top-EV | ML + market combined",
+        "UnderMachine":   "⬇️ Under specialist | Public Over bias fade",
+        "F5Agent":        "5️⃣ First-5 innings | Ignores bullpen variance",
+        "MLEdgeAgent":    "🤖 Pure ML signal | XGBoost ≥ 0.55 prob gate",
+        "LineValueAgent": "📐 No-vig gap | Sharp vs retail consensus delta",
+    }
+    agent_context = _AGENT_CONTEXT.get(agent_name, "🎯 PropIQ Analytics")
+    fields.append({
+        "name": "📊 Slip Metrics",
+        "value": (
+            f"🎯 **Avg Edge vs No-Vig: {avg_ev_sign}{avg_ev_pct}%**\n"
+            f"Slip EV (Underdog math): {ev_sign}{ev_pct}%\n"
+            f"**Unit Size:** {unit_size} units\n"
+            f"*{agent_context}*\n"
             f"{DFS_PLATFORM_STAMP}"
         ),
         "inline": False,
@@ -178,6 +313,22 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
         "fields": fields,
         "footer": {
             "text": f"PropIQ Analytics • {agent_name} • California DFS Legal",
+        "title": (
+            f"[{agent_name}] {entry_badge['icon']} "
+            f"{slip_type.title()} — {entry_badge['label']}"
+    avg_ev_badge = f"{'+' if avg_leg_ev >= 0 else ''}{round(avg_leg_ev * 100, 1)}% EV"
+    return {
+        "title": (
+            f"[{agent_name}] {entry_badge['icon']} "
+            f"{slip_type.title()} — {entry_badge['label']} | {avg_ev_badge}"
+        ),
+        "color": colour,
+        "fields": fields,
+        "footer": {
+            "text": (
+                f"PropIQ Analytics • {agent_name} • "
+                f"{entry_badge['label']} • California DFS Legal"
+            ),
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
