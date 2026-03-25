@@ -7,6 +7,7 @@ feature-importance analysis on historical settled-bet data.
 
 Endpoints
 ---------
+GET  /status                  — Railway healthcheck alias
 GET  /api/ml/health           — Liveness probe
 POST /api/ml/predict          — Single-prop probability prediction
 POST /api/ml/predict-live     — In-game live probability prediction
@@ -128,8 +129,8 @@ class LivePredictRequest(BaseModel):
 
 
 class CorrelationRequest(BaseModel):
-    prop_id: str
     game_id: str
+    prop_id: str
     prop_type: str
     player: str
 
@@ -241,6 +242,20 @@ def _score_correlation(prop_type_a: str, prop_type_b: Optional[str] = None) -> f
         if pair == tuple(sorted([a, b])):
             return _CORRELATION_SCORE
     return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Route: status (Railway healthcheck alias)
+# ---------------------------------------------------------------------------
+
+@app.get("/status")
+def status_check() -> Dict[str, Any]:
+    """Railway healthcheck endpoint. Returns 200 as soon as the server is up."""
+    return {
+        "status": "ok",
+        "model_ready": _model_state["ready"],
+        "loaded_at": _model_state["loaded_at"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +594,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "api_server:app",
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", "5000")),
-        workers=int(os.environ.get("WEB_CONCURRENCY", "2")),
+        port=int(os.environ.get("PORT", "8080")),
+        workers=int(os.environ.get("WEB_CONCURRENCY", "1")),
         log_level="info",
     )
