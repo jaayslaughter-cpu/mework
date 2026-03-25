@@ -150,5 +150,5 @@ class LiveAgent(BaseAgent):
                 }
             ))
 
-        logger.info(f"[live] {len(movements)} movements → {len(slips)} live slips")
+        logger.info("[live] %d movements → %d live slips", len(movements), len(slips))
         return slips

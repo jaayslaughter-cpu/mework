@@ -427,6 +427,42 @@ class PropSimulator(BaseSimulator):
 
                 hist.append(actual)
 
+
+                    if direction == "over":
+                        won = actual > line
+                    else:
+                        won = actual < line
+                    push      = actual == line
+                    outcome   = -1 if push else (1 if won else 0)
+
+                    if outcome == 1:
+                        b = 100.0 / abs(odds) if odds < 0 else odds / 100.0
+                        profit = unit_size * b
+                    elif outcome == 0:
+                        profit = -unit_size
+                    else:
+                        profit = 0.0
+
+                    day_bets.append(BetRecord(
+                        date=date_str,
+                        player_name=row["player_name"],
+                        prop_type=prop_type,
+                        line=line,
+                        direction=direction,
+                        model_prob=round(m_prob, 4),
+                        true_prob=round(true_p,  4),
+                        ev_pct=round(ev,          4),
+                        odds=odds,
+                        kelly_size=round(kelly_f,  4),
+                        unit_size=round(unit_size, 4),
+                        outcome=outcome,
+                        profit_units=round(profit, 4),
+                        agent=agent_name,
+                        season=season,
+                    ))
+
+                hist.append(actual)
+
         self._bets.extend(day_bets)
         return day_bets, {"date": date_str, "bets": len(day_bets), "players": len(players)}
 
@@ -729,3 +765,306 @@ class BacktestReport:
             for b in bets:
                 row = asdict(b)
                 f.write(",".join(str(row[h]) for h in headers) + "\n")
+
+    @staticmethod
+    def _save_csv(bets: list[BetRecord], path: str) -> None:
+        if not bets:
+            return
+        headers = list(asdict(bets[0]).keys())
+        with open(path, "w") as f:
+            f.write(",".join(headers) + "\n")
+            for b in bets:
+                row = asdict(b)
+                f.write(",".join(str(row[h]) for h in headers) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# StrikeoutBacktester — Phase 16 multi-model comparison
+# ---------------------------------------------------------------------------
+class StrikeoutBacktester:
+    """
+    Comparative backtest for the Phase 16 strikeout props integration.
+
+    Builds training data from historical Tank01 box scores, then evaluates
+    three model variants side-by-side on a held-out test window:
+      1. Baseline: RandomForestPropModel  (no hyperparameter tuning)
+      2. XGBoost:  XGBStrikeoutModel      (GridSearchCV + isotonic calibration)
+      3. Ensemble-average:  EnsemblePropModel(mode="average")
+      4. Ensemble-stack:    EnsemblePropModel(mode="stack")
+
+    Features used for training are derived from rolling strikeout history
+    (the same signal available at bet-time), keeping the backtest clean.
+
+    Report
+    ------
+    generate_report() returns a dict with:
+      - model_comparison: list of ModelComparisonResult dicts (best ROI first)
+      - cumulative_roi:   {model_label: [cumulative_roi_pct, …]} per game-day
+      - metadata:         date range, n_train, n_test, ev_gate
+    """
+
+    # Minimum games in rolling buffer before generating a training row
+    _MIN_HISTORY = 14
+    # Fraction of dataset used for testing (chronological split)
+    _TEST_FRAC   = 0.20
+    # EV gate for ROI simulation (matching system-wide 3% rule)
+    _EV_GATE     = 0.03
+
+    def __init__(
+        self,
+        start_date: date,
+        end_date:   date,
+        ev_gate:    float = 0.03,
+    ) -> None:
+        self._start   = start_date
+        self._end     = end_date
+        self._ev_gate = ev_gate
+        self._dataset = BacktestDataset()
+
+    # ------------------------------------------------------------------
+    def _collect_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Collect (X, y) from historical box scores.
+
+        Feature vector per pitcher-start (12 features):
+          0  k_rate_l7      — K/9 over last 7 starts
+          1  k_rate_l14     — K/9 over last 14 starts
+          2  k_rate_l30     — K/9 over last 30 starts
+          3  k_pct_l7       — K% over last 7
+          4  k_pct_l14      — K% over last 14
+          5  era_trend      — ERA L14 − ERA L30 (negative = improving)
+          6  season_month   — month of season (4–10)
+          7  home_away      — 1=home, 0=away
+          8  ip_avg_l4      — avg innings pitched last 4 starts
+          9  line           — simulated prop line (L14 median)
+          10 prop_rel_line  — (k_rate_l14 / 9 × ip_avg_l4) − line
+          11 consistency    — std-dev of last 7 K counts (lower = more consistent)
+
+        Target y: 1 if actual_strikeouts > line, else 0.
+        """
+        rows_X: list[list[float]] = []
+        rows_y: list[int]         = []
+
+        # Rolling buffers: pitcher_id → list of (ks, ip, date_month, home)
+        buffers: dict[str, list[tuple[float, float, int, int]]] = {}
+
+        date_strs = list(self._dataset.iter_dates(self._start, self._end))
+        logger.info(
+            "[StrikeoutBacktester] Collecting data over %d dates", len(date_strs)
+        )
+
+        for date_str in date_strs:
+            try:
+                players = self._dataset.get_player_stats_for_date(date_str)
+            except Exception as exc:
+                logger.warning("[StrikeoutBacktester] Skipping %s: %s", date_str, exc)
+                continue
+
+            month    = int(date_str[4:6])
+            pitchers = [p for p in players if p.get("innings_pitched", 0) >= 1.0]
+
+            for p in pitchers:
+                pid    = p["player_id"] or p["player_name"]
+                if not pid:
+                    continue
+                ks     = float(p.get("strikeouts_pit", 0))
+                ip     = float(p.get("innings_pitched", 5.5))
+                is_home = 1 if p.get("home_away") == "home" else 0
+
+                hist = buffers.setdefault(pid, [])
+
+                if len(hist) >= self._MIN_HISTORY:
+                    ks_vals    = [h[0] for h in hist]
+                    ip_vals    = [h[1] for h in hist]
+                    months     = [h[2] for h in hist]
+
+                    # Compute rolling features
+                    l7  = ks_vals[-7:]
+                    l14 = ks_vals[-14:]
+                    l30 = ks_vals[-30:] if len(ks_vals) >= 30 else ks_vals
+
+                    ip_l4   = float(np.mean(ip_vals[-4:]))
+                    k9_l7   = float(np.mean(l7))  * 9 / max(float(np.mean(ip_vals[-7:])),  1.0)
+                    k9_l14  = float(np.mean(l14)) * 9 / max(float(np.mean(ip_vals[-14:])), 1.0)
+                    k9_l30  = float(np.mean(l30)) * 9 / max(float(np.mean(ip_vals[-len(l30):])), 1.0)
+
+                    # K% proxies (K / (K + estimated batters faced))
+                    bf_per_ip = 4.3   # MLB average BF per inning
+                    k_pct_l7  = float(np.mean(l7))  / max(float(np.mean(ip_vals[-7:]))  * bf_per_ip, 1.0)
+                    k_pct_l14 = float(np.mean(l14)) / max(float(np.mean(ip_vals[-14:])) * bf_per_ip, 1.0)
+
+                    # ERA trend: improve = negative
+                    era_l14 = (float(np.mean(ks_vals[-14:])) / max(float(np.mean(ip_vals[-14:])), 0.1)) * -3.0
+                    era_l30 = (float(np.mean(l30)) / max(float(np.mean(ip_vals[-len(l30):])), 0.1)) * -3.0
+                    era_trend = era_l14 - era_l30
+
+                    line = _simulate_line(ks_vals)
+                    prop_rel = (k9_l14 / 9.0 * ip_l4) - line
+                    consistency = float(np.std(ks_vals[-7:]))
+
+                    feat = [
+                        k9_l7, k9_l14, k9_l30,
+                        k_pct_l7, k_pct_l14,
+                        era_trend,
+                        float(month),
+                        float(is_home),
+                        ip_l4,
+                        line,
+                        prop_rel,
+                        consistency,
+                    ]
+                    rows_X.append(feat)
+                    rows_y.append(1 if ks > line else 0)
+
+                hist.append((ks, ip, month, is_home))
+
+        logger.info(
+            "[StrikeoutBacktester] Collected %d training rows", len(rows_X)
+        )
+        return np.array(rows_X, dtype=np.float32), np.array(rows_y, dtype=np.int32)
+
+    # ------------------------------------------------------------------
+    def run(self) -> dict[str, Any]:
+        """
+        Full pipeline:
+          1. Collect X, y from historical box scores
+          2. Chronological train/test split
+          3. Train 4 model variants
+          4. Evaluate with compare_models()
+          5. Build and return full report dict
+
+        Returns report dict (also saved to OUTPUT_DIR as JSON).
+        """
+        try:
+            from api.services.prop_model import (
+                XGBStrikeoutModel,
+                RandomForestPropModel,
+                EnsemblePropModel,
+                compare_models,
+            )
+        except ImportError as exc:
+            logger.error("[StrikeoutBacktester] prop_model import failed: %s", exc)
+            return {"error": str(exc)}
+
+        X, y = self._collect_data()
+        if len(X) < 50:
+            logger.warning(
+                "[StrikeoutBacktester] Insufficient data (%d rows) — "
+                "need ≥50 rows for a valid backtest",
+                len(X),
+            )
+            return {"error": "insufficient_data", "rows": len(X)}
+
+        # Chronological split (no shuffle)
+        split_idx = int(len(X) * (1.0 - self._TEST_FRAC))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+
+        logger.info(
+            "[StrikeoutBacktester] Train=%d  Test=%d  "
+            "positive_rate_train=%.1f%%  positive_rate_test=%.1f%%",
+            len(X_train), len(X_test),
+            float(np.mean(y_train)) * 100,
+            float(np.mean(y_test))  * 100,
+        )
+
+        # --- Train models ---
+        rf_model  = RandomForestPropModel()
+        xgb_model = XGBStrikeoutModel(tune=True)
+        ens_avg   = EnsemblePropModel(mode="average")
+        ens_stack = EnsemblePropModel(mode="stack")
+
+        for name, mdl in [
+            ("RF", rf_model),
+            ("XGB", xgb_model),
+            ("Ensemble-avg", ens_avg),
+            ("Ensemble-stack", ens_stack),
+        ]:
+            try:
+                logger.info("[StrikeoutBacktester] Training %s …", name)
+                mdl.train(X_train, y_train)
+            except Exception as exc:
+                logger.error("[StrikeoutBacktester] %s training failed: %s", name, exc)
+
+        # --- Compare on test set ---
+        comparison = compare_models(
+            models=[
+                ("RandomForest (baseline)", rf_model),
+                ("XGBoost (tuned)",         xgb_model),
+                ("Ensemble-average",        ens_avg),
+                ("Ensemble-stack",          ens_stack),
+            ],
+            X_test   = X_test,
+            y_test   = y_test,
+            odds_over = -110,
+            ev_gate   = self._ev_gate,
+        )
+
+        # --- Cumulative ROI curves (per model, per test row) ---
+        implied = 110.0 / (110.0 + 100.0)
+        cum_roi: dict[str, list[float]] = {}
+
+        for label, mdl in [
+            ("RandomForest (baseline)", rf_model),
+            ("XGBoost (tuned)",         xgb_model),
+            ("Ensemble-average",        ens_avg),
+            ("Ensemble-stack",          ens_stack),
+        ]:
+            probs    = mdl.predict(X_test)
+            running  = 0.0
+            total_stk = 0.0
+            curve: list[float] = []
+            for prob, truth in zip(probs, y_test):
+                ev = float(prob) - implied
+                if ev < self._ev_gate:
+                    continue
+                total_stk += 1.0
+                running   += 1.0 if int(truth) == 1 else -1.0
+                roi        = (running / total_stk * 100.0) if total_stk > 0 else 0.0
+                curve.append(round(roi, 3))
+            cum_roi[label] = curve
+
+        # --- Build report ---
+        report: dict[str, Any] = {
+            "metadata": {
+                "start_date":         str(self._start),
+                "end_date":           str(self._end),
+                "n_train":            int(len(X_train)),
+                "n_test":             int(len(X_test)),
+                "ev_gate_pct":        self._ev_gate * 100,
+                "positive_rate_train": round(float(np.mean(y_train)) * 100, 2),
+                "positive_rate_test":  round(float(np.mean(y_test))  * 100, 2),
+                "generated":          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+            "model_comparison": [
+                {
+                    "label":     r.label,
+                    "accuracy":  r.accuracy,
+                    "precision": r.precision,
+                    "recall":    r.recall,
+                    "f1":        r.f1,
+                    "log_loss":  r.log_loss,
+                    "roi_pct":   r.roi_pct,
+                    "bet_freq":  r.bet_freq,
+                    "avg_clv":   r.avg_clv,
+                    "summary":   r.summary(),
+                }
+                for r in comparison
+            ],
+            "cumulative_roi": cum_roi,
+            "winner":         comparison[0].label if comparison else "N/A",
+        }
+
+        # Persist report
+        out_path = os.path.join(
+            OUTPUT_DIR,
+            f"strikeout_backtest_{self._start}_{self._end}.json",
+        )
+        try:
+            with open(out_path, "w") as f:
+                json.dump(report, f, indent=2)
+            logger.info("[StrikeoutBacktester] Report saved to %s", out_path)
+        except Exception as exc:
+            logger.warning("[StrikeoutBacktester] Could not save report: %s", exc)
+
+        return report

@@ -1,0 +1,345 @@
+{
+  "methodology": "Monte Carlo, AR(1) \u03c6=0.15, calibrated MLB distributions",
+  "seasons": "2016-2025",
+  "total_bets": 7571594,
+  "total_wins": 4534442,
+  "win_rate_pct": 59.89,
+  "total_pnl_units": 108510.92,
+  "total_risk_units": 757159.4,
+  "overall_roi_pct": 14.33,
+  "over_stats": {
+    "bets": 2006436,
+    "win_rate": 53.35,
+    "roi_pct": 1.85
+  },
+  "under_stats": {
+    "bets": 5565158,
+    "win_rate": 62.24,
+    "roi_pct": 18.83
+  },
+  "by_agent": {
+    "EVHunter": {
+      "bets": 1355146,
+      "wins": 799747,
+      "win_rate": 59.02,
+      "pnl": 17165.1,
+      "roi_pct": 12.67,
+      "sharpe": 59.966,
+      "max_dd": 1.2996,
+      "avg_ev": 19.63,
+      "avg_kelly": 0.1
+    },
+    "UnderMachine": {
+      "bets": 844747,
+      "wins": 528014,
+      "win_rate": 62.51,
+      "pnl": 16328.45,
+      "roi_pct": 19.33,
+      "sharpe": 72.563,
+      "max_dd": 0.0,
+      "avg_ev": 21.7,
+      "avg_kelly": 0.1
+    },
+    "F5Agent": {
+      "bets": 167824,
+      "wins": 93764,
+      "win_rate": 55.87,
+      "pnl": 1118.09,
+      "roi_pct": 6.66,
+      "sharpe": 11.178,
+      "max_dd": 8.5083,
+      "avg_ev": 18.7,
+      "avg_kelly": 0.1
+    },
+    "MLEdgeAgent": {
+      "bets": 1030295,
+      "wins": 627157,
+      "win_rate": 60.87,
+      "pnl": 16701.04,
+      "roi_pct": 16.21,
+      "sharpe": 65.973,
+      "max_dd": 1.2996,
+      "avg_ev": 23.84,
+      "avg_kelly": 0.1
+    },
+    "UmpireAgent": {
+      "bets": 56593,
+      "wins": 35866,
+      "win_rate": 63.38,
+      "pnl": 1187.88,
+      "roi_pct": 20.99,
+      "sharpe": 26.614,
+      "max_dd": 1.1272,
+      "avg_ev": 25.18,
+      "avg_kelly": 0.1
+    },
+    "FadeAgent": {
+      "bets": 76041,
+      "wins": 47112,
+      "win_rate": 61.96,
+      "pnl": 1390.05,
+      "roi_pct": 18.28,
+      "sharpe": 79.88,
+      "max_dd": 0.0,
+      "avg_ev": 21.33,
+      "avg_kelly": 0.1
+    },
+    "LineValueAgent": {
+      "bets": 1355146,
+      "wins": 799747,
+      "win_rate": 59.02,
+      "pnl": 17165.1,
+      "roi_pct": 12.67,
+      "sharpe": 59.966,
+      "max_dd": 1.2996,
+      "avg_ev": 19.63,
+      "avg_kelly": 0.1
+    },
+    "BullpenAgent": {
+      "bets": 9844,
+      "wins": 5646,
+      "win_rate": 57.35,
+      "pnl": 93.48,
+      "roi_pct": 9.5,
+      "sharpe": 13.05,
+      "max_dd": 1.809,
+      "avg_ev": 22.47,
+      "avg_kelly": 0.1
+    },
+    "WeatherAgent": {
+      "bets": 93796,
+      "wins": 54995,
+      "win_rate": 58.63,
+      "pnl": 1119.5,
+      "roi_pct": 11.94,
+      "sharpe": 32.341,
+      "max_dd": 2.5725,
+      "avg_ev": 22.02,
+      "avg_kelly": 0.1
+    },
+    "SteamAgent": {
+      "bets": 203269,
+      "wins": 123802,
+      "win_rate": 60.91,
+      "pnl": 3308.14,
+      "roi_pct": 16.27,
+      "sharpe": 62.867,
+      "max_dd": 0.1907,
+      "avg_ev": 23.89,
+      "avg_kelly": 0.1
+    },
+    "ArsenalAgent": {
+      "bets": 403534,
+      "wins": 238815,
+      "win_rate": 59.18,
+      "pnl": 5238.77,
+      "roi_pct": 12.98,
+      "sharpe": 33.022,
+      "max_dd": 5.1176,
+      "avg_ev": 22.46,
+      "avg_kelly": 0.1
+    },
+    "PlatoonAgent": {
+      "bets": 561001,
+      "wins": 333568,
+      "win_rate": 59.46,
+      "pnl": 7581.37,
+      "roi_pct": 13.51,
+      "sharpe": 62.511,
+      "max_dd": 0.0,
+      "avg_ev": 19.76,
+      "avg_kelly": 0.1
+    },
+    "CatcherAgent": {
+      "bets": 30744,
+      "wins": 17760,
+      "win_rate": 57.77,
+      "pnl": 316.16,
+      "roi_pct": 10.28,
+      "sharpe": 7.487,
+      "max_dd": 2.7272,
+      "avg_ev": 21.84,
+      "avg_kelly": 0.1
+    },
+    "LineupAgent": {
+      "bets": 1187322,
+      "wins": 705983,
+      "win_rate": 59.46,
+      "pnl": 16047.01,
+      "roi_pct": 13.52,
+      "sharpe": 60.452,
+      "max_dd": 1.2996,
+      "avg_ev": 19.76,
+      "avg_kelly": 0.1
+    },
+    "GetawayAgent": {
+      "bets": 196292,
+      "wins": 122466,
+      "win_rate": 62.39,
+      "pnl": 3750.78,
+      "roi_pct": 19.11,
+      "sharpe": 71.813,
+      "max_dd": 0.0,
+      "avg_ev": 21.67,
+      "avg_kelly": 0.1
+    }
+  },
+  "by_season": {
+    "2016": {
+      "bets": 698089,
+      "wins": 417685,
+      "win_rate": 59.83,
+      "pnl": 9931.34,
+      "roi_pct": 14.23
+    },
+    "2017": {
+      "bets": 748173,
+      "wins": 448930,
+      "win_rate": 60.0,
+      "pnl": 10887.93,
+      "roi_pct": 14.55
+    },
+    "2018": {
+      "bets": 773747,
+      "wins": 462101,
+      "win_rate": 59.72,
+      "pnl": 10845.0,
+      "roi_pct": 14.02
+    },
+    "2019": {
+      "bets": 767095,
+      "wins": 459057,
+      "win_rate": 59.84,
+      "pnl": 10929.07,
+      "roi_pct": 14.25
+    },
+    "2020": {
+      "bets": 766597,
+      "wins": 459459,
+      "win_rate": 59.93,
+      "pnl": 11055.62,
+      "roi_pct": 14.42
+    },
+    "2021": {
+      "bets": 771180,
+      "wins": 462763,
+      "win_rate": 60.01,
+      "pnl": 11228.08,
+      "roi_pct": 14.56
+    },
+    "2022": {
+      "bets": 755763,
+      "wins": 454275,
+      "win_rate": 60.11,
+      "pnl": 11149.34,
+      "roi_pct": 14.75
+    },
+    "2023": {
+      "bets": 759461,
+      "wins": 454172,
+      "win_rate": 59.8,
+      "pnl": 10759.88,
+      "roi_pct": 14.17
+    },
+    "2024": {
+      "bets": 760333,
+      "wins": 454500,
+      "win_rate": 59.78,
+      "pnl": 10735.29,
+      "roi_pct": 14.12
+    },
+    "2025": {
+      "bets": 771156,
+      "wins": 461500,
+      "win_rate": 59.85,
+      "pnl": 10989.36,
+      "roi_pct": 14.25
+    }
+  },
+  "by_prop": {
+    "batter_k": {
+      "bets": 1358472,
+      "win_rate": 59.11,
+      "pnl": 17445.51,
+      "roi_pct": 12.84
+    },
+    "doubles": {
+      "bets": 5261,
+      "win_rate": 83.37,
+      "pnl": 311.23,
+      "roi_pct": 59.16
+    },
+    "earned_runs": {
+      "bets": 183761,
+      "win_rate": 57.77,
+      "pnl": 1891.29,
+      "roi_pct": 10.29
+    },
+    "hits": {
+      "bets": 1379596,
+      "win_rate": 57.32,
+      "pnl": 13001.53,
+      "roi_pct": 9.42
+    },
+    "hits_allowed": {
+      "bets": 165776,
+      "win_rate": 56.54,
+      "pnl": 1316.97,
+      "roi_pct": 7.94
+    },
+    "home_runs": {
+      "bets": 967,
+      "win_rate": 92.04,
+      "pnl": 73.21,
+      "roi_pct": 75.71
+    },
+    "innings": {
+      "bets": 174197,
+      "win_rate": 53.95,
+      "pnl": 523.36,
+      "roi_pct": 3.0
+    },
+    "pitcher_k": {
+      "bets": 214785,
+      "win_rate": 56.89,
+      "pnl": 1850.7,
+      "roi_pct": 8.62
+    },
+    "rbis": {
+      "bets": 628606,
+      "win_rate": 64.51,
+      "pnl": 14561.04,
+      "roi_pct": 23.16
+    },
+    "runs": {
+      "bets": 486183,
+      "win_rate": 66.51,
+      "pnl": 13114.36,
+      "roi_pct": 26.97
+    },
+    "singles": {
+      "bets": 842944,
+      "win_rate": 62.62,
+      "pnl": 16478.02,
+      "roi_pct": 19.55
+    },
+    "stolen_bases": {
+      "bets": 183,
+      "win_rate": 92.9,
+      "pnl": 14.15,
+      "roi_pct": 77.35
+    },
+    "total_bases": {
+      "bets": 1902312,
+      "win_rate": 57.69,
+      "pnl": 19280.88,
+      "roi_pct": 10.14
+    },
+    "walks": {
+      "bets": 228551,
+      "win_rate": 72.2,
+      "pnl": 8648.68,
+      "roi_pct": 37.84
+    }
+  }
+}
