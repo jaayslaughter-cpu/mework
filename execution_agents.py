@@ -41,6 +41,7 @@ import pika
 import pika.exceptions
 from odds_math import MIN_EV_THRESHOLD, calculate_no_vig_ev  # noqa: E402
 from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
+from apify_scrapers import DataEnricher  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,59 @@ class PropEdge:
     steam_velocity: float = 0.0
     steam_book_count: int = 0
 
+    # --- ArsenalAgent metadata ---
+    # pitcher_arsenal_json: JSON-encoded dict mapping pitch_type label to
+    #   {"usage_rate": float, "stuff_plus": float}.
+    #   usage_rate is 0.0–1.0 (e.g. 0.40 = 40% slider usage).
+    #   stuff_plus > 100 = above-average raw stuff on that pitch.
+    # batter_whiff_json: JSON-encoded dict mapping pitch_type to whiff_rate
+    #   (0.0–1.0, e.g. 0.32 = 32% swing-and-miss on breaking balls).
+    pitcher_arsenal_json: str = "{}"
+    batter_whiff_json: str = "{}"
+
+    # --- PlatoonAgent metadata ---
+    # wRC+ (Weighted Runs Created Plus) split by handedness of opposing pitcher.
+    # 100 = league average. >100 = above average, <70 = severe weakness.
+    wrc_plus_vl: float = 100.0       # batter wRC+ vs Left-Handed Pitching
+    wrc_plus_vr: float = 100.0       # batter wRC+ vs Right-Handed Pitching
+    wrc_plus_overall: float = 100.0  # season-long baseline (book's pricing anchor)
+    batter_handedness: str = ""      # "L" | "R" | "S" (switch)
+    pitcher_handedness: str = ""     # "L" | "R"
+    pa_starter: float = 2.5          # projected PAs against today's starter
+    pa_total: float = 4.0            # total expected PAs for the game
+    p_lhp_bullpen: float = 0.30      # probability of facing an LHP reliever
+    p_rhp_bullpen: float = 0.70      # probability of facing an RHP reliever
+    # pinch_hit_risk (γ): 0.0–1.0 probability of late-game substitution.
+    # Set to >0 when wrc_plus_vl < 70 and the bullpen is LHP-heavy.
+    pinch_hit_risk: float = 0.0
+
+    # --- CatcherAgent metadata ---
+    # catcher_framing_runs: Statcast framing runs above average per 7,000 pitches.
+    #   > 0 = net strike gains; > 2.0 = elite framer tier.
+    # catcher_pop_time: Seconds from catch to tag at 2B. < 1.85 = elite arm.
+    # pitcher_time_to_plate: Pitcher delivery time (seconds). > 1.4 = slow,
+    #   giving baserunners a significant jump advantage.
+    catcher_framing_runs: float = 0.0
+    catcher_pop_time: float = 1.90
+    pitcher_time_to_plate: float = 1.30
+
+    # --- LineupAgent metadata ---
+    # lineup_position: Confirmed batting order spot (1 = leadoff, 9 = last).
+    # team_total_runs: Implied team run total derived from the game O/U + moneyline.
+    # pa_average: Batter's rolling 14-day PA mean — the book's likely volume anchor.
+    lineup_position: int = 5
+    team_total_runs: float = 4.5
+    pa_average: float = 3.8
+
+    # --- GetawayAgent metadata ---
+    # hours_rest: Hours elapsed between the team's last game and today's first pitch.
+    # time_zone_change: Timezone shift in hours (e.g. 3 for East Coast → West Coast).
+    # previous_game_innings: Innings played in the most recent game.
+    #   > 9 = extra innings fatigue flag.
+    hours_rest: float = 24.0
+    time_zone_change: int = 0
+    previous_game_innings: int = 9
+
 
 # ---------------------------------------------------------------------------
 # Slip Publisher
@@ -134,6 +188,7 @@ class SlipPublisher:
 
     def __init__(self, amqp_url: Optional[str] = None) -> None:
         self._amqp_url = amqp_url
+        self._enricher: DataEnricher = DataEnricher()
         self._connection: Optional[pika.BlockingConnection] = None
         self._channel: Any = None
 
@@ -381,6 +436,23 @@ class BaseSlipBuilder(ABC):
             return False
 
         # TODO: add game_id-based correlation check when PropEdge carries game_id
+        # game_id correlation: block if ≥4 legs from the same game.
+        # Same-game parlays carry high leg-to-leg correlation that understates
+        # true combined probability, especially when all props belong to the
+        # same pitcher / offensive lineup.
+        populated_game_ids = [leg.game_id for leg in combo if leg.game_id]
+        if populated_game_ids:
+            from collections import Counter  # noqa: PLC0415
+            counts = Counter(populated_game_ids)
+            if max(counts.values()) >= 4:
+                logger.debug(
+                    "%s: correlation filter rejected combo "
+                    "(≥4 legs from same game_id '%s').",
+                    self.agent_name,
+                    max(counts, key=counts.__getitem__),
+                )
+                return False
+
         return True
 
     # ------------------------------------------------------------------
@@ -461,6 +533,15 @@ class EVHunter(BaseSlipBuilder):
     Market Scanner (LineValue, Steam, Fade) alerts.  Selects the top-N
     props by edge percentage across the entire MLB slate and constructs
     every valid 3/4/5-leg combination.
+    Market Scanner (LineValue, Steam, Fade) alerts.  Also ingests
+    market_fusion CLV edges and dislocation-scored props from the
+    multi-provider OddsFetcher pipeline.
+
+    Prop ranking uses a composite score:
+        composite = edge_pct + (dislocation_score * DISLOCATION_WEIGHT)
+
+    This ensures props with confirmed Pinnacle/soft-book gaps are
+    ranked above props with the same raw edge but no sharp consensus.
 
     Strategy:
         Pure expected-value maximisation — no filters on Over/Under bias,
@@ -469,6 +550,11 @@ class EVHunter(BaseSlipBuilder):
     """
 
     TOP_N: int = 10
+    TOP_N: int              = 10
+    DISLOCATION_WEIGHT: float = 0.5   # weight applied to dislocation_score bonus
+    CLV_SOURCES: frozenset  = frozenset({
+        "market_fusion", "linevalue", "dislocation", "arbitrage",
+    })
 
     @property
     def agent_name(self) -> str:
@@ -486,7 +572,83 @@ class EVHunter(BaseSlipBuilder):
         """
         eligible = [p for p in props if p.edge_pct > 0]
         eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+    def _composite_score(self, p: "PropEdge") -> float:
+        """Composite ranking score blending edge_pct + CLV dislocation bonus."""
+        dis_score = getattr(p, "dislocation_score", 0.0) or 0.0
+        return p.edge_pct + (dis_score * self.DISLOCATION_WEIGHT)
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Select the top-N props by composite EV score.
+
+        Promotes props from CLV-sourced feeds (market_fusion, linevalue,
+        dislocation) with a dislocation_score bonus on top of raw edge_pct.
+
+        Args:
+            props: Full unfiltered prop pool from all inbound sources.
+
+        Returns:
+            Top :attr:`TOP_N` props ranked by composite score descending,
+            requiring positive edge.
+        """
+        eligible = [p for p in props if p.edge_pct > 0]
+        eligible.sort(key=self._composite_score, reverse=True)
         return eligible[: self.TOP_N]
+
+
+# ---------------------------------------------------------------------------
+# Agent 1b — ArbitrageAgent (True Cross-Book Arbitrage)
+# ---------------------------------------------------------------------------
+
+class ArbitrageAgent(BaseSlipBuilder):
+    """
+    Identifies and builds slips from true cross-book arbitrage opportunities.
+
+    Consumes PropEdges with ``source == "arbitrage"`` from the
+    MarketFusionEngine.arbitrage_scan() pipeline.  These are props where
+    the best available Over on one book + best Under on another book
+    combine to a total implied probability < 1.0 — a guaranteed edge
+    regardless of outcome.
+
+    Filters:
+        - source == "arbitrage"
+        - arb_margin ≥ ARB_GATE (0.5 % guaranteed return)
+        - min_providers ≥ 2 (confirmed cross-book, not a data artefact)
+
+    Slip construction:
+        - MAX_LEGS = 3  (keeps arb slips tight; wider slips dilute the edge)
+        - Builds Over legs only; the guaranteed margin is captured on the
+          over side where the dislocation is largest.
+    """
+
+    MAX_LEGS: int  = 3
+    ARB_GATE: float = 0.005   # 0.5 % minimum guaranteed margin
+
+    @property
+    def agent_name(self) -> str:
+        return "ArbitrageAgent"
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Filter to confirmed arbitrage edges with positive margin.
+
+        Args:
+            props: Full prop pool from all inbound sources.
+
+        Returns:
+            Arbitrage props sorted by ``arb_margin`` descending.
+        """
+        arb_props = [
+            p for p in props
+            if getattr(p, "source", "") == "arbitrage"
+            and getattr(p, "arb_margin", 0.0) >= self.ARB_GATE
+            and len(getattr(p, "providers_sampled", [])) >= 2
+        ]
+        arb_props.sort(
+            key=lambda p: getattr(p, "arb_margin", 0.0),
+            reverse=True,
+        )
+        return arb_props
 
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +1267,472 @@ class SteamAgent(BaseSlipBuilder):
 # Execution Squad — Shared RabbitMQ Consumer
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Agent 11 — ArsenalAgent (Pitch-Type Matchup Specialist)
+# ---------------------------------------------------------------------------
+
+class ArsenalAgent(BaseSlipBuilder):
+    """Identifies strikeout and total-bases edges from pitch-arsenal matchups.
+
+    Strategy:
+        Cross-references a starting pitcher's pitch-type usage (from
+        ``pitcher_arsenal_json``) against the opposing batter's whiff rates
+        per pitch type (``batter_whiff_json``).
+
+        An edge is flagged when:
+          - The pitcher throws a specific pitch ≥ 35% of the time, AND
+          - The batter's whiff rate against that pitch type is ≥ 28%.
+
+        K-Over edges are generated for batters in the opposing lineup who
+        can't handle the pitcher's primary pitch.  TB-Under edges are
+        generated for high-chase hitters who expand their zone against the
+        pitch mix.
+
+    Target props:
+        - ``strikeouts`` (Over — pitcher prop)
+        - ``total_bases`` (Under — batter prop)
+
+    Source:
+        Any (ML engine output or market feed).  Arsenal data must be
+        populated via the RabbitMQ message fields ``pitcher_arsenal_json``
+        and ``batter_whiff_json``.
+
+    Probability gate:
+        ``true_prob >= 0.54``
+    """
+
+    # Pitch-type labels that constitute a "breaking / swing-and-miss" arsenal
+    BREAKING_PITCHES: frozenset = frozenset(
+        {"sweeper", "slider", "curveball", "curve", "slurve", "knuckle_curve"}
+    )
+    USAGE_THRESHOLD: float = 0.35   # ≥35% usage = primary pitch
+    WHIFF_THRESHOLD: float = 0.28   # ≥28% whiff rate = exploitable
+
+    @property
+    def agent_name(self) -> str:
+        return "ArsenalAgent"
+
+    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Keep props where the pitch-type arsenal creates a K or TB edge.
+
+        Args:
+            props: Full incoming prop pool.
+
+        Returns:
+            Filtered props with ``true_prob >= 0.54`` and a confirmed
+            pitch-type matchup edge based on usage and whiff thresholds.
+        """
+        eligible: List[PropEdge] = []
+        for prop in props:
+            if prop.true_prob < 0.54:
+                continue
+            if prop.prop_type.lower() not in ("strikeouts", "ks", "total_bases"):
+                continue
+            # Parse arsenal and whiff dicts (gracefully skip if empty/invalid)
+            try:
+                arsenal: dict = json.loads(prop.pitcher_arsenal_json)
+                whiff_rates: dict = json.loads(prop.batter_whiff_json)
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if not arsenal or not whiff_rates:
+                continue
+
+            # Find primary pitches that both exceed usage threshold and match
+            # a known weakness in the batter's whiff profile
+            matchup_edge = False
+            for pitch_type, pitch_data in arsenal.items():
+                usage = pitch_data.get("usage_rate", 0.0)
+                if usage < self.USAGE_THRESHOLD:
+                    continue
+                batter_whiff = whiff_rates.get(pitch_type, 0.0)
+                if batter_whiff >= self.WHIFF_THRESHOLD:
+                    matchup_edge = True
+                    break
+
+            if not matchup_edge:
+                continue
+
+            # K-Over: pitcher has dominant pitch vs. high-whiff lineup
+            # TB-Under: batter expands zone → fewer balls in play
+            if prop.prop_type.lower() in ("strikeouts", "ks") and prop.side == "Over":
+                eligible.append(prop)
+            elif prop.prop_type.lower() == "total_bases" and prop.side == "Under":
+                eligible.append(prop)
+
+        # Rank by highest whiff delta (best matchup first)
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+        return eligible
+
+
+# ---------------------------------------------------------------------------
+# Agent 12 — PlatoonAgent (Handedness Specialist)
+# ---------------------------------------------------------------------------
+
+class PlatoonAgent(BaseSlipBuilder):
+    """Calculates Expected Matchup Value (EMV) from L/R handedness splits.
+
+    Algorithm (per spec):
+        EMV = (EMV_starter + EMV_bullpen) × (1 − γ)
+
+        where:
+          EMV_starter  = wRC+_{vR|vL} × (pa_starter / pa_total)
+          EMV_bullpen  = (wRC+_vL × P_LHP + wRC+_vR × P_RHP)
+                         × (pa_bullpen / pa_total)
+          γ (gamma)    = pinch_hit_risk when wRC+_vL < 70
+
+        Δ = EMV_Total − wRC+_overall
+          Δ > +15 → OVER  (advantageous platoon spot books haven't priced)
+          Δ < −15 → UNDER (exposed to weak side or high pinch-hit risk)
+
+    Target props:
+        - ``hits``, ``total_bases``, ``runs``, ``rbis`` (Over/Under)
+
+    Probability gate:
+        ``true_prob >= 0.52``
+    """
+
+    EMV_OVER_DELTA: float = 15.0    # Δ threshold for a platoon Over edge
+    EMV_UNDER_DELTA: float = -15.0  # Δ threshold for a platoon Under edge
+    SEVERE_PLATOON_WRC: float = 70.0  # wRC+ vs weak side below this = sub risk
+
+    @property
+    def agent_name(self) -> str:
+        return "PlatoonAgent"
+
+    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Apply EMV platoon delta logic to hitting props.
+
+        Args:
+            props: Full incoming prop pool.
+
+        Returns:
+            Props where the EMV delta vs overall wRC+ exceeds ±15 points,
+            confirming a meaningful handedness mismatch the books haven't
+            fully priced into the line.
+        """
+        hitting_props = {
+            "hits", "total_bases", "singles", "doubles",
+            "runs", "runs_scored", "rbis", "rbi",
+        }
+        eligible: List[PropEdge] = []
+
+        for prop in props:
+            if prop.true_prob < 0.52:
+                continue
+            if prop.prop_type.lower() not in hitting_props:
+                continue
+            if prop.pa_total <= 0:
+                continue
+
+            # Step 1 — Starter exposure
+            if prop.pitcher_handedness.upper() == "L":
+                emv_starter = prop.wrc_plus_vl * (prop.pa_starter / prop.pa_total)
+            else:
+                # Default RHP when pitcher_handedness is empty
+                emv_starter = prop.wrc_plus_vr * (prop.pa_starter / prop.pa_total)
+
+            # Step 2 — Bullpen exposure (blended handedness)
+            pa_bullpen = max(prop.pa_total - prop.pa_starter, 0.0)
+            emv_bullpen = (
+                prop.wrc_plus_vl * prop.p_lhp_bullpen
+                + prop.wrc_plus_vr * prop.p_rhp_bullpen
+            ) * (pa_bullpen / prop.pa_total)
+
+            # Step 3 — Pinch-hit discount (γ)
+            gamma = prop.pinch_hit_risk
+            if prop.wrc_plus_vl < self.SEVERE_PLATOON_WRC:
+                # Severe platoon weakness — elevate substitution risk floor
+                gamma = max(gamma, 0.20)
+
+            # Step 4 — Final EMV
+            emv_total = (emv_starter + emv_bullpen) * (1.0 - gamma)
+            delta = emv_total - prop.wrc_plus_overall
+
+            # Step 5 — Direction gate
+            if delta > self.EMV_OVER_DELTA and prop.side == "Over":
+                eligible.append(prop)
+            elif delta < self.EMV_UNDER_DELTA and prop.side == "Under":
+                eligible.append(prop)
+
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+        return eligible
+
+
+# ---------------------------------------------------------------------------
+# Agent 13 — CatcherAgent (Framer & Cannon Specialist)
+# ---------------------------------------------------------------------------
+
+class CatcherAgent(BaseSlipBuilder):
+    """Identifies K and stolen-base edges from catcher + pitcher battery metrics.
+
+    Two distinct signals:
+
+    1. **Framing upgrade** — An elite framing catcher (``catcher_framing_runs``
+       > 2.0) paired with a wide umpire zone (``umpire_cs_pct`` > 0.345) creates
+       a "double upgrade" on Pitcher Strikeout Overs.  The framer converts
+       borderline pitches; the wide-zone umpire cooperates.
+
+    2. **Stolen-base window** — A slow-to-plate pitcher (``pitcher_time_to_plate``
+       > 1.4 s) combined with a weak-armed catcher (``catcher_pop_time`` > 2.0 s)
+       maximises the stolen-base window for fast runners.  Flags Over Stolen
+       Bases for any baserunner in the opposing lineup with a known SB threat.
+
+    Target props:
+        - ``strikeouts`` (Over — pitcher prop, framing signal)
+        - ``stolen_bases`` (Over — batter prop, battery speed signal)
+
+    Probability gate:
+        ``true_prob >= 0.54``
+    """
+
+    ELITE_FRAMING_RUNS: float = 2.0   # net strike gains (Statcast)
+    WIDE_ZONE_CS_PCT: float = 0.345   # umpire called-strike % threshold
+    SLOW_PITCHER_THRESHOLD: float = 1.40   # seconds to plate (> = slow)
+    WEAK_ARM_POP_TIME: float = 2.00   # seconds to 2B (> = weak arm)
+
+    @property
+    def agent_name(self) -> str:
+        return "CatcherAgent"
+
+    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Apply battery-level framing and stolen-base signal logic.
+
+        Args:
+            props: Full incoming prop pool.
+
+        Returns:
+            K-Over and SB-Over props confirmed by catcher/pitcher battery
+            metrics, with probability >= 0.54.
+        """
+        eligible: List[PropEdge] = []
+
+        for prop in props:
+            if prop.true_prob < 0.54:
+                continue
+
+            # ── Signal 1: Framing double-upgrade → Over Strikeouts ──────────
+            if prop.prop_type.lower() in ("strikeouts", "ks") and prop.side == "Over":
+                elite_framer = prop.catcher_framing_runs > self.ELITE_FRAMING_RUNS
+                wide_zone = prop.umpire_cs_pct > self.WIDE_ZONE_CS_PCT
+                if elite_framer:
+                    # Single upgrade on framing alone; double upgrade with wide zone
+                    prop_weight = 2.0 if wide_zone else 1.0
+                    logger.debug(
+                        "CatcherAgent: K-Over framing signal (weight=%.1f) for %s",
+                        prop_weight, prop.player_name,
+                    )
+                    eligible.append(prop)
+                    continue
+
+            # ── Signal 2: Battery speed window → Over Stolen Bases ──────────
+            if (
+                prop.prop_type.lower() in ("stolen_bases", "sb", "stolen_base")
+                and prop.side == "Over"
+            ):
+                slow_pitcher = prop.pitcher_time_to_plate > self.SLOW_PITCHER_THRESHOLD
+                weak_arm = prop.catcher_pop_time > self.WEAK_ARM_POP_TIME
+                if slow_pitcher and weak_arm:
+                    logger.debug(
+                        "CatcherAgent: SB-Over battery window for %s "
+                        "(pitcher_ttp=%.2fs, catcher_pop=%.2fs)",
+                        prop.player_name,
+                        prop.pitcher_time_to_plate,
+                        prop.catcher_pop_time,
+                    )
+                    eligible.append(prop)
+
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+        return eligible
+
+
+# ---------------------------------------------------------------------------
+# Agent 14 — LineupAgent (Volume & PA Projector)
+# ---------------------------------------------------------------------------
+
+class LineupAgent(BaseSlipBuilder):
+    """Exploits plate-appearance volume mismatches from confirmed lineup data.
+
+    Algorithm (per spec):
+        PA_expected = 3.6 − (0.11 × lineup_position) + (0.15 × team_total_runs)
+        PA_final    = PA_expected × (1 − pinch_hit_risk)
+
+        Δ_vol = PA_final − pa_average
+
+        Δ_vol >  +0.45 → OVER  (lineup bump / high team total = more PAs)
+        Δ_vol < −0.45 → UNDER (lineup drop / low team total / sub risk)
+
+    Example:
+        Batter moved to 2-hole (position 2), team implied 5 runs:
+        PA_expected = 3.6 − 0.22 + 0.75 = 4.13
+        ≈ 13% chance of a 5th PA.  If pa_average was 3.5 → Δ_vol = +0.63 → OVER.
+
+    Target props:
+        - ``hits``, ``total_bases``, ``runs``, ``rbis`` (Over/Under)
+
+    Probability gate:
+        ``true_prob >= 0.52``
+    """
+
+    # Regression coefficients (league-calibrated)
+    BETA_0: float = 3.6    # baseline PAs for leadoff on 0-run team
+    BETA_1: float = 0.11   # PA penalty per lineup slot
+    BETA_2: float = 0.15   # PA boost per implied team run
+    VOL_DELTA_THRESHOLD: float = 0.45  # minimum meaningful PA delta
+
+    @property
+    def agent_name(self) -> str:
+        return "LineupAgent"
+
+    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Keep props where confirmed lineup position creates a PA volume edge.
+
+        Args:
+            props: Full incoming prop pool.
+
+        Returns:
+            Over/Under hitting props confirmed by the PA projection formula,
+            filtered against the 14-day pa_average baseline.
+        """
+        hitting_props = {
+            "hits", "total_bases", "singles", "doubles",
+            "runs", "runs_scored", "rbis", "rbi",
+        }
+        eligible: List[PropEdge] = []
+
+        for prop in props:
+            if prop.true_prob < 0.52:
+                continue
+            if prop.prop_type.lower() not in hitting_props:
+                continue
+            # Require a confirmed lineup slot (default 5 is neutral; skip)
+            if prop.lineup_position == 0:
+                continue
+
+            # Step 1 — Base PA projection
+            pa_expected = (
+                self.BETA_0
+                - (self.BETA_1 * prop.lineup_position)
+                + (self.BETA_2 * prop.team_total_runs)
+            )
+
+            # Step 2 — Platoon/pinch-hit discount
+            pa_final = pa_expected * (1.0 - prop.pinch_hit_risk)
+
+            # Step 3 — Volume delta vs sportsbook anchor
+            delta_vol = pa_final - prop.pa_average
+
+            logger.debug(
+                "LineupAgent: %s pos=%d PA_exp=%.2f PA_final=%.2f Δ=%.2f",
+                prop.player_name, prop.lineup_position, pa_expected, pa_final, delta_vol,
+            )
+
+            if delta_vol > self.VOL_DELTA_THRESHOLD and prop.side == "Over":
+                eligible.append(prop)
+            elif delta_vol < -self.VOL_DELTA_THRESHOLD and prop.side == "Under":
+                eligible.append(prop)
+
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+        return eligible
+
+
+# ---------------------------------------------------------------------------
+# Agent 15 — GetawayAgent (MLB Schedule Anomaly Specialist)
+# ---------------------------------------------------------------------------
+
+class GetawayAgent(BaseSlipBuilder):
+    """Fades offenses in proven fatigue spots created by brutal MLB scheduling.
+
+    Fatigue triggers (any one qualifies):
+        - ``hours_rest < 14``            — sub-overnight turnaround
+        - ``time_zone_change >= 2``
+          AND ``hours_rest < 22``         — cross-country flight with short rest
+        - ``previous_game_innings > 11`` — extra-innings exhaustion
+
+    Severe fatigue (tighter filter — 2 conditions required):
+        - ``hours_rest < 12`` (same-day turnaround), OR
+        - ``time_zone_change >= 3`` AND ``hours_rest < 20``
+
+    Target props (Under only — against the fatigued team):
+        - ``hits``, ``runs``, ``rbis``, ``total_bases``
+
+    Example:
+        Team played a 14-inning Sunday Night game in New York and flies to
+        LA for Monday night.  hours_rest ≈ 17, time_zone_change = 3.
+        GetawayAgent flags Under Team Total / Under Hits for that lineup.
+
+    Probability gate:
+        ``true_prob >= 0.52``
+    """
+
+    # Fatigue thresholds
+    SHORT_REST_HOURS: float = 14.0
+    TIMEZONE_THRESHOLD: int = 2
+    TIMEZONE_REST_HOURS: float = 22.0
+    EXTRA_INNINGS_THRESHOLD: int = 11
+
+    @property
+    def agent_name(self) -> str:
+        return "GetawayAgent"
+
+    def _is_fatigue_spot(self, prop: PropEdge) -> bool:
+        """Return True if at least one schedule-fatigue trigger fires.
+
+        Args:
+            prop: Prop edge with travel and rest metadata.
+
+        Returns:
+            True when the team is in a measurable fatigue spot.
+        """
+        short_rest = prop.hours_rest < self.SHORT_REST_HOURS
+        cross_country = (
+            prop.time_zone_change >= self.TIMEZONE_THRESHOLD
+            and prop.hours_rest < self.TIMEZONE_REST_HOURS
+        )
+        extra_innings = prop.previous_game_innings > self.EXTRA_INNINGS_THRESHOLD
+        return short_rest or cross_country or extra_innings
+
+    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Keep Under hitting props for teams confirmed to be in fatigue spots.
+
+        Args:
+            props: Full incoming prop pool.
+
+        Returns:
+            Under props for fatigued-team batters, ranked by severity
+            (shortest hours_rest first).
+        """
+        fatigue_props = {
+            "hits", "total_bases", "singles",
+            "runs", "runs_scored", "rbis", "rbi",
+        }
+        eligible: List[PropEdge] = []
+
+        for prop in props:
+            if prop.true_prob < 0.52:
+                continue
+            # Only Under props — we're fading the fatigued offense
+            if prop.side != "Under":
+                continue
+            if prop.prop_type.lower() not in fatigue_props:
+                continue
+            if not self._is_fatigue_spot(prop):
+                continue
+
+            logger.debug(
+                "GetawayAgent: fatigue spot — %s (rest=%.1fh tz_shift=%dh prev_inn=%d)",
+                prop.player_name,
+                prop.hours_rest,
+                prop.time_zone_change,
+                prop.previous_game_innings,
+            )
+            eligible.append(prop)
+
+        # Rank by most severe fatigue (fewest rest hours first)
+        eligible.sort(key=lambda p: p.hours_rest)
+        return eligible
+
+
 class ExecutionSquad:
     """Orchestrates all ten agents on a shared RabbitMQ consumer loop.
 
@@ -1130,6 +1758,11 @@ class ExecutionSquad:
         8.  BullpenAgent   — Bullpen fatigue and rest-pattern plays
         9.  WeatherAgent   — Wind, temperature, and park-factor plays
         10. SteamAgent     — Sharp line-movement velocity plays
+        11. ArsenalAgent   — Pitch-type matchup vs batter whiff rates
+        12. PlatoonAgent   — EMV wRC+ handedness split analysis
+        13. CatcherAgent   — Framing runs + pop time battery analysis
+        14. LineupAgent    — PA volume projection from lineup position
+        15. GetawayAgent   — MLB schedule fatigue and travel anomalies
 
     Args:
         amqp_url: AMQP connection string (``None`` → mock mode).
@@ -1148,6 +1781,7 @@ class ExecutionSquad:
         self._last_flush: float = time.time()
         self._agents: List[BaseSlipBuilder] = [
             EVHunter(amqp_url=amqp_url),
+            ArbitrageAgent(amqp_url=amqp_url),
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
             MLEdgeAgent(amqp_url=amqp_url),
@@ -1157,6 +1791,11 @@ class ExecutionSquad:
             BullpenAgent(amqp_url=amqp_url),
             WeatherAgent(amqp_url=amqp_url),
             SteamAgent(amqp_url=amqp_url),
+            ArsenalAgent(amqp_url=amqp_url),
+            PlatoonAgent(amqp_url=amqp_url),
+            CatcherAgent(amqp_url=amqp_url),
+            LineupAgent(amqp_url=amqp_url),
+            GetawayAgent(amqp_url=amqp_url),
         ]
         self._connection: Optional[pika.BlockingConnection] = None
         self._channel: Any = None
@@ -1263,6 +1902,7 @@ class ExecutionSquad:
 
     @staticmethod
     def _parse_prop_edge(data: Dict[str, Any]) -> Optional[PropEdge]:
+    def _parse_prop_edge(self, data: Dict[str, Any]) -> Optional[PropEdge]:
         """Convert a raw RabbitMQ message dict into a :class:`PropEdge`.
 
         Required fields: ``player_id``, ``prop_type``, ``side``,
@@ -1283,6 +1923,20 @@ class ExecutionSquad:
             return None
 
         raw_source: str = data.get("scanner_type", "ml_engine")
+
+        # ── Redis enrichment: merge cache data over sparse broker fields ──
+        enrichment = self._enricher.enrich(
+            player_id=data.get("player_id", ""),
+            player_name=data.get("player_name", ""),
+            team_abbr=data.get("team_abbr", ""),
+            game_id=data.get("game_id", ""),
+            game_date=data.get("game_date", ""),
+            pitcher_id=data.get("pitcher_id", ""),
+            is_pitcher=data.get("prop_type", "").startswith("pitcher_"),
+            catcher_id=data.get("catcher_id", ""),
+        )
+        # Broker fields take precedence: broker > enrichment > PropEdge default
+        merged = {**enrichment, **{k: v for k, v in data.items() if v not in (None, "", {}, [])}}
         # Normalise scanner_type strings to short source labels
         source = (
             raw_source.lower()
@@ -1317,4 +1971,81 @@ class ExecutionSquad:
             # --- SteamAgent ---
             steam_velocity=float(data.get("steam_velocity", 0.0)),
             steam_book_count=int(data.get("steam_book_count", 0)),
+            # --- ArsenalAgent ---
+            pitcher_arsenal_json=str(data.get("pitcher_arsenal_json", "{}")),
+            batter_whiff_json=str(data.get("batter_whiff_json", "{}")),
+            # --- PlatoonAgent ---
+            wrc_plus_vl=float(data.get("wrc_plus_vl", 100.0)),
+            wrc_plus_vr=float(data.get("wrc_plus_vr", 100.0)),
+            wrc_plus_overall=float(data.get("wrc_plus_overall", 100.0)),
+            batter_handedness=str(data.get("batter_handedness", "")),
+            pitcher_handedness=str(data.get("pitcher_handedness", "")),
+            pa_starter=float(data.get("pa_starter", 2.5)),
+            pa_total=float(data.get("pa_total", 4.0)),
+            p_lhp_bullpen=float(data.get("p_lhp_bullpen", 0.30)),
+            p_rhp_bullpen=float(data.get("p_rhp_bullpen", 0.70)),
+            pinch_hit_risk=float(data.get("pinch_hit_risk", 0.0)),
+            # --- CatcherAgent ---
+            catcher_framing_runs=float(data.get("catcher_framing_runs", 0.0)),
+            catcher_pop_time=float(data.get("catcher_pop_time", 1.90)),
+            pitcher_time_to_plate=float(data.get("pitcher_time_to_plate", 1.30)),
+            # --- LineupAgent ---
+            lineup_position=int(data.get("lineup_position", 5)),
+            team_total_runs=float(data.get("team_total_runs", 4.5)),
+            pa_average=float(data.get("pa_average", 3.8)),
+            # --- GetawayAgent ---
+            hours_rest=float(data.get("hours_rest", 24.0)),
+            time_zone_change=int(data.get("time_zone_change", 0)),
+            previous_game_innings=int(data.get("previous_game_innings", 9)),
+            player_id=merged["player_id"],
+            player_name=merged.get("player_name", merged["player_id"]),
+            prop_type=merged["prop_type"],
+            line=float(merged.get("underdog_line", 0.0)),
+            side=merged["side"],
+            true_prob=float(merged["true_prob"]),
+            edge_pct=float(merged["edge_percentage"]),
+            source=source,
+            is_f5=bool(merged.get("is_f5", False)),
+            # --- Sportsbook odds for no-vig EV calculation ---
+            odds_over=float(merged.get("odds_over", -110.0)),
+            odds_under=float(merged.get("odds_under", -110.0)),
+            # --- UmpireAgent ---
+            umpire_cs_pct=float(merged.get("umpire_cs_pct", 0.0)),
+            # --- FadeAgent ---
+            ticket_pct=float(merged.get("ticket_pct", 0.0)),
+            money_pct=float(merged.get("money_pct", 0.0)),
+            # --- BullpenAgent ---
+            fatigue_index=float(merged.get("fatigue_index", 0.0)),
+            # --- WeatherAgent ---
+            wind_speed=float(merged.get("wind_speed", 0.0)),
+            wind_direction=str(merged.get("wind_direction", "")),
+            # --- SteamAgent ---
+            steam_velocity=float(merged.get("steam_velocity", 0.0)),
+            steam_book_count=int(merged.get("steam_book_count", 0)),
+            # --- ArsenalAgent ---
+            pitcher_arsenal_json=str(merged.get("pitcher_arsenal_json", "{}")),
+            batter_whiff_json=str(merged.get("batter_whiff_json", "{}")),
+            # --- PlatoonAgent ---
+            wrc_plus_vl=float(merged.get("wrc_plus_vl", 100.0)),
+            wrc_plus_vr=float(merged.get("wrc_plus_vr", 100.0)),
+            wrc_plus_overall=float(merged.get("wrc_plus_overall", 100.0)),
+            batter_handedness=str(merged.get("batter_handedness", "")),
+            pitcher_handedness=str(merged.get("pitcher_handedness", "")),
+            pa_starter=float(merged.get("pa_starter", 2.5)),
+            pa_total=float(merged.get("pa_total", 4.0)),
+            p_lhp_bullpen=float(merged.get("p_lhp_bullpen", 0.30)),
+            p_rhp_bullpen=float(merged.get("p_rhp_bullpen", 0.70)),
+            pinch_hit_risk=float(merged.get("pinch_hit_risk", 0.0)),
+            # --- CatcherAgent ---
+            catcher_framing_runs=float(merged.get("catcher_framing_runs", 0.0)),
+            catcher_pop_time=float(merged.get("catcher_pop_time", 1.90)),
+            pitcher_time_to_plate=float(merged.get("pitcher_time_to_plate", 1.30)),
+            # --- LineupAgent ---
+            lineup_position=int(merged.get("lineup_position", 5)),
+            team_total_runs=float(merged.get("team_total_runs", 4.5)),
+            pa_average=float(merged.get("pa_average", 3.8)),
+            # --- GetawayAgent ---
+            hours_rest=float(merged.get("hours_rest", 24.0)),
+            time_zone_change=int(merged.get("time_zone_change", 0)),
+            previous_game_innings=int(merged.get("previous_game_innings", 9)),
         )

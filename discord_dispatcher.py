@@ -91,6 +91,11 @@ AGENT_COLOURS: Dict[str, int] = {
     "SteamAgent": 0xE67E22,     # Amber       — steam moves
     "LineValueAgent": 0x2980B9, # Dark blue   — sharp line value
     "BullpenAgent": 0x8E44AD,   # Dark purple — bullpen fatigue
+    "ArsenalAgent": 0xD35400,   # Burnt orange — pitch-type matchup
+    "PlatoonAgent": 0x27AE60,   # Forest green — handedness splits
+    "CatcherAgent": 0x16A085,   # Dark teal    — framing & battery
+    "LineupAgent": 0x2C3E50,    # Midnight     — PA volume projection
+    "GetawayAgent": 0x7F8C8D,   # Slate grey   — schedule fatigue
 }
 DEFAULT_COLOUR: int = 0x34495E   # Charcoal fallback for unlisted agents
 
@@ -199,6 +204,16 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- One embed field per slip leg ---
     for i, leg in enumerate(legs, start=1):
+    # --- One embed field per slip leg (ALL legs guaranteed) ---
+    # Discord hard limit: 25 fields per embed.
+    # Reserved: 1 entry-type field + 1 metrics field = 23 max legs.
+    # PropIQ max is 5 legs — well within the limit.
+    DISCORD_MAX_FIELDS: int = 25
+    reserved_fields: int = 2  # entry-type + metrics
+    max_leg_fields: int = DISCORD_MAX_FIELDS - reserved_fields  # 23
+    DISCORD_MAX_FIELD_VALUE: int = 1024  # Discord per-field char limit
+
+    for i, leg in enumerate(legs[:max_leg_fields], start=1):
         side: str = leg.get("side", "?")
         side_emoji = "⬆️" if side.lower() == "over" else "⬇️"
         prob_pct = round(float(leg.get("true_prob", 0.0)) * 100, 1)
@@ -214,6 +229,29 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
                 f"{leg.get('prop', '?')} "
                 f"({leg.get('line', '?')}) "
                 f"| {prob_pct}% prob | **{ev_label}**"
+        leg_value = (
+            f"{side_emoji} **{side}** "
+            f"{leg.get('prop', '?')} "
+            f"({leg.get('line', '?')}) "
+            f"| {prob_pct}% prob | **{ev_label}**"
+        )
+        # Truncate at Discord's 1024-char field-value limit (safety net)
+        if len(leg_value) > DISCORD_MAX_FIELD_VALUE:
+            leg_value = leg_value[: DISCORD_MAX_FIELD_VALUE - 3] + "..."
+        fields.append({
+            "name": f"Leg {i} — {leg.get('player', 'Unknown')}",
+            "value": leg_value,
+            "inline": False,
+        })
+
+    # Overflow notice if somehow a slip has > 23 legs (should never occur)
+    if len(legs) > max_leg_fields:
+        overflow_count = len(legs) - max_leg_fields
+        fields.append({
+            "name": f"⚠️ +{overflow_count} more legs",
+            "value": (
+                f"Discord field limit reached. Full {len(legs)}-leg slip "
+                "details in RabbitMQ payload."
             ),
             "inline": False,
         })
@@ -223,12 +261,32 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     ev_sign = "+" if total_ev >= 0 else ""
     avg_ev_pct = round(avg_leg_ev * 100, 2)
     avg_ev_sign = "+" if avg_leg_ev >= 0 else ""
+    # Build agent-specific context line (helps orient users on each agent's edge)
+    _AGENT_CONTEXT: Dict[str, str] = {
+        "ArsenalAgent":   "🔬 Pitch-type matchup | Usage × Whiff rate",
+        "PlatoonAgent":   "🤲 EMV platoon delta | wRC+ LHP vs RHP split",
+        "CatcherAgent":   "🧤 Battery analysis | Framing runs + pop time",
+        "LineupAgent":    "📋 PA volume edge | Lineup position × Team total",
+        "GetawayAgent":   "✈️ Schedule fatigue | Rest hours + timezone shift",
+        "UmpireAgent":    "⚖️ Umpire zone | CS% delta vs league average",
+        "FadeAgent":      "🔄 Sharp fade | Ticket% vs money% divergence",
+        "BullpenAgent":   "💪 Fatigue index | L3-5 day bullpen workload",
+        "WeatherAgent":   "🌬️ Wind factor | MPH × direction × park",
+        "SteamAgent":     "💨 Line velocity | Pts/min × book consensus",
+        "EVHunter":       "💰 All-source top-EV | ML + market combined",
+        "UnderMachine":   "⬇️ Under specialist | Public Over bias fade",
+        "F5Agent":        "5️⃣ First-5 innings | Ignores bullpen variance",
+        "MLEdgeAgent":    "🤖 Pure ML signal | XGBoost ≥ 0.55 prob gate",
+        "LineValueAgent": "📐 No-vig gap | Sharp vs retail consensus delta",
+    }
+    agent_context = _AGENT_CONTEXT.get(agent_name, "🎯 PropIQ Analytics")
     fields.append({
         "name": "📊 Slip Metrics",
         "value": (
             f"🎯 **Avg Edge vs No-Vig: {avg_ev_sign}{avg_ev_pct}%**\n"
             f"Slip EV (Underdog math): {ev_sign}{ev_pct}%\n"
             f"**Unit Size:** {unit_size} units\n"
+            f"*{agent_context}*\n"
             f"{DFS_PLATFORM_STAMP}"
         ),
         "inline": False,
