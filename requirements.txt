@@ -29,3 +29,5 @@ apscheduler>=3.10.4
 aiohttp>=3.9.5
 tenacity>=8.3.0
 structlog>=24.1.0
+pybaseball>=2.2.7
+pyyaml>=6.0.2
