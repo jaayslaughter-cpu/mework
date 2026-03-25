@@ -14,66 +14,47 @@ Flow
   2. Fetch live props from PrizePicks and Underdog Fantasy APIs
   3. Merge and deduplicate player lines across both platforms
   4. Fetch baseline stat projections from MLB Stats API (season averages)
-  5. Run platform_selector for each prop 
- pick PrizePicks or Underdog
+  5. Run platform_selector for each prop → pick PrizePicks or Underdog
+  6. Calculate fantasy-points expected value (hitter + pitcher scoring)
+  7. Apply 15 agent filters to build per-agent parlays
+  8. Validate EV gate (≥3%) and Kelly cap (≤10%)
+  9. Fire Discord alerts via DiscordAlertService
+
+Supported prop types (innings_pitched REMOVED per Phase 19):
+  Hitter:  hits, home_runs, rbis, runs, total_bases, stolen_bases,
+           hits_runs_rbis, fantasy_hitter
+  Pitcher: strikeouts (labelled "Pitcher Ks"), earned_runs, fantasy_pitcher
+
+Platform rules:
+  - Compare PP vs Underdog line per prop
+  - Pick platform with higher implied win probability for that specific leg
+  - $20 hard-cap stake per parlay
+  - If fantasy points leg has EV edge ≥ 3% over the offered line → include
+
+Run standalone:
+  python live_dispatcher.py [--date 2026-03-22] [--dry-run]
+"""
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
+import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
 
-# Season record tracker (writes to agent SQL DB)
-try:
-    from season_record import record_parlay, get_agent_season_stats
-    _SEASON_RECORD_AVAILABLE = True
-except ImportError:
-    _SEASON_RECORD_AVAILABLE = False
-    def record_parlay(*_a, **_kw): return False            # noqa: E704
-    def get_agent_season_stats(_agent): return {}         # noqa: E704
-
-from platform_selector import PlatformSelector
+from platform_selector import PlatformSelector, SelectionResult
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
-#  Phase 27: Enhancement layer imports (all optional 
- graceful fallback) 
-try:
-    from draftedge_scraper import enrich_props_with_draftedge as _de_enrich
-    _DE_AVAILABLE = True
-except ImportError:
-    _DE_AVAILABLE = False
-    def _de_enrich(props: list) -> list: return props  # noqa: E704
-
-try:
-    from statcast_feature_layer import (
-        enrich_props_with_statcast as _sc_enrich,
-        StatcastFeatureLayer,
-    )
-    _SC_AVAILABLE = True
-except ImportError:
-    _SC_AVAILABLE = False
-    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
-    class StatcastFeatureLayer:  # noqa: E302
-        pass
-
-try:
-    from public_trends_scraper import PublicTrendsScraper, get_fade_signal as _get_fade_signal
-    _SBD_AVAILABLE = True
-except ImportError:
-    _SBD_AVAILABLE = False
-    def _get_fade_signal(*_a, **_kw):  # noqa: E302, E704
-        return 0.0, "none"
-
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
 )
 logger = logging.getLogger("propiq.live")
 
@@ -83,27 +64,10 @@ logger = logging.getLogger("propiq.live")
 
 MIN_EV_PCT   = 3.0     # minimum EV gate
 MIN_PROB     = 0.52    # minimum implied win probability per leg
-MAX_LEGS     = 4       # hard cap  no parlay may exceed 4 legs
+MAX_LEGS     = 4       # hard cap — no parlay may exceed 4 legs
 MIN_LEGS     = 2       # min legs to send alert
 HALF_KELLY   = 0.5     # Kelly fraction multiplier
 MAX_KELLY    = 0.10    # bankroll cap
-
-# ---------------------------------------------------------------------------
-# OmegaStack ensemble constants
-# ---------------------------------------------------------------------------
-# Per-agent additive edge above raw implied_prob (each agent's unique signal strength)
-_OMEGA_AGENT_EDGE: dict[str, float] = {
-    "VultureStack": 0.040,   # strongest: dual-confirmation fatigue consensus
-    "UmpireAgent":  0.020,   # moderate: ump tendencies predictive but subtle
-    "FadeAgent":    0.015,   # marginal: contrarian adds a small systematic edge
-}
-OMEGA_STACK_WEIGHTS: dict[str, float] = {
-    "VultureStack": 0.60,
-    "UmpireAgent":  0.25,
-    "FadeAgent":    0.15,
-}
-OMEGA_STACK_MIN_PROB = 0.65   # stacked prob gate — rarest, highest conviction
-OMEGA_STACK_MAX_LEGS = 3      # tight: surgical parlays only
 BANKROLL_USD = 200.0   # reference bankroll for Kelly sizing
 MAX_STAKE    = MAX_STAKE_USD   # $20 hard cap
 
@@ -169,11 +133,8 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "👻",
         "max_legs": 4,
         "entry_type": "FLEX",
-        # Phase 27: prefer real SBD fade signal; fall back to implied_prob gate
-        "filter": lambda r: (
-            getattr(r, "is_fade_signal", False) or r.implied_prob >= 0.53
-        ) and r.side == "Under",
-        "note": "Contrarian fades against public consensus (SBD ticket% ≥ 65% preferred)",
+        "filter": lambda r: r.implied_prob >= 0.53 and r.side == "Under",
+        "note": "Contrarian fades against public consensus",
     },
     {
         "name": "LineValueAgent",
@@ -188,16 +149,9 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "🔥",
         "max_legs": 3,
         "entry_type": "FLEX",
-        # Enhanced: earned_runs weighted heavier (clearest bullpen fatigue signal),
-        # runs second, hits only when prob is elevated (≥0.56) to filter noise.
-        # Decay logic: props that represent late-inning exposure (ER, Runs) get a
-        # 0.02 synthetic boost vs. hits which need a higher raw threshold.
-        "filter": lambda r: (
-            (r.prop_type == "earned_runs" and r.implied_prob >= 0.54) or
-            (r.prop_type == "runs"         and r.implied_prob >= 0.55) or
-            (r.prop_type == "hits"         and r.implied_prob >= 0.56)
-        ),
-        "note": "Bullpen fatigue & rest — ER > Runs > Hits (weighted decay)",
+        "filter": lambda r: r.prop_type in ("earned_runs", "runs", "hits")
+                            and r.implied_prob >= 0.54,
+        "note": "Bullpen fatigue & rest patterns",
     },
     {
         "name": "WeatherAgent",
@@ -260,19 +214,11 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "✈️",
         "max_legs": 4,
         "entry_type": "FLEX",
-        # Enhanced: Travel fatigue scoring — time-zone crossing degrades
-        # batter performance (most reliable on hits_runs_rbis composite).
-        # hits_runs_rbis: lowest threshold (broadest fatigue signal).
-        # rbis: intermediate — RBI production suffers most in fatigue.
-        # runs: highest threshold — scoring requires full effort even tired.
-        # All are Under-side only (fatigue → under-performance).
-        "filter": lambda r: r.side == "Under" and (
-            (r.prop_type == "hits_runs_rbis" and r.implied_prob >= 0.52) or
-            (r.prop_type == "rbis"           and r.implied_prob >= 0.53) or
-            (r.prop_type == "hits"           and r.implied_prob >= 0.54) or
-            (r.prop_type == "runs"           and r.implied_prob >= 0.55)
-        ),
-        "note": "Travel fatigue Unders — H+R+RBI > RBI > H > R (decay order)",
+        "filter": lambda r: r.side == "Under"
+                            and r.prop_type in ("hits", "rbis", "runs",
+                                                "hits_runs_rbis")
+                            and r.implied_prob >= 0.52,
+        "note": "Getaway day — schedule fatigue Unders",
     },
     {
         "name": "FantasyPtsAgent",
@@ -283,63 +229,14 @@ AGENT_CONFIGS: list[dict] = [
                             and r.implied_prob >= 0.54,
         "note": "Fantasy-score lines — best scoring format per platform",
     },
-    {
-        # ── 17th agent: VultureStack ───────────────────────────────────────
-        # Consensus mechanism: fires ONLY when BOTH BullpenAgent criteria
-        # (runs/ER exposure) AND GetawayAgent criteria (travel fatigue Under)
-        # overlap on the same prop.  Dual-confirmation → higher confidence.
-        #
-        # Filter logic:
-        #   • Under side only (both agents agree on direction)
-        #   • Props where bullpen fatigue AND travel fatigue intersect:
-        #       runs, earned_runs, hits_runs_rbis
-        #   • Stricter probability gate (≥ 0.57) — consensus already earned it
-        #   • Max 3 legs: tighter pool = premium picks only
-        "name": "VultureStack",
-        "emoji": "🦅",
-        "max_legs": 3,
-        "entry_type": "FLEX",
-        "filter": lambda r: r.side == "Under" and r.prop_type in (
-            "runs", "earned_runs", "hits_runs_rbis"
-        ) and r.implied_prob >= 0.57,
-        "note": "BullpenAgent ∩ GetawayAgent consensus — Under fatigue picks only",
-    },
 ]
 
 # ---------------------------------------------------------------------------
-# PrizePicks session — warm up by visiting the app home page first so
-# Cloudflare + DataDome issue valid cookies, then use those cookies for
-# the API call.  The session is passed in so the warm-up only fires
-# once per process (the daily 11 AM dispatch is a single process).
+# MLB Stats API helpers
+# ---------------------------------------------------------------------------
 
-def _get_pp_session(pp_session: requests.Session | None = None) -> requests.Session:
-    """Return a warmed-up PrizePicks session, creating one if needed."""
-    if pp_session is not None:
-        return pp_session
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            "Version/17.0 Mobile/15E148 Safari/604.1"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-    })
-    try:
-        s.get("https://app.prizepicks.com/", timeout=12)
-        logger.info("[PP] Session warmed up — cookies: %s", list(s.cookies.keys()))
-    except Exception as exc:
-        logger.warning("[PP] Warm-up request failed: %s", exc)
-    # Switch to JSON API headers for subsequent calls
-    s.headers.update({
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://app.prizepicks.com/",
-        "Origin": "https://app.prizepicks.com",
-    })
-    return s
-    return s
+_MLBAPI_BASE = "https://statsapi.mlb.com/api/v1"
+_HEADERS     = {"User-Agent": "Mozilla/5.0 (PropIQ/1.0)"}
 
 
 def fetch_today_schedule(date_str: str | None = None) -> list[dict]:
@@ -428,23 +325,13 @@ def fetch_player_season_stats(player_id: int) -> dict[str, float]:
 # Live prop fetchers (both platforms)
 # ---------------------------------------------------------------------------
 
-# Baseball-specific stat types used to identify MLB props on PrizePicks.
-# Updated to match actual API responses (live-probed Mar 2026):
-#   "pitcher strikeouts" replaced bare "strikeouts"
-#   "earned runs allowed" replaced "earned runs"
-#   "hits allowed" and "walks allowed" added for pitcher props
-#   "pitching outs" added (outs recorded prop)
+# Baseball-specific stat types used to identify MLB props on PrizePicks
+# (PrizePicks API v3 does not return league in projection attributes)
 _PP_MLB_STAT_TYPES = {
-    "hits", "home runs", "rbis", "rbi", "runs",
-    "total bases", "stolen bases",
-    "hits+runs+rbis", "hits + runs + rbis",
+    "hits", "home runs", "strikeouts", "rbis", "rbi", "runs",
+    "total bases", "stolen bases", "hits+runs+rbis", "hits + runs + rbis",
     "hitter fantasy score", "pitcher fantasy score",
-    "doubles", "triples",
-    # Pitcher props (actual PP label as of 2026)
-    "pitcher strikeouts", "strikeouts",   # keep bare form as fallback
-    "earned runs allowed", "earned runs",  # keep old form as fallback
-    "hits allowed", "walks allowed", "pitching outs",
-    "walks",
+    "earned runs", "walks", "doubles", "triples",
 }
 
 # Underdog stat → our internal prop_type
@@ -468,43 +355,25 @@ _UD_STAT_MAP: dict[str, str] = {
 
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
-def _fetch_prizepicks_response(pp_session):
-    for attempt in range(3):
-        if attempt:
-            time.sleep(2 ** attempt)
-            pp_session = None
-        sess = _get_pp_session(pp_session)
-        resp = sess.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("data", [])
-    raise RuntimeError("Failed to fetch PrizePicks projections after retries")
 
-def fetch_prizepicks_props(pp_session) -> list[dict]:
+def fetch_prizepicks_props() -> list[dict]:
     """
-    Fetch PrizePicks MLB projections via session-cookie warm-up.
-
-    PrizePicks is protected by Cloudflare + DataDome bot detection.
-    The fix: visit app.prizepicks.com first (mobile Safari UA) so the
-    CDN issues valid cookies, then hit the API on the same session.
-    Without the warm-up visit every direct API call returns 403.
-
+    Fetch PrizePicks MLB projections.
+    Filters by baseball-specific stat types (API v3 does not expose league
+    on projection attributes — filtering by sport keyword is the only
+    reliable approach without authentication).
     Returns raw list of dicts.
     """
     try:
-        return _fetch_prizepicks_response(pp_session)
-    except RuntimeError:
-        return []
-                data = resp.json()
-                break
-            logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
-            if resp.status_code == 403:
-                pp_session = None   # force re-warm on next attempt
-        if data is None:
+        resp = requests.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True},
+            headers=_HEADERS, timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("[PP] HTTP %d", resp.status_code)
             return []
+        data = resp.json()
 
         # Build player id → name map from included resources
         player_map: dict[str, str] = {}
@@ -529,6 +398,31 @@ def fetch_prizepicks_props(pp_session) -> list[dict]:
                 continue
 
             line_val = attrs.get("line_score")
+            if line_val is None:
+                continue
+
+            pid   = (proj.get("relationships", {})
+                        .get("new_player", {})
+                        .get("data", {})
+                        .get("id", ""))
+            pname = player_map.get(pid, "")
+            if not pname:
+                continue
+
+            props.append({
+                "source":      "prizepicks",
+                "player_name": pname,
+                "stat_type":   stat_raw,
+                "line":        float(line_val),
+            })
+
+        logger.info("[PP] Fetched %d MLB props", len(props))
+        return props
+    except Exception as exc:
+        logger.warning("[PP] Fetch failed: %s", exc)
+        return []
+
+
 def fetch_underdog_props() -> list[dict]:
     """
     Fetch Underdog Fantasy MLB over/under lines.
@@ -543,60 +437,12 @@ def fetch_underdog_props() -> list[dict]:
     Returns raw list of dicts.
     """
     try:
-        _ud_headers = {
-            "User-Agent": "Underdog Fantasy/3.0 (iPhone; iOS 17.0) CFNetwork/1474 Darwin/23.0.0",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "x-api-key": "KeepItSecret",
-        }
         resp = requests.get(
-            "https://api.underdogfantasy.com/beta/v5/over_under_lines",
-            headers=_ud_headers, timeout=20,
+            "https://api.underdogfantasy.com/v1/over_under_lines",
+            headers=_HEADERS, timeout=20,
         )
         if resp.status_code != 200:
             logger.warning("[UD] HTTP %d", resp.status_code)
-            return []
-
-        data = resp.json()
-        over_under_lines = data.get("over_under_lines", [])
-        appearances_map = {
-            item["appearance_stat"]["appearance_id"]: item["appearance_stat"]
-            for item in data.get("appearances", [])
-        }
-        players_map = {player["id"]: player for player in data.get("players", [])}
-
-        def is_valid_line(line_info: dict) -> bool:
-            stat_info = line_info.get("over_under", {}).get("appearance_stat", {})
-            appearance_id = stat_info.get("appearance_id")
-            player_id = appearances_map.get(appearance_id, {}).get("player_id")
-            player = players_map.get(player_id, {})
-            line_val = line_info.get("over_under", {}).get("line")
-            return all([
-                player_id,
-                player.get("sport_id") == "MLB",
-                not line_info.get("inactive", False),
-                stat_info.get("stat"),
-                line_val is not None,
-            ])
-
-        def build_prop(line_info: dict) -> dict:
-            stat_info = line_info["over_under"]["appearance_stat"]
-            appearance_id = stat_info["appearance_id"]
-            player_id = appearances_map[appearance_id]["player_id"]
-            return {
-                "source": "underdog",
-                "player_name": players_map[player_id]["name"],
-                "stat_type": stat_info["stat"]["name"],
-                "line": float(line_info["over_under"]["line"]),
-            }
-
-        props = [build_prop(line) for line in over_under_lines if is_valid_line(line)]
-
-        logger.info("[UD] Fetched %d MLB props", len(props))
-        return props
-    except Exception as exc:
-        logger.warning("[UD] Fetch failed: %s", exc)
-        return []
             return []
         data = resp.json()
 
@@ -708,21 +554,12 @@ _STAT_TYPE_MAP: dict[str, str] = {
     "pitcher fantasy score":"fantasy_pitcher",
     "fantasy_points_hitter":"fantasy_hitter",
     "fantasy_points_pitcher":"fantasy_pitcher",
-    # Earned runs (PrizePicks uses "earned runs allowed" as of 2026)
+    # Earned runs
     "earned runs":          "earned_runs",
     "earned_runs":          "earned_runs",
-    "earned runs allowed":  "earned_runs",
-    # Pitcher hits / walks allowed (PP labels as of 2026)
-    "hits allowed":         "hits_allowed",
-    "walks allowed":        "walks_allowed",
-    "pitching outs":        "pitching_outs",
-    # Walks (batter)
+    # Walks (pitcher)
     "walks":                "walks",
-    # Doubles / triples
-    "doubles":              "doubles",
-    "triples":              "triples",
 }
-
 
 
 def normalise_stat(raw: str) -> str | None:
@@ -749,6 +586,7 @@ def implied_prob_from_odds(odds: float) -> float:
 def calc_ev(true_prob: float, odds: float = -110.0) -> float:
     """Return EV percentage given true probability and American odds."""
     dec     = american_to_decimal(odds)
+    implied = implied_prob_from_odds(odds)
     no_vig  = true_prob
     ev_pct  = (no_vig * (dec - 1) - (1 - no_vig)) * 100
     return ev_pct
@@ -772,19 +610,15 @@ def kelly_fraction(prob: float, odds: float = -110.0) -> float:
 @dataclass
 class PropLeg:
     """A fully evaluated parlay leg ready for Discord."""
-    player_name:    str
-    prop_type:      str
-    side:           str
-    line:           float
-    platform:       str
-    implied_prob:   float
-    entry_type:     str   = ""
-    fantasy_pts:    float = 0.0
-    ev_pct:         float = 0.0
-    # Phase 27: Enhancement layer signals
-    de_boost:       float = 0.0   # DraftEdge probability blend delta
-    sbd_ticket_pct: float = 0.0   # SBD public ticket% (FadeAgent signal)
-    is_fade_signal: bool  = False  # True when ticket_pct ≥ 65%
+    player_name:   str
+    prop_type:     str
+    side:          str
+    line:          float
+    platform:      str
+    implied_prob:  float
+    entry_type:    str   = ""
+    fantasy_pts:   float = 0.0
+    ev_pct:        float = 0.0
 
 
 def build_parlay(
@@ -806,14 +640,10 @@ def build_parlay(
         l for l in legs
         if agent["filter"](
             type("SR", (), {
-                "side":            l.side,
-                "prop_type":       l.prop_type,
-                "implied_prob":    l.implied_prob,
+                "side": l.side,
+                "prop_type": l.prop_type,
+                "implied_prob": l.implied_prob,
                 "fantasy_pts_edge": l.fantasy_pts,
-                # Phase 27: enhancement signals exposed to agent filters
-                "is_fade_signal":  l.is_fade_signal,
-                "sbd_ticket_pct":  l.sbd_ticket_pct,
-                "de_boost":        l.de_boost,
             })()
         )
         # Hard exclusion: leg already used by a previous agent
@@ -870,141 +700,6 @@ def build_parlay(
 
 
 # ---------------------------------------------------------------------------
-# OmegaStack ensemble meta-model (18th agent)
-# ---------------------------------------------------------------------------
-
-def build_omega_parlay(
-    legs: list[PropLeg],
-    excluded_keys: set[tuple] | None = None,
-) -> dict | None:
-    """
-    OmegaStack — 18th agent: true ensemble meta-model.
-
-    Triple confirmation required: a leg must pass ALL of
-    VultureStack, UmpireAgent, and FadeAgent filters.  Each contributing
-    agent then adds its own additive edge to the raw implied_prob, and the
-    weighted stacked probability is computed:
-
-        stacked_prob = 0.60 × (prob + 0.040)   # VultureStack
-                     + 0.25 × (prob + 0.020)   # UmpireAgent
-                     + 0.15 × (prob + 0.015)   # FadeAgent
-
-    Only legs with stacked_prob >= OMEGA_STACK_MIN_PROB (0.65) are included.
-    Raw implied_prob must be ~0.62+ to clear the gate — the tightest bar in
-    the entire system.  Result: fewest parlays, highest conviction.
-    """
-    if excluded_keys is None:
-        excluded_keys = set()
-
-    # Resolve contributing-agent filter lambdas by name once
-    agent_filters: dict[str, any] = {
-        a["name"]: a["filter"] for a in AGENT_CONFIGS
-    }
-    vulture_f = agent_filters.get("VultureStack", lambda _r: False)
-    umpire_f  = agent_filters.get("UmpireAgent",  lambda _r: False)
-    fade_f    = agent_filters.get("FadeAgent",    lambda _r: False)
-
-    qualified: list[tuple[PropLeg, float]] = []
-    for leg in legs:
-        if (leg.player_name, leg.prop_type, leg.side) in excluded_keys:
-            continue
-
-        # Synthetic SelectionResult for filter evaluation
-        sr = type("SR", (), {
-            "side":              leg.side,
-            "prop_type":         leg.prop_type,
-            "implied_prob":      leg.implied_prob,
-            "fantasy_pts_edge":  leg.fantasy_pts,
-        })()
-
-        # Triple confirmation — all three must agree
-        if not (vulture_f(sr) and umpire_f(sr) and fade_f(sr)):
-            continue
-
-        # Weighted stacked probability with per-agent edge boosts
-        vulture_eff  = leg.implied_prob + _OMEGA_AGENT_EDGE["VultureStack"]
-        umpire_eff   = leg.implied_prob + _OMEGA_AGENT_EDGE["UmpireAgent"]
-        fade_eff     = leg.implied_prob + _OMEGA_AGENT_EDGE["FadeAgent"]
-        stacked_prob = (
-            OMEGA_STACK_WEIGHTS["VultureStack"] * vulture_eff
-            + OMEGA_STACK_WEIGHTS["UmpireAgent"]  * umpire_eff
-            + OMEGA_STACK_WEIGHTS["FadeAgent"]    * fade_eff
-        )
-
-        if stacked_prob < OMEGA_STACK_MIN_PROB:
-            continue
-
-        qualified.append((leg, stacked_prob))
-
-    if len(qualified) < MIN_LEGS:
-        return None
-
-    # Sort by stacked_prob desc, cap at OMEGA_STACK_MAX_LEGS
-    qualified.sort(key=lambda t: -t[1])
-    selected_pairs = qualified[: min(OMEGA_STACK_MAX_LEGS, MAX_LEGS)]
-
-    selected_legs  = [p[0] for p in selected_pairs]
-    selected_probs = [p[1] for p in selected_pairs]
-
-    ev_pct       = sum(calc_ev(sp) for sp in selected_probs) / len(selected_probs)
-    avg_prob     = sum(selected_probs) / len(selected_probs)
-    prob_score   = (avg_prob - 0.50) / 0.30 * 7.0
-    ev_bonus     = min(ev_pct / 15.0 * 2.0, 2.0)
-    legs_penalty = max(0, len(selected_legs) - 3) * 0.3
-    conf         = round(min(10.0, max(1.0, prob_score + ev_bonus - legs_penalty)), 1)
-
-    return {
-        "agent_name":  "OmegaStack",
-        "agent_emoji": "🔱",
-        "entry_type":  "STANDARD",
-        "ev_pct":      round(ev_pct, 2),
-        "confidence":  conf,
-        "notes":       "VultureStack×0.60 + UmpireAgent×0.25 + FadeAgent×0.15 — triple confirm ≥ 0.65 stacked",
-        "legs": [
-            {
-                "player_name":  l.player_name,
-                "prop_type":    l.prop_type,
-                "side":         l.side,
-                "line":         l.line,
-                "platform":     l.platform,
-                "implied_prob": round(sp, 4),
-                "entry_type":   l.entry_type,
-                "fantasy_pts":  round(l.fantasy_pts, 2),
-            }
-            for l, sp in zip(selected_legs, selected_probs)
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Phase 27: MLB player name → mlbam_id lookup
-# ---------------------------------------------------------------------------
-
-def _build_mlbam_lookup() -> dict:
-    """
-    Fetch all active MLB players from the Stats API and build a
-    lowercase-full-name → mlbam_id mapping.  Used to attach Statcast
-    features to raw props (which carry player names, not MLBAM IDs).
-
-    Falls back to an empty dict on any network/parse error — Statcast
-    enrichment degrades gracefully without it.
-    """
-    try:
-        import datetime as _dt
-        season = _dt.datetime.now(_dt.timezone.utc).year
-        resp = requests.get(
-            "https://statsapi.mlb.com/api/v1/sports/1/players",
-            params={"season": season, "gameType": "R"},
-            headers={"User-Agent": "PropIQ/1.0"},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            logger.warning("[MLBAM] Lookup HTTP %d — Statcast enrichment skipped",
-                           resp.status_code)
-            return {}
-        lookup: dict = {}
-        for person in resp.json().get("people", []):
-# ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1014,11 +709,6 @@ class LiveDispatcher:
     def __init__(self, dry_run: bool = False) -> None:
         self.dry_run   = dry_run
         self.selector  = platform_selector
-
-    def _fetch_raw_props(self) -> list:
-        pp_props = fetch_prizepicks_props()
-        ud_props = fetch_underdog_props()
-        return pp_props + ud_props
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1034,57 +724,16 @@ class LiveDispatcher:
         logger.info("%d games scheduled", len(games))
 
         # 2. Fetch live props from both platforms
-        all_raw = self._fetch_raw_props()
+        pp_props = fetch_prizepicks_props()
+        ud_props = fetch_underdog_props()
+        all_raw  = pp_props + ud_props
 
         if not all_raw:
             logger.warning("No props fetched from either platform — aborting.")
             return
 
-        # ── Phase 27: Enrich raw props with enhancement layers ────────────
-        # Step 1: DraftEdge projections (name-based, adds de_* fields)
-        if _DE_AVAILABLE:
-            try:
-                all_raw = _de_enrich(all_raw)
-                logger.info("[Phase27] DraftEdge enrichment applied to %d props",
-                            len(all_raw))
-            except Exception as exc:
-                logger.warning("[Phase27] DraftEdge enrichment failed: %s", exc)
-
-        # Step 2: Statcast XGBoost features (mlbam_id resolved from Stats API)
-        if _SC_AVAILABLE:
-            try:
-                mlbam_lookup = _build_mlbam_lookup()
-                for p in all_raw:
-                    name_key = p.get("player_name", "").lower()
-                    p["mlbam_id"] = mlbam_lookup.get(name_key, 0)
-                _sc_layer = StatcastFeatureLayer()
-                _ud_pitcher_pos = {"SP", "RP", "P", "CP"}
-                pitcher_raw = [p for p in all_raw
-                               if p.get("position", "") in _ud_pitcher_pos]
-                batter_raw  = [p for p in all_raw
-                               if p.get("position", "") not in _ud_pitcher_pos]
-                pitcher_raw = _sc_enrich(pitcher_raw, "pitcher", layer=_sc_layer)
-                batter_raw  = _sc_enrich(batter_raw,  "batter",  layer=_sc_layer)
-                all_raw = pitcher_raw + batter_raw
-                logger.info("[Phase27] Statcast enrichment applied")
-            except Exception as exc:
-                logger.warning("[Phase27] Statcast enrichment failed: %s", exc)
-
-        # Step 3: SportsBettingDime public trends (FadeAgent precision upgrade)
-        sbd_game_df = None
-        sbd_prop_df = None
-        if _SBD_AVAILABLE:
-            try:
-                _sbd = PublicTrendsScraper()
-                sbd_game_df, sbd_prop_df = _sbd.fetch()
-                logger.info("[Phase27] SBD trends: %d games, %d player props",
-                            len(sbd_game_df), len(sbd_prop_df))
-            except Exception as exc:
-                logger.warning("[Phase27] SBD fetch failed: %s", exc)
-        # ── End Phase 27 enrichment ────────────────────────────────────────
-
-        # 3. Build evaluated leg pool (enrichment data flows through)
-        leg_pool: list[PropLeg] = self._evaluate_props(all_raw, sbd_game_df, sbd_prop_df)
+        # 3. Build evaluated leg pool
+        leg_pool: list[PropLeg] = self._evaluate_props(all_raw)
         logger.info("Leg pool: %d evaluated legs (min prob %.0f%%)",
                     len(leg_pool), MIN_PROB * 100)
 
@@ -1093,13 +742,12 @@ class LiveDispatcher:
             return
 
         # 4. Per-agent parlay building + Discord dispatch
-        # Each agent picks independently from the full filtered pool.
-        # Shared legs across parlays are acceptable — consensus across agents
-        # is a positive signal, not a risk. Each parlay is a separate $20 bet
-        # with its own thesis.
+        # global_used: tracks (player_name, prop_type, side) already claimed.
+        # Once a leg is in a sent parlay it cannot appear in any subsequent one.
+        global_used: set[tuple] = set()
         sent = 0
         for agent in AGENT_CONFIGS:
-            parlay = build_parlay(leg_pool, agent)
+            parlay = build_parlay(leg_pool, agent, excluded_keys=global_used)
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
                 continue
@@ -1122,115 +770,23 @@ class LiveDispatcher:
                 agent["name"], n, ev, conf,
             )
 
+            # Claim these legs — no subsequent agent may reuse them
+            for leg in parlay["legs"]:
+                global_used.add((leg["player_name"], leg["prop_type"], leg["side"]))
+
             if not self.dry_run:
-                # Attach live season record for this agent before sending
-                parlay["season_stats"] = get_agent_season_stats(agent["name"])
                 discord_alert.send_parlay_alert(parlay)
                 time.sleep(1.5)   # rate-limit Discord webhook (25 req/s global)
-                # Record parlay in DB as PENDING (settled nightly by nightly_recap.py)
-                record_parlay(
-                    date=date,
-                    agent=agent["name"],
-                    num_legs=len(parlay["legs"]),
-                    confidence=conf,
-                    ev_pct=ev,
-                    legs=[
-                        {
-                            "player_name": l.get("player_name", l.get("player", "")),
-                            "prop_type":   l["prop_type"],
-                            "side":        l["side"],
-                            "line":        l["line"],
-                        }
-                        for l in parlay["legs"]
-                    ],
-                )
             else:
                 logger.info("[DRY-RUN] Would send: %s",
                             json.dumps(parlay, indent=2)[:400])
             sent += 1
 
-        # ── OmegaStack (18th agent) — triple-confirmation ensemble ──
-        omega = build_omega_parlay(leg_pool)
-        if omega:
-            ev_o   = omega.get("ev_pct", 0)
-            conf_o = omega.get("confidence", 0)
-            if ev_o >= MIN_EV_PCT and conf_o >= 7.0:
-                logger.info(
-                    "[OmegaStack] %d-leg ensemble parlay EV=%.1f%% conf=%.1f/10 → SEND",
-                    len(omega["legs"]), ev_o, conf_o,
-                )
-                if not self.dry_run:
-                    omega["season_stats"] = get_agent_season_stats("OmegaStack")
-                    discord_alert.send_parlay_alert(omega)
-                    time.sleep(1.5)
-                    record_parlay(
-                        date=date,
-                        agent="OmegaStack",
-                        num_legs=len(omega["legs"]),
-                        confidence=conf_o,
-                        ev_pct=ev_o,
-                        legs=[
-                            {
-                                "player_name": l.get("player_name", l.get("player", "")),
-                                "prop_type":   l["prop_type"],
-                                "side":        l["side"],
-                                "line":        l["line"],
-                            }
-                            for l in omega["legs"]
-                        ],
-                    )
-                else:
-                    logger.info("[DRY-RUN] OmegaStack would send: %s",
-                                json.dumps(omega, indent=2)[:400])
-                sent += 1
-            else:
-                logger.info(
-                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 — below gate, skipped.",
-                    ev_o, conf_o,
-                )
-        else:
-            logger.info("[OmegaStack] No triple-confirmation legs today.")
-
         logger.info("Dispatch complete — %d parlays sent for %s", sent, date)
-
-        # ── StreakAgent (19th agent) — runs after the main 18-agent dispatch ──
-        # Single best pick per day for Underdog Streaks format (11 consecutive
-        # correct picks → $1K/$5K/$10K prize). Confidence gate ≥ 8/10.
-        try:
-            from streak_agent import run_streak_pick
-            streak_entry = int(os.getenv("STREAK_ENTRY_AMOUNT", "1"))
-            streak_result = run_streak_pick(
-                date_str     = date,
-                entry_amount = streak_entry,
-                dry_run      = self.dry_run,
-            )
-            if streak_result:
-                logger.info(
-                    "[StreakAgent] Pick #%d/%d sent — %s %s %.1f %s "
-                    "| conf=%.1f | prob=%.1f%%",
-                    streak_result["pick_number"], 11,
-                    streak_result["player_name"],
-                    streak_result["prop_type"],
-                    streak_result["line"],
-                    streak_result["direction"],
-                    streak_result["confidence"],
-                    streak_result["probability"] * 100,
-                )
-            else:
-                logger.info("[StreakAgent] No qualifying pick today (conf ≥ 8.0 gate not met).")
-        except ImportError:
-            logger.debug("[StreakAgent] streak_agent.py not found — skipping.")
-        except Exception as _streak_err:
-            logger.warning("[StreakAgent] Error during streak pick: %s", _streak_err)
 
     # ── private ───────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _evaluate_props(
-        raw_props: list[dict],
-        sbd_game_df=None,
-        sbd_prop_df=None,
-    ) -> list[PropLeg]:
+    def _evaluate_props(self, raw_props: list[dict]) -> list[PropLeg]:
         """
         Normalise raw props, compare platforms, apply EV gate.
 
@@ -1326,8 +882,10 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
+        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
+        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
@@ -1351,16 +909,6 @@ class LiveDispatcher:
                 groups[key][platform] = {
                     "line": line_val, "entry_type": etype,
                     "player_name": pname, "position": position,
-                    # Phase 27: preserve enrichment fields through grouping
-                    "de_hit_pct":   float(raw.get("de_hit_pct",  0.0) or 0.0),
-                    "de_hr_pct":    float(raw.get("de_hr_pct",   0.0) or 0.0),
-                    "de_k_pct":     float(raw.get("de_k_pct",    0.0) or 0.0),
-                    "de_sb_pct":    float(raw.get("de_sb_pct",   0.0) or 0.0),
-                    "de_run_pct":   float(raw.get("de_run_pct",  0.0) or 0.0),
-                    "de_rbi_pct":   float(raw.get("de_rbi_pct",  0.0) or 0.0),
-                    "sc_whiff_rate":    float(raw.get("sc_whiff_rate",    0.0) or 0.0),
-                    "sc_hard_hit_rate": float(raw.get("sc_hard_hit_rate", 0.0) or 0.0),
-                    "sc_season_avg":    float(raw.get("sc_season_avg",    0.0) or 0.0),
                 }
 
         # ── Evaluate each group ────────────────────────────────────────────
@@ -1424,66 +972,6 @@ class LiveDispatcher:
                     platform_bonus = min(0.03, line_diff * 0.01)
                     prob = min(0.80, prob + platform_bonus)
 
-                # ── Phase 27: Enhancement layer boosts ────────────────────
-                de_boost_val = 0.0
-
-                # 1. DraftEdge blend (65% base + 35% DE signal when available)
-                def _de_signal(pt: str, sd: str, ent: dict) -> float:
-                    """Map prop_type + side to the relevant DraftEdge probability."""
-                    _over_map = {
-                        "hits":         "de_hit_pct",
-                        "home_runs":    "de_hr_pct",
-                        "stolen_bases": "de_sb_pct",
-                        "runs":         "de_run_pct",
-                        "rbis":         "de_rbi_pct",
-                        "strikeouts":   "de_k_pct",
-                    }
-                    if sd == "Over":
-                        key = _over_map.get(pt)
-                        return float(ent.get(key, 0.0) or 0.0) if key else 0.0
-                    else:  # Under — invert the over probability
-                        key = _over_map.get(pt)
-                        if not key:
-                            return 0.0
-                        p_over = float(ent.get(key, 0.0) or 0.0)
-                        return (1.0 - p_over) if p_over > 0 else 0.0
-
-                de_sig = _de_signal(prop_type, side, chosen_entry)
-                if de_sig > 0:
-                    blended = 0.65 * prob + 0.35 * de_sig
-                    de_boost_val = round(blended - prob, 4)
-                    prob = min(0.80, blended)
-
-                # 2. Statcast boosts (small additive signal on K and HR/TB props)
-                if prop_type == "strikeouts" and side == "Over":
-                    sc_whiff = float(chosen_entry.get("sc_whiff_rate", 0.0) or 0.0)
-                    if sc_whiff > 0:
-                        # whiff_rate 0.20–0.35 typical → adds 3–5% to K prob
-                        prob = min(0.80, prob + sc_whiff * 0.15)
-                elif prop_type in ("home_runs", "total_bases") and side == "Over":
-                    sc_hh = float(chosen_entry.get("sc_hard_hit_rate", 0.0) or 0.0)
-                    if sc_hh > 0:
-                        prob = min(0.80, prob + sc_hh * 0.10)
-                elif prop_type == "hits" and side == "Over":
-                    sc_avg = float(chosen_entry.get("sc_season_avg", 0.0) or 0.0)
-                    if sc_avg > 0:
-                        # Positive contact rate (avg > .270) adds slight hit prob bump
-                        prob = min(0.80, prob + max(0.0, sc_avg - 0.250) * 0.10)
-
-                # 3. SBD FadeAgent signal
-                sbd_ticket_pct = 0.0
-                is_fade_signal = False
-                if sbd_game_df is not None and sbd_prop_df is not None and _SBD_AVAILABLE:
-                    try:
-                        raw_pct, _ = _get_fade_signal(
-                            pname, "", prop_type, sbd_game_df, sbd_prop_df,
-                        )
-                        sbd_ticket_pct = float(raw_pct or 0.0)
-                        is_fade_signal = sbd_ticket_pct >= 65.0
-                    except Exception:
-                        pass  # non-fatal: SBD data unavailable for this prop
-                # ── End Phase 27 ──────────────────────────────────────────
-
                 # Gate checks
                 if prob < cfg["min_prob"]:
                     continue
@@ -1503,9 +991,6 @@ class LiveDispatcher:
                     entry_type=entry_type,
                     fantasy_pts=0.0,
                     ev_pct=round(ev, 2),
-                    de_boost=de_boost_val,
-                    sbd_ticket_pct=round(sbd_ticket_pct, 1),
-                    is_fade_signal=is_fade_signal,
                 ))
 
         # Sort by implied prob desc
