@@ -115,13 +115,35 @@ except ImportError:
     class _DummyFormLayer:  # noqa: D101
         @staticmethod
         def prefetch_form_data(*_args, **_kwargs) -> None:
-            # No-op: Dummy form layer does not prefetch any data
-            pass
+            """Dummy implementation; no form data to prefetch."""
+            pass  # intentionally left blank
         @staticmethod
         def get_form_adjustment(*_args, **_kwargs) -> float: return 0.0  # noqa: E704
 
     _form_layer = _DummyFormLayer()  # type: ignore[assignment]
     logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
+
+# ---------------------------------------------------------------------------
+# FanGraphs season stats layer (pybaseball — Phase 34)
+# Provides CSW%, wRC+, xFIP, ISO, wOBA and 10 additional metrics.
+# Cached daily; gracefully disabled if pybaseball is unavailable.
+# ---------------------------------------------------------------------------
+try:
+    from fangraphs_layer import (
+        fangraphs_adjustment as _fg_adjustment,
+        get_batter as _fg_get_batter,
+        get_pitcher as _fg_get_pitcher,
+    )
+    _FG_AVAILABLE = True
+    logger.info("[FG] FanGraphs layer loaded.")
+except ImportError:
+    _FG_AVAILABLE = False
+
+    def _fg_adjustment(*_a, **_kw) -> float: return 0.0  # noqa: E704
+    def _fg_get_batter(*_a, **_kw) -> dict: return {}     # noqa: E704
+    def _fg_get_pitcher(*_a, **_kw) -> dict: return {}    # noqa: E704
+
+    logger.warning("[FG] fangraphs_layer not found — FanGraphs adjustments disabled.")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -392,8 +414,6 @@ _HEADERS = {
 _pp_session: requests.Session | None = None
 
 
-_pp_session = None
-
 def _get_pp_session() -> requests.Session:
     """Return a warmed-up PrizePicks session, creating one if needed."""
     global _pp_session
@@ -552,7 +572,7 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
-def fetch_prizepicks_props() -> list[dict]:
+def fetch_prizepicks_props(pp_session=None) -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -569,8 +589,8 @@ def fetch_prizepicks_props() -> list[dict]:
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
-                _pp_session = None
-            sess = _get_pp_session()
+                pp_session = None
+            sess = pp_session or _get_pp_session()
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
                 params={"per_page": 250, "single_stat": True, "league_id": 2},
@@ -581,11 +601,11 @@ def fetch_prizepicks_props() -> list[dict]:
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                _pp_session = None   # force re-warm on next attempt
+                pp_session = None   # force re-warm on next attempt
         if data is None:
             return []
 
-        # Build player id 12; name map from included resources
+        # Build player id → name map from included resources
         player_map: dict[str, str] = {}
         for item in data.get("included", []):
             if item.get("type") == "new_player":
@@ -1811,6 +1831,36 @@ class LiveDispatcher:
                     prob = min(0.80, max(0.40, prob + _form_adj))
                 except Exception:
                     pass  # graceful degradation — never let form data kill a leg
+
+                # ── Layer 5: FanGraphs season stats (Phase 34) ───────────────
+                # Per-agent signal routing:
+                #   UmpireAgent / ArsenalAgent  → CSW%, SwStr%, K-BB%
+                #   MLEdgeAgent / F5Agent       → xFIP, SIERA
+                #   BullpenAgent / VultureStack → FIP
+                #   UnderMachine / OmegaStack   → xFIP (Under pitcher props)
+                #   LineupAgent / PlatoonAgent  → wRC+, wOBA
+                #   WeatherAgent                → ISO, HR/FB%
+                #   GetawayAgent                → BABIP regression flag
+                #   FadeAgent                   → LOB%, BABIP
+                #   EVHunter / StreakAgent      → full signal set
+                if _FG_AVAILABLE:
+                    try:
+                        try:
+                            _fg_data = _fg_get_pitcher(pname)
+                            player_type = "pitcher"
+                        except KeyError:
+                            _fg_data = _fg_get_batter(pname)
+                            player_type = "batter"
+                        _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
+                        if _fg_adj != 0.0:
+                            logger.debug(
+                                "[FG] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
+                                pname, prop_type, _fg_adj, prob, prob + _fg_adj,
+                            )
+                        prob = min(0.80, max(0.40, prob + _fg_adj))
+                    except Exception:
+                        pass  # FanGraphs is additive — never let it crash the leg
+                # ── End Layer 5 ──────────────────────────────────────────────
 
                 # Gate checks
                 if prob < cfg["min_prob"]:
