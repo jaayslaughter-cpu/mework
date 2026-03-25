@@ -204,6 +204,9 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- One embed field per slip leg ---
     for i, leg in enumerate(legs, start=1):
+        side: str = leg.get("side", "?")
+        side_emoji = "⬆️" if side.lower() == "over" else "⬇️"
+        prob_pct = round(float(leg.get("true_prob", 0.0)) * 100, 1)
     # --- One embed field per slip leg (ALL legs guaranteed) ---
     # Discord hard limit: 25 fields per embed.
     # Reserved: 1 entry-type field + 1 metrics field = 23 max legs.
@@ -228,6 +231,7 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
                 f"{side_emoji} **{side}** "
                 f"{leg.get('prop', '?')} "
                 f"({leg.get('line', '?')}) "
+                f"| {prob_pct}% prob"
                 f"| {prob_pct}% prob | **{ev_label}**"
         leg_value = (
             f"{side_emoji} **{side}** "
@@ -259,6 +263,11 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     # --- Metrics summary field ---
     ev_pct = round(total_ev * 100, 2)
     ev_sign = "+" if total_ev >= 0 else ""
+    fields.append({
+        "name": "📊 Slip Metrics",
+        "value": (
+            f"**Total EV:** {ev_sign}{ev_pct}%\n"
+            f"**Unit Size:** {unit_size} units\n"
     avg_ev_pct = round(avg_leg_ev * 100, 2)
     avg_ev_sign = "+" if avg_leg_ev >= 0 else ""
     # Build agent-specific context line (helps orient users on each agent's edge)
@@ -292,6 +301,10 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
         "inline": False,
     })
 
+    return {
+        "title": (
+            f"[{agent_name}] {entry_badge['icon']} "
+            f"{slip_type.title()} — {entry_badge['label']}"
     avg_ev_badge = f"{'+' if avg_leg_ev >= 0 else ''}{round(avg_leg_ev * 100, 1)}% EV"
     return {
         "title": (
