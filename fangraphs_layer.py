@@ -5,21 +5,23 @@ fangraphs_layer.py
 import tempfile
 from .utils import _normalise_name, _safe_float
 from .settings import cache_path
-Phase 34 — FanGraphs season statistics via pybaseball.
 
-Provides per-agent signal enhancement for all 19 agents:
+# Phase 34 - FanGraphs season statistics via pybaseball.
+#
+# Provides per-agent signal enhancement for all 19 agents:
+#
+#   Pitchers
+#   --------
+#   csw_pct    : Called Strikes + Whiffs % (best single K predictor)
+#   swstr_pct  : Swinging Strike %
+#   k_bb_pct   : K% minus BB% (true command metric)
+#   xfip       : Expected FIP - strips HR variance (true skill ERA)
+#   siera      : Skill-Interactive ERA (sequence-adjusted skill metric)
+#   fip        : Fielding Independent Pitching
+#   hr_fb_pct  : Home run per fly ball rate
+#   lob_pct    : Left-on-base strand rate (regression flag)
+#   babip      : Pitcher BABIP (luck normaliser)
 
-  Pitchers
-  --------
-  csw_pct    : Called Strikes + Whiffs % (best single K predictor)
-  swstr_pct  : Swinging Strike %
-  k_bb_pct   : K% minus BB% (true command metric)
-  xfip       : Expected FIP — strips HR variance (true skill ERA)
-  siera      : Skill-Interactive ERA (sequence-adjusted skill metric)
-  fip        : Fielding Independent Pitching
-  hr_fb_pct  : Home run per fly ball rate
-  lob_pct    : Left-on-base strand rate (regression flag)
-  babip      : Pitcher BABIP (luck normaliser)
 from __future__ import annotations
 
 import json
