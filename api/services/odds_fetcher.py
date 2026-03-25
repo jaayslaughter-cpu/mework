@@ -101,6 +101,51 @@ def _get(url: str, params: dict | None = None,
 # Abstract base
 # ---------------------------------------------------------------------------
 class BaseOddsFetcher(ABC):
+# ─────────────────────────────────────────────
+API_KEYS = [
+    os.getenv("ODDS_API_KEY_1", "e4e30098807a9eece674d85e30471f03"),
+    os.getenv("ODDS_API_KEY_2", "673bf195062e60e666399be40f763545"),
+]
+BASE_URL = "https://api.the-odds-api.com/v4"
+CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL", "120"))   # 2 min default
+MAX_RETRIES = 4
+BASE_BACKOFF = 2.0   # seconds
+
+
+# ─────────────────────────────────────────────
+# In-memory cache
+# ─────────────────────────────────────────────
+class SimpleCache:
+    def __init__(self, ttl: int = CACHE_TTL_SECONDS):
+        self._store: Dict[str, Tuple[float, Any]] = {}
+        self.ttl = ttl
+
+    @staticmethod
+    def _cache_key(url: str, params: Dict) -> str:
+        raw = url + json.dumps(params, sort_keys=True)
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def get(self, url: str, params: Dict) -> Optional[Any]:
+        key = self._cache_key(url, params)
+        if key in self._store:
+            ts, val = self._store[key]
+            if time.time() - ts < self.ttl:
+                return val
+            del self._store[key]
+        return None
+
+    def set(self, url: str, params: Dict, value: Any):
+        key = self._cache_key(url, params)
+        self._store[key] = (time.time(), value)
+
+    def invalidate_all(self):
+        self._store.clear()
+
+
+# ─────────────────────────────────────────────
+# Rate limiter
+# ─────────────────────────────────────────────
+class RateLimiter:
     """
     Common interface for all PropIQ odds providers.
 
@@ -122,6 +167,61 @@ class BaseOddsFetcher(ABC):
     ) -> list[dict]:
         """
         Hit the provider endpoint for the given sport / market / date.
+    def __init__(self, per_minute: int = 25, per_day: int = 450):
+        self.per_minute = per_minute
+        self.per_day = per_day
+        self._minute_counts: Dict[int, Dict[str, int]] = {}  # key -> {minute_bucket: count}
+        self._day_counts: Dict[str, int] = {k: 0 for k in API_KEYS}
+        self._remaining: Dict[str, int] = {k: per_day for k in API_KEYS}
+        self._day_reset: Dict[str, datetime] = {k: datetime.utcnow() + timedelta(days=1) for k in API_KEYS}
+
+    @staticmethod
+    def _minute_bucket() -> int:
+        return int(time.time() // 60)
+
+    def can_request(self, api_key: str) -> bool:
+        # Reset daily if needed
+        if datetime.utcnow() > self._day_reset.get(api_key, datetime.utcnow()):
+            self._day_counts[api_key] = 0
+            self._day_reset[api_key] = datetime.utcnow() + timedelta(days=1)
+
+        bucket = self._minute_bucket()
+        minute_count = self._minute_counts.get(api_key, {}).get(bucket, 0)
+        day_count = self._day_counts.get(api_key, 0)
+
+        return minute_count < self.per_minute and day_count < self.per_day
+
+    def record_request(self, api_key: str):
+        bucket = self._minute_bucket()
+        if api_key not in self._minute_counts:
+            self._minute_counts[api_key] = {}
+        self._minute_counts[api_key][bucket] = self._minute_counts[api_key].get(bucket, 0) + 1
+        self._day_counts[api_key] = self._day_counts.get(api_key, 0) + 1
+
+    def update_from_headers(self, api_key: str, headers: Dict):
+        """Parse X-RateLimit-Remaining headers."""
+        remaining = headers.get("x-requests-remaining")
+        if remaining:
+            try:
+                self._remaining[api_key] = int(remaining)
+            except ValueError:
+                pass
+
+    def best_available_key(self) -> Optional[str]:
+        """Return the key with the most remaining quota."""
+        for key in API_KEYS:
+            if self.can_request(key):
+                return key
+        return None
+
+    def status(self) -> Dict:
+        return {
+            key: {
+                "remaining_day": self._remaining.get(key, "?"),
+                "used_today": self._day_counts.get(key, 0),
+            }
+            for key in API_KEYS
+        }
 
         Args:
             sport:       Provider-specific sport slug
@@ -255,6 +355,12 @@ class OddsApiOddsFetcher(BaseOddsFetcher):
 
         Args:
             response: Raw JSON string from The Odds API.
+        # Check cache first
+        if use_cache:
+            cached = self.cache.get(url, params)
+            if cached is not None:
+                logger.debug("Cache hit: %s", endpoint)
+                return cached
 
         Returns:
             Parsed list of event dicts.
@@ -342,6 +448,29 @@ class OddsApiOddsFetcher(BaseOddsFetcher):
                     if not self._rotate_key():
                         logger.error("[OddsAPI] Both keys exhausted")
                         return []
+                self.limiter.record_request(api_key)
+                resp = self.session.get(url, params=params, timeout=15)
+                self.limiter.update_from_headers(api_key, dict(resp.headers))
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if use_cache:
+                        self.cache.set(url, params, data)
+                    return data
+
+                elif resp.status_code == 422:
+                    logger.error("Odds API 422 Unprocessable: %s", resp.text)
+                    return None
+
+                elif resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 60))
+                    logger.warning("Rate limited. Waiting %ss then rotating key.", retry_after)
+                    time.sleep(retry_after)
+                    # Try next key
+                    new_key = self.limiter.best_available_key()
+                    if new_key and new_key != api_key:
+                        api_key = new_key
+                        params["apiKey"] = api_key
                     continue
                 resp.raise_for_status()
                 return resp.json()
@@ -397,6 +526,23 @@ class SportsBooksReviewOddsFetcher(BaseOddsFetcher):
     The standalone module contains the full XML/JSON/HTML transport stack,
     xmltodict parsing, parse_event() Participant extraction, and
     normalize_odds() schema mapping.
+                else:
+                    logger.warning("HTTP %s on attempt %s: %s", resp.status_code, attempt + 1, resp.text[:200])
+
+            except requests.exceptions.Timeout:
+                logger.warning("Timeout on attempt %s", attempt + 1)
+            except requests.exceptions.ConnectionError as e:
+                logger.warning("Connection error on attempt %s: %s", attempt + 1, e)
+            except Exception as e:
+                logger.error("Unexpected error: %s", e)
+
+            # Exponential backoff with jitter
+            wait = BASE_BACKOFF ** (attempt + 1) + random.uniform(0, 1)
+            logger.info("Backing off %0.1fs before retry %s", wait, attempt + 2)
+            time.sleep(wait)
+
+        logger.error("All %s attempts failed for %s", MAX_RETRIES, endpoint)
+        return None
 
     REMOVED: old single-endpoint SBR API stub — replaced with triple-transport
     scraper (JSON AJAX → XML feed → HTML __NEXT_DATA__ fallback).
@@ -405,6 +551,32 @@ class SportsBooksReviewOddsFetcher(BaseOddsFetcher):
     def __init__(self) -> None:
         from api.services.sportsbookreview_odds_fetcher import (  # noqa: PLC0415
             SportsBooksReviewOddsFetcher as _SBRImpl,
+        games = []
+        for event in data:
+            game = {
+                "event_id": event.get("id"),
+                "home_team": event.get("home_team"),
+                "away_team": event.get("away_team"),
+                "commence_time": event.get("commence_time"),
+                "bookmakers": {},
+            }
+            for book in event.get("bookmakers", []):
+                book_data = {}
+                for market in book.get("markets", []):
+                    mkey = market["key"]
+                    outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
+                    book_data[mkey] = outcomes
+                game["bookmakers"][book["title"]] = book_data
+            games.append(game)
+
+        logger.info("Fetched %s MLB games", len(games))
+        return games
+
+    def get_mlb_events(self) -> List[Dict]:
+        """Get list of events (for getting event IDs)."""
+        data = self._request(
+            "/sports/baseball_mlb/events",
+            {"regions": "us"},
         )
         self._impl = _SBRImpl()
 
@@ -563,6 +735,28 @@ class OddsFetcher:
         return merged
 
     def top_clv_opportunities(
+            for book in data.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    for outcome in market.get("outcomes", []):
+                        all_props.append({
+                            "event_id": event_id,
+                            "book": book["title"],
+                            "market": market["key"],
+                            "player": outcome.get("description", outcome.get("name", "")),
+                            "side": outcome["name"],   # "Over" or "Under"
+                            "line": outcome.get("point", 0),
+                            "odds": outcome["price"],
+                            "implied_prob": self._implied_prob(outcome["price"]),
+                            "last_update": market.get("last_update"),
+                        })
+
+            # Polite delay between chunks
+            time.sleep(0.5)
+
+        logger.info("Fetched %s prop lines for event %s", len(all_props), event_id)
+        return all_props
+
+    def get_all_mlb_props(
         self,
         n: int = 20,
         min_clv_pct: float = 0.02,
