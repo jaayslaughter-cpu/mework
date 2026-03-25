@@ -18,7 +18,7 @@ if (!KEY) {
 async function getTodaysGames(date) {
 if (!KEY) console.warn('⚠️ SPORTSDATA_API_KEY is missing. Fetchers will return errors.');
 
-async function getTodaysGames(date) {
+export async function getTodaysGames(date) {
   if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
   return getOrFetch(`propiq:sportsdata:games:${date}`, 60, async () => {
     return withBackoff(async () => {
@@ -28,6 +28,7 @@ async function getTodaysGames(date) {
   });
 }
 
+export async function getStartingLineups(date) {
 async function getPlayerPropsByGame(gameId) {
   return getOrFetch(`propiq:sportsdata:props:${gameId}`, 12, async () => {
     return withBackoff(async () => {
@@ -56,7 +57,8 @@ const getStartingLineups = async (date) => {
   });
 }
 
-async function getInjuredPlayers() {
+export async function getInjuredPlayers() {
+const getInjuredPlayers = async () => {
   if (!KEY) throw new Error('SPORTSDATA_API_KEY is missing.');
   return getOrFetch('propiq:sportsdata:injuries:today', 600, async () => {
     return withBackoff(async () => {

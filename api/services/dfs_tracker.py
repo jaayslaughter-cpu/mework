@@ -312,7 +312,8 @@ class PropBacktester:
     def half_kelly(self, model_prob: float, book_prob: float) -> float:
         return self.kelly_criterion(model_prob, book_prob) / 2
 
-    def load_results(self) -> Optional[Dict]:
+    @staticmethod
+    def load_results() -> Optional[Dict]:
         if not BACKTEST_RESULTS_FILE.exists():
             return None
         with open(BACKTEST_RESULTS_FILE) as f:
