@@ -202,6 +202,8 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     ]
 
+    # --- One embed field per slip leg ---
+    for i, leg in enumerate(legs, start=1):
     # --- One embed field per slip leg (ALL legs guaranteed) ---
     # Discord hard limit: 25 fields per embed.
     # Reserved: 1 entry-type field + 1 metrics field = 23 max legs.
@@ -220,6 +222,13 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
         leg_ev_str = f"{leg_ev_sign}{round(leg_ev * 100, 1)}%"
         # Colour-code the EV label: green for positive, red for negative
         ev_label = f"✅ {leg_ev_str} EV vs no-vig" if leg_ev >= 0 else f"⚠️ {leg_ev_str} EV vs no-vig"
+        fields.append({
+            "name": f"Leg {i} — {leg.get('player', 'Unknown')}",
+            "value": (
+                f"{side_emoji} **{side}** "
+                f"{leg.get('prop', '?')} "
+                f"({leg.get('line', '?')}) "
+                f"| {prob_pct}% prob | **{ev_label}**"
         leg_value = (
             f"{side_emoji} **{side}** "
             f"{leg.get('prop', '?')} "
