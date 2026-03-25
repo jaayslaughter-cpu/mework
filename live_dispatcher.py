@@ -1926,11 +1926,11 @@ class LiveDispatcher:
                 #   EVHunter / StreakAgent      → full signal set
                 if _FG_AVAILABLE:
                     try:
-                        if player_type == "pitcher":
+                        if _player_type == "pitcher":
                             _fg_data = _fg_get_pitcher(pname)
                         else:
                             _fg_data = _fg_get_batter(pname)
-                        _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
+                        _fg_adj = _fg_adjustment(prop_type, side, _player_type, _fg_data)
                         if _fg_adj != 0.0:
                             logger.debug(
                                 "[FG] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
