@@ -41,7 +41,6 @@ import argparse
 import json
 import logging
 import math
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -299,24 +298,7 @@ AGENT_CONFIGS: list[dict] = [
 # ---------------------------------------------------------------------------
 
 _MLBAPI_BASE = "https://statsapi.mlb.com/api/v1"
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
-
-# PrizePicks needs its own referer/origin to avoid 403
-_PP_HEADERS = {
-    **_HEADERS,
-    "Referer": "https://app.prizepicks.com/",
-    "Origin":  "https://app.prizepicks.com",
-}
+_HEADERS     = {"User-Agent": "Mozilla/5.0 (PropIQ/1.0)"}
 
 
 def fetch_today_schedule(date_str: str | None = None) -> list[dict]:
@@ -445,22 +427,15 @@ def fetch_prizepicks_props() -> list[dict]:
     Returns raw list of dicts.
     """
     try:
-        data = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2 ** attempt)   # 2s, 4s back-off
-            resp = requests.get(
-                "https://api.prizepicks.com/projections",
-                params={"per_page": 250, "single_stat": True, "league_id": 2},
-                headers=_PP_HEADERS,
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                break
-            logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
-        if data is None:
+        resp = requests.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True},
+            headers=_HEADERS, timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("[PP] HTTP %d", resp.status_code)
             return []
+        data = resp.json()
 
         # Build player id → name map from included resources
         player_map: dict[str, str] = {}
@@ -970,22 +945,13 @@ class LiveDispatcher:
                 parlay["season_stats"] = get_agent_season_stats(agent["name"])
                 discord_alert.send_parlay_alert(parlay)
                 time.sleep(1.5)   # rate-limit Discord webhook (25 req/s global)
-                # Record parlay in DB as PENDING (settled nightly by nightly_recap.py)
+                # Record parlay in DB as PENDING (resolved manually or via future hook)
                 record_parlay(
                     date=date,
                     agent=agent["name"],
                     num_legs=len(parlay["legs"]),
                     confidence=conf,
                     ev_pct=ev,
-                    legs=[
-                        {
-                            "player_name": l["player"],
-                            "prop_type":   l["prop_type"],
-                            "side":        l["side"],
-                            "line":        l["line"],
-                        }
-                        for l in parlay["legs"]
-                    ],
                 )
             else:
                 logger.info("[DRY-RUN] Would send: %s",
@@ -1012,15 +978,6 @@ class LiveDispatcher:
                         num_legs=len(omega["legs"]),
                         confidence=conf_o,
                         ev_pct=ev_o,
-                        legs=[
-                            {
-                                "player_name": l["player"],
-                                "prop_type":   l["prop_type"],
-                                "side":        l["side"],
-                                "line":        l["line"],
-                            }
-                            for l in omega["legs"]
-                        ],
                     )
                 else:
                     logger.info("[DRY-RUN] OmegaStack would send: %s",
@@ -1035,36 +992,6 @@ class LiveDispatcher:
             logger.info("[OmegaStack] No triple-confirmation legs today.")
 
         logger.info("Dispatch complete — %d parlays sent for %s", sent, date)
-
-        # ── StreakAgent (19th agent) — runs after the main 18-agent dispatch ──
-        # Single best pick per day for Underdog Streaks format (11 consecutive
-        # correct picks → $1K/$5K/$10K prize). Confidence gate ≥ 8/10.
-        try:
-            from streak_agent import run_streak_pick
-            streak_entry = int(os.getenv("STREAK_ENTRY_AMOUNT", "1"))
-            streak_result = run_streak_pick(
-                date_str     = date,
-                entry_amount = streak_entry,
-                dry_run      = self.dry_run,
-            )
-            if streak_result:
-                logger.info(
-                    "[StreakAgent] Pick #%d/%d sent — %s %s %.1f %s "
-                    "| conf=%.1f | prob=%.1f%%",
-                    streak_result["pick_number"], 11,
-                    streak_result["player_name"],
-                    streak_result["prop_type"],
-                    streak_result["line"],
-                    streak_result["direction"],
-                    streak_result["confidence"],
-                    streak_result["probability"] * 100,
-                )
-            else:
-                logger.info("[StreakAgent] No qualifying pick today (conf ≥ 8.0 gate not met).")
-        except ImportError:
-            logger.debug("[StreakAgent] streak_agent.py not found — skipping.")
-        except Exception as _streak_err:
-            logger.warning("[StreakAgent] Error during streak pick: %s", _streak_err)
 
     # ── private ───────────────────────────────────────────────────────────────
 
