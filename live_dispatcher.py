@@ -360,10 +360,18 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "📋",
         "max_legs": 4,
         "entry_type": "FLEX",
+        # Phase 37: batting order awareness
+        #   - Confirmed top-6 hitters (1-6) get a lower prob gate (more PA → more opportunities)
+        #   - Confirmed bottom-3 (7-9) need higher prob to justify the reduced PA exposure
+        #   - Unconfirmed lineup (batting_order_pos == 0) keeps the original 0.53 gate
         "filter": lambda r: r.prop_type in ("hits", "rbis", "runs",
                                              "hits_runs_rbis", "fantasy_hitter")
-                            and r.implied_prob >= 0.53,
-        "note": "Volume & PA specialist — lineup construction",
+                            and (
+                                (r.batting_order_pos in range(1, 7) and r.implied_prob >= 0.52)
+                                or (r.batting_order_pos in range(7, 10) and r.implied_prob >= 0.55)
+                                or (r.batting_order_pos == 0 and r.implied_prob >= 0.53)
+                            ),
+        "note": "Volume & PA specialist — batting order aware (top-6 preferred)",
     },
     {
         "name": "GetawayAgent",
@@ -498,6 +506,40 @@ def fetch_today_schedule(date_str: str | None = None) -> list[dict]:
     except Exception as exc:
         logger.warning("[Schedule] Failed: %s", exc)
         return []
+
+
+def fetch_today_lineups(date_str: str | None = None) -> dict[int, int]:
+    """
+    Fetch confirmed batting order positions for today's games via MLB Stats API.
+
+    Returns {mlbam_player_id: batting_order_position (1-9)}.
+    Returns empty dict if lineups not yet posted or on any error.
+    Players not in a confirmed lineup get batting_order_pos = 0 (unconfirmed).
+    """
+    date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        resp = requests.get(
+            f"{_MLBAPI_BASE}/schedule",
+            params={"sportId": 1, "date": date, "hydrate": "lineups"},
+            headers=_HEADERS, timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("[Lineups] HTTP %d — batting order unavailable", resp.status_code)
+            return {}
+        order: dict[int, int] = {}
+        for date_block in resp.json().get("dates", []):
+            for game in date_block.get("games", []):
+                lineups = game.get("lineups", {})
+                for side in ("homePlayers", "awayPlayers"):
+                    for pos, player in enumerate(lineups.get(side, []), start=1):
+                        pid = player.get("id")
+                        if pid:
+                            order[int(pid)] = pos
+        logger.info("[Lineups] Confirmed batting order for %d players", len(order))
+        return order
+    except Exception as exc:
+        logger.warning("[Lineups] Fetch failed: %s — batting order unavailable", exc)
+        return {}
 
 
 def fetch_player_season_stats(player_id: int) -> dict[str, float]:
@@ -1049,6 +1091,8 @@ class PropLeg:
     # Phase 36: pre-nudge snapshot (before hot/cold form + FanGraphs layers)
     # Used by BullpenAgent, SteamAgent, and StreakAgent to bypass form/FG nudges
     prob_pre_form:  float = 0.0   # prob after Statcast — before form & FG layers
+    # Phase 37: confirmed batting order position (1-9, 0 = unconfirmed)
+    batting_order_pos: int = 0
 
 
 def build_parlay(
@@ -1083,14 +1127,16 @@ def build_parlay(
         l for l in legs
         if agent["filter"](
             type("SR", (), {
-                "side":            l.side,
-                "prop_type":       l.prop_type,
-                "implied_prob":    _eff_prob(l),   # per-agent effective prob
-                "fantasy_pts_edge": l.fantasy_pts,
+                "side":               l.side,
+                "prop_type":          l.prop_type,
+                "implied_prob":       _eff_prob(l),
+                "fantasy_pts_edge":   l.fantasy_pts,
                 # Phase 27: enhancement signals exposed to agent filters
-                "is_fade_signal":  l.is_fade_signal,
-                "sbd_ticket_pct":  l.sbd_ticket_pct,
-                "de_boost":        l.de_boost,
+                "is_fade_signal":     l.is_fade_signal,
+                "sbd_ticket_pct":     l.sbd_ticket_pct,
+                "de_boost":           l.de_boost,
+                # Phase 37: batting order position for LineupAgent
+                "batting_order_pos":  l.batting_order_pos,
             })()
         )
         # Hard exclusion: leg already used by a previous agent
@@ -1357,6 +1403,18 @@ class LiveDispatcher:
                 logger.info("[Phase27] Statcast enrichment applied")
             except Exception as exc:
                 logger.warning("[Phase27] Statcast enrichment failed: %s", exc)
+
+        # Step 2b: Confirmed batting order from MLB Stats API
+        try:
+            batting_order = fetch_today_lineups(date)
+            for p in all_raw:
+                mid = int(p.get("mlbam_id") or 0)
+                p["batting_order_pos"] = batting_order.get(mid, 0) if mid else 0
+            confirmed = sum(1 for p in all_raw if p.get("batting_order_pos", 0) > 0)
+            logger.info("[Lineups] Batting order attached: %d/%d props confirmed",
+                        confirmed, len(all_raw))
+        except Exception as exc:
+            logger.warning("[Lineups] Batting order attachment failed: %s", exc)
 
         # Step 3: SportsBettingDime public trends (FadeAgent precision upgrade)
         sbd_game_df = None
@@ -1713,9 +1771,17 @@ class LiveDispatcher:
                     "de_sb_pct":    float(raw.get("de_sb_pct",   0.0) or 0.0),
                     "de_run_pct":   float(raw.get("de_run_pct",  0.0) or 0.0),
                     "de_rbi_pct":   float(raw.get("de_rbi_pct",  0.0) or 0.0),
-                    "sc_whiff_rate":    float(raw.get("sc_whiff_rate",    0.0) or 0.0),
-                    "sc_hard_hit_rate": float(raw.get("sc_hard_hit_rate", 0.0) or 0.0),
-                    "sc_season_avg":    float(raw.get("sc_season_avg",    0.0) or 0.0),
+                    "sc_whiff_rate":      float(raw.get("sc_whiff_rate",      0.0) or 0.0),
+                    "sc_hard_hit_rate":   float(raw.get("sc_hard_hit_rate",   0.0) or 0.0),
+                    "sc_season_avg":      float(raw.get("sc_season_avg",      0.0) or 0.0),
+                    # Phase 37: Baseball Savant expected stats + batting order
+                    "sc_xwoba":           float(raw.get("sc_xwoba",           0.0) or 0.0),
+                    "sc_xba":             float(raw.get("sc_xba",             0.0) or 0.0),
+                    "sc_xslg":            float(raw.get("sc_xslg",            0.0) or 0.0),
+                    "sc_barrel_rate":     float(raw.get("sc_barrel_rate",     0.0) or 0.0),
+                    "sc_avg_launch_speed": float(raw.get("sc_avg_launch_speed", 0.0) or 0.0),
+                    "sc_xiso":            float(raw.get("sc_xiso",            0.0) or 0.0),
+                    "batting_order_pos":  int(raw.get("batting_order_pos",    0)   or 0),
                 }
 
         # ── Pre-fetch hot/cold form data for all unique players ─────────────
@@ -1844,6 +1910,26 @@ class LiveDispatcher:
                         # Positive contact rate (avg > .270) adds slight hit prob bump
                         prob = min(0.80, prob + max(0.0, sc_avg - 0.250) * 0.10)
 
+                # Phase 37: xwOBA boost for hits/contact props
+                # xwOBA > 0.320 (above avg) = confirmed quality contact → +hit prob
+                if prop_type in ("hits", "hits_runs_rbis") and side == "Over":
+                    sc_xwoba = float(chosen_entry.get("sc_xwoba", 0.0) or 0.0)
+                    if sc_xwoba > 0.320:
+                        prob = min(0.80, prob + (sc_xwoba - 0.320) * 0.12)
+
+                # Phase 37: barrel rate boost for HR/TB props
+                # Barrel% > 8% (above avg) = elite hard contact → +power prop prob
+                if prop_type in ("home_runs", "total_bases") and side == "Over":
+                    sc_barrel = float(chosen_entry.get("sc_barrel_rate", 0.0) or 0.0)
+                    if sc_barrel > 0.08:
+                        prob = min(0.80, prob + (sc_barrel - 0.08) * 0.10)
+
+                # Phase 37: xSLG boost for total_bases Over
+                if prop_type == "total_bases" and side == "Over":
+                    sc_xslg = float(chosen_entry.get("sc_xslg", 0.0) or 0.0)
+                    if sc_xslg > 0.420:  # above avg slugger
+                        prob = min(0.80, prob + (sc_xslg - 0.420) * 0.08)
+
                 _prob_after_sc = prob  # Phase 35: snapshot after Statcast
 
                 # 3. SBD FadeAgent signal
@@ -1962,6 +2048,8 @@ class LiveDispatcher:
                     is_fade_signal=is_fade_signal,
                     # Phase 36: store pre-nudge prob for agent-specific overrides
                     prob_pre_form=round(_prob_pre_form, 4),
+                    # Phase 37: confirmed batting order position
+                    batting_order_pos=int(chosen_entry.get("batting_order_pos", 0) or 0),
                 ))
                 # Phase 35: log INCLUDED leg with full feature trail
                 if _DL_AVAILABLE:
