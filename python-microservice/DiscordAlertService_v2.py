@@ -211,5 +211,67 @@ class DiscordAlertService:
                     date_str, sign, total_profit, wins, losses, pushes)
 
 
+    def send_parlay_alert(self, parlay: dict) -> None:
+        """
+        Send a formatted Discord embed for a DFS parlay slip.
+        Called by AgentTasklet when The Correlated Parlay Agent builds a valid slip.
+
+        Embed shows:
+          - Agent name as title
+          - Each leg: Player | Stat | Over/Under | Underdog Line | Leg EV%
+          - Combined EV% across all legs
+        """
+        agent_name   = parlay.get("agent", "The Correlated Parlay Agent")
+        legs         = parlay.get("legs", [])
+        combined_ev  = parlay.get("combined_ev_pct", 0.0)
+        leg_count    = parlay.get("leg_count", len(legs))
+
+        if not legs:
+            return
+
+        fields: list[dict] = []
+        for i, leg in enumerate(legs, 1):
+            player    = leg.get("player", "?")
+            prop_type = leg.get("prop_type", "?")
+            side      = leg.get("side", "?")
+            line      = leg.get("line", "?")
+            ud_raw    = leg.get("underdog_line", leg.get("odds_american", -120))
+            ud_str    = (f"+{ud_raw}" if isinstance(ud_raw, int) and ud_raw > 0
+                         else str(ud_raw))
+            leg_ev    = leg.get("ev_pct", 0.0)
+            fields.append({
+                "name": f"Leg {i} — {player}",
+                "value": (
+                    f"**{prop_type} {side} {line}**  |  "
+                    f"Underdog: `{ud_str}`  |  "
+                    f"Leg EV: `+{leg_ev:.1f}%`"
+                ),
+                "inline": False,
+            })
+
+        fields.append({
+            "name": f"🎯 Combined EV — {leg_count}-Leg Slip",
+            "value": f"**+{combined_ev:.1f}%** total edge vs sharp consensus",
+            "inline": False,
+        })
+
+        self._post({
+            "embeds": [{
+                "title": f"🐶 {agent_name} — {leg_count}-Leg Underdog Slip",
+                "description": (
+                    "Sharp consensus confirms mispricing vs Underdog lines.
+"
+                    "**Open Underdog Fantasy to enter this slip.**"
+                ),
+                "color": _COLOUR_BLUE,
+                "fields": fields,
+                "footer": {"text": "PropIQ Analytics Engine • Underdog Fantasy"},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }]
+        })
+        logger.info("[Discord] Parlay alert sent — %d legs, combined EV +%.1f%%",
+                    leg_count, combined_ev)
+
+
 # Module-level singleton — import this everywhere
 discord_alert = DiscordAlertService()

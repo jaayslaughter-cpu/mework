@@ -56,6 +56,8 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
 try:
@@ -83,12 +85,11 @@ PROP_TYPES: Dict[str, str] = {
     "total_bases":      "classifier",   # batter:  TB >= 1.5
     "home_runs":        "classifier",   # batter:  HR >= 0.5
     "rbis":             "classifier",   # batter:  RBI >= 1
-    "runs":             "classifier",   # batter:  R >= 1
-    "hits_runs_rbis":   "regressor",    # batter:  H+R+RBI combo total
     "stolen_bases":     "classifier",   # batter:  SB >= 0.5
     "walks":            "classifier",   # pitcher: BB >= line
     # Continuous props (regressor): model outputs projected stat value
     "earned_runs":      "regressor",    # ERA projection
+    "innings_pitched":  "regressor",    # IP projection
     "fantasy_points":   "regressor",    # DK/Underdog fantasy point projection
 }
 
@@ -855,8 +856,7 @@ class PlayerPropXGBoost:
         calibrated.fit(X, y)
         return calibrated
 
-    @staticmethod
-    def _default_params() -> Dict:
+    def _default_params(self) -> Dict:
         """Conservative defaults that generalize well for MLB prop data."""
         return {
             "n_estimators":     300,
@@ -1484,7 +1484,7 @@ def demo() -> None:
     print("\n" + "═" * 70)
     print("  ✅ Pipeline demo complete.")
     print("  P(over) is calibrated — safe for EV Agent consumption.")
-    print("  Routing key: mlb.projections.strikeouts")
+    print(f"  Routing key: mlb.projections.strikeouts")
     print("═" * 70 + "\n")
 
     pipeline.close()
