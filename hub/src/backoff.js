@@ -1,7 +1,7 @@
 // hub/src/backoff.js
 // Exponential backoff with jitter for 429 and 5xx responses.
 
-async function withBackoff(fn, maxRetries = 4, baseDelay = 1000) {
+export async function withBackoff(fn, maxRetries = 4, baseDelay = 1000) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
