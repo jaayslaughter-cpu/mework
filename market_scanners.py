@@ -437,6 +437,9 @@ class SteamScanner:
             key:          Cache key (player_id, prop_type).
             redis_client: An initialised ``redis.Redis`` client instance.
         """
+        # TODO: deserialise OddsTick JSON members from Redis sorted set and
+        #       populate self._cache[key].
+        pass
         redis_key = f"steam:{key[0]}:{key[1]}"
         try:
             raw_members = redis_client.zrangebyscore(
@@ -554,6 +557,8 @@ class FadeScanner:
     # Private helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _best_sharp_under(sharp_odds: Dict[str, int]) -> Optional[int]:
     def _best_sharp_under(self, sharp_odds: Dict[str, int]) -> Optional[int]:
         """Find the most aggressively priced Under across sharp books.
 
@@ -575,6 +580,7 @@ class FadeScanner:
 
 # ---------------------------------------------------------------------------
 # RabbitMQ Publisher
+# ------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
 class MarketEdgePublisher:
@@ -810,6 +816,7 @@ class MarketScannerOrchestrator:
                 )
                 self.process_snapshot(snapshot)
             ch.basic_ack(delivery_tag=method.delivery_tag)
+        except (KeyError, TypeError, ValueError) as exc:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.error("MarketScannerOrchestrator: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)

@@ -174,6 +174,9 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     slip_type: str = payload.get("slip_type", "N-leg standard")
     legs: List[Dict[str, Any]] = payload.get("legs", [])
     total_ev: float = float(payload.get("total_ev", 0.0))
+    unit_size: float = float(payload.get("recommended_unit_size", 0.0))
+
+    # Determine embed colour
     avg_leg_ev: float = float(payload.get("avg_leg_ev", 0.0))
     unit_size: float = float(payload.get("recommended_unit_size", 0.0))
 
@@ -193,6 +196,8 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         colour = AGENT_COLOURS.get(agent_name, DEFAULT_COLOUR)
 
+    # Build one embed field per slip leg
+    fields: List[Dict[str, Any]] = []
     # --- Entry type field (first field — most prominent) ---
     fields: List[Dict[str, Any]] = [
         {
@@ -260,6 +265,7 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
             "inline": False,
         })
 
+    # Metrics summary field
     # --- Metrics summary field ---
     ev_pct = round(total_ev * 100, 2)
     ev_sign = "+" if total_ev >= 0 else ""
@@ -302,6 +308,11 @@ def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
     })
 
     return {
+        "title": f"[{agent_name}] 🎯 {slip_type.title()} Slip",
+        "color": colour,
+        "fields": fields,
+        "footer": {
+            "text": f"PropIQ Analytics • {agent_name} • California DFS Legal",
         "title": (
             f"[{agent_name}] {entry_badge['icon']} "
             f"{slip_type.title()} — {entry_badge['label']}"

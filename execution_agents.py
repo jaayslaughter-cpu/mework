@@ -1,6 +1,10 @@
 """execution_agents.py — PropIQ Analytics Execution Tier
 
 Four independent execution agents that consume ML probability outputs and
+Market Scanner alerts from RabbitMQ, filter by their specific strategy
+"""execution_agents.py — PropIQ Analytics Execution Tier
+
+Four independent execution agents that consume ML probability outputs and
 Ten independent execution agents that consume ML probability outputs and
 Market Scanner alerts from RabbitMQ, filter by their specific strategy
 criteria, generate Underdog Fantasy slip combinations, validate expected
@@ -36,6 +40,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -89,6 +94,61 @@ class PropEdge:
     is_f5: bool = False
     kelly_fraction: float = 0.0
 
+
+# ---------------------------------------------------------------------------
+# Mock UnderdogMathEngine (contract boundary)
+# ---------------------------------------------------------------------------
+
+def _underdog_payout_multiplier(n_legs: int) -> float:
+    """Return Underdog Fantasy's gross payout multiplier for an n-leg slip.
+
+    Payouts are based on Underdog's published payout table for their
+    Higher/Lower Power Play format.
+
+    Args:
+        n_legs: Number of legs (3, 4, or 5).
+
+    Returns:
+        Gross payout multiplier (stake × multiplier = gross return).
+    """
+    multipliers: Dict[int, float] = {3: 5.45, 4: 10.5, 5: 19.5}
+    return multipliers.get(n_legs, 5.45)
+
+
+class UnderdogMathEngine:
+    """Evaluates the expected value of a multi-leg Underdog Fantasy slip.
+
+    In production this class is imported from ``underdog_math_engine.py``.
+    This stub mirrors the public interface so agents can be tested in isolation.
+
+    EV Calculation:
+        combined_prob = product of each leg's true_prob
+        gross_payout  = _underdog_payout_multiplier(n_legs)
+        total_ev      = (combined_prob × gross_payout) − 1.0
+    """
+
+    @staticmethod
+    def evaluate_slip(legs: List[PropEdge]) -> Dict[str, float]:
+        """Estimate expected value and payout for a slip combination.
+
+        Args:
+            legs: List of :class:`PropEdge` objects forming one slip.
+
+        Returns:
+            Dict with:
+                - ``total_ev``                (float) — net EV (e.g., 0.045 = +4.5%)
+                - ``implied_payout_multiplier`` (float) — gross payout multiple
+        """
+        if not legs:
+            return {"total_ev": 0.0, "implied_payout_multiplier": 1.0}
+
+        combined_prob = 1.0
+        for leg in legs:
+            combined_prob *= leg.true_prob
+
+        payout = _underdog_payout_multiplier(len(legs))
+        total_ev = (combined_prob * payout) - 1.0
+        return {"total_ev": round(total_ev, 4), "implied_payout_multiplier": payout}
     # --- Sportsbook odds (required for true no-vig EV calculation) ---
     # Defaults to standard -110/-110 juice when live odds are unavailable.
     odds_over: float = -110.0
@@ -327,6 +387,16 @@ class BaseSlipBuilder(ABC):
         for combo in self.generate_combinations(filtered):
             if not self.validate_correlation(combo):
                 continue
+            ev_result = self.math_engine.evaluate_slip(list(combo))
+            if ev_result["total_ev"] <= self.min_ev:
+                continue
+            payload = self._format_payload(list(combo), ev_result)
+            self.publisher.publish(payload)
+            published.append(payload)
+
+        logger.info(
+            "%s: %d props → %d slips published",
+            self.agent_name, len(filtered), len(published),
             leg_probs = [leg.true_prob for leg in combo]
             try:
                 slip_eval: SlipEvaluation = self.math_engine.evaluate_slip(leg_probs)
@@ -473,6 +543,7 @@ class BaseSlipBuilder(ABC):
     def _format_payload(
         self,
         legs: List[PropEdge],
+        ev_result: Dict[str, float],
         slip_eval: SlipEvaluation,
         leg_evs: List[float],
         avg_leg_ev: float,
@@ -481,6 +552,16 @@ class BaseSlipBuilder(ABC):
 
         Args:
             legs:      Validated list of :class:`PropEdge` objects.
+            ev_result: Output from :meth:`UnderdogMathEngine.evaluate_slip`.
+
+        Returns:
+            Slip payload conforming to the Discord dispatcher schema.
+        """
+        slip_type = f"{len(legs)}-leg standard"
+        unit_size = self._fractional_kelly(ev_result["total_ev"], legs)
+        return {
+            "agent_name": self.agent_name,
+            "slip_type": slip_type,
             slip_eval: :class:`SlipEvaluation` from
                        :meth:`UnderdogMathEngine.evaluate_slip`.
             legs:        Validated list of :class:`PropEdge` objects.
@@ -511,6 +592,38 @@ class BaseSlipBuilder(ABC):
                     "line": leg.line,
                     "side": leg.side,
                     "true_prob": round(leg.true_prob, 4),
+                }
+                for leg in legs
+            ],
+            "total_ev": ev_result["total_ev"],
+            "recommended_unit_size": unit_size,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    @staticmethod
+    def _fractional_kelly(total_ev: float, legs: List[PropEdge]) -> float:
+        """Calculate a half-Kelly recommended unit size.
+
+        The full Kelly formula for a binary bet is:
+            f* = edge / net_odds
+
+        We apply ½ Kelly as a standard risk management guardrail, capping
+        the output at 10% of bankroll to prevent ruin on a single slip.
+
+        Args:
+            total_ev: Net expected value of the slip (e.g., 0.045 = +4.5%).
+            legs:     Legs in the slip (used to derive payout odds).
+
+        Returns:
+            Fractional unit size clamped to [0.0, 0.10].
+        """
+        net_odds = _underdog_payout_multiplier(len(legs)) - 1.0
+        if net_odds <= 0.0:
+            return 0.0
+        full_kelly = total_ev / net_odds
+        half_kelly = full_kelly / 2.0
+        return round(max(0.0, min(half_kelly, 0.10)), 4)
+
                     "edge_pct": round(leg.edge_pct, 4),
                 }
                 for leg in legs
@@ -1987,6 +2100,7 @@ class ExecutionSquad:
             if self._should_flush():
                 self._flush_to_agents()
             ch.basic_ack(delivery_tag=method.delivery_tag)
+        except (KeyError, TypeError, ValueError) as exc:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.error("ExecutionSquad: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
