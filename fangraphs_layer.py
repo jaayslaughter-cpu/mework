@@ -77,39 +77,16 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
         "bb_pct":    0.085,
     },
 }
-
-
-# ─── Internal helpers ─────────────────────────────────────────────────────────
-
-def _safe_float(val: Any, default: float) -> float:
-    """Cast val to float, returning default on None / NaN / empty string."""
-    try:
-        f = float(val)
-        import math
-        return default if math.isnan(f) else f
-    except (TypeError, ValueError):
-        return default
-
-
-def _normalise_name(name: str) -> str:
-    """Lower-case, strip extra whitespace."""
-    return " ".join(name.strip().lower().split())
-
-
-# ─── Loader ───────────────────────────────────────────────────────────────────
-
 def _load() -> None:
     """Fetch or load from daily cache.  Sets _loaded = True on completion."""
-    global _BATTER_CACHE, _PITCHER_CACHE, _loaded
 
     today = date.today().isoformat()
-    cache_path = f"/tmp/fangraphs_{today}.json"
 
     # ── Try cache first ──────────────────────────────────────────────────────
-    if os.path.exists(cache_path):
+    with tempfile.TemporaryFile(mode='w+') as tmp:
         try:
-            with open(cache_path) as fh:
-                data = json.load(fh)
+            tmp.seek(0)
+            data = json.load(tmp)
             _BATTER_CACHE  = data.get("batters", {})
             _PITCHER_CACHE = data.get("pitchers", {})
             logger.info(
