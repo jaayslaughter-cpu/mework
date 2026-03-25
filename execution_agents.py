@@ -1900,6 +1900,8 @@ class ExecutionSquad:
     # Parsing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_prop_edge(data: Dict[str, Any]) -> Optional[PropEdge]:
     def _parse_prop_edge(self, data: Dict[str, Any]) -> Optional[PropEdge]:
         """Convert a raw RabbitMQ message dict into a :class:`PropEdge`.
 
@@ -1944,6 +1946,57 @@ class ExecutionSquad:
         ) or "ml_engine"
 
         return PropEdge(
+            player_id=data["player_id"],
+            player_name=data.get("player_name", data["player_id"]),
+            prop_type=data["prop_type"],
+            line=float(data.get("underdog_line", 0.0)),
+            side=data["side"],
+            true_prob=float(data["true_prob"]),
+            edge_pct=float(data["edge_percentage"]),
+            source=source,
+            is_f5=bool(data.get("is_f5", False)),
+            # --- Sportsbook odds for no-vig EV calculation ---
+            odds_over=float(data.get("odds_over", -110.0)),
+            odds_under=float(data.get("odds_under", -110.0)),
+            # --- UmpireAgent ---
+            umpire_cs_pct=float(data.get("umpire_cs_pct", 0.0)),
+            # --- FadeAgent ---
+            ticket_pct=float(data.get("ticket_pct", 0.0)),
+            money_pct=float(data.get("money_pct", 0.0)),
+            # --- BullpenAgent ---
+            fatigue_index=float(data.get("fatigue_index", 0.0)),
+            # --- WeatherAgent ---
+            wind_speed=float(data.get("wind_speed", 0.0)),
+            wind_direction=str(data.get("wind_direction", "")),
+            # --- SteamAgent ---
+            steam_velocity=float(data.get("steam_velocity", 0.0)),
+            steam_book_count=int(data.get("steam_book_count", 0)),
+            # --- ArsenalAgent ---
+            pitcher_arsenal_json=str(data.get("pitcher_arsenal_json", "{}")),
+            batter_whiff_json=str(data.get("batter_whiff_json", "{}")),
+            # --- PlatoonAgent ---
+            wrc_plus_vl=float(data.get("wrc_plus_vl", 100.0)),
+            wrc_plus_vr=float(data.get("wrc_plus_vr", 100.0)),
+            wrc_plus_overall=float(data.get("wrc_plus_overall", 100.0)),
+            batter_handedness=str(data.get("batter_handedness", "")),
+            pitcher_handedness=str(data.get("pitcher_handedness", "")),
+            pa_starter=float(data.get("pa_starter", 2.5)),
+            pa_total=float(data.get("pa_total", 4.0)),
+            p_lhp_bullpen=float(data.get("p_lhp_bullpen", 0.30)),
+            p_rhp_bullpen=float(data.get("p_rhp_bullpen", 0.70)),
+            pinch_hit_risk=float(data.get("pinch_hit_risk", 0.0)),
+            # --- CatcherAgent ---
+            catcher_framing_runs=float(data.get("catcher_framing_runs", 0.0)),
+            catcher_pop_time=float(data.get("catcher_pop_time", 1.90)),
+            pitcher_time_to_plate=float(data.get("pitcher_time_to_plate", 1.30)),
+            # --- LineupAgent ---
+            lineup_position=int(data.get("lineup_position", 5)),
+            team_total_runs=float(data.get("team_total_runs", 4.5)),
+            pa_average=float(data.get("pa_average", 3.8)),
+            # --- GetawayAgent ---
+            hours_rest=float(data.get("hours_rest", 24.0)),
+            time_zone_change=int(data.get("time_zone_change", 0)),
+            previous_game_innings=int(data.get("previous_game_innings", 9)),
             player_id=merged["player_id"],
             player_name=merged.get("player_name", merged["player_id"]),
             prop_type=merged["prop_type"],
