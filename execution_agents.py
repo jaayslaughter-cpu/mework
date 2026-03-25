@@ -435,6 +435,7 @@ class BaseSlipBuilder(ABC):
             )
             return False
 
+        # TODO: add game_id-based correlation check when PropEdge carries game_id
         # game_id correlation: block if ≥4 legs from the same game.
         # Same-game parlays carry high leg-to-leg correlation that understates
         # true combined probability, especially when all props belong to the
