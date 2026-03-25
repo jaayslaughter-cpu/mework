@@ -40,7 +40,7 @@ class MLBStatsClient:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            logger.error(f"MLB Stats API error {path}: {e}")
+            logger.error("MLB Stats API error %s: %s", path, e)
             return None
 
     def get_schedule(self, game_date: Optional[str] = None) -> List[Dict]:
@@ -180,7 +180,7 @@ class ESPNClient:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            logger.error(f"ESPN API error {path}: {e}")
+            logger.error("ESPN API error %s: %s", path, e)
             return None
 
     def get_scoreboard(self, game_date: Optional[str] = None) -> List[Dict]:
@@ -314,7 +314,7 @@ class StatcastClient:
             player_id = int(lkup.iloc[0]["key_mlbam"])
             return statcast_batter(start_dt, end_dt, player_id)
         except Exception as e:
-            logger.error(f"Statcast batter error: {e}")
+            logger.error("Statcast batter error: %s", e)
             return None
 
     def get_pitcher_statcast(self, player_name: str, start_dt: str, end_dt: str) -> Optional[Any]:
@@ -329,7 +329,7 @@ class StatcastClient:
             player_id = int(lkup.iloc[0]["key_mlbam"])
             return statcast_pitcher(start_dt, end_dt, player_id)
         except Exception as e:
-            logger.error(f"Statcast pitcher error: {e}")
+            logger.error("Statcast pitcher error: %s", e)
             return None
 
     def get_sprint_speed(self, season: int = None) -> Optional[Any]:
@@ -339,7 +339,7 @@ class StatcastClient:
             from pybaseball import statcast_sprint_speed
             return statcast_sprint_speed(season or datetime.now().year)
         except Exception as e:
-            logger.error(f"Sprint speed error: {e}")
+            logger.error("Sprint speed error: %s", e)
             return None
 
 
