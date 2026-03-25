@@ -116,7 +116,7 @@ except ImportError:
         @staticmethod
         def prefetch_form_data(*_, **__) -> None:  # noqa: E704
             """Intentionally does nothing; dummy implementation."""
-            pass
+            pass  # no form data to prefetch
         @staticmethod
         def get_form_adjustment(*_, **__) -> float: return 0.0  # noqa: E704
 
@@ -620,7 +620,7 @@ def fetch_prizepicks_props(pp_session=None):
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
                 pp_session = None
-            sess = _get_pp_session(pp_session)
+            sess = _get_pp_session()
             pp_session = sess
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
@@ -1926,11 +1926,11 @@ class LiveDispatcher:
                 #   EVHunter / StreakAgent      → full signal set
                 if _FG_AVAILABLE:
                     try:
-                        if _player_type == "pitcher":
+                        if player_type == "pitcher":
                             _fg_data = _fg_get_pitcher(pname)
                         else:
                             _fg_data = _fg_get_batter(pname)
-                        _fg_adj = _fg_adjustment(prop_type, side, _player_type, _fg_data)
+                        _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
                         if _fg_adj != 0.0:
                             logger.debug(
                                 "[FG] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
