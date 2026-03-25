@@ -435,6 +435,7 @@ class BaseSlipBuilder(ABC):
             )
             return False
 
+        # TODO: add game_id-based correlation check when PropEdge carries game_id
         # game_id correlation: block if ≥4 legs from the same game.
         # Same-game parlays carry high leg-to-leg correlation that understates
         # true combined probability, especially when all props belong to the
@@ -529,6 +530,9 @@ class EVHunter(BaseSlipBuilder):
     """Builds maximum-EV slips regardless of prop type, side, or source.
 
     Subscribes to both ML Engine calibrated probability alerts and all
+    Market Scanner (LineValue, Steam, Fade) alerts.  Selects the top-N
+    props by edge percentage across the entire MLB slate and constructs
+    every valid 3/4/5-leg combination.
     Market Scanner (LineValue, Steam, Fade) alerts.  Also ingests
     market_fusion CLV edges and dislocation-scored props from the
     multi-provider OddsFetcher pipeline.
@@ -545,6 +549,7 @@ class EVHunter(BaseSlipBuilder):
         the single most profitable combination available on any given day.
     """
 
+    TOP_N: int = 10
     TOP_N: int              = 10
     DISLOCATION_WEIGHT: float = 0.5   # weight applied to dislocation_score bonus
     CLV_SOURCES: frozenset  = frozenset({
@@ -555,6 +560,18 @@ class EVHunter(BaseSlipBuilder):
     def agent_name(self) -> str:
         return "EVHunter"
 
+    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
+        """Select the top-N props by edge percentage.
+
+        Args:
+            props: Full unfiltered prop pool.
+
+        Returns:
+            Top :attr:`TOP_N` props ranked by ``edge_pct`` descending,
+            requiring positive edge.
+        """
+        eligible = [p for p in props if p.edge_pct > 0]
+        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
     def _composite_score(self, p: "PropEdge") -> float:
         """Composite ranking score blending edge_pct + CLV dislocation bonus."""
         dis_score = getattr(p, "dislocation_score", 0.0) or 0.0
