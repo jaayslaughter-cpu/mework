@@ -84,7 +84,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -93,7 +93,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
+    def _get_fade_signal(*_, **__):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -113,8 +113,12 @@ except ImportError:
     _FORM_LAYER_AVAILABLE = False
 
     class _DummyFormLayer:  # noqa: D101
-        def prefetch_form_data(self, *a, **kw) -> None: pass       # noqa: E704
-        def get_form_adjustment(self, *a, **kw) -> float: return 0.0  # noqa: E704
+        @staticmethod
+        def prefetch_form_data(*_, **__) -> None:  # noqa: E704
+            """Intentionally does nothing; dummy implementation."""
+            pass
+        @staticmethod
+        def get_form_adjustment(*_, **__) -> float: return 0.0  # noqa: E704
 
     _form_layer = _DummyFormLayer()  # type: ignore[assignment]
     logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
@@ -598,7 +602,7 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
-def fetch_prizepicks_props() -> list[dict]:
+def fetch_prizepicks_props(pp_session=None):
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -607,17 +611,17 @@ def fetch_prizepicks_props() -> list[dict]:
     CDN issues valid cookies, then hit the API on the same session.
     Without the warm-up visit every direct API call returns 403.
 
-    Returns raw list of dicts.
+    Returns raw list of dicts and the session used.
     """
-    global _pp_session
     try:
         data = None
         for attempt in range(3):
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
-                _pp_session = None
-            sess = _get_pp_session()
+                pp_session = None
+            sess = _get_pp_session(pp_session)
+            pp_session = sess
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
                 params={"per_page": 250, "single_stat": True, "league_id": 2},
@@ -628,9 +632,9 @@ def fetch_prizepicks_props() -> list[dict]:
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                _pp_session = None   # force re-warm on next attempt
+                pp_session = None   # force re-warm on next attempt
         if data is None:
-            return []
+            return [], pp_session
 
         # Build player id → name map from included resources
         player_map: dict[str, str] = {}
@@ -1922,11 +1926,11 @@ class LiveDispatcher:
                 #   EVHunter / StreakAgent      → full signal set
                 if _FG_AVAILABLE:
                     try:
-                        if player_type == "pitcher":
+                        if _player_type == "pitcher":
                             _fg_data = _fg_get_pitcher(pname)
                         else:
                             _fg_data = _fg_get_batter(pname)
-                        _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
+                        _fg_adj = _fg_adjustment(prop_type, side, _player_type, _fg_data)
                         if _fg_adj != 0.0:
                             logger.debug(
                                 "[FG] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
