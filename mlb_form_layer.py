@@ -157,8 +157,9 @@ class MLBFormLayer:
     # API fetchers
     # ------------------------------------------------------------------
 
+    @staticmethod
     def _fetch_game_log(
-        self, player_id: int, group: str, window: int
+        player_id: int, group: str, window: int
     ) -> list[dict]:
         """
         Fetch the last `window` game log splits for a player.
@@ -192,8 +193,9 @@ class MLBFormLayer:
                 logger.debug("[Form] Game log p%d/%s/%d: %s", player_id, group, season, exc)
         return []
 
+    @staticmethod
     def _fetch_season_per_game(
-        self, player_id: int, group: str
+        player_id: int, group: str
     ) -> dict[str, float]:
         """
         Fetch season totals for a player and return per-game averages.

@@ -49,6 +49,8 @@ from typing import Any
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 # Season record tracker (writes to agent SQL DB)
 try:
     from season_record import record_parlay, get_agent_season_stats
@@ -73,8 +75,12 @@ except ImportError:
     _FORM_LAYER_AVAILABLE = False
 
     class _DummyFormLayer:  # noqa: D101
-        def prefetch_form_data(self, *a, **kw) -> None: pass       # noqa: E704
-        def get_form_adjustment(self, *a, **kw) -> float: return 0.0  # noqa: E704
+        @staticmethod
+        def prefetch_form_data(*a, **kw) -> None:
+            """No-op for dummy form layer."""
+            pass
+        @staticmethod
+        def get_form_adjustment(*a, **kw) -> float: return 0.0  # noqa: E704
 
     _form_layer = _DummyFormLayer()  # type: ignore[assignment]
     logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
@@ -95,7 +101,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -104,7 +110,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
+    def _get_fade_signal(*_a, **_kw):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -366,11 +372,10 @@ _HEADERS = {
 _pp_session: requests.Session | None = None
 
 
-def _get_pp_session() -> requests.Session:
+def _get_pp_session(pp_session: requests.Session | None = None) -> requests.Session:
     """Return a warmed-up PrizePicks session, creating one if needed."""
-    global _pp_session
-    if _pp_session is not None:
-        return _pp_session
+    if pp_session is not None:
+        return pp_session
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -393,7 +398,6 @@ def _get_pp_session() -> requests.Session:
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
     })
-    _pp_session = s
     return s
 
 
@@ -535,7 +539,6 @@ def fetch_prizepicks_props() -> list[dict]:
 
     Returns raw list of dicts.
     """
-    global _pp_session
     try:
         data = None
         for attempt in range(3):
@@ -558,7 +561,7 @@ def fetch_prizepicks_props() -> list[dict]:
         if data is None:
             return []
 
-        # Build player id → name map from included resources
+        # Build player id 12; name map from included resources
         player_map: dict[str, str] = {}
         for item in data.get("included", []):
             if item.get("type") == "new_player":
