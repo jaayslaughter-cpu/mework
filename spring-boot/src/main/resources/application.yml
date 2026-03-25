@@ -1,0 +1,342 @@
+spring:
+  application:
+    name: propiq-analytics
+  batch:
+    job:
+      enabled: false          # Tasklets run on @Scheduled, NOT on boot
+    jdbc:
+      initialize-schema: always
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/propiq}
+    username: ${SPRING_DATASOURCE_USERNAME:propiq_admin}
+    password: ${SPRING_DATASOURCE_PASSWORD:sharp_money_2026}
+
+# ============================================================
+#  PropIQ Analytics — application.yml
+#  Spring Boot 3.2 / Java 21
+#  PRE-MATCH ONLY policy: DataHubTasklet checks game_state
+#  before every scrape cycle. LIVE/FINAL games are skipped.
+# ============================================================
+
+spring:
+  application:
+    name: propiq-analytics
+
+  # ── Datasource ──────────────────────────────────────────
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/propiq}
+    username: ${SPRING_DATASOURCE_USERNAME:propiq}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # ── JPA ─────────────────────────────────────────────────
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+
+  # ── Spring Batch ─────────────────────────────────────────
+  batch:
+    job:
+      enabled: false           # Jobs are triggered by @Scheduled, not on startup
+    jdbc:
+      initialize-schema: never  # init.sql handles Spring Batch tables
+
+  # ── Redis ─────────────────────────────────────────────────
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      timeout: 3000ms
+      password: ${SPRING_REDIS_PASSWORD}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 4
+          min-idle: 1
+
+  # ── Kafka ─────────────────────────────────────────────────
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: propiq-dfs-consumer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.propiq.*"
+
+# PropIQ-specific configuration
+propiq:
+  apis:
+    sportsdata:
+      key: ${SPORTSDATA_API_KEY:c2abf26f55714d228c7c311290f956d7}
+      base-url: https://api.sportsdata.io/v3/mlb
+    theodds:
+      key: ${THEODDS_API_KEY:e4e30098807a9eece674d85e30471f03}
+      base-url: https://api.the-odds-api.com/v4
+    tank01:
+      key: ${TANK01_API_KEY:58a304828bmshcbb94dbde04853fp12d39cjsn002951acdfed}
+      base-url: https://tank01-baseball-v1.p.rapidapi.com
+      host: tank01-baseball-v1.p.rapidapi.com
+    apify:
+      key: ${APIFY_API_KEY:}
+      base-url: https://api.apify.com/v2
+  books:
+    targets: draftkings,fanduel,betmgm,bet365  # California-legal offshore books only
+  ml:
+    service-url: ${ML_ENGINE_URL:http://localhost:5000}
+    baseline-accuracy: 0.777
+    target-accuracy: 0.842
+  polling:
+    datahub-ms: 15000      # Every 15s — fast live data
+    agent-ms: 30000        # Every 30s — agent evaluation
+    analyzer-ms: 5000      # Every 5s  — pre-compute EV cache
+    leaderboard-ms: 60000  # Every 60s — capital allocation
+    # The Odds API MUST poll every 5 min (300s) — protect quota
+    odds-api-cycles: 20    # 20 × 15s = 300s = 5 minutes
+    sportsdata-cycles: 4   # 4  × 15s = 60s
+    apify-cycles: 20       # 20 × 15s = 5 minutes
+  agents:
+    base-unit: 1.0
+    top-tier-multiplier: 2.0
+    cold-tier-multiplier: 0.5
+    kelly-fraction: 0.25
+    ev-threshold: 5.0
+    trailing-days: 14
+  thresholds:
+    min-fip: 3.80
+    min-swstr: 12.0
+    min-xwoba: 0.360
+    min-ump-k-pct: 22.0
+    max-public-pct: 70.0    # FadeAgent trigger
+    min-line-movement: 5.0  # LiveAgent trigger
+    min-arb-edge: 1.0
+    bullpen-fatigue-max-pitches: 25
+
+# Logging
+logging:
+  level:
+    com.propiq: DEBUG
+    org.springframework.batch: WARN
+    org.springframework.kafka: WARN
+    org.hibernate.SQL: WARN
+
+# Actuator / Prometheus metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+      acks: 1
+      retries: 3
+    consumer:
+      group-id: propiq-alert-consumer
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      auto-offset-reset: latest
+      properties:
+        spring.json.trusted.packages: "com.propiq.*"
+    topics:
+      bet-queue: bet_queue
+      abort-queue: abort_queue
+      grading-queue: grading_queue
+
+# ── Actuator ──────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# ============================================================
+#  PropIQ Custom Configuration
+# ============================================================
+propiq:
+
+  # ── API Keys ──────────────────────────────────────────────
+  apis:
+    sportsdata:
+      key: ${SPORTSDATA_API_KEY}
+      base-url: https://api.sportsdata.io/v3/mlb
+    theodds:
+      key-primary: ${THEODDS_API_KEY_PRIMARY}
+      key-backup: ${THEODDS_API_KEY_BACKUP}
+      base-url: https://api.the-odds-api.com/v4
+      # QUOTA PROTECTION: 5-10 minute polling enforced in DataHubTasklet
+      min-poll-interval-minutes: 7
+    tank01:
+      key: ${TANK01_API_KEY}
+      base-url: https://tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com
+      # PRE-MATCH ONLY: Tank01 called during polling window, not on 15s loop
+      enabled: true
+    apify:
+      key: ${APIFY_API_KEY}
+      base-url: https://api.apify.com/v2
+
+  # ── Telegram ──────────────────────────────────────────────
+  telegram:
+    bot-token: "8713049010:AAFgh_Ab1tZZyT11rlClBaJ-OWmiJv4Gix4"
+    chat-id: "${TELEGRAM_CHAT_ID:YOUR_CHAT_ID_HERE}"
+    base-url: https://api.telegram.org/bot
+    # DFS platform label shown in every alert header
+    dfs-platforms: "PrizePicks | Underdog Fantasy | Sleeper"
+
+  # ── ML Service ────────────────────────────────────────────
+  ml:
+    service-url: ${ML_SERVICE_URL:http://localhost:8000}
+    min-accuracy-threshold: 0.777
+    shap-audit-enabled: true
+    retrain-winning-picks-only: true
+
+  # ── Polling Schedule (PRE-MATCH ONLY) ─────────────────────
+  # All schedules are cron expressions. DataHubTasklet checks
+  # game_state on every cycle — LIVE or FINAL games are skipped.
+  schedule:
+    # Physics/Arsenal + Context/Environment scrapes: every 10 minutes
+    data-hub-scraper-cron: "0 */10 * * * *"
+    # Market/Sharp Steam (Odds API quota guard): every 7 minutes
+    data-hub-odds-cron: "0 */7 * * * *"
+    # DFS Target lines (PrizePicks, Underdog, Sleeper): every 5 minutes
+    data-hub-dfs-cron: "0 */5 * * * *"
+    # Agent evaluation (reads Redis, no external calls): every 30 seconds
+    agent-cron: "*/30 * * * * *"
+    # BetAnalyzer pre-compute cache: every 5 seconds
+    analyzer-cron: "*/5 * * * * *"
+    # Leaderboard ROI refresh: every 60 seconds
+    leaderboard-cron: "*/60 * * * * *"
+    # Grading: 1:05 AM daily (after boxscores finalize)
+    grading-cron: "0 5 1 * * *"
+    # Backtest SHAP audit: 12:01 AM daily
+    backtest-cron: "0 1 0 * * *"
+    # XGBoost retrain: Sunday 2:00 AM weekly
+    xgboost-retrain-cron: "0 0 2 * * SUN"
+
+  # ── Apify Scraper URL Mappings ─────────────────────────────
+  # All scrapers are pre-match. DataHubTasklet checks game_state
+  # and will NOT enrich a game that has already started (LIVE/FINAL).
+  scrapers:
+    physics-arsenal:
+      - url: "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+        label: "ARSENAL_STATS"
+        ttl-minutes: 60
+      - url: "https://www.rotowire.com/baseball/stats-advanced.php"
+        label: "ADVANCED_STATS"
+        ttl-minutes: 30
+      - url: "https://www.rotowire.com/baseball/stats-bvp.php"
+        label: "BVP_STATS"
+        ttl-minutes: 30
+      - url: "https://www.rotowire.com/baseball/stats-batted-ball.php"
+        label: "BATTED_BALL"
+        ttl-minutes: 30
+      - url: "https://www.rotowire.com/baseball/stats-second-half.php"
+        label: "SECOND_HALF"
+        ttl-minutes: 120
+    context-environment:
+      - url: "https://www.rotowire.com/baseball/weather.php"
+        label: "WEATHER"
+        ttl-minutes: 15
+      - url: "https://www.rotowire.com/baseball/umpire-stats-daily.php"
+        label: "UMPIRE"
+        ttl-minutes: 60
+      - url: "https://www.rotowire.com/baseball/news.php?injuries=all"
+        label: "INJURIES"
+        ttl-minutes: 10
+      - url: "https://www.rotowire.com/baseball/batting-orders.php"
+        label: "LINEUPS"
+        ttl-minutes: 10
+      - url: "https://www.rotowire.com/baseball/projected-starters.php"
+        label: "STARTERS"
+        ttl-minutes: 20
+    market-sharp:
+      - url: "https://www.actionnetwork.com/mlb/public-betting"
+        label: "PUBLIC_BETTING"
+        ttl-minutes: 7
+      - url: "https://www.actionnetwork.com/mlb/sharp-report"
+        label: "SHARP_REPORT"
+        ttl-minutes: 7
+      - url: "https://www.actionnetwork.com/mlb/prop-projections"
+        label: "PROP_PROJECTIONS"
+        ttl-minutes: 7
+      - url: "https://www.actionnetwork.com/mlb/odds"
+        label: "ODDS_MARKET"
+        ttl-minutes: 7
+    dfs-targets:
+      - url: "https://www.rotowire.com/picks/underdog/"
+        label: "UNDERDOG_PICKS"
+        ttl-minutes: 5
+      - url: "https://www.rotowire.com/picks/prizepicks/"
+        label: "PRIZEPICKS_PICKS"
+        ttl-minutes: 5
+      - url: "https://www.rotowire.com/picks/sleeper/"
+        label: "SLEEPER_PICKS"
+        ttl-minutes: 5
+      - url: "https://www.rotowire.com/daily/mlb/optimizer.php"
+        label: "DFS_OPTIMIZER"
+        ttl-minutes: 5
+
+  # ── Betting Constraints ────────────────────────────────────
+  betting:
+    max-kelly-fraction: 0.25          # Quarter-Kelly
+    max-bankroll-per-bet: 0.05        # 5% hard cap
+    min-ev-threshold: 0.03            # 3% minimum edge
+    min-xgboost-confidence: 0.60      # 60% model probability floor
+    leaderboard-lookback-days: 14
+    capital-multiplier-min: 0.5
+    capital-multiplier-max: 2.0
+    dfs-platforms:
+      - PRIZEPICKS
+      - UNDERDOG_FANTASY
+      - SLEEPER
+
+  # ── Spring Training Mode ──────────────────────────────────
+  # Set spring-training=true before Opening Day (March 26)
+  # Runs on historical data, no live Telegram alerts sent
+  season:
+    spring-training: false
+    opening-day: "2026-03-26"
+
+# ── Profiles ──────────────────────────────────────────────
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  jpa:
+    show-sql: true
+propiq:
+  season:
+    spring-training: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  jpa:
+    show-sql: false
+propiq:
+  season:
+    spring-training: false

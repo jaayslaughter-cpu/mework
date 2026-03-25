@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+  # ── Infrastructure ───────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       propiq
+      POSTGRES_USER:     propiq
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-propiq_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME:   2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    restart: unless-stopped
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_BROKER_ID:                        1
+      KAFKA_ZOOKEEPER_CONNECT:                zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS:             PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+
+  # ── Orchestrator (7 tasklets + BetAnalyzer API on 8081) ─────────────────
+  orchestrator:
+    build: .
+    restart: unless-stopped
+    depends_on: [redis, postgres, kafka]
+    environment:
+      REDIS_HOST:            redis
+      REDIS_PORT:            6379
+      POSTGRES_HOST:         postgres
+      POSTGRES_PORT:         5432
+      POSTGRES_DB:           propiq
+      POSTGRES_USER:         propiq
+      POSTGRES_PASSWORD:     ${POSTGRES_PASSWORD:-propiq_dev}
+      KAFKA_BOOTSTRAP:       kafka:9092
+      SPORTSDATA_API_KEY:    ${SPORTSDATA_API_KEY}
+      ODDS_API_KEY:          ${ODDS_API_KEY}
+      TANK01_API_KEY:        ${TANK01_API_KEY}
+      RAPIDAPI_KEY:          ${RAPIDAPI_KEY}
+      APIFY_API_KEY:         ${APIFY_API_KEY}
+      XGB_MODEL_PATH:        /app/models/xgb_propiq.pkl
+      API_PORT:              8081
+      LOG_LEVEL:             INFO
+    volumes:
+      - model_data:/app/models
+    ports:
+      - "8081:8081"    # Bet Analyzer REST API
+
+  # ── Next.js Frontend (localhost:8080) ────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    depends_on: [orchestrator]
+    environment:
+      NEXT_PUBLIC_API_URL:       http://orchestrator:8081
+      NEXT_PUBLIC_REDIS_HUB_URL: http://orchestrator:8081/analyze/live
+    ports:
+      - "8080:3000"
+
+  # ── Nginx reverse proxy ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on: [frontend, orchestrator]
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+  model_data:

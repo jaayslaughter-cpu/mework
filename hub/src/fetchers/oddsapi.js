@@ -13,11 +13,11 @@ if (!KEY) {
   console.warn('⚠️ ODDS_API_KEY is missing from environment variables.');
 }
 
-async function getMLBEvents() {
+export async function getMLBEvents() {
   if (!KEY) throw new Error('ODDS_API_KEY is missing.');
 
   // Cache for 60 seconds
-  return getOrFetch(`propiq:oddsapi:events:today`, 60, async () => {
+  return getOrFetch('propiq:oddsapi:events:today', 60, async () => {
     return withBackoff(async () => {
       await checkAndIncrement('oddsapi');
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
@@ -28,7 +28,7 @@ async function getMLBEvents() {
   });
 }
 
-async function getPlayerProps(eventId, markets = 'pitcher_strikeouts,batter_total_bases,batter_home_runs,batter_hits_runs_rbis') {
+export async function getPlayerProps(eventId, markets = 'pitcher_strikeouts,batter_total_bases,batter_home_runs,batter_hits_runs_rbis') {
   if (!KEY) throw new Error('ODDS_API_KEY is missing.');
 
   // Cache for 60 seconds to reduce upstream requests
