@@ -532,7 +532,6 @@ class _EVHunter(_BaseAgent):
 
 
 class _UnderMachine(_BaseAgent):
-    name = "UnderMachine"
 
     def evaluate(self, prop: dict) -> dict | None:
         under_odds = prop.get("under_american", -110)
