@@ -519,6 +519,112 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Trigger routes — invoked by Tasklet schedule triggers
+# Each endpoint spawns the target script in a background thread so the HTTP
+# response returns immediately while the long-running job executes.
+# A per-script lock prevents concurrent double-runs.
+# ---------------------------------------------------------------------------
+
+import subprocess
+import threading
+
+_TRIGGER_LOCKS: Dict[str, bool] = {
+    "stream": False,
+    "dispatch": False,
+    "settle": False,
+}
+_TRIGGER_LOCK_MUTEX = threading.Lock()
+
+
+def _run_script_bg(script_name: str, lock_key: str) -> None:
+    """Run *script_name* as a subprocess; guard against double-runs."""
+    with _TRIGGER_LOCK_MUTEX:
+        if _TRIGGER_LOCKS[lock_key]:
+            logger.warning(
+                "[Trigger] %s is already running — skipping duplicate invocation.",
+                script_name,
+            )
+            return
+        _TRIGGER_LOCKS[lock_key] = True
+
+    try:
+        logger.info("[Trigger] Starting %s …", script_name)
+        result = subprocess.run(
+            ["python", script_name],
+            capture_output=True,
+            text=True,
+            timeout=3600,          # 1-hour hard ceiling
+        )
+        if result.returncode != 0:
+            logger.error(
+                "[Trigger] %s exited %d.\nSTDERR (tail):\n%s",
+                script_name,
+                result.returncode,
+                result.stderr[-3000:],
+            )
+        else:
+            logger.info("[Trigger] %s completed OK.", script_name)
+    except subprocess.TimeoutExpired:
+        logger.error("[Trigger] %s timed out after 3600 s.", script_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[Trigger] %s raised: %s", script_name, exc)
+    finally:
+        with _TRIGGER_LOCK_MUTEX:
+            _TRIGGER_LOCKS[lock_key] = False
+
+
+@app.post("/trigger/stream")
+def trigger_stream() -> Dict[str, str]:
+    """Kick off line_stream.py — snapshot lines, detect steam, track live games."""
+    t = threading.Thread(
+        target=_run_script_bg,
+        args=("line_stream.py", "stream"),
+        daemon=True,
+        name="trigger-stream",
+    )
+    t.start()
+    return {"status": "triggered", "script": "line_stream"}
+
+
+@app.post("/trigger/dispatch")
+def trigger_dispatch() -> Dict[str, str]:
+    """Kick off live_dispatcher.py — build & post up to 19 agent parlays."""
+    t = threading.Thread(
+        target=_run_script_bg,
+        args=("live_dispatcher.py", "dispatch"),
+        daemon=True,
+        name="trigger-dispatch",
+    )
+    t.start()
+    return {"status": "triggered", "script": "live_dispatcher"}
+
+
+@app.post("/trigger/settle")
+def trigger_settle() -> Dict[str, str]:
+    """Kick off nightly_recap.py — settle all PENDING parlays + streak picks."""
+    t = threading.Thread(
+        target=_run_script_bg,
+        args=("nightly_recap.py", "settle"),
+        daemon=True,
+        name="trigger-settle",
+    )
+    t.start()
+    return {"status": "triggered", "script": "nightly_recap"}
+
+
+@app.get("/trigger/status")
+def trigger_status() -> Dict[str, Any]:
+    """Return live lock state so callers can check if a script is still running."""
+    with _TRIGGER_LOCK_MUTEX:
+        snapshot = dict(_TRIGGER_LOCKS)
+    return {
+        "stream_running": snapshot["stream"],
+        "dispatch_running": snapshot["dispatch"],
+        "settle_running": snapshot["settle"],
+    }
+
+
 if __name__ == "__main__":
     import uvicorn  # noqa: PLC0415
 
