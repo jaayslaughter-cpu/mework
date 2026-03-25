@@ -1,31 +1,29 @@
-# PropIQ Python ML Microservice — Production Dependencies
-# Pin minor versions for Railway reproducibility
+# PropIQ Python ML Service — production dependencies
+# RabbitMQ (pika) REMOVED — Phase 29 HTTP migration complete
+# confluent-kafka REMOVED — never used in production code
 
-# ── Web framework ──────────────────────────────────────────────────────────
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-pydantic==2.7.1
-
-# ── ML core ───────────────────────────────────────────────────────────────
-xgboost==2.0.3
-scikit-learn==1.4.2
-numpy==1.26.4
-pandas==2.2.2
-
-# ── SHAP (backtest audit) ─────────────────────────────────────────────────
-shap==0.45.0
-
-# ── Message broker ────────────────────────────────────────────────────────
-pika==1.3.2
-
-# ── Caching ───────────────────────────────────────────────────────────────
-redis==5.0.4
-
-# ── Scraping / HTTP ───────────────────────────────────────────────────────
-httpx==0.27.0
-apify-client==1.7.1
-requests==2.32.4
-beautifulsoup4==4.12.3
-
-# ── Data processing ───────────────────────────────────────────────────────
-scipy==1.13.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+requests>=2.31.0
+httpx>=0.27.0
+psycopg2-binary>=2.9.9
+SQLAlchemy>=2.0.30
+python-dotenv>=1.0.1
+pandas>=2.2.2
+numpy>=1.26.4
+scikit-learn>=1.4.2
+xgboost>=2.0.3
+optuna>=3.6.1
+joblib>=1.4.2
+scipy>=1.13.0
+pytz>=2024.1
+beautifulsoup4>=4.12.3
+lxml>=5.2.1
+rapidfuzz>=3.9.0
+tqdm>=4.66.4
+python-dateutil>=2.9.0
+discord-webhook>=1.3.0
+apscheduler>=3.10.4
+aiohttp>=3.9.5
+tenacity>=8.3.0
+structlog>=24.1.0

@@ -49,8 +49,6 @@ from typing import Any
 
 import requests
 
-logger = logging.getLogger(__name__)
-
 # Season record tracker (writes to agent SQL DB)
 try:
     from season_record import record_parlay, get_agent_season_stats
@@ -60,31 +58,15 @@ except ImportError:
     def record_parlay(*a, **kw): return False            # noqa: E704
     def get_agent_season_stats(agent): return {}         # noqa: E704
 
-from platform_selector import PlatformSelector, SelectionResult
-platform_selector = PlatformSelector()
-from DiscordAlertService import discord_alert, MAX_STAKE_USD
-
-# ---------------------------------------------------------------------------
-# Hot/cold form layer (MLB Stats API game logs — free, no key required)
-# ---------------------------------------------------------------------------
 try:
-    from mlb_form_layer import form_layer as _form_layer
-    _FORM_LAYER_AVAILABLE = True
-    logger.info("[Form] Hot/cold form layer loaded.")
+    from platform_selector import PlatformSelector, SelectionResult
+    platform_selector = PlatformSelector()
+    _PLATFORM_SELECTOR_AVAILABLE = True
 except ImportError:
-    _FORM_LAYER_AVAILABLE = False
+    _PLATFORM_SELECTOR_AVAILABLE = False
+    platform_selector = None  # type: ignore[assignment]
 
-    class _DummyFormLayer:  # noqa: D101
-        @staticmethod
-        def prefetch_form_data(*a, **kw) -> None:
-            """No-op for dummy form layer."""
-            # This method is intentionally left blank as a no-op.
-            pass
-        @staticmethod
-        def get_form_adjustment(*a, **kw) -> float: return 0.0  # noqa: E704
-
-    _form_layer = _DummyFormLayer()  # type: ignore[assignment]
-    logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
+from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
 # ── Phase 27: Enhancement layer imports (all optional — graceful fallback) ──
 try:
@@ -111,7 +93,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*_a, **_kw):  # noqa: E302, E704
+    def _get_fade_signal(*_args, **_kwargs):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -119,6 +101,27 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
 )
 logger = logging.getLogger("propiq.live")
+
+# ---------------------------------------------------------------------------
+# Hot/cold form layer (MLB Stats API game logs — free, no key required)
+# ---------------------------------------------------------------------------
+try:
+    from mlb_form_layer import form_layer as _form_layer
+    _FORM_LAYER_AVAILABLE = True
+    logger.info("[Form] Hot/cold form layer loaded.")
+except ImportError:
+    _FORM_LAYER_AVAILABLE = False
+
+    class _DummyFormLayer:  # noqa: D101
+        @staticmethod
+        def prefetch_form_data(*_args, **_kwargs) -> None:
+            # No-op: Dummy form layer does not prefetch any data
+            pass
+        @staticmethod
+        def get_form_adjustment(*_args, **_kwargs) -> float: return 0.0  # noqa: E704
+
+    _form_layer = _DummyFormLayer()  # type: ignore[assignment]
+    logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -197,6 +200,22 @@ AGENT_CONFIGS: list[dict] = [
         "entry_type": "FLEX",
         "filter": lambda r: r.implied_prob >= 0.56,
         "note": "Pure model probability — highest confidence only",
+    },
+    {
+        # ── F5Agent — First 5 Innings specialist ───────────────────────────
+        # Focuses on pitcher-centric props where outcomes are driven by the
+        # starter's quality.  Bullpen variance is eliminated because the prop
+        # resolves before any reliever touches the game.
+        # Targets high-probability pitcher props: K and hits/runs suppression.
+        # Strict probability gate (≥ 0.55) compensates for the small prop pool.
+        "name": "F5Agent",
+        "emoji": "5️⃣",
+        "max_legs": 3,
+        "entry_type": "STANDARD",
+        "filter": lambda r: r.prop_type in (
+            "strikeouts", "earned_runs", "hits_runs_rbis", "runs"
+        ) and r.implied_prob >= 0.55,
+        "note": "First-5-innings props — ignores bullpen, SP quality only",
     },
     {
         "name": "UmpireAgent",
@@ -373,10 +392,13 @@ _HEADERS = {
 _pp_session: requests.Session | None = None
 
 
-def _get_pp_session(pp_session: requests.Session | None = None) -> requests.Session:
+_pp_session = None
+
+def _get_pp_session() -> requests.Session:
     """Return a warmed-up PrizePicks session, creating one if needed."""
-    if pp_session is not None:
-        return pp_session
+    global _pp_session
+    if _pp_session is not None:
+        return _pp_session
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -399,6 +421,7 @@ def _get_pp_session(pp_session: requests.Session | None = None) -> requests.Sess
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
     })
+    _pp_session = s
     return s
 
 
@@ -773,7 +796,10 @@ def normalise_stat(raw: str) -> str | None:
 # ArbitrageAgent — module-level base-rate helpers
 # ---------------------------------------------------------------------------
 
-_ARB_BASE_RATES: dict[str, list[tuple[float, float]]] = {
+# Single source of truth for MLB per-game prop base rates.
+# Used by both _evaluate_props (agent parlays) and ArbitrageAgent.
+# Format: {prop_type: [(line_threshold, over_prob), ...]} — interpolated linearly.
+_BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "hits":            [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
     "home_runs":       [(0.5, 0.22), (1.5, 0.04)],
     "rbis":            [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
@@ -796,7 +822,7 @@ _ARB_MIN_GAP:      float = 0.5     # minimum line gap between PP and UD to quali
 
 def _arb_base_prob(prop_type: str, line: float, side: str) -> float:
     """Interpolate MLB base-rate probability for ArbitrageAgent calculations."""
-    rates = _ARB_BASE_RATES.get(prop_type, [])
+    rates = _BASE_RATES.get(prop_type, [])
     if not rates:
         return 0.50
     xs = [r[0] for r in rates]
@@ -1546,36 +1572,8 @@ class LiveDispatcher:
         independently — we work directly from already-fetched raw_props).
         """
         # ── MLB historical base-rate probabilities ─────────────────────────
-        # P(player hits Over X) based on MLB 2022-2025 season averages.
-        # Derived from known per-game stat distributions.
-        # Format: {prop_type: [(line_threshold, over_prob), ...]}
-        # Interpolated linearly between thresholds.
-        _BASE_RATES: dict[str, list[tuple[float, float]]] = {
-            # Hitter: H ≥ X
-            "hits":           [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
-            # HR ≥ X
-            "home_runs":      [(0.5, 0.22), (1.5, 0.04)],
-            # RBI ≥ X
-            "rbis":           [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
-            # R ≥ X
-            "runs":           [(0.5, 0.55), (1.5, 0.23), (2.5, 0.09)],
-            # TB ≥ X
-            "total_bases":    [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
-            # SB ≥ X
-            "stolen_bases":   [(0.5, 0.14), (1.5, 0.03)],
-            # H+R+RBI ≥ X
-            "hits_runs_rbis": [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
-            # Pitcher K ≥ X
-            "strikeouts":     [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
-            # ER ≤ X (Under is typically the bet)
-            "earned_runs":    [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
-            # Fantasy hitter score
-            "fantasy_hitter": [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
-            # Fantasy pitcher score
-            "fantasy_pitcher":[(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
-            # Walks (pitcher)
-            "walks":          [(0.5, 0.68), (1.5, 0.42), (2.5, 0.22)],
-        }
+        # Uses module-level _BASE_RATES (single source of truth shared with
+        # ArbitrageAgent).  See top of file for full table + documentation.
 
         # ── Per-game line range validation ────────────────────────────────
         # Lines outside these ranges are season-long or special markets.

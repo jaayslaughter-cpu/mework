@@ -122,8 +122,7 @@ class MLBFormLayer:
                 timeout=20,
             )
             if resp.status_code != 200:
-                logger.warning("[Form] Roster HTTP %d", resp.status_code)
-                self._roster_loaded = True
+                logger.warning("[Form] Roster HTTP %d — will retry next call", resp.status_code)
                 return
             for p in resp.json().get("people", []):
                 pid  = p.get("id")
@@ -131,10 +130,9 @@ class MLBFormLayer:
                 if pid and name:
                     self._roster[name.lower()] = pid
             logger.info("[Form] Roster loaded — %d players", len(self._roster))
+            self._roster_loaded = True  # only mark done on genuine success
         except Exception as exc:
-            logger.warning("[Form] Roster load error: %s", exc)
-        finally:
-            self._roster_loaded = True
+            logger.warning("[Form] Roster load error: %s — will retry next call", exc)
 
     def _resolve_player_id(self, player_name: str) -> int | None:
         """Return MLB Stats API player ID for a player name (exact then fuzzy)."""
