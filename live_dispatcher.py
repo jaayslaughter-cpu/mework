@@ -84,7 +84,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -93,7 +93,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*_args, **_kwargs):  # noqa: E302, E704
+    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -113,12 +113,8 @@ except ImportError:
     _FORM_LAYER_AVAILABLE = False
 
     class _DummyFormLayer:  # noqa: D101
-        @staticmethod
-        def prefetch_form_data(*_args, **_kwargs) -> None:
-            """Dummy implementation; no form data to prefetch."""
-            pass  # intentionally left blank
-        @staticmethod
-        def get_form_adjustment(*_args, **_kwargs) -> float: return 0.0  # noqa: E704
+        def prefetch_form_data(self, *a, **kw) -> None: pass       # noqa: E704
+        def get_form_adjustment(self, *a, **kw) -> float: return 0.0  # noqa: E704
 
     _form_layer = _DummyFormLayer()  # type: ignore[assignment]
     logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
@@ -144,6 +140,36 @@ except ImportError:
     def _fg_get_pitcher(*_a, **_kw) -> dict: return {}    # noqa: E704
 
     logger.warning("[FG] fangraphs_layer not found — FanGraphs adjustments disabled.")
+
+# ── Phase 35: Operations layer (agent config, risk manager, decision logger) ──
+try:
+    import yaml as _yaml
+    _config_path = os.path.join(os.path.dirname(__file__), "agent_config.yaml")
+    with open(_config_path) as _f:
+        _agent_config: dict = _yaml.safe_load(_f) or {}
+    _CONFIG_VERSION: str = _agent_config.get("version", "unknown")
+    logger.info("[CONFIG] Loaded agent_config.yaml v%s", _CONFIG_VERSION)
+except Exception as _cfg_exc:
+    _agent_config = {}
+    _CONFIG_VERSION = "unknown"
+    logger.warning("[CONFIG] Could not load agent_config.yaml: %s", _cfg_exc)
+
+try:
+    from risk_manager import RiskManager as _RiskManager
+    _risk_manager = _RiskManager()
+    logger.info("[RISK] RiskManager loaded")
+except Exception as _rm_exc:
+    _risk_manager = None  # type: ignore[assignment]
+    logger.warning("[RISK] RiskManager not available: %s", _rm_exc)
+
+try:
+    import decision_logger as _decision_logger
+    _DL_AVAILABLE = True
+    logger.info("[DL] Decision logger loaded")
+except ImportError:
+    _DL_AVAILABLE = False
+    _decision_logger = None  # type: ignore[assignment]
+    logger.warning("[DL] decision_logger not available — leg decisions will not be logged")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -572,7 +598,7 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
-def fetch_prizepicks_props(pp_session=None) -> list[dict]:
+def fetch_prizepicks_props() -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 
@@ -583,14 +609,15 @@ def fetch_prizepicks_props(pp_session=None) -> list[dict]:
 
     Returns raw list of dicts.
     """
+    global _pp_session
     try:
         data = None
         for attempt in range(3):
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
-                pp_session = None
-            sess = pp_session or _get_pp_session()
+                _pp_session = None
+            sess = _get_pp_session()
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
                 params={"per_page": 250, "single_stat": True, "league_id": 2},
@@ -601,7 +628,7 @@ def fetch_prizepicks_props(pp_session=None) -> list[dict]:
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                pp_session = None   # force re-warm on next attempt
+                _pp_session = None   # force re-warm on next attempt
         if data is None:
             return []
 
@@ -1342,8 +1369,17 @@ class LiveDispatcher:
         # Shared legs across parlays are acceptable — consensus across agents
         # is a positive signal, not a risk. Each parlay is a separate $20 bet
         # with its own thesis.
+        # Phase 35: active agent gate — respects config toggles + auto cool-down
+        _active_agents = (
+            set(_risk_manager.get_active_agents())
+            if _risk_manager else None
+        )
+
         sent = 0
         for agent in AGENT_CONFIGS:
+            if _active_agents is not None and agent["name"] not in _active_agents:
+                logger.info("[RISK] %s — skipped (disabled or in cool-down)", agent["name"])
+                continue
             parlay = build_parlay(leg_pool, agent)
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
@@ -1392,6 +1428,9 @@ class LiveDispatcher:
             else:
                 logger.info("[DRY-RUN] Would send: %s",
                             json.dumps(parlay, indent=2)[:400])
+            # Phase 35: record exposure for daily cap tracking
+            if _risk_manager and not self.dry_run:
+                _risk_manager.record_stake(agent["name"], 20.0)
             sent += 1
 
         # ── OmegaStack (18th agent) — triple-confirmation ensemble ──
@@ -1567,6 +1606,16 @@ class LiveDispatcher:
                 logger.info("[ArbitrageAgent] No qualifying cross-platform discrepancies today.")
         except Exception as _arb_err:
             logger.warning("[ArbitrageAgent] Error: %s", _arb_err, exc_info=True)
+
+        # Phase 35: flush decision log buffer (batch write all leg decisions)
+        if _DL_AVAILABLE:
+            try:
+                n_logged = _decision_logger.flush_buffer()
+                logger.info("[DL] Flushed %d leg decisions to decision_log", n_logged)
+            except Exception as _dl_err:
+                logger.warning("[DL] Flush failed: %s", _dl_err)
+
+        logger.info("Dispatch complete — %d parlays posted", sent)
 
     # ── private ───────────────────────────────────────────────────────────────
 
@@ -1746,6 +1795,10 @@ class LiveDispatcher:
 
                 # Calculate implied probability from MLB base rates
                 prob = base_prob(prop_type, line_val, side)
+                _prob_base = prob        # Phase 35: track layer contributions
+                _prob_after_de = prob    # updated after DraftEdge
+                _prob_after_sc = prob    # updated after Statcast
+                _prob_after_form = prob  # updated after form layer
 
                 # Platform edge bonus: if both platforms available and we chose
                 # the better line, add a small bonus (0.5–2.5%) for line advantage
@@ -1786,6 +1839,7 @@ class LiveDispatcher:
                     blended = 0.65 * prob + 0.35 * de_sig
                     de_boost_val = round(blended - prob, 4)
                     prob = min(0.80, blended)
+                _prob_after_de = prob  # Phase 35: snapshot after DraftEdge
 
                 # 2. Statcast boosts (small additive signal on K and HR/TB props)
                 if prop_type == "strikeouts" and side == "Over":
@@ -1802,6 +1856,8 @@ class LiveDispatcher:
                     if sc_avg > 0:
                         # Positive contact rate (avg > .270) adds slight hit prob bump
                         prob = min(0.80, prob + max(0.0, sc_avg - 0.250) * 0.10)
+
+                _prob_after_sc = prob  # Phase 35: snapshot after Statcast
 
                 # 3. SBD FadeAgent signal
                 sbd_ticket_pct = 0.0
@@ -1831,6 +1887,7 @@ class LiveDispatcher:
                     prob = min(0.80, max(0.40, prob + _form_adj))
                 except Exception:
                     pass  # graceful degradation — never let form data kill a leg
+                _prob_after_form = prob  # Phase 35: snapshot after form layer
 
                 # ── Layer 5: FanGraphs season stats (Phase 34) ───────────────
                 # Per-agent signal routing:
@@ -1845,12 +1902,10 @@ class LiveDispatcher:
                 #   EVHunter / StreakAgent      → full signal set
                 if _FG_AVAILABLE:
                     try:
-                        try:
+                        if player_type == "pitcher":
                             _fg_data = _fg_get_pitcher(pname)
-                            player_type = "pitcher"
-                        except KeyError:
+                        else:
                             _fg_data = _fg_get_batter(pname)
-                            player_type = "batter"
                         _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
                         if _fg_adj != 0.0:
                             logger.debug(
@@ -1862,12 +1917,42 @@ class LiveDispatcher:
                         pass  # FanGraphs is additive — never let it crash the leg
                 # ── End Layer 5 ──────────────────────────────────────────────
 
-                # Gate checks
+                # Gate checks — Phase 35: log all decisions with full feature trail
                 if prob < cfg["min_prob"]:
+                    if _DL_AVAILABLE:
+                        _decision_logger.log_leg(
+                            agent_name="dispatcher", player_name=pname,
+                            prop_type=prop_type, direction=side, line=line_val,
+                            platform=chosen_platform,
+                            prob_base=_prob_base,
+                            prob_draftedge=round(_prob_after_de - _prob_base, 4),
+                            prob_statcast=round(_prob_after_sc - _prob_after_de, 4),
+                            prob_sbd=sbd_ticket_pct / 100.0 if sbd_ticket_pct else 0.0,
+                            prob_form=round(_prob_after_form - _prob_after_sc, 4),
+                            prob_fangraphs=round(prob - _prob_after_form, 4),
+                            prob_final=prob, edge_pct=0.0,
+                            decision="REJECTED",
+                            reject_reason=f"prob {prob:.3f} < min {cfg['min_prob']:.3f}",
+                        )
                     continue
 
                 ev = calc_ev(prob)
                 if ev < MIN_EV_PCT:
+                    if _DL_AVAILABLE:
+                        _decision_logger.log_leg(
+                            agent_name="dispatcher", player_name=pname,
+                            prop_type=prop_type, direction=side, line=line_val,
+                            platform=chosen_platform,
+                            prob_base=_prob_base,
+                            prob_draftedge=round(_prob_after_de - _prob_base, 4),
+                            prob_statcast=round(_prob_after_sc - _prob_after_de, 4),
+                            prob_sbd=sbd_ticket_pct / 100.0 if sbd_ticket_pct else 0.0,
+                            prob_form=round(_prob_after_form - _prob_after_sc, 4),
+                            prob_fangraphs=round(prob - _prob_after_form, 4),
+                            prob_final=prob, edge_pct=ev,
+                            decision="REJECTED",
+                            reject_reason=f"EV {ev:.4f} < min {MIN_EV_PCT:.4f}",
+                        )
                     continue
 
                 seen.add(leg_key)
@@ -1885,6 +1970,26 @@ class LiveDispatcher:
                     sbd_ticket_pct=round(sbd_ticket_pct, 1),
                     is_fade_signal=is_fade_signal,
                 ))
+                # Phase 35: log INCLUDED leg with full feature trail
+                if _DL_AVAILABLE:
+                    _decision_logger.log_leg(
+                        agent_name="dispatcher", player_name=pname,
+                        prop_type=prop_type, direction=side, line=line_val,
+                        platform=chosen_platform,
+                        prob_base=_prob_base,
+                        prob_draftedge=round(_prob_after_de - _prob_base, 4),
+                        prob_statcast=round(_prob_after_sc - _prob_after_de, 4),
+                        prob_sbd=sbd_ticket_pct / 100.0 if sbd_ticket_pct else 0.0,
+                        prob_form=round(_prob_after_form - _prob_after_sc, 4),
+                        prob_fangraphs=round(prob - _prob_after_form, 4),
+                        prob_final=prob, edge_pct=ev,
+                        decision="INCLUDED",
+                        features={
+                            "sbd_ticket_pct": sbd_ticket_pct,
+                            "is_fade_signal": is_fade_signal,
+                            "de_boost": de_boost_val,
+                        },
+                    )
 
         # Sort by implied prob desc
         legs.sort(key=lambda l: -l.implied_prob)

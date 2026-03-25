@@ -1,0 +1,269 @@
+# PropIQ Agent Configuration — Central Control Panel
+# Version is baked into every DB record so you know exactly which logic ran.
+# Edit this file to toggle agents, override thresholds, or force fallback modes.
+# Railway redeploys on every git push — no code changes needed for config changes.
+
+version: "2026.1"
+config_updated: "2026-03-25"
+
+# ---------------------------------------------------------------------------
+# RISK MANAGEMENT (global)
+# ---------------------------------------------------------------------------
+risk:
+  bankroll: 1000.0                   # Total bankroll in USD
+  max_daily_stake_pct: 0.15          # Max 15% of bankroll per day across all agents
+  max_agent_stake_pct: 0.03          # Max 3% of bankroll per agent per day
+  half_kelly_cap: 0.10               # Hard ceiling on any single Kelly bet
+  cool_down_days: 3                  # Days to pause agent after threshold breach
+  cool_down_roi_threshold: -0.20     # 30-day ROI < -20% → cool-down
+  cool_down_clv_threshold: -0.030    # 30-day CLV < -3% → cool-down
+  cool_down_brier_threshold: 0.28    # 30-day Brier score > 0.28 → cool-down (0.25 = perfect)
+
+# ---------------------------------------------------------------------------
+# FALLBACK MODES
+# When a data feed fails, the system degrades gracefully rather than crashing.
+# ---------------------------------------------------------------------------
+fallback:
+  base_rate_only_prob_threshold: 0.56   # Tighter gate when projections are missing
+  base_rate_only_confidence_gate: 8     # Raise confidence threshold in base-rate-only mode
+  disable_statcast_on_failure: true     # Statcast down → zero its contribution
+  disable_fangraphs_on_failure: true    # FanGraphs down → zero its contribution (already graceful)
+  disable_sbd_agents_on_failure:        # These agents need SBD trends — auto-disable if feed fails
+    - FadeAgent
+  disable_draftedge_agents_on_failure:  # These agents rely heavily on DraftEdge projections
+    - MLEdgeAgent
+  alert_on_feed_failure: true           # Discord alert when any primary feed goes down
+
+# ---------------------------------------------------------------------------
+# CALIBRATION
+# Run weekly (Sundays). Alert if Brier score or reliability degrades.
+# ---------------------------------------------------------------------------
+calibration:
+  min_sample_size: 50               # Don't score calibration until N settled bets
+  brier_alert_threshold: 0.26       # Alert if overall Brier exceeds this
+  reliability_bucket_size: 0.05     # 5-point buckets: [0.50-0.55), [0.55-0.60), etc.
+  rolling_window_days: 30           # Window for rolling calibration checks
+
+# ---------------------------------------------------------------------------
+# AGENT DEFINITIONS
+# Fields per agent:
+#   enabled:          Master on/off switch
+#   min_prob:         Minimum win probability to fire
+#   min_edge_pct:     Minimum EV edge (decimal) to fire
+#   max_legs:         Hard cap on legs per parlay
+#   confidence_gate:  Minimum confidence score (0-10) to post to Discord
+#   depends_on_feeds: List of feeds this agent requires — auto-disabled if any fail
+#   cool_down_active: Set to true manually or auto-set by risk_manager.py
+#   cool_down_until:  ISO date — agent skips until this date passes
+#   notes:            Human-readable rationale
+# ---------------------------------------------------------------------------
+agents:
+
+  EVHunter:
+    enabled: true
+    min_prob: 0.53
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Generalist — pools top 10 edges. Uses all 5 enhancement layers."
+
+  UnderMachine:
+    enabled: true
+    min_prob: 0.53
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Strictly Unders. Exploits public Over bias."
+
+  F5Agent:
+    enabled: true
+    min_prob: 0.53
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "First 5 innings only. Ignores bullpen data."
+
+  MLEdgeAgent:
+    enabled: true
+    min_prob: 0.55
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: [draftedge]
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Pure ML probabilities. Needs DraftEdge projections for signal."
+
+  UmpireAgent:
+    enabled: true
+    min_prob: 0.54
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Umpire K/BB/ER tendencies. Benefits from FanGraphs CSW%."
+
+  FadeAgent:
+    enabled: true
+    min_prob: 0.52
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: [sbd]
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Contrarian. REQUIRES SBD real ticket%/money%. Auto-disabled if SBD fails."
+
+  LineValueAgent:
+    enabled: true
+    min_prob: 0.53
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Sharp consensus gaps. Edge >= 3%."
+
+  BullpenAgent:
+    enabled: true
+    min_prob: 0.54
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Bullpen fatigue. Excludes F5. Prop-weighted thresholds."
+
+  WeatherAgent:
+    enabled: true
+    min_prob: 0.54
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: [openmeteo]
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Wind >= 15 mph, temp extremes. HR/TB/hits props."
+
+  SteamAgent:
+    enabled: true
+    min_prob: 0.53
+    min_edge_pct: 0.04
+    max_legs: 3
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Line velocity >= 2.0 pts/min. MAX_LEGS = 3."
+
+  ArsenalAgent:
+    enabled: true
+    min_prob: 0.54
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Pitch-type matchup. K + TB props. Benefits from FanGraphs CSW%."
+
+  PlatoonAgent:
+    enabled: true
+    min_prob: 0.52
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Handedness splits. Hitting props."
+
+  CatcherAgent:
+    enabled: true
+    min_prob: 0.54
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Framing + battery specialist. K + SB props."
+
+  LineupAgent:
+    enabled: true
+    min_prob: 0.52
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Volume + PA specialist. Hitting props."
+
+  GetawayAgent:
+    enabled: true
+    min_prob: 0.52
+    min_edge_pct: 0.03
+    max_legs: 4
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Schedule anomaly — Unders on travel days."
+
+  ArbitrageAgent:
+    enabled: true
+    min_prob: 0.54
+    min_edge_pct: 0.005    # 0.5% guaranteed margin
+    max_legs: 2
+    confidence_gate: 7
+    depends_on_feeds: [prizepicks, underdog]
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Cross-platform arbitrage. Both platforms required."
+
+  VultureStack:
+    enabled: true
+    min_prob: 0.57
+    min_edge_pct: 0.03
+    max_legs: 3
+    confidence_gate: 7
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Dual-consensus: requires BullpenAgent AND GetawayAgent signals."
+
+  OmegaStack:
+    enabled: true
+    min_prob: 0.65
+    min_edge_pct: 0.03
+    max_legs: 3
+    confidence_gate: 8     # Higher gate for meta-model
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Triple-consensus: requires VultureStack + UmpireAgent + FadeAgent."
+
+  StreakAgent:
+    enabled: true
+    min_prob: 0.80
+    min_edge_pct: 0.03
+    max_legs: 1
+    confidence_gate: 8
+    depends_on_feeds: []
+    cool_down_active: false
+    cool_down_until: null
+    notes: "Underdog Streaks. 11-pick progressive. 8/10 confidence gate."

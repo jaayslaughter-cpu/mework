@@ -309,6 +309,33 @@ def run(settle_date: Optional[str] = None) -> None:
     except Exception as _streak_settle_err:
         logger.warning("[StreakAgent] Settlement error: %s", _streak_settle_err)
 
+    # ── Phase 35: Calibration + Edge Health (post-settlement) ────────────────
+    # Run after every settlement to check if our probabilities are well-calibrated
+    # and flag agents that are statistically underperforming their backtest baseline.
+    try:
+        from calibration_monitor import run as run_calibration
+        logger.info("[Phase35] Running calibration monitor (30-day window)...")
+        run_calibration(days=30, quiet=False)  # posts to Discord if degraded
+    except ImportError:
+        logger.debug("[Phase35] calibration_monitor.py not found — skipping.")
+    except Exception as _cal_err:
+        logger.warning("[Phase35] Calibration monitor error: %s", _cal_err)
+
+    try:
+        from edge_health_monitor import run as run_edge_health
+        from risk_manager import RiskManager
+        logger.info("[Phase35] Running edge health monitor...")
+        edge_metrics = run_edge_health(days=30, quiet=False)  # posts Discord report
+        # Apply cool-downs to any agents that breached ROI/CLV/Brier thresholds
+        if edge_metrics:
+            rm = RiskManager()
+            rm.check_and_apply_cool_downs(edge_metrics)
+            logger.info("[Phase35] Cool-down check complete for %d agents", len(edge_metrics))
+    except ImportError:
+        logger.debug("[Phase35] edge_health_monitor.py not found — skipping.")
+    except Exception as _eh_err:
+        logger.warning("[Phase35] Edge health monitor error: %s", _eh_err)
+
 
 if __name__ == "__main__":
     date_arg = sys.argv[1] if len(sys.argv) > 1 else None
