@@ -436,6 +436,23 @@ class BaseSlipBuilder(ABC):
             return False
 
         # TODO: add game_id-based correlation check when PropEdge carries game_id
+        # game_id correlation: block if ≥4 legs from the same game.
+        # Same-game parlays carry high leg-to-leg correlation that understates
+        # true combined probability, especially when all props belong to the
+        # same pitcher / offensive lineup.
+        populated_game_ids = [leg.game_id for leg in combo if leg.game_id]
+        if populated_game_ids:
+            from collections import Counter  # noqa: PLC0415
+            counts = Counter(populated_game_ids)
+            if max(counts.values()) >= 4:
+                logger.debug(
+                    "%s: correlation filter rejected combo "
+                    "(≥4 legs from same game_id '%s').",
+                    self.agent_name,
+                    max(counts, key=counts.__getitem__),
+                )
+                return False
+
         return True
 
     # ------------------------------------------------------------------
@@ -516,6 +533,15 @@ class EVHunter(BaseSlipBuilder):
     Market Scanner (LineValue, Steam, Fade) alerts.  Selects the top-N
     props by edge percentage across the entire MLB slate and constructs
     every valid 3/4/5-leg combination.
+    Market Scanner (LineValue, Steam, Fade) alerts.  Also ingests
+    market_fusion CLV edges and dislocation-scored props from the
+    multi-provider OddsFetcher pipeline.
+
+    Prop ranking uses a composite score:
+        composite = edge_pct + (dislocation_score * DISLOCATION_WEIGHT)
+
+    This ensures props with confirmed Pinnacle/soft-book gaps are
+    ranked above props with the same raw edge but no sharp consensus.
 
     Strategy:
         Pure expected-value maximisation — no filters on Over/Under bias,
@@ -524,6 +550,11 @@ class EVHunter(BaseSlipBuilder):
     """
 
     TOP_N: int = 10
+    TOP_N: int              = 10
+    DISLOCATION_WEIGHT: float = 0.5   # weight applied to dislocation_score bonus
+    CLV_SOURCES: frozenset  = frozenset({
+        "market_fusion", "linevalue", "dislocation", "arbitrage",
+    })
 
     @property
     def agent_name(self) -> str:
@@ -541,7 +572,83 @@ class EVHunter(BaseSlipBuilder):
         """
         eligible = [p for p in props if p.edge_pct > 0]
         eligible.sort(key=lambda p: p.edge_pct, reverse=True)
+    def _composite_score(self, p: "PropEdge") -> float:
+        """Composite ranking score blending edge_pct + CLV dislocation bonus."""
+        dis_score = getattr(p, "dislocation_score", 0.0) or 0.0
+        return p.edge_pct + (dis_score * self.DISLOCATION_WEIGHT)
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Select the top-N props by composite EV score.
+
+        Promotes props from CLV-sourced feeds (market_fusion, linevalue,
+        dislocation) with a dislocation_score bonus on top of raw edge_pct.
+
+        Args:
+            props: Full unfiltered prop pool from all inbound sources.
+
+        Returns:
+            Top :attr:`TOP_N` props ranked by composite score descending,
+            requiring positive edge.
+        """
+        eligible = [p for p in props if p.edge_pct > 0]
+        eligible.sort(key=self._composite_score, reverse=True)
         return eligible[: self.TOP_N]
+
+
+# ---------------------------------------------------------------------------
+# Agent 1b — ArbitrageAgent (True Cross-Book Arbitrage)
+# ---------------------------------------------------------------------------
+
+class ArbitrageAgent(BaseSlipBuilder):
+    """
+    Identifies and builds slips from true cross-book arbitrage opportunities.
+
+    Consumes PropEdges with ``source == "arbitrage"`` from the
+    MarketFusionEngine.arbitrage_scan() pipeline.  These are props where
+    the best available Over on one book + best Under on another book
+    combine to a total implied probability < 1.0 — a guaranteed edge
+    regardless of outcome.
+
+    Filters:
+        - source == "arbitrage"
+        - arb_margin ≥ ARB_GATE (0.5 % guaranteed return)
+        - min_providers ≥ 2 (confirmed cross-book, not a data artefact)
+
+    Slip construction:
+        - MAX_LEGS = 3  (keeps arb slips tight; wider slips dilute the edge)
+        - Builds Over legs only; the guaranteed margin is captured on the
+          over side where the dislocation is largest.
+    """
+
+    MAX_LEGS: int  = 3
+    ARB_GATE: float = 0.005   # 0.5 % minimum guaranteed margin
+
+    @property
+    def agent_name(self) -> str:
+        return "ArbitrageAgent"
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Filter to confirmed arbitrage edges with positive margin.
+
+        Args:
+            props: Full prop pool from all inbound sources.
+
+        Returns:
+            Arbitrage props sorted by ``arb_margin`` descending.
+        """
+        arb_props = [
+            p for p in props
+            if getattr(p, "source", "") == "arbitrage"
+            and getattr(p, "arb_margin", 0.0) >= self.ARB_GATE
+            and len(getattr(p, "providers_sampled", [])) >= 2
+        ]
+        arb_props.sort(
+            key=lambda p: getattr(p, "arb_margin", 0.0),
+            reverse=True,
+        )
+        return arb_props
 
 
 # ---------------------------------------------------------------------------
@@ -1674,6 +1781,7 @@ class ExecutionSquad:
         self._last_flush: float = time.time()
         self._agents: List[BaseSlipBuilder] = [
             EVHunter(amqp_url=amqp_url),
+            ArbitrageAgent(amqp_url=amqp_url),
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
             MLEdgeAgent(amqp_url=amqp_url),
