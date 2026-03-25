@@ -84,7 +84,7 @@ try:
     _SC_AVAILABLE = True
 except ImportError:
     _SC_AVAILABLE = False
-    def _sc_enrich(props: list, _player_type: str, _layer=None) -> list: return props  # noqa: E704
+    def _sc_enrich(props: list, player_type: str, layer=None) -> list: return props  # noqa: E704
     class StatcastFeatureLayer:  # noqa: E302
         pass
 
@@ -93,7 +93,7 @@ try:
     _SBD_AVAILABLE = True
 except ImportError:
     _SBD_AVAILABLE = False
-    def _get_fade_signal(*_a, **_kw):  # noqa: E302, E704
+    def _get_fade_signal(*a, **kw):  # noqa: E302, E704
         return 0.0, "none"
 
 logging.basicConfig(
@@ -113,10 +113,8 @@ except ImportError:
     _FORM_LAYER_AVAILABLE = False
 
     class _DummyFormLayer:  # noqa: D101
-        @staticmethod
-        def prefetch_form_data(*_a, **_kw) -> None: """Intentionally does nothing."""  # noqa: E704
-        @staticmethod
-        def get_form_adjustment(*_a, **_kw) -> float: return 0.0  # noqa: E704
+        def prefetch_form_data(self, *a, **kw) -> None: pass       # noqa: E704
+        def get_form_adjustment(self, *a, **kw) -> float: return 0.0  # noqa: E704
 
     _form_layer = _DummyFormLayer()  # type: ignore[assignment]
     logger.warning("[Form] mlb_form_layer not found — form adjustments disabled.")
@@ -578,7 +576,7 @@ _PP_MLB_STAT_TYPES = {
     "walks",
 }
 
-# Underdog stat  our internal prop_type
+# Underdog stat → our internal prop_type
 _UD_STAT_MAP: dict[str, str] = {
     "strikeouts":    "strikeouts",
     "pitch_outs":    "strikeouts",   # alternate UD label for pitcher Ks
@@ -597,7 +595,6 @@ _UD_STAT_MAP: dict[str, str] = {
     "fantasy_points_pitcher": "fantasy_pitcher",
 }
 
-
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
@@ -612,13 +609,14 @@ def fetch_prizepicks_props() -> list[dict]:
 
     Returns raw list of dicts.
     """
+    global _pp_session
     try:
         data = None
         for attempt in range(3):
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
                 # Force a fresh session on retry so we get new cookies
-                pp_session = None
+                _pp_session = None
             sess = _get_pp_session()
             resp = sess.get(
                 "https://api.prizepicks.com/projections",
@@ -630,7 +628,7 @@ def fetch_prizepicks_props() -> list[dict]:
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                pp_session = None   # force re-warm on next attempt
+                _pp_session = None   # force re-warm on next attempt
         if data is None:
             return []
 
@@ -1048,6 +1046,9 @@ class PropLeg:
     de_boost:       float = 0.0   # DraftEdge probability blend delta
     sbd_ticket_pct: float = 0.0   # SBD public ticket% (FadeAgent signal)
     is_fade_signal: bool  = False  # True when ticket_pct ≥ 65%
+    # Phase 36: pre-nudge snapshot (before hot/cold form + FanGraphs layers)
+    # Used by BullpenAgent, SteamAgent, and StreakAgent to bypass form/FG nudges
+    prob_pre_form:  float = 0.0   # prob after Statcast — before form & FG layers
 
 
 def build_parlay(
@@ -1065,13 +1066,26 @@ def build_parlay(
     if excluded_keys is None:
         excluded_keys = set()
 
+    # Phase 36: agents that must not be nudged by hot/cold form or FanGraphs.
+    #   BullpenAgent — form (player recency) conflicts with bullpen fatigue signal
+    #   SteamAgent   — form double-counts market movement (steam is already a
+    #                  market signal; player perf nudge adds noise, not edge)
+    #   StreakAgent  — precision over volume; form/FG can inflate marginal picks
+    #                  past the 0.80 gate, hurting win-rate with lower-quality legs
+    _SKIP_NUDGE_AGENTS = {"BullpenAgent", "SteamAgent", "StreakAgent"}
+    _use_pre_form = agent["name"] in _SKIP_NUDGE_AGENTS
+
+    def _eff_prob(leg: PropLeg) -> float:
+        """Return the probability appropriate for this agent's signal model."""
+        return leg.prob_pre_form if _use_pre_form else leg.implied_prob
+
     filtered = [
         l for l in legs
         if agent["filter"](
             type("SR", (), {
                 "side":            l.side,
                 "prop_type":       l.prop_type,
-                "implied_prob":    l.implied_prob,
+                "implied_prob":    _eff_prob(l),   # per-agent effective prob
                 "fantasy_pts_edge": l.fantasy_pts,
                 # Phase 27: enhancement signals exposed to agent filters
                 "is_fade_signal":  l.is_fade_signal,
@@ -1083,8 +1097,8 @@ def build_parlay(
         and (l.player_name, l.prop_type, l.side) not in excluded_keys
     ]
 
-    # Sort by implied prob desc, cap at min(agent max_legs, global MAX_LEGS)
-    filtered.sort(key=lambda x: -x.implied_prob)
+    # Sort by effective prob desc, cap at min(agent max_legs, global MAX_LEGS)
+    filtered.sort(key=lambda x: -_eff_prob(x))
     cap = min(agent["max_legs"], MAX_LEGS)
     selected = filtered[:cap]
 
@@ -1099,7 +1113,7 @@ def build_parlay(
     #   1. prob_score  : avg win prob scaled 0→7 over the range 50%→80%
     #   2. ev_bonus    : EV% scaled 0→2 (caps at 15% EV)
     #   3. legs_penalty: -0.3 per leg above 3 (more legs = more variance)
-    avg_prob     = sum(l.implied_prob for l in selected) / len(selected)
+    avg_prob     = sum(_eff_prob(l) for l in selected) / len(selected)
     prob_score   = (avg_prob - 0.50) / 0.30 * 7.0
     ev_bonus     = min(ev_pct / 15.0 * 2.0, 2.0)
     legs_penalty = max(0, len(selected) - 3) * 0.3
@@ -1875,6 +1889,10 @@ class LiveDispatcher:
                         pass  # non-fatal: SBD data unavailable for this prop
                 # ── End Phase 27 ──────────────────────────────────────────
 
+                # Phase 36: snapshot prob before form + FG nudges.
+                # BullpenAgent, SteamAgent, StreakAgent use this in build_parlay.
+                _prob_pre_form = prob  # noqa: SIM117
+
                 # ── Hot/cold form adjustment (MLB Stats API rolling avg) ────────
                 # Compares player's last-7-game rolling stat avg vs prior-season
                 # per-game avg.  Returns ±0.035 max — never blocks a prop on its
@@ -1904,11 +1922,11 @@ class LiveDispatcher:
                 #   EVHunter / StreakAgent      → full signal set
                 if _FG_AVAILABLE:
                     try:
-                        if prop_type == "pitcher":
+                        if player_type == "pitcher":
                             _fg_data = _fg_get_pitcher(pname)
                         else:
                             _fg_data = _fg_get_batter(pname)
-                        _fg_adj = _fg_adjustment(prop_type, side, prop_type, _fg_data)
+                        _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
                         if _fg_adj != 0.0:
                             logger.debug(
                                 "[FG] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
@@ -1971,6 +1989,8 @@ class LiveDispatcher:
                     de_boost=de_boost_val,
                     sbd_ticket_pct=round(sbd_ticket_pct, 1),
                     is_fade_signal=is_fade_signal,
+                    # Phase 36: store pre-nudge prob for agent-specific overrides
+                    prob_pre_form=round(_prob_pre_form, 4),
                 ))
                 # Phase 35: log INCLUDED leg with full feature trail
                 if _DL_AVAILABLE:
