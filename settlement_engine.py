@@ -169,7 +169,6 @@ def settle_leg(leg: dict, player_stats: dict[str, dict]) -> LegResult:
 def settle_parlay(
     parlay_id:    int,
     agent_name:   str,
-    date:         str,
     stake:        float,
     legs_data:    list[dict],
     player_stats: dict[str, dict],

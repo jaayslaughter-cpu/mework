@@ -155,8 +155,9 @@ class MLBFormLayer:
     # API fetchers
     # ------------------------------------------------------------------
 
+    @staticmethod
     def _fetch_game_log(
-        self, player_id: int, group: str, window: int
+        player_id: int, group: str, window: int
     ) -> list[dict]:
         """
         Fetch the last `window` game log splits for a player.

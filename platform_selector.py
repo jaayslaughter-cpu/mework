@@ -14,7 +14,7 @@ to define the SelectionResult dataclass used by agent filter lambdas.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -41,5 +41,6 @@ class PlatformSelector:
     satisfies the import without duplicating work.
     """
 
-    def select(self, *args, **kwargs) -> SelectionResult | None:  # noqa: D102
+    @staticmethod
+    def select(*args, **kwargs) -> SelectionResult | None:  # noqa: D102
         return None
