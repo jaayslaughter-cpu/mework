@@ -3,18 +3,18 @@ line_stream.py
 ==============
 Real-time line streaming pipeline.
 
-Runs every 30 minutes, 10 AM – 10 PM ET, via a scheduled trigger.
+Runs every 30 minutes, 10 AM - 10 PM ET, via a scheduled trigger.
 
 Three phases per run:
 
   PRE-GAME   Snapshot current PrizePicks + Underdog player prop lines.
-             Compare to previous 30-min snapshot  10; detect steam moves
-             (line shift  61 0.5 units). Post Discord alert for each move.
+             Compare to previous 30-min snapshot; detect steam moves
+             (line shift >= 0.5 units). Post Discord alert for each move.
              Mark first snapshot of day as opening lines.
 
   IN-GAME    Fetch live ESPN box scores for games currently in progress.
              Check PENDING parlay leg survival vs. live stats.
-             Post informational Discord update (data only  10; no new bets).
+             Post informational Discord update (data only; no new bets).
              Mark last pre-game snapshot as closing lines.
 
   CLV        Once closing lines are recorded, compute CLV for every
@@ -23,8 +23,8 @@ Three phases per run:
              Post CLV report to Discord.
 
 APIs / sources (all free, no new keys):
-  - api.prizepicks.com          (no key, same as live_dispatcher.py)
-  - api.underdogfantasy.com     (no key, same as live_dispatcher.py)
+  - api.prizepicks.com          (session warm-up to bypass bot protection)
+  - api.underdogfantasy.com     (no key, no quota)
   - site.api.espn.com           (no key, no quota)
 
 No in-game bet signals are generated. In-game phase is monitoring only.
@@ -71,12 +71,12 @@ _HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",   # no br — requests can't decode brotli
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
 }
 
-# PrizePicks: warm-up via app.prizepicks.com to harvest Cloudflare/DataDome cookies,
-# then hit the API on the same session (same technique used in live_dispatcher.py)
+# PrizePicks session warm-up: visit app.prizepicks.com first to harvest
+# Cloudflare/DataDome cookies, then hit the API on the same session.
 _PP_WARMUP_URL = "https://app.prizepicks.com/"
 _PP_WARMUP_HEADERS = {
     "User-Agent": (
@@ -90,8 +90,7 @@ _PP_WARMUP_HEADERS = {
     "Connection": "keep-alive",
 }
 
-# Baseball stat types recognised on PrizePicks (must be lowercase)
-# Includes both legacy and current PrizePicks label variants
+# Recognised PrizePicks MLB stat type labels (lowercase)
 _PP_MLB_STAT_TYPES: frozenset[str] = frozenset({
     # Batter props
     "hits", "home runs", "total bases", "runs", "rbi", "rbis",
@@ -165,14 +164,14 @@ def _get_db() -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# Prop fetching
+# Prop fetching — PrizePicks
 # ---------------------------------------------------------------------------
 
 def _fetch_prizepicks() -> list[dict]:
     """Fetch active PrizePicks MLB props using session cookie warm-up.
 
-    PrizePicks runs Cloudflare + DataDome bot protection. A bare GET always
-    returns 403. Fix: create a requests.Session, warm it up against
+    PrizePicks runs Cloudflare + DataDome bot protection.  A bare GET always
+    returns 403.  Fix: create a requests.Session, warm it up against
     app.prizepicks.com (which issues __cf_bm + datadome cookies), then
     hit the projections API on the same session.
     """
@@ -195,7 +194,7 @@ def _fetch_prizepicks() -> list[dict]:
         data = None
         for attempt in range(3):
             if attempt:
-                time.sleep(2 ** attempt)  # 2s, 4s back-off
+                time.sleep(2 ** attempt)  # 2 s, 4 s back-off
             resp = session.get(
                 "https://api.prizepicks.com/projections",
                 params={"per_page": 250, "single_stat": True, "league_id": 2},
@@ -206,24 +205,128 @@ def _fetch_prizepicks() -> list[dict]:
                 data = resp.json()
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
+
         if data is None:
             return []
 
+        # Build player_id → display_name map from the "included" sidecar
         player_map: dict[str, str] = {}
         for item in data.get("included", []):
             if item.get("type") == "new_player":
-                pid = item["id"]
-                name = item.get("attributes", {}).get("display_name", "")
-                if name:
-                    player_map[pid] = name
+                pid = item.get("id", "")
+                name = (item.get("attributes", {}).get("display_name") or "").strip()
+                if pid and name:
+                    player_map[str(pid)] = name
 
         props: list[dict] = []
         for proj in data.get("data", []):
             attrs = proj.get("attributes", {})
-            stat_raw = str(attrs.get("stat_type", "") or "").lower()
+            stat_raw = str(attrs.get("stat_type") or "").lower()
+
             if stat_raw not in _PP_MLB_STAT_TYPES or "inning" in stat_raw:
                 continue
+
             line_val = attrs.get("line_score")
+            if line_val is None:
+                continue
+
+            # Resolve player name via relationship → included sidecar
+            rels = proj.get("relationships", {})
+            player_rel_data = rels.get("new_player", {}).get("data") or {}
+            player_id = str(player_rel_data.get("id", ""))
+            pname = player_map.get(player_id, "")
+            if not pname:
+                continue
+
+            props.append({
+                "player_name": pname,
+                "prop_type":   stat_raw,
+                "platform":    "prizepicks",
+                "line":        float(line_val),
+            })
+
+        logger.info("[PP] %d props fetched", len(props))
+        return props
+
+    except Exception as exc:
+        logger.warning("[PP] fetch failed: %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Prop fetching — Underdog Fantasy
+# ---------------------------------------------------------------------------
+
+def _is_active_line(line: dict) -> bool:
+    """Return True if an Underdog line dict is currently active."""
+    return line.get("status") == "active"
+
+
+def _create_underdog_prop(
+    line: dict,
+    players_map: dict[str, dict],
+    appearances_map: dict[str, dict],
+) -> Optional[dict]:
+    """Build a normalised prop dict from a single Underdog over_under_line."""
+    player_id     = line.get("player_id", "")
+    appearance_id = line.get("appearance_id", "")
+    player        = players_map.get(str(player_id))
+    appearance    = appearances_map.get(str(appearance_id))
+    line_val      = line.get("stat_value") or line.get("line")
+
+    if not player or not appearance or line_val is None:
+        return None
+
+    # Sport guard — MLB only
+    if player.get("sport_id", "").upper() != "MLB":
+        return None
+
+    pname = (
+        f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+    )
+    if not pname:
+        return None
+
+    stat_ud = (
+        line.get("stat_type")
+        or (line.get("over_under") or {}).get("stat_type")
+        or ""
+    ).lower()
+
+    return {
+        "player_name": pname,
+        "prop_type":   stat_ud,
+        "platform":    "underdog",
+        "line":        float(line_val),
+    }
+
+
+def _process_underdog_lines(
+    lines: list[dict],
+    players_map: dict[str, dict],
+    appearances_map: dict[str, dict],
+) -> list[dict]:
+    """Process a raw list of Underdog over_under_lines into normalised props."""
+    props: list[dict] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        if not _is_active_line(line):
+            continue
+
+        stable_id = str(line.get("stable_id") or line.get("id", ""))
+        if stable_id and stable_id in seen:
+            continue
+        if stable_id:
+            seen.add(stable_id)
+
+        prop = _create_underdog_prop(line, players_map, appearances_map)
+        if prop:
+            props.append(prop)
+
+    return props
+
+
 def _fetch_underdog() -> list[dict]:
     """Fetch active Underdog Fantasy MLB props."""
     try:
@@ -237,8 +340,9 @@ def _fetch_underdog() -> list[dict]:
             return []
 
         data = resp.json()
-        players_map = {p["id"]: p for p in data.get("players", [])}
-        appearances_map = {a["id"]: a for a in data.get("appearances", [])}
+
+        players_map     = {str(p["id"]): p for p in data.get("players", [])}
+        appearances_map = {str(a["id"]): a for a in data.get("appearances", [])}
 
         props = _process_underdog_lines(
             data.get("over_under_lines", []),
@@ -247,86 +351,7 @@ def _fetch_underdog() -> list[dict]:
         )
         logger.info("[UD] %d props fetched", len(props))
         return props
-    except Exception as exc:
-        logger.warning("[UD] fetch failed: %s", exc)
-        return []
 
-def _process_underdog_lines(
-    lines: list[dict],
-    players_map: dict[str, dict],
-    appearances_map: dict[str, dict]
-) -> list[dict]:
-    props: list[dict] = []
-    seen: set[str] = set()
-
-    for line in lines:
-        if not _is_active_line(line):
-            continue
-
-        stable_id = line.get("stable_id", line.get("id", ""))
-        if stable_id in seen:
-            continue
-        seen.add(stable_id)
-
-        prop = _create_underdog_prop(line, players_map, appearances_map)
-        if prop:
-            props.append(prop)
-
-    return props
-
-def _is_active_line(line: dict) -> bool:
-    return line.get("status") == "active"
-
-def _create_underdog_prop(
-    line: dict,
-    players_map: dict[str, dict],
-    appearances_map: dict[str, dict]
-) -> dict | None:
-    player_id = line.get("player_id")
-    appearance_id = line.get("appearance_id")
-    player = players_map.get(player_id)
-    appearance = appearances_map.get(appearance_id)
-    line_val = line.get("line")
-
-    if not player or not appearance or line_val is None:
-        return None
-
-    return {
-        "player_name": player.get("full_name", ""),
-        "prop_type": line.get("over_under", ""),
-        "platform": "underdog",
-        "line": float(line_val),
-        "game_time": appearance.get("game_time", ""),
-    }
-
-            ou = line.get("over_under") or {}
-            app_stat = ou.get("appearance_stat") or {}
-            stat_ud = app_stat.get("stat", "").lower()
-            app_id = app_stat.get("appearance_id", "")
-            if not stat_ud or not app_id or "inning" in stat_ud:
-                continue
-
-            appearance = appearances_map.get(app_id, {})
-            player_id = appearance.get("player_id", "")
-            player = players_map.get(player_id, {})
-            if player.get("sport_id") != "MLB":
-                continue
-
-            pname = (
-                f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
-            )
-            if not pname:
-                continue
-
-            props.append({
-                "player_name": pname,
-                "prop_type":   stat_ud,
-                "platform":    "underdog",
-                "line":        float(line.get("stat_value") or 0),
-            })
-
-        logger.info("[UD] %d props fetched", len(props))
-        return props
     except Exception as exc:
         logger.warning("[UD] fetch failed: %s", exc)
         return []
@@ -372,7 +397,10 @@ def store_snapshot(
         rows,
     )
     conn.commit()
-    logger.info("[DB] Stored %d snapshots (opening=%s) at %s", len(rows), is_opening, ts)
+    logger.info(
+        "[DB] Stored %d snapshots (opening=%s) at %s",
+        len(rows), is_opening, ts,
+    )
 
 
 def get_previous_snapshot(
@@ -381,14 +409,14 @@ def get_previous_snapshot(
     current_ts: str,
 ) -> dict[tuple, float]:
     """
-    Return a dict of (player_name, prop_type, platform) → line
+    Return a dict of (player_name, prop_type, platform) -> line
     for the most recent snapshot stored before current_ts.
     """
     row = conn.execute(
         """
         SELECT MAX(snapshot_ts) AS prev_ts
-        FROM line_snapshots
-        WHERE game_date = ? AND snapshot_ts < ?
+          FROM line_snapshots
+         WHERE game_date = ? AND snapshot_ts < ?
         """,
         (date_str, current_ts),
     ).fetchone()
@@ -399,8 +427,8 @@ def get_previous_snapshot(
     rows = conn.execute(
         """
         SELECT player_name, prop_type, platform, line
-        FROM line_snapshots
-        WHERE game_date = ? AND snapshot_ts = ?
+          FROM line_snapshots
+         WHERE game_date = ? AND snapshot_ts = ?
         """,
         (date_str, prev_ts),
     ).fetchall()
@@ -425,13 +453,13 @@ def mark_closing_lines(
         (date_str,),
     ).fetchone()["cnt"]
     if already > 0:
-        return False  # already marked
+        return False
 
     row = conn.execute(
         """
         SELECT MAX(snapshot_ts) AS prev_ts
-        FROM line_snapshots
-        WHERE game_date = ? AND snapshot_ts < ?
+          FROM line_snapshots
+         WHERE game_date = ? AND snapshot_ts < ?
         """,
         (date_str, current_ts),
     ).fetchone()
@@ -441,8 +469,8 @@ def mark_closing_lines(
     conn.execute(
         """
         UPDATE line_snapshots
-        SET is_closing = 1
-        WHERE game_date = ? AND snapshot_ts = ?
+           SET is_closing = 1
+         WHERE game_date = ? AND snapshot_ts = ?
         """,
         (date_str, row["prev_ts"]),
     )
@@ -495,22 +523,18 @@ def compute_and_store_clv(
     """
     Compute closing line value for each parlay leg.
 
-    CLV convention (DFS — no juice, line-based only):
+    CLV convention (DFS — no juice, line-based):
       Under bets: clv_pts = pick_line - closing_line
-                  Positive = close moved down (easier to go under), we locked in harder
-                  → we beat the close if clv_pts > 0
+                  Positive = close moved down (harder under locked in)
       Over bets:  clv_pts = closing_line - pick_line
-                  Positive = close moved up (harder to go over), we locked in easier
-                  → we beat the close if clv_pts > 0
-
-    Stores results in clv_records and returns the list.
+                  Positive = close moved up (easier over locked in)
     """
     closing_rows = conn.execute(
         """
         SELECT player_name, prop_type, AVG(line) AS line
-        FROM line_snapshots
-        WHERE game_date = ? AND is_closing = 1
-        GROUP BY player_name, prop_type
+          FROM line_snapshots
+         WHERE game_date = ? AND is_closing = 1
+         GROUP BY player_name, prop_type
         """,
         (date_str,),
     ).fetchall()
@@ -519,14 +543,14 @@ def compute_and_store_clv(
         for r in closing_rows
     }
 
-    now_ts = datetime.now(timezone.utc).isoformat()
+    now_ts  = datetime.now(timezone.utc).isoformat()
     results: list[dict] = []
 
     for parlay in parlays:
         for leg in parlay.get("legs", []):
-            pname = (leg.get("player_name") or "").lower()
-            ptype = (leg.get("prop_type") or "").lower()
-            side = (leg.get("side") or "under").lower()
+            pname     = (leg.get("player_name") or "").lower()
+            ptype     = (leg.get("prop_type")   or "").lower()
+            side      = (leg.get("side")        or "under").lower()
             pick_line = leg.get("line")
             if pick_line is None:
                 continue
@@ -582,10 +606,7 @@ def compute_and_store_clv(
 # ---------------------------------------------------------------------------
 
 def _name_match(a: str, b: str) -> bool:
-    """
-    Fuzzy player name match: exact → last-name + first-initial fallback.
-    Handles ESPN vs PrizePicks/Underdog name differences.
-    """
+    """Fuzzy player name match: exact -> last-name + first-initial fallback."""
     a, b = a.lower().strip(), b.lower().strip()
     if a == b:
         return True
@@ -611,10 +632,10 @@ def check_parlay_legs_live(
         for leg in parlay.get("legs", []):
             pname = leg.get("player_name", "")
             ptype = (leg.get("prop_type") or "").lower()
-            side = (leg.get("side") or "under").lower()
-            line = leg.get("line", 0)
+            side  = (leg.get("side")      or "under").lower()
+            line  = leg.get("line", 0)
 
-            # Fuzzy match player in ESPN stats
+            # Fuzzy-match player in ESPN stats
             stats: Optional[dict] = None
             for stats_name, s in player_stats.items():
                 if _name_match(pname, stats_name):
@@ -624,7 +645,7 @@ def check_parlay_legs_live(
             if stats is None:
                 leg_statuses.append({
                     **leg,
-                    "current": None,
+                    "current":     None,
                     "live_status": "⏳ Not yet in box score",
                 })
                 continue
@@ -632,30 +653,32 @@ def check_parlay_legs_live(
             stat_key = _PROP_STAT_MAP.get(ptype)
             if stat_key == "_combo_hrr":
                 current = (
-                    float(stats.get("hits", 0))
+                    float(stats.get("hits",  0))
                     + float(stats.get("runs", 0))
-                    + float(stats.get("rbi", 0))
+                    + float(stats.get("rbi",  0))
                 )
             elif stat_key:
                 current = float(stats.get(stat_key, 0))
             else:
                 leg_statuses.append({
                     **leg,
-                    "current": None,
+                    "current":     None,
                     "live_status": "⏳ Unsupported prop",
                 })
                 continue
 
             if side == "under":
-                if current >= line:
-                    live_status = f"❌ Busted ({current:.0f} ≥ {line})"
-                else:
-                    live_status = f"✅ Live ({current:.0f}/{line})"
+                live_status = (
+                    f"❌ Busted ({current:.0f} ≥ {line})"
+                    if current >= line
+                    else f"✅ Live ({current:.0f}/{line})"
+                )
             else:
-                if current > line:
-                    live_status = f"✅ Cashed ({current:.0f} > {line})"
-                else:
-                    live_status = f"📈 Needs {line - current:.1f} more ({current:.0f}/{line})"
+                live_status = (
+                    f"✅ Cashed ({current:.0f} > {line})"
+                    if current > line
+                    else f"📈 Needs {line - current:.1f} more ({current:.0f}/{line})"
+                )
 
             leg_statuses.append({**leg, "current": current, "live_status": live_status})
 
@@ -684,14 +707,14 @@ def _post_discord(payload: dict) -> bool:
 
 
 def post_steam_alert(date_str: str, moves: list[dict]) -> None:
-    """Post a steam move Discord alert for detected line movements."""
+    """Post a steam-move Discord alert for detected line movements."""
     if not moves:
         return
 
     lines: list[str] = []
     for m in moves[:8]:
         arrow = "🔺" if m["delta"] > 0 else "🔻"
-        sign = "+" if m["delta"] > 0 else ""
+        sign  = "+" if m["delta"] > 0 else ""
         lines.append(
             f"{arrow} **{m['player']}** {m['prop'].title()} "
             f"({m['platform'].title()}) "
@@ -701,12 +724,10 @@ def post_steam_alert(date_str: str, moves: list[dict]) -> None:
 
     _post_discord({
         "embeds": [{
-            "title": f"🌊 Steam Alert — {date_str}",
+            "title":       f"🌊 Steam Alert — {date_str}",
             "description": "\n".join(lines),
-            "color": 0xF4A300,
-            "footer": {
-                "text": f"PropIQ Line Stream · {len(moves)} move(s) detected"
-            },
+            "color":       0xF4A300,
+            "footer":      {"text": f"PropIQ Line Stream · {len(moves)} move(s) detected"},
         }]
     })
     logger.info("[Discord] Steam alert posted (%d moves)", len(moves))
@@ -732,7 +753,7 @@ def post_ingame_update(
 
     leg_sections: list[str] = []
     for parlay in enriched_parlays[:10]:
-        agent = parlay.get("agent_name", "Unknown")
+        agent    = parlay.get("agent_name", "Unknown")
         statuses = parlay.get("leg_statuses", [])
         if not statuses:
             continue
@@ -759,10 +780,10 @@ def post_ingame_update(
 
     _post_discord({
         "embeds": [{
-            "title": f"⚡ Live Update — {date_str}",
+            "title":       f"⚡ Live Update — {date_str}",
             "description": "\n\n".join(description_parts),
-            "color": 0x00B3FF,
-            "footer": {
+            "color":       0x00B3FF,
+            "footer":      {
                 "text": (
                     "PropIQ Line Stream · In-game monitoring "
                     "(informational only — no new bets generated)"
@@ -781,10 +802,10 @@ def post_clv_report(date_str: str, clv_results: list[dict]) -> None:
     if not clv_results:
         return
 
-    total = len(clv_results)
-    beats = sum(1 for c in clv_results if c["beat_close"])
+    total    = len(clv_results)
+    beats    = sum(1 for c in clv_results if c["beat_close"])
     beat_pct = beats / total * 100 if total else 0
-    avg_clv = sum(c["clv_pts"] for c in clv_results) / total if total else 0
+    avg_clv  = sum(c["clv_pts"] for c in clv_results) / total if total else 0
 
     sorted_clv = sorted(clv_results, key=lambda x: abs(x["clv_pts"]), reverse=True)
     lines: list[str] = []
@@ -800,22 +821,27 @@ def post_clv_report(date_str: str, clv_results: list[dict]) -> None:
     color = 0x00C851 if beat_pct >= 55 else (0xF4A300 if beat_pct >= 45 else 0xE74C3C)
     _post_discord({
         "embeds": [{
-            "title": f"📈 CLV Report — {date_str}",
+            "title":       f"📈 CLV Report — {date_str}",
             "description": (
                 f"**Beat close on {beats}/{total} legs ({beat_pct:.0f}%) · "
                 f"Avg CLV: {'+' if avg_clv >= 0 else ''}{avg_clv:.2f}**\n\n"
                 + "\n".join(lines)
             ),
-            "color": color,
+            "color":  color,
             "footer": {"text": "PropIQ Line Stream · Closing Line Value Analysis"},
         }]
     })
     logger.info("[Discord] CLV report posted (%d/%d beat close)", beats, total)
 
 
-def log_espn_game_states(today):
-    games = get_game_states(today)
-    pre_count = sum(1 for g in games if g["status"] == "SCHEDULED")
+# ---------------------------------------------------------------------------
+# Orchestration helpers
+# ---------------------------------------------------------------------------
+
+def log_espn_game_states(today: str) -> tuple[list[dict], int, int, int]:
+    """Fetch ESPN game states and return (games, pre_count, live_count, final_count)."""
+    games      = get_game_states(today)
+    pre_count  = sum(1 for g in games if g["status"] == "SCHEDULED")
     live_count = sum(1 for g in games if g["status"] == "IN_PROGRESS")
     final_count = sum(1 for g in games if g["status"] == "FINAL")
     logger.info(
@@ -824,7 +850,11 @@ def log_espn_game_states(today):
     )
     return games, pre_count, live_count, final_count
 
-def handle_pre_game_phase(conn, today):
+
+def handle_pre_game_phase(
+    conn: sqlite3.Connection, today: str
+) -> tuple[list[dict], bool]:
+    """Fetch current props and determine if this is the first snapshot of the day."""
     props = fetch_all_props()
     is_first = conn.execute(
         "SELECT COUNT(*) AS cnt FROM line_snapshots WHERE game_date = ?",
@@ -832,26 +862,26 @@ def handle_pre_game_phase(conn, today):
     ).fetchone()["cnt"] == 0
     return props, is_first
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Main entry point  called every 30 min by the scheduled trigger."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Main entry point — called every 30 min by the scheduled trigger."""
+    today  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     now_ts = datetime.now(timezone.utc).isoformat()
     logger.info("=== PropIQ Line Stream | %s ===", now_ts)
 
     conn = _get_db()
 
-    #  Phase 0: ESPN game states 
+    # ── Phase 0: ESPN game states ──────────────────────────────────────────
     games, pre_count, live_count, _ = log_espn_game_states(today)
 
-    #  Phase 1: Pre-game snapshot + steam detection 
+    # ── Phase 1: Pre-game snapshot + steam detection ───────────────────────
     if pre_count > 0 or live_count > 0:
         props, is_first = handle_pre_game_phase(conn, today)
-
-        previous_snap = get_previous_snapshot(conn, today, now_ts)
+        previous_snap   = get_previous_snapshot(conn, today, now_ts)
         store_snapshot(conn, today, props, now_ts, is_opening=is_first)
 
         if previous_snap:
@@ -862,17 +892,15 @@ def main() -> None:
             else:
                 logger.info("[Steam] No significant moves this window")
         else:
-            logger.info("[Steam] No previous snapshot to compare — first run of day")
+            logger.info("[Steam] No previous snapshot — first run of day")
 
-    #  Phase 2: In-game leg tracking 
+    # ── Phase 2: In-game leg tracking ─────────────────────────────────────
     if live_count > 0:
-        # Mark closing lines (first time a game goes IN_PROGRESS)
         newly_marked = mark_closing_lines(conn, today, now_ts)
         if newly_marked:
             logger.info("[Closing] Closing lines marked for %s", today)
 
-        # Live ESPN stats
-        espn_date = today.replace("-", "")
+        espn_date    = today.replace("-", "")
         player_stats = get_all_player_stats(espn_date)
 
         parlays = get_pending_parlays(today)
@@ -880,9 +908,9 @@ def main() -> None:
             enriched = check_parlay_legs_live(parlays, player_stats)
             post_ingame_update(today, enriched, games)
         else:
-            logger.info("[InGame] No pending parlays or no ESPN stats — skipping update")
+            logger.info("[InGame] No pending parlays or ESPN stats — skipping update")
 
-    # ── Phase 3: CLV (runs once, after closing lines appear) ───────────
+    # ── Phase 3: CLV (once, after closing lines appear) ───────────────────
     closing_count = conn.execute(
         "SELECT COUNT(*) AS cnt FROM line_snapshots WHERE game_date = ? AND is_closing = 1",
         (today,),
