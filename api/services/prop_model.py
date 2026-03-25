@@ -244,6 +244,115 @@ class RandomForestPropModel:
 # EnsemblePropModel
 # ---------------------------------------------------------------------------
 class EnsemblePropModel:
+    def __init__(self, store: ErrorStore, prior_alpha: float = 2.0, prior_beta: float = 2.0):
+        self.store = store
+        self.prior_alpha = prior_alpha
+        self.prior_beta = prior_beta
+        # Global Platt parameters (learned from all predictions)
+        self._platt_a: float = 1.0
+        self._platt_b: float = 0.0
+        # Active error-pattern corrections  {(player, prop_type): correction_delta}
+        self._corrections: Dict[Tuple, float] = {}
+        self._load_calibration()
+
+    @staticmethod
+    def _key_hash(player: str, prop_type: str, line_bucket: float) -> str:
+        raw = f"{player}|{prop_type}|{line_bucket:.2f}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _load_calibration(self):
+        """Load saved calibration from DB."""
+        try:
+            # Pre-load corrections from error_patterns
+            patterns = self.store.conn.execute(
+                "SELECT player, prop_type, correction FROM error_patterns WHERE resolved=0"
+            ).fetchall()
+            for p in patterns:
+                self._corrections[(p[0], p[1])] = p[2]
+        except Exception as e:
+            logger.warning("Calibration load warning: %s", e)
+
+    def _get_beta_params(self, player: str, prop_type: str, line_bucket: float) -> Tuple[float, float]:
+        key_hash = self._key_hash(player, prop_type, line_bucket)
+        row = self.store.conn.execute(
+            "SELECT alpha, beta FROM calibration_store WHERE key_hash=?",
+            (key_hash,),
+        ).fetchone()
+        if row:
+            return row[0], row[1]
+        return self.prior_alpha, self.prior_beta
+
+    def _save_beta_params(self, player: str, prop_type: str, line_bucket: float, alpha: float, beta: float, n: int):
+        key_hash = self._key_hash(player, prop_type, line_bucket)
+        self.store.conn.execute(
+            """INSERT INTO calibration_store (key_hash,player,prop_type,line_bucket,alpha,beta,n_samples,updated_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(key_hash) DO UPDATE SET alpha=?,beta=?,n_samples=?,updated_at=?""",
+            (
+                key_hash, player, prop_type, line_bucket, alpha, beta, n, datetime.utcnow().isoformat(),
+                alpha, beta, n, datetime.utcnow().isoformat(),
+            ),
+        )
+        self.store.conn.commit()
+
+    def calibrate(self, raw_prob: float, player: str, prop_type: str, book_prob: float, shrink: float = 0.3) -> float:
+        """
+        Three-layer calibration:
+          L1: Bayesian Beta shrinkage toward historical hit-rate
+          L2: Shrink toward book line (market efficiency)
+          L3: Apply any active error-pattern correction
+        """
+        line_bucket = round(book_prob, 2)
+        a, b = self._get_beta_params(player, prop_type, line_bucket)
+
+        p = max(0.01, min(0.99, raw_prob))
+        book_p = max(0.01, min(0.99, book_prob))
+
+        # L1: Bayesian posterior mean blended with raw
+        beta_mean = a / (a + b)
+        p_l1 = (a * p + b * beta_mean) / (a + b)
+
+        # L2: shrink toward efficient market (book line)
+        p_l2 = (1 - shrink) * p_l1 + shrink * book_p
+
+        # L3: Apply self-correction for known biases
+        correction = self._corrections.get((player, prop_type), 0.0)
+        p_final = max(0.01, min(0.99, p_l2 + correction))
+
+        return round(p_final, 4)
+
+    def update(self, player: str, prop_type: str, book_prob: float, actual_result: float):
+        """Update Beta parameters after seeing actual outcome."""
+        line_bucket = round(book_prob, 2)
+        a, b = self._get_beta_params(player, prop_type, line_bucket)
+        n_row = self.store.conn.execute(
+            "SELECT n_samples FROM calibration_store WHERE key_hash=?",
+            (self._key_hash(player, prop_type, line_bucket),),
+        ).fetchone()
+        n = (n_row[0] if n_row else 0) + 1
+
+        new_a = a + float(actual_result)
+        new_b = b + (1.0 - float(actual_result))
+        self._save_beta_params(player, prop_type, line_bucket, new_a, new_b, n)
+
+    def refresh_corrections(self):
+        """Re-detect error patterns and update active corrections."""
+        patterns = self.store.detect_error_patterns()
+        self._corrections = {(p["player"], p["prop_type"]): p["correction"] for p in patterns}
+        logger.info("Calibration refreshed. Active corrections: %s", len(self._corrections))
+
+
+# ─────────────────────────────────────────────
+# 3.  PropModelWithCalibration — main class
+# ─────────────────────────────────────────────
+class PropModelWithCalibration:
+    """
+    Full-stack prop model:
+      - XGBoost for raw probability
+      - CalibrationLayer for post-hoc adjustment
+      - ErrorStore for mistake logging + self-correction
+      - Live sportsbook line integration
+      - DFS outcome tracking
     """
     Flexible ensemble that combines XGBStrikeoutModel + RandomForestPropModel
     predictions using one of three combination modes.
@@ -267,6 +376,49 @@ class EnsemblePropModel:
     """
 
     def __init__(
+    def _load_model(self):
+        """Load XGBoost model if available."""
+        try:
+            import xgboost as xgb
+            if Path(MODEL_PATH).exists():
+                self._xgb_model = xgb.XGBClassifier()
+                self._xgb_model.load_model(MODEL_PATH)
+                logger.info("XGBoost model loaded from %s", MODEL_PATH)
+            else:
+                logger.warning("No model at %s. Using fallback probability.", MODEL_PATH)
+        except ImportError:
+            logger.warning("xgboost not installed. Using fallback probability.")
+        except Exception as e:
+            logger.error("Model load error: %s", e)
+
+    def _raw_predict(self, features: Dict) -> float:
+        """Get raw probability from XGBoost or fallback heuristic."""
+        if self._xgb_model is None:
+            # Fallback: simple linear combo of key features
+            # Replace this with your feature engineering
+            base = 0.50
+            if features.get("recent_avg", 0) > features.get("season_avg", 0):
+                base += 0.04
+            if features.get("park_factor", 1.0) > 1.05:
+                base += 0.02
+            if features.get("pitcher_era", 4.0) > 4.5:
+                base += 0.03
+            if features.get("is_home", False):
+                base += 0.015
+            return max(0.01, min(0.99, base))
+
+        try:
+            import xgboost as xgb
+            feature_df = pd.DataFrame([features])
+            # Drop non-numeric columns before predicting
+            numeric_df = feature_df.select_dtypes(include=[np.number])
+            prob = self._xgb_model.predict_proba(numeric_df)[0][1]
+            return float(prob)
+        except Exception as e:
+            logger.error("XGBoost predict error: %s", e)
+            return 0.50
+
+    def predict(
         self,
         models:     Optional[list[Any]] = None,
         mode:       EnsembleMode = "average",
@@ -355,6 +507,63 @@ class EnsemblePropModel:
         else:
             # Fallback if meta-learner not trained (e.g., too few samples)
             result = np.mean(base_preds, axis=0)
+        # Every 50 results, re-detect patterns and refresh corrections
+        total = self.error_store.conn.execute(
+            "SELECT COUNT(*) FROM prediction_log WHERE actual_result IS NOT NULL"
+        ).fetchone()[0]
+        if total % 50 == 0:
+            self.calibration.refresh_corrections()
+            logger.info("Auto-calibration refresh triggered at %s results", total)
+
+    def batch_predict(self, props: List[Dict]) -> List[Dict]:
+        """
+        Predict a list of props.
+        Each dict: {player, prop_type, features, book_prob, line_value, ...}
+        """
+        results = []
+        for p in props:
+            try:
+                result = self.predict(
+                    player=p["player"],
+                    prop_type=p["prop_type"],
+                    features=p.get("features", {}),
+                    book_prob=p["book_prob"],
+                    line_value=p.get("line_value", 0),
+                    game_date=p.get("game_date"),
+                    book_name=p.get("book_name"),
+                )
+                results.append(result)
+            except Exception as e:
+                logger.error("Batch predict error for %s: %s", p.get('player'), e)
+                results.append({"player": p.get("player"), "error": str(e)})
+        return results
+
+    def get_accuracy_report(self) -> Dict:
+        """Return recent accuracy metrics + active calibration corrections."""
+        return {
+            "accuracy_by_prop": self.error_store.get_recent_accuracy(days=7),
+            "active_corrections": [
+                {"player": k[0], "prop_type": k[1], "correction": v}
+                for k, v in self.calibration.get_corrections().items()
+            ],
+            "total_logged": self.error_store.conn.execute(
+                "SELECT COUNT(*) FROM prediction_log"
+            ).fetchone()[0],
+            "total_resolved": self.error_store.conn.execute(
+                "SELECT COUNT(*) FROM prediction_log WHERE actual_result IS NOT NULL"
+            ).fetchone()[0],
+        }
+
+
+# ─────────────────────────────────────────────
+# 4.  American odds helpers
+# ─────────────────────────────────────────────
+def american_to_implied(odds: int) -> float:
+    """Convert American odds to implied probability (no vig)."""
+    if odds > 0:
+        return 100 / (odds + 100)
+    else:
+        return abs(odds) / (abs(odds) + 100)
 
         return np.clip(result, 0.01, 0.99).astype(np.float32)
 
