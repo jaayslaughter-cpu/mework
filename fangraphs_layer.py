@@ -2,6 +2,7 @@
 fangraphs_layer.py
 ------------------
 """
+from __future__ import annotations
 import tempfile
 from .utils import _normalise_name, _safe_float
 from .settings import cache_path
@@ -21,8 +22,6 @@ from .settings import cache_path
 #   hr_fb_pct  : Home run per fly ball rate
 #   lob_pct    : Left-on-base strand rate (regression flag)
 #   babip      : Pitcher BABIP (luck normaliser)
-
-from __future__ import annotations
 
 import json
 import logging
