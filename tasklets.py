@@ -1102,13 +1102,12 @@ def get_agents() -> dict:
         logger.warning("[AgentTasklet] get_agents Redis error: %s", e)
     return _agent_perf
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. LeaderboardTasklet
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_leaderboard_tasklet() -> None:
-    """
+    ```
     Read 14-day settled bets from Postgres, compute per-agent ROI,
     update capital multipliers (0.5x – 2.0x), store in Redis.
     """
