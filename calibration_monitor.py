@@ -232,55 +232,24 @@ def store_metrics(metrics: dict[str, dict], config_version: str, days: int) -> N
                     m["n"], m["n_legs"], json.dumps(m["curve"]),
                 ))
             conn.commit()
-        logger.info("Stored calibration metrics for %d agents", len(metrics))
+        logger.info(f"Stored calibration metrics for {len(metrics)} agents")
     except Exception as exc:
-        logger.error("Failed to store metrics: %s", exc)
+        logger.error(f"Failed to store metrics: {exc}")
 
 
 # ---------------------------------------------------------------------------
 # Discord alert for degraded agents
 # ---------------------------------------------------------------------------
-def _post_calibration_report(metrics: dict[str, dict], cfg: dict, days: int) -> None:
-    cal_cfg = cfg.get("calibration", {})
-    brier_alert = cal_cfg.get("brier_alert_threshold", 0.26)
-    min_n = cal_cfg.get("min_sample_size", 50)
-
-    degraded = [
-        (agent, m) for agent, m in metrics.items()
-        if m["brier"] > brier_alert and m["n_legs"] >= min_n
-    ]
-
-    lines = [f"📊 **Calibration Report — {days}-Day Window**\n"]
-    lines.append("```")
-    lines.append(f"{'Agent':<18} {'Brier':>7} {'ECE':>7} {'Win%':>7} {'Legs':>6}")
-    lines.append("-" * 50)
-    for agent, m in sorted(metrics.items(), key=lambda x: x[1]["brier"]):
-        flag = " ⚠️" if m["brier"] > brier_alert and m["n_legs"] >= min_n else ""
-        lines.append(
-            f"{agent:<18} {m['brier']:>7.4f} {m['ece']:>7.4f} "
-            f"{m['actual_win_rate']:>6.1%} {m['n_legs']:>6}{flag}"
-        )
-    lines.append("```")
-    lines.append("*Brier: lower is better. 0.25 = random. Perfect = 0.00*")
-
-    if degraded:
-        lines.append("\n🚨 **Agents with degraded calibration (Brier > {:.2f}):**".format(brier_alert))
-        for agent, m in degraded:
-            lines.append(
-                f"  • **{agent}** — Brier {m['brier']:.4f} | Win rate {m['actual_win_rate']:.1%} "
-                f"| ECE {m['ece']:.4f} | N={m['n_legs']} legs"
-            )
-        lines.append("\n_Consider raising min_prob threshold or triggering cool-down in agent_config.yaml_")
-
-    body = "\n".join(lines)
-    if _DISCORD:
-        try:
-            requests.post(_DISCORD, json={"content": body}, timeout=10)
-            logger.info("Calibration report posted to Discord")
-        except Exception as exc:
-            logger.error("Discord post failed: %s", exc)
-    else:
-        print(body)
+    f"{'Agent':<18} {'Brier':>7} {'ECE':>7} {'Win%':>7} {'Legs':>6}",
+    "-" * 50,
+]
+for agent, m in sorted(metrics.items(), key=lambda x: x[1]["brier"]):
+    flag = " ⚠️" if m["brier"] > brier_alert and m["n_legs"] >= min_n else ""
+    lines.append(
+        f"{agent:<18} {m['brier']:>7.4f} {m['ece']:>7.4f} "
+        f"{m['actual_win_rate']:>6.1%} {m['n_legs']:>6}{flag}"
+    )
+lines.append("
 
 
 # ---------------------------------------------------------------------------

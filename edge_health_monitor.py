@@ -256,56 +256,30 @@ def store_edge_metrics(metrics: dict[str, dict], clv: dict[str, float], config_v
 # ---------------------------------------------------------------------------
 # Discord report
 # ---------------------------------------------------------------------------
-def _post_edge_report(metrics: dict[str, dict], clv: dict[str, float], days: int) -> dict[str, dict]:
-    lines = [f"🏥 **Edge Health Report — {days}-Day Window**\n```"]
-    lines.append(f"{'Agent':<18} {'CLV':>7} {'ROI':>8} {'W-L':>8} {'Z-Score':>9} {'Status':>7}")
-    lines.append("-" * 64)
-
-    flagged = []
-    combined: dict[str, dict] = {}
-    for agent, m in sorted(metrics.items(), key=lambda x: x[1]["z_score"]):
-        agent_clv = clv.get(agent, 0.0)
-        z = m["z_score"]
-        if z <= Z_ALERT_THRESHOLD:
-            status = "🚨 ALERT"
-            flagged.append((agent, m, agent_clv))
-        elif z <= Z_CONCERN_THRESHOLD:
-            status = "⚠️  WARN"
-        elif z >= 1.5:
-            status = "🔥 HOT "
-        else:
-            status = "✅ OK  "
-        wl = f"{m['wins']}-{m['losses']}"
-        lines.append(
-            f"{agent:<18} {agent_clv:>+7.3f} {m['roi_30d']:>+7.1%} {wl:>8} {z:>+9.2f} {status}"
-        )
-        combined[agent] = {**m, "clv_30d": agent_clv}
-
-    lines.append("```")
-    lines.append("*Z-Score vs backtest baseline. < -2.0 = statistically degraded. CLV = closing line value.*")
-
-    if flagged:
-        lines.append("\n🚨 **Agents requiring attention:**")
-        for agent, m, agent_clv in flagged:
-            lines.append(
-                f"  • **{agent}** — Z-score {m['z_score']:+.2f} | "
-                f"30d ROI {m['roi_30d']:+.1%} | CLV {agent_clv:+.3f} | "
-                f"W-L {m['wins']}-{m['losses']}"
-            )
-        lines.append("\n_Review agent_config.yaml to toggle or adjust thresholds. "
-                     "Risk manager will auto-apply cool-down if ROI/CLV thresholds breached._")
-
-    body = "\n".join(lines)
-    if _DISCORD:
-        try:
-            requests.post(_DISCORD, json={"content": body}, timeout=10)
-            logger.info("Edge health report posted to Discord")
-        except Exception as exc:
-            logger.error("Discord post failed: %s", exc)
+    f"{'Agent':<18} {'CLV':>7} {'ROI':>8} {'W-L':>8} {'Z-Score':>9} {'Status':>7}",
+    "-" * 64,
+]
+flagged = []
+combined: dict[str, dict] = {}
+for agent, m in sorted(metrics.items(), key=lambda x: x[1]["z_score"]):
+    agent_clv = clv.get(agent, 0.0)
+    z = m["z_score"]
+    if z <= Z_ALERT_THRESHOLD:
+        status = "🚨 ALERT"
+        flagged.append((agent, m, agent_clv))
+    elif z <= Z_CONCERN_THRESHOLD:
+        status = "⚠️  WARN"
+    elif z >= 1.5:
+        status = "🔥 HOT "
     else:
-        print(body)
+        status = "✅ OK  "
+    wl = f"{m['wins']}-{m['losses']}"
+    lines.append(
+        f"{agent:<18} {agent_clv:>+7.3f} {m['roi_30d']:>+7.1%} {wl:>8} {z:>+9.2f} {status}"
+    )
+    combined[agent] = {**m, "clv_30d": agent_clv}
 
-    return combined
+lines.append("
 
 
 # ---------------------------------------------------------------------------

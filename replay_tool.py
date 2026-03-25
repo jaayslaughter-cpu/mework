@@ -50,7 +50,7 @@ def fetch_decisions(
     log_date: str,
     agent_name: str | None = None,
     player_name: str | None = None,
-    decision_filter: str | None = None,  # "INCLUDED" or "REJECTED"
+    decision_status: str | None = None,  # "INCLUDED" or "REJECTED"
 ) -> list[dict]:
     query = """
         SELECT agent_name, player_name, prop_type, direction, line, platform,
@@ -68,9 +68,9 @@ def fetch_decisions(
     if player_name:
         query += " AND player_name ILIKE %s"
         params.append(f"%{player_name}%")
-    if decision_filter:
+    if decision_status:
         query += " AND decision = %s"
-        params.append(decision_filter)
+        params.append(decision_status)
 
     query += " ORDER BY agent_name, prob_final DESC"
 
@@ -162,7 +162,7 @@ def render_parlays(parlays: list[dict]) -> str:
                 prob = leg.get("prob", leg.get("probability", 0))
                 lines.append(f"       Leg {i}: {player} {prop} {direction} (prob: {prob:.3f})")
         except Exception:
-            lines.append(f"       [Could not parse legs]")
+            lines.append("       [Could not parse legs]")
     return "\n".join(lines)
 
 
@@ -173,16 +173,16 @@ def run(
     log_date: str,
     agent_name: str | None = None,
     player_name: str | None = None,
-    decision_filter: str | None = None,
+    decision_filter_arg: str | None = None,
     show_parlays: bool = True,
 ) -> dict:
     logger.info("Replaying decisions for %s", log_date)
-    decisions = fetch_decisions(log_date, agent_name, player_name, decision_filter)
+    decisions = fetch_decisions(log_date, agent_name, player_name, decision_filter_arg)
     parlays = fetch_posted_parlays(log_date) if show_parlays else []
 
     n_included = sum(1 for d in decisions if d["decision"] == "INCLUDED")
     n_rejected = sum(1 for d in decisions if d["decision"] == "REJECTED")
-    agents_seen = set(d["agent_name"] for d in decisions)
+    agents_seen = {d["agent_name"] for d in decisions}
 
     print(f"\n{'='*60}")
     print(f"  PropIQ Decision Replay — {log_date}")

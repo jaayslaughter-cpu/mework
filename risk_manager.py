@@ -19,10 +19,8 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-from datetime import date, datetime, timedelta
 
 import psycopg2
 import yaml
@@ -111,15 +109,14 @@ class RiskManager:
 
     def _load_cool_downs(self) -> None:
         try:
-            with _get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
+            with _get_conn() as conn, conn.cursor() as cur:
+                cur.execute("""
                         SELECT agent_name, cool_down_until
                         FROM agent_cool_down
                         WHERE cool_down_until >= %s
                     """, (date.today(),))
-                    for row in cur.fetchall():
-                        self._cool_down_cache[row[0]] = row[1]
+                for row in cur.fetchall():
+                    self._cool_down_cache[row[0]] = row[1]
         except Exception as exc:
             logger.warning("Could not load cool-downs: %s", exc)
 

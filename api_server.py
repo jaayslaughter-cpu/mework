@@ -531,12 +531,10 @@ def replay_decisions(
     Query params: date (YYYY-MM-DD), agent, player, decision (INCLUDED|REJECTED)
     Example: GET /replay?date=2026-03-25&agent=FadeAgent
     """
-    import subprocess, sys
     from datetime import date as dt_date
     replay_date = date or dt_date.today().isoformat()
     try:
         from replay_tool import fetch_decisions, fetch_posted_parlays
-        filters: Dict[str, Any] = {}
         decisions = fetch_decisions(
             log_date=replay_date,
             agent_name=agent or None,
