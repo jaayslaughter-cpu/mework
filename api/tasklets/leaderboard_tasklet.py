@@ -145,11 +145,13 @@ def run_leaderboard_tasklet() -> dict:
         json.dump(output, f, indent=2)
 
     logger.info(
-        f"[leaderboard] Updated {len(leaderboard)} agents — "
-        f"Top: {leaderboard[0]['display_name'] if leaderboard else 'N/A'} "
-        f"({leaderboard[0]['roi_pct'] if leaderboard else 0:.1f}% ROI)"
+        "[leaderboard] Updated %d agents — Top: %s (%.1f%% ROI)",
+        len(leaderboard),
+        leaderboard[0]['display_name'] if leaderboard else 'N/A',
+        leaderboard[0]['roi_pct'] if leaderboard else 0
     )
     return output
+
 
 
 def read_leaderboard() -> dict:
