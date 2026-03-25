@@ -56,6 +56,8 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
 try:
@@ -63,6 +65,23 @@ try:
     RABBITMQ_AVAILABLE = True
 except ImportError:
     RABBITMQ_AVAILABLE = False
+
+# RABBITMQ_ENABLED controls production vs mock behaviour:
+#   "true"  → always attempt real broker; raise RuntimeError after retries (hard fail)
+#   "false" → always use mock logging (never attempt real broker)
+#   "auto"  → (default) try real broker if RABBITMQ_HOST is not localhost/127.0.0.1;
+#             fall back gracefully to mock if connection fails
+_RABBITMQ_ENABLED_RAW: str = os.getenv("RABBITMQ_ENABLED", "auto").lower().strip()
+_RABBITMQ_HOST: str = os.getenv("RABBITMQ_HOST", "localhost")
+_IS_LOCAL_HOST: bool = _RABBITMQ_HOST in ("localhost", "127.0.0.1", "")
+
+if _RABBITMQ_ENABLED_RAW == "true":
+    RABBITMQ_MODE = "strict"          # hard fail if broker unreachable
+elif _RABBITMQ_ENABLED_RAW == "false":
+    RABBITMQ_MODE = "mock"            # always mock — never attempt real broker
+else:
+    # auto: real when host points to a remote broker, mock-fallback otherwise
+    RABBITMQ_MODE = "mock" if _IS_LOCAL_HOST else "real"
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(
@@ -83,11 +102,12 @@ PROP_TYPES: Dict[str, str] = {
     "total_bases":      "classifier",   # batter:  TB >= 1.5
     "home_runs":        "classifier",   # batter:  HR >= 0.5
     "rbis":             "classifier",   # batter:  RBI >= 1
+    "runs":             "classifier",   # batter:  R >= 1
+    "hits_runs_rbis":   "regressor",    # batter:  H+R+RBI combo total
     "stolen_bases":     "classifier",   # batter:  SB >= 0.5
     "walks":            "classifier",   # pitcher: BB >= line
     # Continuous props (regressor): model outputs projected stat value
     "earned_runs":      "regressor",    # ERA projection
-    "innings_pitched":  "regressor",    # IP projection
     "fantasy_points":   "regressor",    # DK/Underdog fantasy point projection
 }
 
@@ -169,16 +189,6 @@ class FeatureEngineer:
         "total_bases", "plate_appearances", "batting_avg",
         "on_base_pct", "slugging_pct", "ops",
         "ground_outs", "air_outs", "left_on_base",
-        # ── Statcast-derived (Phase 24 — statcast_feature_layer.py) ──────
-        "sc_avg_launch_speed",   # exit velocity → hard contact quality
-        "sc_avg_bat_speed",      # swing speed → power / contact profile
-        "sc_avg_swing_length",   # swing compactness (shorter = better contact)
-        "sc_hard_hit_rate",      # % balls >= 95 mph → sustained hard contact
-        "sc_recent_hrs",         # Statcast-verified HR events this game
-        "sc_season_hr",          # season HR total (lineup context)
-        "sc_season_avg",         # season batting average (contact quality)
-        "sc_season_slg",         # season slugging pct (power profile)
-        "sc_season_pa",          # plate appearances (lineup slot proxy)
     ]
 
     # Pitcher stat columns — sourced from mlb-props-main feature taxonomy
@@ -188,14 +198,6 @@ class FeatureEngineer:
         "strike_percentage", "batters_faced", "games_started",
         "complete_games", "shutouts", "wild_pitches", "balks",
         "inherited_runners", "inherited_runners_scored",
-        # ── Statcast-derived (Phase 24 — statcast_feature_layer.py) ──────
-        "sc_avg_velocity",       # fastball velocity → K rate proxy
-        "sc_avg_spin_rate",      # spin quality → movement / swing-and-miss
-        "sc_whiff_rate",         # whiffs/pitch → strongest K prop predictor
-        "sc_avg_exit_velocity",  # hard contact allowed → ERA/quality proxy
-        "sc_avg_launch_angle",   # launch angle allowed (low = groundballs)
-        "sc_avg_extension",      # release mechanics consistency
-        "sc_recent_ks",          # Statcast-verified K count this game
     ]
 
     def __init__(
@@ -434,40 +436,6 @@ class FeatureEngineer:
             l14_col = f"L14_{col}"
             if l7_col in df.columns and l14_col in df.columns:
                 df[f"delta_7v14_{col}"] = df[l7_col] - df[l14_col]
-
-        # ── Velocity / spin drop momentum (Phase 24, from engineer_features.py)
-        # Pitcher fatigue early warning: velocity/spin falling L7 vs L30 baseline.
-        # Positive pct_drop = metric has declined (fatiguing / mechanics off).
-        for stat_name, sc_col in [
-            ("velocity",  "sc_avg_velocity"),
-            ("spin_rate", "sc_avg_spin_rate"),
-        ]:
-            l7_col  = f"L7_{sc_col}"
-            l30_col = f"L30_{sc_col}"
-            if l7_col in df.columns and l30_col in df.columns:
-                df[f"pct_drop_{stat_name}"] = np.where(
-                    df[l30_col] > 0,
-                    (df[l30_col] - df[l7_col]) / df[l30_col],
-                    0.0,
-                )
-
-        # ── Whiff rate trend — strongest leading indicator for K props ──
-        # Rising EMA whiff rate = pitcher's swing-and-miss stuff is peaking.
-        ema_whiff = "EMA_sc_whiff_rate"
-        if ema_whiff in df.columns:
-            df["momentum_whiff_rate"] = (
-                df.groupby("player_id")[ema_whiff]
-                .transform(lambda s: s.diff().rolling(3, min_periods=1).mean())
-            )
-
-        # ── Hard hit rate momentum — batter hot-streak signal ───────────
-        # Rising EMA hard hit rate = batter is squaring up pitches (Over edge).
-        ema_hhr = "EMA_sc_hard_hit_rate"
-        if ema_hhr in df.columns:
-            df["momentum_hard_hit"] = (
-                df.groupby("player_id")[ema_hhr]
-                .transform(lambda s: s.diff().rolling(3, min_periods=1).mean())
-            )
 
         return df
 
@@ -906,8 +874,7 @@ class PlayerPropXGBoost:
         calibrated.fit(X, y)
         return calibrated
 
-    @staticmethod
-    def _default_params() -> Dict:
+    def _default_params(self) -> Dict:
         """Conservative defaults that generalize well for MLB prop data."""
         return {
             "n_estimators":     300,
@@ -998,6 +965,57 @@ class ProjectionPublisher:
         self.config = config or RABBITMQ_CONFIG
         self._connection = None
         self._channel = None
+
+    # ------------------------------------------------------------------
+    # Startup health check
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def startup_check(cls) -> None:
+        """
+        Log RabbitMQ mode at startup so Railway logs make it immediately obvious
+        whether the real broker or mock fallback is active.
+
+        Call this once at application boot (e.g. in live_dispatcher.py or
+        the Spring Boot XGBoostTasklet initialisation block).
+        """
+        border = "=" * 70
+        if not RABBITMQ_AVAILABLE:
+            logger.warning(
+                "\n%s\n"
+                "  ⚠️  RABBITMQ — pika NOT INSTALLED\n"
+                "  All publishes will fall back to mock stdout logging.\n"
+                "  Install pika:  pip install pika\n"
+                "%s",
+                border, border,
+            )
+            return
+
+        if RABBITMQ_MODE == "mock":
+            logger.warning(
+                "\n%s\n"
+                "  ⚠️  RABBITMQ — MOCK MODE (RABBITMQ_HOST=%s)\n"
+                "  No real broker targeted. All publishes log to stdout only.\n"
+                "  Set RABBITMQ_HOST + RABBITMQ_USER + RABBITMQ_PASS on Railway\n"
+                "  to enable the real broker, or set RABBITMQ_ENABLED=false to\n"
+                "  silence this warning.\n"
+                "%s",
+                border, _RABBITMQ_HOST, border,
+            )
+        elif RABBITMQ_MODE in ("real", "strict"):
+            logger.info(
+                "\n%s\n"
+                "  ✅  RABBITMQ — %s MODE (host=%s port=%s vhost=%s)\n"
+                "  Exchange: %s\n"
+                "%s",
+                border,
+                RABBITMQ_MODE.upper(),
+                _RABBITMQ_HOST,
+                os.getenv("RABBITMQ_PORT", "5672"),
+                os.getenv("RABBITMQ_VHOST", "/"),
+                RABBITMQ_CONFIG["exchange"],
+                border,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1171,54 +1189,91 @@ class ProjectionPublisher:
             *.projections.*         → all ML projections (all sports)
             mlb.projections.*       → all MLB projections
             mlb.projections.strikeouts → strikeout projections only
+
+        Retries 3× with exponential backoff (2 s → 4 s → 8 s) before giving up.
+        In STRICT mode (RABBITMQ_ENABLED=true) raises RuntimeError on exhaustion.
+        In REAL/auto mode falls back to mock after exhaustion.
         """
-        credentials = pika.PlainCredentials(
-            self.config["username"],
-            self.config["password"],
+        import time
+
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                credentials = pika.PlainCredentials(
+                    self.config["username"],
+                    self.config["password"],
+                )
+                parameters = pika.ConnectionParameters(
+                    host=self.config["host"],
+                    port=self.config["port"],
+                    virtual_host=self.config["virtual_host"],
+                    credentials=credentials,
+                    heartbeat=600,
+                    blocked_connection_timeout=300,
+                    connection_attempts=1,
+                    retry_delay=0,
+                )
+                self._connection = pika.BlockingConnection(parameters)
+                self._channel = self._connection.channel()
+                self._channel.exchange_declare(
+                    exchange=self.config["exchange"],
+                    exchange_type="topic",
+                    durable=True,
+                )
+                logger.info(
+                    "RabbitMQ connected | host=%s | exchange=%s",
+                    self.config["host"], self.config["exchange"],
+                )
+                return  # success — exit retry loop
+
+            except Exception as exc:
+                wait = 2 ** attempt  # 2 s, 4 s, 8 s
+                logger.warning(
+                    "RabbitMQ connect attempt %d/%d failed: %s — retrying in %ds",
+                    attempt, max_attempts, exc, wait,
+                )
+                if attempt < max_attempts:
+                    time.sleep(wait)
+
+        # All attempts exhausted
+        msg = (
+            f"RabbitMQ unreachable after {max_attempts} attempts "
+            f"(host={self.config['host']} port={self.config['port']}). "
+            f"Set RABBITMQ_ENABLED=false to suppress or fix broker connectivity."
         )
-        parameters = pika.ConnectionParameters(
-            host=self.config["host"],
-            port=self.config["port"],
-            virtual_host=self.config["virtual_host"],
-            credentials=credentials,
-            heartbeat=600,
-            blocked_connection_timeout=300,
-        )
-        self._connection = pika.BlockingConnection(parameters)
-        self._channel = self._connection.channel()
-        self._channel.exchange_declare(
-            exchange=self.config["exchange"],
-            exchange_type="topic",
-            durable=True,
-        )
-        logger.info(
-            "RabbitMQ connected | host=%s | exchange=%s",
-            self.config["host"], self.config["exchange"],
-        )
+        if RABBITMQ_MODE == "strict":
+            raise RuntimeError(msg)
+        else:
+            logger.error("%s — falling back to mock publish.", msg)
+            raise  # re-raise so _publish() catches it and calls _mock_publish
 
     def _mock_publish(self, payload: Dict, routing_key: str) -> None:
         """
-        Mock publisher for local development / Railway deployments without RabbitMQ.
+        Mock publisher — used when pika is unavailable, RABBITMQ_ENABLED=false,
+        or broker connection failed after retries.
 
-        Prints the full formatted payload to stdout so developers can verify
-        the message structure during testing without a live broker.
+        Logs at WARNING level when running against a non-local host (Railway)
+        so the Railway log stream makes it immediately obvious that messages
+        are NOT reaching the real broker.
 
-        In production, swap this for real pika by installing:
-            pip install pika
-        and setting RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS env vars.
+        Logs at DEBUG level for localhost / local dev to avoid noise.
         """
         border = "─" * 70
-        logger.info(
+        log_fn = logger.warning if not _IS_LOCAL_HOST else logger.debug
+        log_fn(
             "\n%s\n"
-            "  MOCK RabbitMQ PUBLISH\n"
+            "  ⚠️  MOCK RabbitMQ PUBLISH (no real broker — messages NOT delivered)\n"
             "  Exchange   : %s\n"
             "  Routing Key: %s\n"
-            "  Payload    :\n%s\n"
+            "  Player     : %s | Prop: %s | Date: %s\n"
+            "  Set RABBITMQ_HOST + RABBITMQ_USER + RABBITMQ_PASS to enable real broker.\n"
             "%s",
             border,
             self.config["exchange"],
             routing_key,
-            json.dumps(payload, indent=4),
+            payload.get("player_name", "?"),
+            payload.get("prop_type", "?"),
+            payload.get("game_date", "?"),
             border,
         )
 
@@ -1352,7 +1407,7 @@ class MLPipeline:
         game_date : str
             "YYYY-MM-DD" for today's game.
         line : float
-            Prop line from DFS platform (Underdog/PrizePicks/Sleeper).
+            Prop line from DFS platform (Underdog/PrizePicks).
         over_odds : int, optional
             American odds for over side. Enables edge calculation.
         under_odds : int, optional
@@ -1535,7 +1590,7 @@ def demo() -> None:
     print("\n" + "═" * 70)
     print("  ✅ Pipeline demo complete.")
     print("  P(over) is calibrated — safe for EV Agent consumption.")
-    print("  Routing key: mlb.projections.strikeouts")
+    print(f"  Routing key: mlb.projections.strikeouts")
     print("═" * 70 + "\n")
 
     pipeline.close()
