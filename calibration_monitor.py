@@ -27,7 +27,6 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 import psycopg2
-import requests
 import yaml
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [CALIBRATION] %(message)s")
@@ -232,14 +231,19 @@ def store_metrics(metrics: dict[str, dict], config_version: str, days: int) -> N
                     m["n"], m["n_legs"], json.dumps(m["curve"]),
                 ))
             conn.commit()
-        logger.info(f"Stored calibration metrics for {len(metrics)} agents")
+        logger.info("Stored calibration metrics for %s agents", len(metrics))
     except Exception as exc:
-        logger.error(f"Failed to store metrics: {exc}")
+        logger.error("Failed to store metrics: %s", exc)
 
 
 # ---------------------------------------------------------------------------
 # Discord alert for degraded agents
 # ---------------------------------------------------------------------------
+def _post_calibration_report(metrics: dict[str, dict], cfg: dict, days: int) -> None:
+    cal_cfg = cfg.get("calibration", {})
+    brier_alert = cal_cfg.get("brier_alert_threshold", 0.05)
+    min_n = cal_cfg.get("min_sample_size", 50)
+
     lines = [
         f"{'Agent':<18} {'Brier':>7} {'ECE':>7} {'Win%':>7} {'Legs':>6}",
         "-" * 50,

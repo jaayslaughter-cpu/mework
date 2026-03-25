@@ -578,7 +578,7 @@ _PP_MLB_STAT_TYPES = {
     "walks",
 }
 
-# Underdog stat → our internal prop_type
+# Underdog stat  our internal prop_type
 _UD_STAT_MAP: dict[str, str] = {
     "strikeouts":    "strikeouts",
     "pitch_outs":    "strikeouts",   # alternate UD label for pitcher Ks
@@ -601,7 +601,7 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
-def fetch_prizepicks_props(pp_session=None) -> list[dict]:
+def fetch_prizepicks_props() -> list[dict]:
     """
     Fetch PrizePicks MLB projections via session-cookie warm-up.
 

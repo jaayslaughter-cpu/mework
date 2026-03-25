@@ -233,29 +233,10 @@ def store_edge_metrics(metrics: dict[str, dict], clv: dict[str, float], config_v
                     roi_30d FLOAT,
                     clv_30d FLOAT,
                     z_score FLOAT,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            for agent, m in metrics.items():
-                cur.execute("""
-                    INSERT INTO agent_metrics
-                        (agent_name, window_days, config_version, actual_win_rate,
-                         n_bets, roi_30d, clv_30d, z_score)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    agent, days, config_version,
-                    m["win_rate"], m["wins"] + m["losses"],
-                    m["roi_30d"], clv.get(agent, 0.0), m["z_score"],
-                ))
-            conn.commit()
-        logger.info("Stored edge metrics for %d agents", len(metrics))
-    except Exception as exc:
-        logger.error("Failed to store edge metrics: %s", exc)
-
-
 # ---------------------------------------------------------------------------
 # Discord report
 # ---------------------------------------------------------------------------
+lines = [
     f"{'Agent':<18} {'CLV':>7} {'ROI':>8} {'W-L':>8} {'Z-Score':>9} {'Status':>7}",
     "-" * 64,
 ]
