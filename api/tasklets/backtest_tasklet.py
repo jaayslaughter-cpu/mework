@@ -427,6 +427,42 @@ class PropSimulator(BaseSimulator):
 
                 hist.append(actual)
 
+
+                    if direction == "over":
+                        won = actual > line
+                    else:
+                        won = actual < line
+                    push      = actual == line
+                    outcome   = -1 if push else (1 if won else 0)
+
+                    if outcome == 1:
+                        b = 100.0 / abs(odds) if odds < 0 else odds / 100.0
+                        profit = unit_size * b
+                    elif outcome == 0:
+                        profit = -unit_size
+                    else:
+                        profit = 0.0
+
+                    day_bets.append(BetRecord(
+                        date=date_str,
+                        player_name=row["player_name"],
+                        prop_type=prop_type,
+                        line=line,
+                        direction=direction,
+                        model_prob=round(m_prob, 4),
+                        true_prob=round(true_p,  4),
+                        ev_pct=round(ev,          4),
+                        odds=odds,
+                        kelly_size=round(kelly_f,  4),
+                        unit_size=round(unit_size, 4),
+                        outcome=outcome,
+                        profit_units=round(profit, 4),
+                        agent=agent_name,
+                        season=season,
+                    ))
+
+                hist.append(actual)
+
         self._bets.extend(day_bets)
         return day_bets, {"date": date_str, "bets": len(day_bets), "players": len(players)}
 
@@ -718,6 +754,17 @@ class BacktestReport:
 
         logger.info("[BacktestReport] Written to %s", OUTPUT_DIR)
         return summary
+
+    @staticmethod
+    def _save_csv(bets: list[BetRecord], path: str) -> None:
+        if not bets:
+            return
+        headers = list(asdict(bets[0]).keys())
+        with open(path, "w") as f:
+            f.write(",".join(headers) + "\n")
+            for b in bets:
+                row = asdict(b)
+                f.write(",".join(str(row[h]) for h in headers) + "\n")
 
     @staticmethod
     def _save_csv(bets: list[BetRecord], path: str) -> None:

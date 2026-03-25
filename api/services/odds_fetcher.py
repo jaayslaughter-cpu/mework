@@ -101,6 +101,68 @@ def _get(url: str, params: dict | None = None,
 # Abstract base
 # ---------------------------------------------------------------------------
 class BaseOddsFetcher(ABC):
+    """All providers implement this interface."""
+
+    @abstractmethod
+    def fetch_player_props(self, sport: str = "baseball_mlb") -> list[OddsLine]:
+        """Return normalised OddsLine list for all available player props."""
+        ...
+
+    @abstractmethod
+    def provider_name(self) -> str:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Provider 1 — The Odds API
+# ---------------------------------------------------------------------------
+_PROP_TYPE_MAP_ODDS_API: dict[str, str] = {
+    "batter_hits":           "hits",
+    "batter_home_runs":      "home_runs",
+    "batter_rbis":           "rbi",
+    "batter_runs_scored":    "runs",
+    "batter_total_bases":    "total_bases",
+    "batter_stolen_bases":   "stolen_bases",
+    "batter_doubles":        "doubles",
+    "pitcher_strikeouts":    "strikeouts",
+    "pitcher_walks":         "pitcher_walks",
+    "pitcher_hits_allowed":  "hits_allowed",
+    "pitcher_earned_runs":   "earned_runs",
+    "pitcher_outs":          "outs",
+}
+
+_BOOKS_PRIORITY = [
+    "draftkings", "fanduel", "betmgm", "caesars",
+    "pointsbet_us", "betonlineag", "bovada",
+]
+
+
+class OddsApiOddsFetcher(BaseOddsFetcher):
+    """
+    Fetches MLB player props from The Odds API v4.
+    Supports dual-key rotation on 429 quota exhaustion.
+    """
+
+    def __init__(self) -> None:
+        self._keys = [ODDS_API_KEY_PRIMARY, ODDS_API_KEY_BACKUP]
+        self._key_idx = 0
+
+    def provider_name(self) -> str:
+        return "OddsAPI"
+
+    def _active_key(self) -> str:
+        return self._keys[self._key_idx]
+
+    def _rotate_key(self) -> bool:
+        if self._key_idx < len(self._keys) - 1:
+            self._key_idx += 1
+            logger.warning("[OddsAPI] Key quota hit — rotating to backup key")
+            return True
+        return False
+
+    def _get_with_rotation(self, url: str, params: dict) -> Any:
+        for _ in range(len(self._keys)):
+            params["apiKey"] = self._active_key()
 # ─────────────────────────────────────────────
 API_KEYS = [
     os.getenv("ODDS_API_KEY_1", "e4e30098807a9eece674d85e30471f03"),
@@ -203,23 +265,144 @@ class RateLimiter:
         remaining = headers.get("x-requests-remaining")
         if remaining:
             try:
-                self._remaining[api_key] = int(remaining)
-            except ValueError:
-                pass
+                resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+                if resp.status_code == 429:
+                    if not self._rotate_key():
+                        logger.error("[OddsAPI] Both keys exhausted")
+                        return []
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                logger.error("[OddsAPI] Request error: %s", e)
+                return []
+        return []
 
-    def best_available_key(self) -> Optional[str]:
-        """Return the key with the most remaining quota."""
-        for key in API_KEYS:
-            if self.can_request(key):
-                return key
-        return None
+    def fetch_player_props(self, sport: str = "baseball_mlb") -> list[OddsLine]:
+        lines: list[OddsLine] = []
 
-    def status(self) -> Dict:
-        return {
-            key: {
-                "remaining_day": self._remaining.get(key, "?"),
-                "used_today": self._day_counts.get(key, 0),
+        for market_key, prop_type in _PROP_TYPE_MAP_ODDS_API.items():
+            url = f"{ODDS_API_BASE}/sports/{sport}/odds"
+            params = {
+                "regions":    "us",
+                "markets":    market_key,
+                "oddsFormat": "american",
+                "bookmakers": ",".join(_BOOKS_PRIORITY),
             }
+            data = self._get_with_rotation(url, params)
+            if not data:
+                continue
+
+            for game in data:
+                game_id       = game.get("id", "")
+                commence_time = game.get("commence_time", "")
+                for bookmaker in game.get("bookmakers", []):
+                    book = bookmaker.get("key", "")
+                    for market in bookmaker.get("markets", []):
+                        if market.get("key") != market_key:
+                            continue
+                        for outcome in market.get("outcomes", []):
+                            # Outcomes: {name: player_name, description: Over/Under,
+                            #            point: line, price: odds}
+                            direction = outcome.get("description", "")
+                            player    = outcome.get("name", "")
+                            line_val  = float(outcome.get("point", 0))
+                            price     = int(outcome.get("price", -110))
+
+                            # Build or update OddsLine — we accumulate over/under separately
+                            existing = next(
+                                (l for l in lines
+                                 if l.provider == f"OddsAPI/{book}"
+                                 and l.player_name == player
+                                 and l.prop_type == prop_type
+                                 and l.line == line_val),
+                                None,
+                            )
+                            if existing is None:
+                                ol = OddsLine(
+                                    provider=f"OddsAPI/{book}",
+                                    player_name=player,
+                                    prop_type=prop_type,
+                                    line=line_val,
+                                    odds_over=-110,
+                                    odds_under=-110,
+                                    market_key=market_key,
+                                    game_id=game_id,
+                                    commence_time=commence_time,
+                                )
+                                lines.append(ol)
+                                existing = ol
+
+                            if direction == "Over":
+                                existing.odds_over = price
+                            elif direction == "Under":
+                                existing.odds_under = price
+
+        logger.info("[OddsAPI] Fetched %d prop lines across %d markets",
+                    len(lines), len(_PROP_TYPE_MAP_ODDS_API))
+        return lines
+
+
+# ---------------------------------------------------------------------------
+# Provider 2 — SportsBooksReview
+# ---------------------------------------------------------------------------
+_PROP_TYPE_MAP_SBR: dict[str, str] = {
+    "SO":  "strikeouts",
+    "H":   "hits",
+    "HR":  "home_runs",
+    "RBI": "rbi",
+    "R":   "runs",
+    "TB":  "total_bases",
+    "SB":  "stolen_bases",
+    "2B":  "doubles",
+    "BB":  "pitcher_walks",
+    "HA":  "hits_allowed",
+    "ER":  "earned_runs",
+}
+
+
+class SportsBooksReviewOddsFetcher(BaseOddsFetcher):
+    """
+    Ingests MLB player prop odds from SportsBooksReview public API.
+    SBR aggregates sharp books (Pinnacle, Circa, etc.) making it ideal
+    for CLV estimation — the sharpest closing lines come from here.
+    """
+
+    def provider_name(self) -> str:
+        return "SBR"
+
+    def _fetch_sbr_props(self) -> list[dict]:
+        """
+        SBR public endpoint for MLB player props.
+        Returns raw JSON list of prop objects.
+        """
+        url = f"{SBR_API_BASE}/player-props/mlb"
+        try:
+            data = _get(url, timeout=SBR_TIMEOUT)
+            if isinstance(data, dict):
+                # SBR typically wraps in {data: [...]}
+                return data.get("data", data.get("props", []))
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning("[SBR] Failed to fetch player props: %s", e)
+            return []
+
+    def fetch_player_props(self, sport: str = "baseball_mlb") -> list[OddsLine]:
+        raw = self._fetch_sbr_props()
+        lines: list[OddsLine] = []
+
+        for prop in raw:
+            try:
+                player    = prop.get("playerName", prop.get("player", ""))
+                stat_key  = prop.get("statType", prop.get("stat", ""))
+                prop_type = _PROP_TYPE_MAP_SBR.get(stat_key, stat_key.lower())
+                line_val  = float(prop.get("line", prop.get("total", 0)))
+                book      = prop.get("book", prop.get("sportsbook", "SBR"))
+                odds_over  = int(prop.get("overOdds",  prop.get("over",  -110)))
+                odds_under = int(prop.get("underOdds", prop.get("under", -110)))
+                game_id    = str(prop.get("gameId", prop.get("game_id", "")))
+
+                if not player or line_val == 0:
             for key in API_KEYS
         }
 
@@ -488,6 +671,24 @@ class OddsApiOddsFetcher(BaseOddsFetcher):
         """
         all_lines: list[OddsLine] = []
 
+                lines.append(OddsLine(
+                    provider=f"SBR/{book}",
+                    player_name=player,
+                    prop_type=prop_type,
+                    line=line_val,
+                    odds_over=odds_over,
+                    odds_under=odds_under,
+                    market_key=stat_key,
+                    game_id=game_id,
+                ))
+            except Exception as e:
+                logger.debug("[SBR] Skipping malformed prop: %s — %s", prop, e)
+                continue
+
+        logger.info("[SBR] Fetched %d prop lines", len(lines))
+        return lines
+
+
         for market_key in _PROP_TYPE_MAP_ODDS_API:
             raw = self.fetch_odds(sport=sport, market_type=market_key)
             if not raw:
@@ -614,6 +815,142 @@ def _american_to_implied(odds: int) -> float:
     if odds > 0:
         return 100.0 / (odds + 100.0)
     return abs(odds) / (abs(odds) + 100.0)
+
+
+def _strip_vig(odds_over: int, odds_under: int) -> tuple[float, float]:
+    """Return (true_prob_over, true_prob_under) with vig removed."""
+    p_over  = _american_to_implied(odds_over)
+    p_under = _american_to_implied(odds_under)
+    total   = p_over + p_under
+    if total <= 0:
+        return 0.5, 0.5
+    return p_over / total, p_under / total
+
+
+def _prob_to_american(prob: float) -> int:
+    """Convert true probability to American odds (no-vig)."""
+    if prob <= 0 or prob >= 1:
+        return -110
+    if prob >= 0.5:
+        return -round((prob / (1 - prob)) * 100)
+    return round(((1 - prob) / prob) * 100)
+
+
+# ---------------------------------------------------------------------------
+# OddsFetcher — master orchestrator + merger
+# ---------------------------------------------------------------------------
+class OddsFetcher:
+    """
+    Orchestrates all providers, merges odds, and identifies top CLV edges.
+
+    CLV (Closing Line Value) estimation:
+      - SBR sharp-book line treated as the "true" closing consensus.
+      - If Underdog / soft book offers better odds than no-vig SBR price
+        → positive CLV edge detected.
+      - CLV edge % = (soft_prob / sharp_prob) - 1
+    """
+
+    def __init__(self) -> None:
+        self._providers: list[BaseOddsFetcher] = [
+            OddsApiOddsFetcher(),
+            SportsBooksReviewOddsFetcher(),
+        ]
+
+    def fetch_all(self, sport: str = "baseball_mlb") -> list[OddsLine]:
+        """Collect raw lines from every provider."""
+        all_lines: list[OddsLine] = []
+        for provider in self._providers:
+            try:
+                lines = provider.fetch_player_props(sport)
+                all_lines.extend(lines)
+                logger.info("[OddsFetcher] %s returned %d lines",
+                            provider.provider_name(), len(lines))
+            except Exception as e:
+                logger.error("[OddsFetcher] Provider %s failed: %s",
+                             provider.provider_name(), e)
+        return all_lines
+
+    def merge_odds(self, lines: list[OddsLine]) -> list[MergedOdds]:
+        """
+        Group lines by (player_name, prop_type, line), compute consensus
+        no-vig probabilities, find best odds, and estimate CLV.
+        """
+        # Group: key = (player_name, prop_type, line_rounded)
+        groups: dict[tuple, list[OddsLine]] = {}
+        for ol in lines:
+            key = (ol.player_name.lower(), ol.prop_type, round(ol.line * 2) / 2)
+            groups.setdefault(key, []).append(ol)
+
+        merged: list[MergedOdds] = []
+        for (player, prop_type, line), group in groups.items():
+            # Consensus: average no-vig probs across all providers
+            probs_over  = []
+            probs_under = []
+            for ol in group:
+                p_o, p_u = _strip_vig(ol.odds_over, ol.odds_under)
+                probs_over.append(p_o)
+                probs_under.append(p_u)
+
+            if not probs_over:
+                continue
+
+            consensus_over  = sum(probs_over)  / len(probs_over)
+            consensus_under = sum(probs_under) / len(probs_under)
+
+            # Best odds (highest payout for backer)
+            best_over_line  = max(group, key=lambda x: x.odds_over)
+            best_under_line = max(group, key=lambda x: x.odds_under)
+
+            # CLV: compare best available odds vs sharp consensus
+            sharp_lines = [ol for ol in group if "SBR/Pinnacle" in ol.provider
+                           or "SBR/Circa" in ol.provider or "SBR" in ol.provider]
+            if sharp_lines:
+                sharp_prob_over, _ = _strip_vig(
+                    sharp_lines[0].odds_over, sharp_lines[0].odds_under)
+                soft_prob_over, _  = _strip_vig(
+                    best_over_line.odds_over, best_over_line.odds_under)
+                clv_edge = (soft_prob_over / sharp_prob_over) - 1.0 if sharp_prob_over else 0.0
+            else:
+                clv_edge = 0.0
+
+            merged.append(MergedOdds(
+                player_name=group[0].player_name,
+                prop_type=prop_type,
+                line=line,
+                consensus_prob_over=round(consensus_over, 4),
+                consensus_prob_under=round(consensus_under, 4),
+                best_odds_over=best_over_line.odds_over,
+                best_odds_under=best_under_line.odds_under,
+                best_over_provider=best_over_line.provider,
+                best_under_provider=best_under_line.provider,
+                clv_edge_pct=round(clv_edge, 4),
+                providers_sampled=list({ol.provider for ol in group}),
+                game_id=group[0].game_id,
+                commence_time=group[0].commence_time,
+                raw_lines=group,
+            ))
+
+        # Sort by CLV edge descending
+        merged.sort(key=lambda x: x.clv_edge_pct, reverse=True)
+        logger.info("[OddsFetcher] Merged %d unique prop lines", len(merged))
+        return merged
+
+    def top_clv_opportunities(
+        self,
+        n: int = 20,
+        min_clv_pct: float = 0.02,
+        sport: str = "baseball_mlb",
+    ) -> list[MergedOdds]:
+        """
+        Full pipeline: fetch → merge → filter top CLV edges.
+        Returns up to `n` props with CLV ≥ min_clv_pct.
+        """
+        raw   = self.fetch_all(sport)
+        merged = self.merge_odds(raw)
+        top   = [m for m in merged if m.clv_edge_pct >= min_clv_pct]
+        logger.info("[OddsFetcher] %d props above %.1f%% CLV gate",
+                    len(top), min_clv_pct * 100)
+        return top[:n]
 
 
 def _strip_vig(odds_over: int, odds_under: int) -> tuple[float, float]:
