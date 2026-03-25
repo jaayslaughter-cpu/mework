@@ -1,5 +1,6 @@
 """execution_agents.py — PropIQ Analytics Execution Tier
 
+Four independent execution agents that consume ML probability outputs and
 Ten independent execution agents that consume ML probability outputs and
 Market Scanner alerts from RabbitMQ, filter by their specific strategy
 criteria, generate Underdog Fantasy slip combinations, validate expected
@@ -12,6 +13,8 @@ Classes:
     UnderMachine      – Specialist: all-Under contrarian slips only
     F5Agent           – First-5-innings props only (ignores bullpen data)
     MLEdgeAgent       – Pure ML calibrated probability slips (no market scanner)
+    SlipPublisher     – RabbitMQ publisher to alerts.discord.slips
+    ExecutionSquad    – Orchestrates all four agents on a shared consumer loop
     UmpireAgent       – Umpire K-rate and run-environment tendencies
     FadeAgent         – Contrarian fades against public consensus
     LineValueAgent    – Sharp consensus gap plays (no-vig line value)
@@ -809,6 +812,11 @@ class MLEdgeAgent(BaseSlipBuilder):
 
 
 # ---------------------------------------------------------------------------
+# Execution Squad — Shared RabbitMQ Consumer
+# ---------------------------------------------------------------------------
+
+class ExecutionSquad:
+    """Orchestrates all four agents on a shared RabbitMQ consumer loop.
 # Agent 5 — UmpireAgent (Umpire Tendencies)
 # ---------------------------------------------------------------------------
 
@@ -1847,6 +1855,7 @@ class ExecutionSquad:
 
     Processing model:
         Messages are consumed and buffered into an in-memory prop pool.
+        The pool is flushed to all four agents every ``FLUSH_EVERY_N``
         The pool is flushed to all ten agents every ``FLUSH_EVERY_N``
         messages or every ``FLUSH_EVERY_S`` seconds, whichever comes first.
         This batching model reduces redundant combination generation while
@@ -1886,6 +1895,9 @@ class ExecutionSquad:
         self._last_flush: float = time.time()
         self._agents: List[BaseSlipBuilder] = [
             EVHunter(amqp_url=amqp_url),
+            UnderMachine(amqp_url=amqp_url),
+            F5Agent(amqp_url=amqp_url),
+            MLEdgeAgent(amqp_url=amqp_url),
             ArbitrageAgent(amqp_url=amqp_url),
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
@@ -1988,6 +2000,7 @@ class ExecutionSquad:
         )
 
     def _flush_to_agents(self) -> None:
+        """Distribute the current prop pool to all four agents, then clear."""
         """Distribute the current prop pool to all ten agents, then clear."""
         if not self._prop_pool:
             return
