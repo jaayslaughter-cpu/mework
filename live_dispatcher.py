@@ -78,6 +78,7 @@ except ImportError:
         @staticmethod
         def prefetch_form_data(*a, **kw) -> None:
             """No-op for dummy form layer."""
+            # This method is intentionally left blank as a no-op.
             pass
         @staticmethod
         def get_form_adjustment(*a, **kw) -> float: return 0.0  # noqa: E704
