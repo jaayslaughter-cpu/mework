@@ -46,7 +46,7 @@ def _get_with_backoff(url: str, params: dict = None, headers: dict = None, timeo
     resp = requests.get(url, params=params, headers=headers, timeout=timeout)
     if resp.status_code == 429:
         retry_after = int(resp.headers.get("X-Retry-After", resp.headers.get("Retry-After", 30)))
-        logger.warning(f"Rate limit hit on {url} — retrying after {retry_after}s")
+        logger.warning("Rate limit hit on %s — retrying after %ss", url, retry_after)
         time.sleep(retry_after)
         raise RateLimitError(f"429 on {url}")
     resp.raise_for_status()
@@ -80,7 +80,7 @@ def _write_hub(data: dict):
             _redis_client.setex("mlb_hub", TTL_SECONDS * 4, json.dumps(data))
             return
         except Exception as e:
-            logger.warning(f"Redis write failed: {e}")
+            logger.warning("Redis write failed: %s", e)
     _hub_cache = data
     _hub_timestamp = time.time()
 
@@ -123,10 +123,10 @@ def _fetch_games_today() -> list[dict]:
                     "venue": game.get("venue", {}).get("name", ""),
                     "status": game.get("status", {}).get("abstractGameState", ""),
                 })
-        logger.info(f"[hub] {len(games)} games today")
+        logger.info("[hub] %s games today", len(games))
         return games
     except Exception as e:
-        logger.error(f"[hub] Games fetch error: {e}")
+        logger.error("[hub] Games fetch error: %s", e)
         return []
 
 
@@ -142,9 +142,9 @@ def _fetch_player_props(_event_ids: list[str]) -> list[dict]:
             params={"apiKey": ODDS_API_KEY}
         )
         event_ids_api = [e.get("id") for e in events if e.get("id")]
-        logger.info(f"[hub] {len(event_ids_api)} events from Odds API")
+        logger.info("[hub] %s events from Odds API", len(event_ids_api))
     except Exception as e:
-        logger.error(f"[hub] Odds API events error: {e}")
+        logger.error("[hub] Odds API events error: %s", e)
         event_ids_api = []
 
     for event_id in event_ids_api[:5]:  # Cap at 5 to save quota
@@ -178,7 +178,7 @@ def _fetch_player_props(_event_ids: list[str]) -> list[dict]:
                         })
             time.sleep(0.3)  # Rate limit courtesy
         except Exception as e:
-            logger.warning(f"[hub] Props fetch error for event {event_id}: {e}")
+            logger.warning("[hub] Props fetch error for event %s: %s", event_id, e)
 
     # Merge over/under for same player+prop+line+book
     merged: dict[str, dict] = {}
@@ -194,7 +194,7 @@ def _fetch_player_props(_event_ids: list[str]) -> list[dict]:
                 merged[key][f"{direction}_odds"] = val
 
     props_list = [v for v in merged.values() if v.get("over_odds") or v.get("under_odds")]
-    logger.info(f"[hub] {len(props_list)} merged prop lines")
+    logger.info("[hub] %s merged prop lines", len(props_list))
     return props_list
 
 
@@ -217,10 +217,10 @@ def _fetch_pitcher_stats() -> dict:
                 "innings_pitched": p.get("InningsPitchedDecimal", 0),
                 "games": p.get("Games", 0),
             }
-        logger.info(f"[hub] {len(stats)} pitcher stats loaded")
+        logger.info("[hub] %s pitcher stats loaded", len(stats))
         return stats
     except Exception as e:
-        logger.error(f"[hub] Pitcher stats error: {e}")
+        logger.error("[hub] Pitcher stats error: %s", e)
         return {}
 
 
@@ -255,10 +255,10 @@ def _fetch_game_odds() -> list[dict]:
                             entry[f"total_{direction}_odds"] = o.get("price")
                             entry["total_line"] = o.get("point", 8.5)
                 game_odds.append(entry)
-        logger.info(f"[hub] {len(game_odds)} game-odds lines")
+        logger.info("[hub] %s game-odds lines", len(game_odds))
         return game_odds
     except Exception as e:
-        logger.error(f"[hub] Game odds error: {e}")
+        logger.error("[hub] Game odds error: %s", e)
         return []
 
 
@@ -300,7 +300,7 @@ def run_data_hub_tasklet() -> dict:
     _write_hub(hub)
     elapsed = time.time() - start
     logger.info(
-        f"[hub] DataHub refresh complete in {elapsed:.2f}s — "
-        f"{len(games_today)} games, {len(player_props)} props, {len(game_odds)} game-lines"
+        "[hub] DataHub refresh complete in %.2fs — %d games, %d props, %d game-lines",
+        elapsed, len(games_today), len(player_props), len(game_odds)
     )
     return hub
