@@ -218,7 +218,8 @@ class CalibrationLayer:
         self._corrections: Dict[Tuple, float] = {}
         self._load_calibration()
 
-    def _key_hash(self, player: str, prop_type: str, line_bucket: float) -> str:
+    @staticmethod
+    def _key_hash(player: str, prop_type: str, line_bucket: float) -> str:
         raw = f"{player}|{prop_type}|{line_bucket:.2f}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
