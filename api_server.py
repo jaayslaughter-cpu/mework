@@ -15,16 +15,24 @@ POST /api/ml/correlation      — Prop-pair correlation score
 POST /api/ml/game-prob        — Team win probability
 POST /api/ml/anomaly-detect   — Stat anomaly detection
 POST /api/ml/backtest-audit   — SHAP feature importance audit (BacktestTasklet)
+POST /trigger/dispatch        — Run live_dispatcher.py (19-agent parlay build)
+POST /trigger/stream          — Run line_stream.py (line snapshots + steam detection)
+POST /trigger/settle          — Run nightly_recap.py (settlement + calibration)
+GET  /replay                  — Decision replay for a given date
+GET  /config                  — Dump agent_config.yaml as JSON
 
 Usage
 -----
-    uvicorn api_server:app --host 0.0.0.0 --port 5000 --workers 2
+    uvicorn api_server:app --host 0.0.0.0 --port 8080 --workers 1
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -32,7 +40,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -181,6 +189,12 @@ class BacktestResponse(BaseModel):
     feature_accuracies: Dict[str, float]
 
 
+class TriggerResponse(BaseModel):
+    status: str
+    trigger: str
+    message: str
+
+
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
@@ -210,6 +224,33 @@ def _compute_z_score(actual: float, historical_mean: float, historical_std: floa
     if historical_std == 0:
         return 0.0
     return (actual - historical_mean) / historical_std
+
+
+# ---------------------------------------------------------------------------
+# Background task runner
+# ---------------------------------------------------------------------------
+
+def _run_script(script_name: str) -> None:
+    """Run a Python script in a subprocess, logging stdout/stderr."""
+    script_path = os.path.join(os.path.dirname(__file__), script_name)
+    try:
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            timeout=3600,  # 1-hour hard cap
+        )
+        if result.returncode == 0:
+            logger.info("[trigger] %s completed successfully.", script_name)
+        else:
+            logger.error(
+                "[trigger] %s exited with code %s.\nstdout: %s\nstderr: %s",
+                script_name, result.returncode, result.stdout[-2000:], result.stderr[-2000:],
+            )
+    except subprocess.TimeoutExpired:
+        logger.error("[trigger] %s timed out after 3600s.", script_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[trigger] %s failed to start: %s", script_name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +313,57 @@ def health_check() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Trigger routes
+# ---------------------------------------------------------------------------
+
+@app.post("/trigger/dispatch", response_model=TriggerResponse)
+def trigger_dispatch(background_tasks: BackgroundTasks) -> TriggerResponse:
+    """Fire the 19-agent daily dispatcher (live_dispatcher.py).
+
+    Returns immediately with 202-style acknowledgment; the dispatcher runs
+    in a background thread and posts results to Discord when complete.
+    """
+    background_tasks.add_task(_run_script, "live_dispatcher.py")
+    logger.info("[trigger/dispatch] Dispatched live_dispatcher.py")
+    return TriggerResponse(
+        status="accepted",
+        trigger="dispatch",
+        message="live_dispatcher.py started in background — Discord alerts will post on completion.",
+    )
+
+
+@app.post("/trigger/stream", response_model=TriggerResponse)
+def trigger_stream(background_tasks: BackgroundTasks) -> TriggerResponse:
+    """Fire the line stream snapshot (line_stream.py).
+
+    Snapshots current lines, detects steam moves, and posts alerts to Discord.
+    """
+    background_tasks.add_task(_run_script, "line_stream.py")
+    logger.info("[trigger/stream] Dispatched line_stream.py")
+    return TriggerResponse(
+        status="accepted",
+        trigger="stream",
+        message="line_stream.py started in background — steam alerts will post on detection.",
+    )
+
+
+@app.post("/trigger/settle", response_model=TriggerResponse)
+def trigger_settle(background_tasks: BackgroundTasks) -> TriggerResponse:
+    """Fire the nightly settlement engine (nightly_recap.py).
+
+    Grades all PENDING parlays, updates season record, runs calibration checks,
+    and posts the settlement summary to Discord.
+    """
+    background_tasks.add_task(_run_script, "nightly_recap.py")
+    logger.info("[trigger/settle] Dispatched nightly_recap.py")
+    return TriggerResponse(
+        status="accepted",
+        trigger="settle",
+        message="nightly_recap.py started in background — settlement report will post to Discord.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route: predict
 # ---------------------------------------------------------------------------
 
@@ -297,15 +389,10 @@ def predict(request: PredictRequest) -> PredictResponse:
 
 @app.post("/api/ml/predict-live", response_model=PredictResponse)
 def predict_live(request: LivePredictRequest) -> PredictResponse:
-    """In-game live probability prediction using real-time box score state.
-
-    Adjusts the base model probability using pitch-count progression and
-    current score differential to reflect the remaining prop window.
-    """
+    """In-game live probability prediction using real-time box score state."""
     in_game = request.in_game_data
     base_features: Dict[str, float] = {}
 
-    # Extract numeric features from the live payload
     for field in ("pitch_count", "score_diff", "inning", "outs_in_inning"):
         val = in_game.get(field, 0)
         try:
@@ -315,7 +402,6 @@ def predict_live(request: LivePredictRequest) -> PredictResponse:
 
     prob = _predict_raw(base_features)
 
-    # Regress probability toward 50% as score differential becomes extreme
     score_diff = abs(base_features.get("score_diff", 0))
     if score_diff >= 5:
         regression_weight = min(score_diff / 10.0, 0.4)
@@ -335,12 +421,7 @@ def predict_live(request: LivePredictRequest) -> PredictResponse:
 
 @app.post("/api/ml/correlation", response_model=CorrelationResponse)
 def correlation(request: CorrelationRequest) -> CorrelationResponse:
-    """Compute prop-pair correlation score.
-
-    Returns a 0.0–1.0 score where values >= 0.72 indicate a correlated pair
-    that should not be combined in the same slip.
-    """
-    # Use prop_type to look up known correlation pairs
+    """Compute prop-pair correlation score."""
     score = _score_correlation(request.prop_type)
     return CorrelationResponse(prop_id=request.prop_id, correlation=score)
 
@@ -351,12 +432,7 @@ def correlation(request: CorrelationRequest) -> CorrelationResponse:
 
 @app.post("/api/ml/game-prob", response_model=GameProbResponse)
 def game_prob(request: GameProbRequest) -> GameProbResponse:
-    """Team win probability for a given game_id.
-
-    Uses a simplified Pythagorean win-expectation model.  In production this
-    is enriched by TheOddsApiService run-line prices passed through Redis.
-    """
-    # Read team win probability from Redis cache if available; fall back to 50.
+    """Team win probability for a given game_id."""
     try:
         import redis  # noqa: PLC0415
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -376,11 +452,7 @@ def game_prob(request: GameProbRequest) -> GameProbResponse:
 
 @app.post("/api/ml/anomaly-detect", response_model=AnomalyResponse)
 def anomaly_detect(request: AnomalyRequest) -> AnomalyResponse:
-    """Detect statistically improbable stat values that may need correction.
-
-    Uses a rolling z-score against 30-game historical distributions stored in
-    Redis.  Values with |z| >= 3.0 are flagged as potential stat corrections.
-    """
+    """Detect statistically improbable stat values."""
     threshold_z = 3.0
     historical_mean: float = 0.0
     historical_std: float = 1.0
@@ -413,20 +485,7 @@ def anomaly_detect(request: AnomalyRequest) -> AnomalyResponse:
 
 @app.post("/api/ml/backtest-audit", response_model=BacktestResponse)
 def backtest_audit(request: BacktestRequest) -> BacktestResponse:
-    """SHAP-based feature importance audit for BacktestTasklet.
-
-    Algorithm
-    ---------
-    1. Build a DataFrame from ``settled_bets`` with numerical feature columns.
-    2. Compute binary accuracy of the calibrated XGBoost probability on the
-       held-out data (xgboost_prob vs prop_hit_actual).
-    3. Compute SHAP mean absolute values via ``shap.TreeExplainer``.
-    4. Normalise SHAP importances to produce per-feature accuracy estimates:
-       ``feature_accuracy = overall_accuracy * (shap_i / shap_max)``
-       floored at 50% to avoid nonsensical near-zero values.
-    5. Any feature whose estimated accuracy falls below
-       ``min_feature_accuracy`` is added to ``dropped_features``.
-    """
+    """SHAP-based feature importance audit for BacktestTasklet."""
     bets = request.settled_bets
     if len(bets) < MIN_BACKTEST_RECORDS:
         raise HTTPException(
@@ -439,7 +498,6 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
 
     df = pd.DataFrame(bets)
 
-    # Determine which feature columns are present in this batch
     available_features = [c for c in FEATURE_COLUMNS if c in df.columns]
     if not available_features:
         raise HTTPException(
@@ -450,7 +508,6 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
     if "prop_hit_actual" not in df.columns:
         raise HTTPException(status_code=422, detail="Missing 'prop_hit_actual' column.")
 
-    # Clean data
     df = df.dropna(subset=available_features + ["prop_hit_actual"])
     df["prop_hit_actual"] = df["prop_hit_actual"].astype(int)
 
@@ -459,15 +516,12 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
 
     sample_size = len(df)
 
-    # ── Overall accuracy from xgboost_prob column ────────────────────────
     if "xgboost_prob" in df.columns:
-        # xgboost_prob stored as 0-100
         preds_binary = (df["xgboost_prob"].fillna(50) >= 55).astype(int)
         overall_accuracy = float((preds_binary == y).mean())
     else:
         overall_accuracy = 0.0
 
-    # ── SHAP feature importance ──────────────────────────────────────────
     try:
         import shap  # noqa: PLC0415
 
@@ -476,7 +530,6 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
             dmat = xgb.DMatrix(pd.DataFrame(x, columns=available_features))
             shap_values: np.ndarray = explainer.shap_values(dmat)
         else:
-            # Fallback: fit a lightweight XGBoost model on the backtest data
             dtrain = xgb.DMatrix(x, label=y, feature_names=available_features)
             params = {
                 "objective": "binary:logistic",
@@ -496,7 +549,6 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
 
     except ImportError:
-        # shap not installed — use XGBoost gain importance as fallback
         logger.warning("shap not installed; using XGBoost gain importance as fallback.")
         if _model_state["booster"] is not None:
             scores = _model_state["booster"].get_score(importance_type="gain")
@@ -506,16 +558,13 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
         else:
             mean_abs_shap = np.ones(len(available_features), dtype=np.float32)
 
-    # ── Map SHAP importances to per-feature accuracy estimates ───────────
     shap_max = mean_abs_shap.max() if mean_abs_shap.max() > 0 else 1.0
     feature_accuracies: Dict[str, float] = {}
     for feat, shap_val in zip(available_features, mean_abs_shap):
-        # Normalise: scale between 0.50 (random) and overall_accuracy (best)
         ratio = float(shap_val) / shap_max
         est_accuracy = 0.50 + ratio * max(overall_accuracy - 0.50, 0.0)
         feature_accuracies[feat] = round(est_accuracy, 4)
 
-    # ── Determine dropped features ───────────────────────────────────────
     dropped_features = [
         feat
         for feat, acc in feature_accuracies.items()
@@ -531,7 +580,7 @@ def backtest_audit(request: BacktestRequest) -> BacktestResponse:
 
 
 # ---------------------------------------------------------------------------
-# Phase 35: Replay endpoint — returns full decision trail for a given date
+# Phase 35: Replay endpoint
 # ---------------------------------------------------------------------------
 
 @app.get("/replay")
@@ -541,11 +590,7 @@ def replay_decisions(
     player: str = "",
     decision: str = "",
 ) -> Dict[str, Any]:
-    """
-    Returns all leg decisions logged for a given date.
-    Query params: date (YYYY-MM-DD), agent, player, decision (INCLUDED|REJECTED)
-    Example: GET /replay?date=2026-03-25&agent=FadeAgent
-    """
+    """Returns all leg decisions logged for a given date."""
     from datetime import date as dt_date
     replay_date = date or dt_date.today().isoformat()
     try:
