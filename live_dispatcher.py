@@ -116,7 +116,7 @@ except ImportError:
         @staticmethod
         def prefetch_form_data(*_args, **_kwargs) -> None:
             """Dummy implementation; no form data to prefetch."""
-            pass
+            pass  # intentionally left blank
         @staticmethod
         def get_form_adjustment(*_args, **_kwargs) -> float: return 0.0  # noqa: E704
 
@@ -1848,7 +1848,7 @@ class LiveDispatcher:
                         try:
                             _fg_data = _fg_get_pitcher(pname)
                             player_type = "pitcher"
-                        except:
+                        except KeyError:
                             _fg_data = _fg_get_batter(pname)
                             player_type = "batter"
                         _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)

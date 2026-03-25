@@ -1,6 +1,10 @@
 """
 fangraphs_layer.py
 ------------------
+"""
+import tempfile
+from .utils import _normalise_name, _safe_float
+from .settings import cache_path
 Phase 34 — FanGraphs season statistics via pybaseball.
 
 Provides per-agent signal enhancement for all 19 agents:
@@ -16,32 +20,10 @@ Provides per-agent signal enhancement for all 19 agents:
   hr_fb_pct  : Home run per fly ball rate
   lob_pct    : Left-on-base strand rate (regression flag)
   babip      : Pitcher BABIP (luck normaliser)
-
-  Batters
-  -------
-  wrc_plus   : wRC+ — park/league adjusted run creation (100 = average)
-  woba       : Weighted On-Base Average
-  iso        : Isolated Power (SLG - AVG)
-  babip      : Batter BABIP (hot/cold luck flag)
-  o_swing    : O-Swing% — chase rate outside zone
-  z_contact  : Z-Contact% — contact inside zone
-  hr_fb_pct  : Batter HR/FB rate (power + wind interaction)
-  k_pct      : Strikeout rate (batter Ks)
-  bb_pct     : Walk rate
-
-Data is fetched once daily and cached to /tmp/ so all 19 agents share
-the same dataset without hammering FanGraphs.
-
-Fallback: if pybaseball is unavailable or FanGraphs is down, every
-get_*() call returns an empty dict — all adjustments in the dispatcher
-will be 0.0 and the pipeline continues normally.
-"""
-
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import date
 from typing import Any
 
@@ -80,8 +62,6 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
 def _load() -> None:
     """Fetch or load from daily cache.  Sets _loaded = True on completion."""
 
-    today = date.today().isoformat()
-
     # ── Try cache first ──────────────────────────────────────────────────────
     with tempfile.TemporaryFile(mode='w+') as tmp:
         try:
@@ -107,7 +87,7 @@ def _load() -> None:
 
         season = date.today().year
 
-        # ── Batting stats ────────────────────────────────────────────────────
+        # ── Batting stats ───────────────────────────────────────────────────
         bd = LEAGUE_DEFAULTS["batter"]
         bat_df = pb.batting_stats(season, qual=20)
         for _, row in bat_df.iterrows():
@@ -145,7 +125,7 @@ def _load() -> None:
                 "babip":     _safe_float(row.get("BABIP"),   pd_["babip"]),
             }
 
-        # ── Persist cache ────────────────────────────────────────────────────
+        # ── Persist cache ───────────────────────────────────────────────────
         with open(cache_path, "w") as fh:
             json.dump({"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE}, fh)
 
@@ -199,7 +179,6 @@ _PROP_GROUPS: dict[str, list[str]] = {
 
 def _in_group(prop_type: str, group: str) -> bool:
     return prop_type in _PROP_GROUPS.get(group, [])
-
 
 def fangraphs_adjustment(
     prop_type: str,
