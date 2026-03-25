@@ -169,6 +169,16 @@ class FeatureEngineer:
         "total_bases", "plate_appearances", "batting_avg",
         "on_base_pct", "slugging_pct", "ops",
         "ground_outs", "air_outs", "left_on_base",
+        # ── Statcast-derived (Phase 24 — statcast_feature_layer.py) ──────
+        "sc_avg_launch_speed",   # exit velocity → hard contact quality
+        "sc_avg_bat_speed",      # swing speed → power / contact profile
+        "sc_avg_swing_length",   # swing compactness (shorter = better contact)
+        "sc_hard_hit_rate",      # % balls >= 95 mph → sustained hard contact
+        "sc_recent_hrs",         # Statcast-verified HR events this game
+        "sc_season_hr",          # season HR total (lineup context)
+        "sc_season_avg",         # season batting average (contact quality)
+        "sc_season_slg",         # season slugging pct (power profile)
+        "sc_season_pa",          # plate appearances (lineup slot proxy)
     ]
 
     # Pitcher stat columns — sourced from mlb-props-main feature taxonomy
@@ -178,6 +188,14 @@ class FeatureEngineer:
         "strike_percentage", "batters_faced", "games_started",
         "complete_games", "shutouts", "wild_pitches", "balks",
         "inherited_runners", "inherited_runners_scored",
+        # ── Statcast-derived (Phase 24 — statcast_feature_layer.py) ──────
+        "sc_avg_velocity",       # fastball velocity → K rate proxy
+        "sc_avg_spin_rate",      # spin quality → movement / swing-and-miss
+        "sc_whiff_rate",         # whiffs/pitch → strongest K prop predictor
+        "sc_avg_exit_velocity",  # hard contact allowed → ERA/quality proxy
+        "sc_avg_launch_angle",   # launch angle allowed (low = groundballs)
+        "sc_avg_extension",      # release mechanics consistency
+        "sc_recent_ks",          # Statcast-verified K count this game
     ]
 
     def __init__(
@@ -416,6 +434,40 @@ class FeatureEngineer:
             l14_col = f"L14_{col}"
             if l7_col in df.columns and l14_col in df.columns:
                 df[f"delta_7v14_{col}"] = df[l7_col] - df[l14_col]
+
+        # ── Velocity / spin drop momentum (Phase 24, from engineer_features.py)
+        # Pitcher fatigue early warning: velocity/spin falling L7 vs L30 baseline.
+        # Positive pct_drop = metric has declined (fatiguing / mechanics off).
+        for stat_name, sc_col in [
+            ("velocity",  "sc_avg_velocity"),
+            ("spin_rate", "sc_avg_spin_rate"),
+        ]:
+            l7_col  = f"L7_{sc_col}"
+            l30_col = f"L30_{sc_col}"
+            if l7_col in df.columns and l30_col in df.columns:
+                df[f"pct_drop_{stat_name}"] = np.where(
+                    df[l30_col] > 0,
+                    (df[l30_col] - df[l7_col]) / df[l30_col],
+                    0.0,
+                )
+
+        # ── Whiff rate trend — strongest leading indicator for K props ──
+        # Rising EMA whiff rate = pitcher's swing-and-miss stuff is peaking.
+        ema_whiff = "EMA_sc_whiff_rate"
+        if ema_whiff in df.columns:
+            df["momentum_whiff_rate"] = (
+                df.groupby("player_id")[ema_whiff]
+                .transform(lambda s: s.diff().rolling(3, min_periods=1).mean())
+            )
+
+        # ── Hard hit rate momentum — batter hot-streak signal ───────────
+        # Rising EMA hard hit rate = batter is squaring up pitches (Over edge).
+        ema_hhr = "EMA_sc_hard_hit_rate"
+        if ema_hhr in df.columns:
+            df["momentum_hard_hit"] = (
+                df.groupby("player_id")[ema_hhr]
+                .transform(lambda s: s.diff().rolling(3, min_periods=1).mean())
+            )
 
         return df
 
