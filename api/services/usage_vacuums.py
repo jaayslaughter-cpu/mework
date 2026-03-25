@@ -10,7 +10,7 @@ def calculate_vacated_usage(standard_lineup: list, confirmed_lineup: list, playe
     
     return vacated_weight
 
-def apply_vacuum_boost(player_id: str, old_lineup_spot: int, new_lineup_spot: int, vacated_weight: float) -> float:
+def apply_vacuum_boost(_player_id: str, old_lineup_spot: int, new_lineup_spot: int, vacated_weight: float) -> float:
     """
     Calculates a positive multiplier for a player based on their new lineup position 
     and the total vacated usage on the team.

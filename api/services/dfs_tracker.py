@@ -10,12 +10,11 @@ Drop this into: api/services/dfs_tracker.py
 import os
 import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +140,8 @@ class DFSScorer:
 
         return round(pts, 2)
 
-    def salary_value(self, dfs_points: float, salary: int) -> float:
+    @staticmethod
+    def salary_value(dfs_points: float, salary: int) -> float:
         """Value = points per $1000 salary."""
         return round(dfs_points / (salary / 1000), 2) if salary else 0.0
 
@@ -294,10 +294,11 @@ class PropBacktester:
         with open(BACKTEST_RESULTS_FILE, "w") as f:
             json.dump(results, f, indent=2)
 
-        logger.info(f"Backtest: {total_bets} bets, {wins} wins ({wins/total_bets:.1%}), ROI {roi:.1f}%")
+        logger.info("Backtest: %d bets, %d wins (%.1f%%), ROI %.1f%%", total_bets, wins, wins/total_bets * 100, roi)
         return results
 
-    def kelly_criterion(self, model_prob: float, book_prob: float, max_fraction: float = 0.25) -> float:
+    @staticmethod
+    def kelly_criterion(model_prob: float, book_prob: float, max_fraction: float = 0.25) -> float:
         """
         Full Kelly Criterion bet size (as fraction of bankroll).
         Capped at max_fraction for safety.
@@ -311,7 +312,8 @@ class PropBacktester:
     def half_kelly(self, model_prob: float, book_prob: float) -> float:
         return self.kelly_criterion(model_prob, book_prob) / 2
 
-    def load_results(self) -> Optional[Dict]:
+    @staticmethod
+    def load_results() -> Optional[Dict]:
         if not BACKTEST_RESULTS_FILE.exists():
             return None
         with open(BACKTEST_RESULTS_FILE) as f:

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .data_hub_tasklet import read_hub
-from ..agents import ALL_AGENTS, EVHunter, UnderMachine, ThreeLeg, ParlayAgent, LiveAgent, ArbAgent, GradingAgent
+from ..agents import EVHunter, UnderMachine, ThreeLeg, ParlayAgent, LiveAgent, ArbAgent, GradingAgent
 
 logger = logging.getLogger("propiq.tasklet.agent")
 
@@ -59,7 +59,7 @@ def run_agent_tasklet() -> dict:
             }
             all_slips.extend(slips)
         except Exception as e:
-            logger.error(f"[agents] {name} crashed: {e}")
+            logger.error("[agents] %s crashed: %s", name, e)
             agent_results[name] = {"error": str(e)}
 
     # Append to bet queue
@@ -70,8 +70,10 @@ def run_agent_tasklet() -> dict:
 
     elapsed = time.time() - start
     logger.info(
-        f"[agents] {len(all_slips)} slips filed across "
-        f"{len([k for k, v in agent_results.items() if 'error' not in v])} agents in {elapsed:.2f}s"
+        "[agents] %d slips filed across %d agents in %.2fs",
+        len(all_slips),
+        len([k for k, v in agent_results.items() if 'error' not in v]),
+        elapsed,
     )
 
     return {

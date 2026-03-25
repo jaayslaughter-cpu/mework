@@ -7,7 +7,6 @@ Books: DraftKings, FanDuel, BetMGM, bet365.
 """
 from __future__ import annotations
 import logging
-from itertools import combinations
 from .base_agent import BaseAgent, BetSlip, Leg
 
 logger = logging.getLogger("propiq.agent.arb")
@@ -158,5 +157,5 @@ class ArbAgent(BaseAgent):
 
         # Sort by arb_pct
         slips.sort(key=lambda x: x.metadata.get("arb_pct", 0), reverse=True)
-        logger.info(f"[arb] Found {len(slips)} arbitrage opportunities")
+        logger.info("[arb] Found %s arbitrage opportunities", len(slips))
         return slips[:10]

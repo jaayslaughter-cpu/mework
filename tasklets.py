@@ -19,6 +19,7 @@ Railway deployment notes
   All service addresses come from environment variables with safe defaults.
   Every external call is wrapped in try/except so a downed dependency
   degrades gracefully instead of crashing the whole process.
+degrades gracefully instead of crashing the whole process.
 """
 
 from __future__ import annotations
@@ -30,10 +31,41 @@ import math
 import os
 import pickle
 import time
+import os
+import pickle
 from typing import Any
 
 import requests
 import redis as redis_lib
+from DiscordAlertService import discord_alert
+from public_trends_scraper import PublicTrendsScraper, get_fade_signal
+
+# ── Null-object fallback for when Redis is unreachable ────────────────────────
+
+class _NullRedis:
+    """
+    Silent no-op drop-in for redis.Redis.
+    Returned by _redis() when the server is unreachable so the app boots
+    successfully and degrades gracefully instead of crashing.
+    """
+    @staticmethod
+    def exists(*a, **kw):  return False
+    @staticmethod
+    def get(*a, **kw):     return None
+    @staticmethod
+    def setex(*a, **kw):   return None
+    @staticmethod
+    def set(*a, **kw):     return None
+    @staticmethod
+    def lpush(*a, **kw):   return None
+    @staticmethod
+    def ltrim(*a, **kw):   return None
+    @staticmethod
+    def lrange(*a, **kw):  return []
+    @staticmethod
+    def delete(*a, **kw):  return None
+    @staticmethod
+    def ping(*a, **kw):    return False
 
 logger = logging.getLogger("propiq.tasklets")
 
@@ -83,6 +115,30 @@ def _redis() -> redis_lib.Redis:
         db=int(os.getenv("REDIS_DB", 0)),
         decode_responses=True,
     )
+def _redis():
+    """
+    Connect to Redis using Railway env var or explicit host/port.
+    Returns _NullRedis() if the server is unreachable — allows the app
+    to boot successfully and run without cache/queue.
+    """
+    try:
+        url = os.getenv("REDIS_URL")
+        if url:
+            r = redis_lib.from_url(url, decode_responses=True,
+                                   socket_connect_timeout=3)
+        else:
+            r = redis_lib.Redis(
+                host=os.getenv("REDIS_HOST", "redis"),
+                port=int(os.getenv("REDIS_PORT", 6379)),
+                db=int(os.getenv("REDIS_DB", 0)),
+                decode_responses=True,
+                socket_connect_timeout=3,
+            )
+        r.ping()   # fail fast if server is down
+        return r
+    except Exception as e:
+        logger.warning("Redis unavailable — running without cache (app will still boot): %s", e)
+        return _NullRedis()
 
 
 def _pg_conn():
@@ -106,6 +162,13 @@ def _kafka_producer():
         from confluent_kafka import Producer
         bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
         return Producer({"bootstrap.servers": bootstrap})
+        p = Producer({
+            "bootstrap.servers": bootstrap,
+            "socket.timeout.ms": 3000,
+            "message.timeout.ms": 5000,
+            "retries": 0,
+        })
+        return p
     except Exception as e:
         logger.warning("Kafka unavailable — falling back to Redis queue: %s", e)
         return None
@@ -161,6 +224,24 @@ def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
     except Exception as e:
         logger.error("Apify error (%s): %s", actor_id, e)
         return []
+
+
+def _fetch_sbd_public_trends() -> dict:
+    """Fetch SportsBettingDime public betting splits (replaces Apify ActionNetwork call).
+
+    Returns dict with keys: game_df, prop_df (pandas DataFrames as dicts for JSON storage).
+    Caches via PublicTrendsScraper daily Parquet cache — zero re-hits after first fetch.
+    """
+    try:
+        scraper = PublicTrendsScraper()
+        game_df, prop_df = scraper.fetch()
+        return {
+            "game_df": game_df.to_dict(orient="records") if not game_df.empty else [],
+            "prop_df": prop_df.to_dict(orient="records") if not prop_df.empty else [],
+        }
+    except Exception as exc:
+        logger.warning("[DataHub] SBD public trends fetch failed: %s", exc)
+        return {"game_df": [], "prop_df": []}
 
 
 def _sportsdata_get(path: str) -> Any:
@@ -311,6 +392,7 @@ def run_data_hub_tasklet() -> None:
                 "startUrls": [{"url": "https://www.actionnetwork.com/mlb/public-betting"}],
                 "maxCrawlingDepth": 0,
             }),
+            "public_betting": _fetch_sbd_public_trends(),
             "sharp_report": _fetch_apify("apify/web-scraper", {
                 "startUrls": [{"url": "https://www.actionnetwork.com/mlb/sharp-report"}],
                 "maxCrawlingDepth": 0,
@@ -447,6 +529,8 @@ class _BaseAgent:
         }
 
     def _confidence(self, ev_pct: float) -> int:
+    @staticmethod
+    def _confidence(ev_pct: float) -> int:
         if ev_pct >= 10: return 9
         if ev_pct >= 7:  return 8
         if ev_pct >= 5:  return 7
@@ -461,6 +545,7 @@ class _EVHunter(_BaseAgent):
         over_odds  = prop.get("over_american",  -110)
         under_odds = prop.get("under_american", -110)
         fair_over, _ = _no_vig(over_odds, under_odds)
+        _, _ = _no_vig(over_odds, under_odds)
         model_prob   = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied      = _american_to_implied(over_odds) / 100
         ev_pct       = (model_prob / 100 - implied) / implied
@@ -476,6 +561,9 @@ class _UnderMachine(_BaseAgent):
     def evaluate(self, prop: dict) -> dict | None:
         under_odds = prop.get("under_american", -110)
         _, fair_under = _no_vig(prop.get("over_american", -110), under_odds)
+
+    def evaluate(self, prop: dict) -> dict | None:
+        under_odds = prop.get("under_american", -110)
         model_prob    = 100 - self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied       = _american_to_implied(under_odds) / 100
         ev_pct        = (model_prob / 100 - implied) / implied
@@ -544,6 +632,40 @@ class _FadeAgent(_BaseAgent):
         # Fade the public → take UNDER
         model_prob = self._model_prob(player, prop.get("prop_type", ""))
         fade_prob  = 100 - model_prob + 5.0   # boost by 5 pp for fade logic
+        """Fades heavy public action using SportsBettingDime real BET%/MONEY% data.
+
+        Signal precedence:
+          1. Player-level prop bets% from SBD player-props API (most precise)
+          2. Game-level total Over bets% from SBD sport-event API (fallback)
+        Threshold: 65% (down from 70% — SBD data is more precise than Apify estimates).
+        """
+        SBD_THRESHOLD = 65.0          # % public tickets on Over → fade signal
+        market   = self.hub.get("market", {})
+        pub_data = market.get("public_betting", {})
+        player   = prop.get("player", "")
+        team     = prop.get("team", "")
+        prop_type = prop.get("prop_type", "")
+
+        # Build lightweight DataFrames from cached SBD data stored in hub
+        import pandas as pd
+        game_records = pub_data.get("game_df", []) if isinstance(pub_data, dict) else []
+        prop_records = pub_data.get("prop_df", []) if isinstance(pub_data, dict) else []
+        game_df = pd.DataFrame(game_records) if game_records else pd.DataFrame()
+        prop_df = pd.DataFrame(prop_records) if prop_records else pd.DataFrame()
+
+        pub_pct, signal_src = get_fade_signal(
+            player, team, prop_type, game_df, prop_df, threshold=SBD_THRESHOLD
+        )
+
+        if pub_pct < SBD_THRESHOLD:
+            return None
+
+        # Fade the public → take UNDER
+        # Stronger fade when both bets% AND money% are lopsided (squares + whale action)
+        model_prob = self._model_prob(player, prop_type)
+        # Apply stronger boost when signal comes from precise player-level data
+        fade_boost = 6.0 if signal_src == "player_prop" else 5.0
+        fade_prob  = 100 - model_prob + fade_boost
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (fade_prob / 100 - implied) / implied
@@ -682,6 +804,186 @@ class _MLEdgeAgent(_BaseAgent):
         return None
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Underdog-vs-Sharp edge helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_underdog_props(hub: dict) -> list[dict]:
+    """Parse Underdog Fantasy lines from hub DFS data."""
+    picks = hub.get("dfs", {}).get("underdog", [])
+    props: list[dict] = []
+    for pick in picks:
+        if not isinstance(pick, dict):
+            continue
+        over_odds  = int(pick.get("over_odds",  -120) or -120)
+        under_odds = int(pick.get("under_odds", -120) or -120)
+        props.append({
+            "player":         pick.get("player", pick.get("name", "Unknown")),
+            "prop_type":      pick.get("stat_type", pick.get("prop", "H")),
+            "line":           float(pick.get("line", pick.get("value", 1.5)) or 1.5),
+            "over_american":  over_odds,
+            "under_american": under_odds,
+            "team":           pick.get("team", ""),
+            "venue":          pick.get("venue", ""),
+            "platform":       "underdog",
+            "underdog_line":  over_odds,
+        })
+    return props
+
+
+_SHARP_BOOKS = {"draftkings", "fanduel", "pinnacle", "circa", "betmgm", "pointsbet"}
+
+
+def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None:
+    """
+    Extract sharp-book consensus implied probability for a player/prop
+    from The Odds API data in hub.market.odds.
+    Returns probability as a percentage (0-100), or None if no data found.
+    """
+    odds_list = hub.get("market", {}).get("odds", [])
+    probs: list[float] = []
+    player_lower = player.lower()
+    for game in odds_list:
+        if not isinstance(game, dict):
+            continue
+        for bookmaker in game.get("bookmakers", []):
+            if bookmaker.get("key", "").lower() not in _SHARP_BOOKS:
+                continue
+            for market in bookmaker.get("markets", []):
+                for outcome in market.get("outcomes", []):
+                    desc = str(outcome.get("description", "")).lower()
+                    name = str(outcome.get("name", "")).lower()
+                    if player_lower in desc or player_lower in name:
+                        price = outcome.get("price")
+                        if price is not None:
+                            try:
+                                probs.append(_american_to_implied(int(price)))
+                            except (TypeError, ValueError):
+                                pass
+    return (sum(probs) / len(probs)) if probs else None
+
+
+def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
+    """
+    Edge = sharp consensus implied prob % − Underdog implied prob %.
+    Positive = Underdog is mispriced vs sharp books → exploitable DFS edge.
+    """
+    return sharp_prob_pct - _american_to_implied(underdog_odds)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DFS Parlay (Slip) builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _are_legs_correlated(legs: list[dict]) -> bool:
+    """Return True if any two legs share the same player."""
+    players = [lg.get("player", "") for lg in legs]
+    return len(set(players)) < len(players)
+
+
+def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
+    return {
+        "agent":           agent_name,
+        "legs":            legs,
+        "leg_count":       len(legs),
+        "combined_ev_pct": round(sum(lg["ev_pct"] for lg in legs), 2),
+        "ts":              datetime.datetime.utcnow().isoformat(),
+    }
+
+
+def _build_parlays(ev_pool: list[dict], agent_name: str = "The Correlated Parlay Agent",
+                   min_legs: int = 2,
+                   max_legs: int = 3,
+                   max_parlays: int = 5) -> list[dict]:
+    """
+    Package individual +EV picks into 2-leg and 3-leg Underdog slips.
+    Avoids same-player correlation. Returns up to max_parlays slips sorted
+    by combined EV descending.
+    """
+    if len(ev_pool) < min_legs:
+        return []
+
+    top = sorted(ev_pool, key=lambda x: x["ev_pct"], reverse=True)[:12]
+    parlays: list[dict] = []
+
+    for i in range(len(top)):
+        for j in range(i + 1, len(top)):
+            two = [top[i], top[j]]
+            if _are_legs_correlated(two):
+                continue
+            parlays.append(_make_parlay(two, agent_name))
+            # Attempt 3-leg extension
+            if max_legs >= 3:
+                for k in range(j + 1, len(top)):
+                    three = two + [top[k]]
+                    if not _are_legs_correlated(three):
+                        parlays.append(_make_parlay(three, agent_name))
+                        break
+            if len(parlays) >= max_parlays * 2:
+                break
+        if len(parlays) >= max_parlays * 2:
+            break
+
+    # Deduplicate by player-set key, keep highest-EV version
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for p in sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True):
+        key = "|".join(sorted(lg["player"] for lg in p["legs"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+
+    return unique[:max_parlays]
+
+
+
+def _build_agent_parlays(hits: list[dict], agent_name: str,
+                          min_legs: int = 2, max_legs: int = 3,
+                          max_parlays: int = 3) -> list[dict]:
+    """
+    Build 2-leg and 3-leg Underdog slips for one specific agent from its own
+    hit list.  Avoids same-player correlation.  Returns up to max_parlays
+    slips sorted by combined EV descending, each branded with agent_name.
+    """
+    if len(hits) < min_legs:
+        return []
+
+    top = sorted(hits, key=lambda x: x["ev_pct"], reverse=True)[:10]
+    parlays: list[dict] = []
+    seen: set[str] = set()
+
+    for i in range(len(top)):
+        if len(parlays) >= max_parlays:
+            break
+        for j in range(i + 1, len(top)):
+            if len(parlays) >= max_parlays:
+                break
+            two = [top[i], top[j]]
+            if _are_legs_correlated(two):
+                continue
+
+            # Try to extend to 3 legs first (higher combined EV)
+            if max_legs >= 3:
+                for k in range(j + 1, len(top)):
+                    three = two + [top[k]]
+                    if not _are_legs_correlated(three):
+                        key = "|".join(sorted(lg["player"] for lg in three))
+                        if key not in seen:
+                            seen.add(key)
+                            parlays.append(_make_parlay(three, agent_name))
+                        break
+
+            # Also capture the 2-leg version
+            key2 = "|".join(sorted(lg["player"] for lg in two))
+            if key2 not in seen:
+                seen.add(key2)
+                parlays.append(_make_parlay(two, agent_name))
+
+    return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
+
+
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _SteamAgent, _MLEdgeAgent,
@@ -800,6 +1102,100 @@ def run_agent_tasklet() -> None:
                 producer.produce("bet_queue", key=bet["player"].encode(), value=payload.encode())
             except Exception as e:
                 logger.warning("[AgentTasklet] Kafka produce error: %s — using Redis", e)
+    # No hardcoded test bets — engine only fires on real market data.
+    return props
+
+
+def _get_props(hub) -> list[dict]:
+    return _extract_underdog_props(hub) or _build_synthetic_props(hub)
+
+
+def run_agent_tasklet() -> None:
+    """
+    Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
+
+    Each agent:
+      1. Evaluates every prop using its own unique quantitative logic.
+      2. Collects qualifying picks into its own internal hit list.
+      3. When it accumulates 2-3 valid uncorrelated picks, packages them into
+         its own branded Underdog slip (e.g. "EVHunter 2-Leg Slip").
+      4. Sends the slip to Discord with the agent's own name as the title.
+
+    No shared consensus vote — each agent fires independently.
+    Sharp consensus gate still applied per-pick to confirm Underdog mispricing.
+    """
+    hub   = read_hub()
+    model = _load_xgb_model()
+
+    props = _get_props(hub)
+    if not props:
+        logger.info("[AgentTasklet] No Underdog props available — skipping cycle.")
+        return
+
+    all_parlays: list[dict] = []
+
+    # ── Each agent runs independently ─────────────────────────────────────
+    for cls in _AGENT_CLASSES:
+        agent      = cls(hub, model)
+        agent_hits: list[dict] = []
+
+        for prop in props:
+            player    = prop.get("player", "")
+            prop_type = prop.get("prop_type", "")
+
+            try:
+                bet = agent.evaluate(prop)
+                if not bet:
+                    continue
+
+                # Sharp consensus gate: confirm Underdog is mispriced
+                sharp_prob = _get_sharp_consensus(hub, player, prop_type)
+                if sharp_prob is not None:
+                    side    = bet["side"]
+                    ud_odds = (prop.get("over_american", -120)
+                               if side == "OVER"
+                               else prop.get("under_american", -120))
+                    edge = _underdog_edge(ud_odds, sharp_prob)
+                    if edge < MIN_EV_THRESH * 100:
+                        continue   # sharps don't confirm — skip
+                    bet["ev_pct"]          = round(edge, 2)
+                    bet["model_prob"]      = round(sharp_prob, 1)
+                    bet["sharp_consensus"] = True
+
+                bet["underdog_line"] = prop.get("underdog_line",
+                                                prop.get("over_american", -120))
+                agent_hits.append(bet)
+
+            except Exception as e:
+                logger.debug("[AgentTasklet] %s error on %s: %s",
+                             agent.name, player, e)
+
+        if len(agent_hits) < 2:
+            logger.debug("[AgentTasklet] %s — %d hit(s), not enough for a slip.",
+                         agent.name, len(agent_hits))
+            continue
+
+        # Build this agent's own branded parlays
+        agent_parlays = _build_agent_parlays(agent_hits, agent.name)
+        if agent_parlays:
+            all_parlays.extend(agent_parlays)
+            logger.info("[AgentTasklet] %s → %d slip(s) from %d hit(s).",
+                        agent.name, len(agent_parlays), len(agent_hits))
+
+    if not all_parlays:
+        logger.info("[AgentTasklet] No qualifying slips this cycle.")
+        return
+
+    # ── Publish to Kafka / Redis ────────────────────────────────────────────
+    producer = _kafka_producer()
+    r        = _redis()
+    for parlay in all_parlays:
+        payload = json.dumps(parlay)
+        if producer:
+            try:
+                producer.produce("bet_queue", value=payload.encode())
+            except Exception as e:
+                logger.warning("[AgentTasklet] Kafka error: %s — Redis fallback", e)
                 r.lpush("bet_queue", payload)
                 r.ltrim("bet_queue", 0, 499)
         else:
@@ -812,6 +1208,22 @@ def run_agent_tasklet() -> None:
     logger.info("[AgentTasklet] Queued %d bets. Top EV: %.1f%%  (%s %s %s)",
                 len(queue_out), queue_out[0]["ev_pct"],
                 queue_out[0]["player"], queue_out[0]["prop_type"], queue_out[0]["side"])
+    if producer:
+        producer.flush(timeout=5)
+
+    # ── Discord — one embed per agent per slip ──────────────────────────────
+    for parlay in all_parlays:
+        try:
+            discord_alert.send_parlay_alert(parlay)
+        except Exception as _disc_err:
+            logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
+
+    active_agents = len({p["agent"] for p in all_parlays})
+    best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
+    logger.info("[AgentTasklet] Cycle complete — %d slip(s) from %d active agent(s). "
+                "Best slip: %s | %d legs | combined EV=%.1f%%",
+                len(all_parlays), active_agents,
+                best["agent"], best["leg_count"], best["combined_ev_pct"])
 
 
 def get_agents() -> dict:
@@ -832,6 +1244,7 @@ def get_agents() -> dict:
 
 def run_leaderboard_tasklet() -> None:
     """
+    ```
     Read 14-day settled bets from Postgres, compute per-agent ROI,
     update capital multipliers (0.5x – 2.0x), store in Redis.
     """
@@ -1067,6 +1480,7 @@ def run_grading_tasklet() -> None:
         with conn.cursor() as cur:
             for row in open_bets:
                 bid, player, ptype, line, side, odds, units, model_prob, ev_pct, agent = row
+                bid, player, ptype, line, side, odds, units, model_prob, _, agent = row
                 stats = stat_lookup.get(player, {})
                 actual = _get_stat(stats, ptype)
 
@@ -1133,6 +1547,11 @@ def run_grading_tasklet() -> None:
 
     # Send daily recap via Telegram
     _send_telegram_recap(results, total_profit, today)
+    # Send daily recap via Discord webhook
+    try:
+        discord_alert.send_daily_recap(results, total_profit, today)
+    except Exception as _disc_err:
+        logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
 
 
 def _get_stat(stats: dict, prop_type: str) -> float | None:
@@ -1176,6 +1595,7 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
             if not isinstance(game, dict):
                 continue
             for market_key, outcomes in game.get("bookmakers", [{}])[0].get("markets", [{}]):
+            for _ in game.get("bookmakers", [{}])[0].get("markets", [{}]):
                 pass
     except Exception:
         pass
