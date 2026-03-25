@@ -93,6 +93,8 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
       }
       return null;
     },
+    spread: (mkt, bm) => {
+    },
   };
 
   for (const bm of data.bookmakers) {
@@ -107,6 +109,7 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
 
   return result;
 }
+    moneyline: (mkt, bm) => {
       const home = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.home_team);
       const away = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.away_team);
       if (home && away) {

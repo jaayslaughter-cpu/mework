@@ -76,9 +76,11 @@ class ResultFeedbackRequest(BaseModel):
     dfs_points: Optional[float] = None
 
 
-# ─────────────────────────────────────────────
+
+
+# [90m─────────────────────────────────────────────[39m
 # Routes
-# ─────────────────────────────────────────────
+# [90m─────────────────────────────────────────────[39m
 @router.post("/predict", response_model=PropPredictionResponse)
 async def predict_prop(req: PropPredictionRequest):
     """
@@ -100,7 +102,7 @@ async def predict_prop(req: PropPredictionRequest):
         try:
             player_features = mlb.build_player_features(req.player, req.game_date)
             features.update(player_features)
-        except Exception as e:
+        except Exception:
             pass  # gracefully degrade
 
     # Apply request overrides
@@ -148,7 +150,7 @@ async def predict_batch(req: BatchPredictionRequest):
         try:
             result = await predict_prop(prop)
             results.append(result)
-        except Exception as e:
+        except Exception:
             results.append(PropPredictionResponse(
                 player=prop.player,
                 prop_type=prop.prop_type,

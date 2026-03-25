@@ -1,0 +1,357 @@
+# Instincts generated from https://github.com/jaayslaughter-cpu/mework
+# Generated: 2026-03-20T03:04:10.701Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: mework-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, fix, chore
+
+## Evidence
+
+- 55 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat: PropIQ complete implementation [fix/sync-worker-bugs], fix(docker): Add REDIS_PASSWORD env var to hub service
+
+---
+id: mework-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Commit Length
+
+## Action
+
+Write moderate-length commit messages (~58 characters)
+
+## Evidence
+
+- Average commit message length: 58 chars
+- Based on 55 commits
+
+---
+id: mework-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: mework-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Export Style
+
+## Action
+
+Prefer mixed exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: mixed
+
+---
+id: mework-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: mework-workflow-database-migration
+trigger: "when modifying the database schema or adding tables"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Database Migration
+
+## Action
+
+Follow the database-migration workflow:
+1. Create migration file
+2. Update schema definitions
+3. Generate/update types
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~10x per month
+- Files: 
+
+---
+id: mework-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~17x per month
+- Files: **/api/**
+
+---
+id: mework-workflow-refactoring
+trigger: "when refactoring code"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Refactoring
+
+## Action
+
+Follow the refactoring workflow:
+1. Ensure tests pass before refactor
+2. Refactor code structure
+3. Verify tests still pass
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/**/*
+
+---
+id: mework-workflow-add-or-update-database-table-or-schema
+trigger: "when doing add or update database table or schema"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Update Database Table Or Schema
+
+## Action
+
+Follow the add-or-update-database-table-or-schema workflow:
+1. Create or update SQL migration file in db/init/*.sql
+2. Sometimes update related backend code (e.g., api/database.py, hub/src/sync.js) to use new/changed tables
+3. Commit migration and related code
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: db/init/01_core_reference.sql, db/init/02_projection_market_layer.sql, db/init/03_bets_log_views_indexes.sql
+
+---
+id: mework-workflow-add-or-enhance-api-endpoint
+trigger: "when doing add or enhance api endpoint"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Enhance Api Endpoint
+
+## Action
+
+Follow the add-or-enhance-api-endpoint workflow:
+1. Create or update api/routers/*.py for endpoint logic
+2. Create or update api/services/*.py for business logic
+3. Update api/main.py to register new routers
+4. Update api/requirements.txt if new dependencies are needed
+5. Commit all related files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: api/routers/*.py, api/services/*.py, api/main.py
+
+---
+id: mework-workflow-add-or-train-ml-model
+trigger: "when doing add or train ml model"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Train Ml Model
+
+## Action
+
+Follow the add-or-train-ml-model workflow:
+1. Create or update scripts/train_model.py for training logic
+2. Generate or update model artifact files in api/models/*.json
+3. Update api/services/predictor.py to use new models if needed
+4. Update api/requirements.txt if new ML dependencies are needed
+5. Commit all related files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: scripts/train_model.py, api/models/*.json, api/services/predictor.py
+
+---
+id: mework-workflow-add-or-enhance-hub-sync-worker
+trigger: "when doing add or enhance hub sync worker"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Enhance Hub Sync Worker
+
+## Action
+
+Follow the add-or-enhance-hub-sync-worker workflow:
+1. Update or create hub/src/sync.js for polling logic
+2. Update related fetchers (hub/src/fetchers/*.js) for new data sources
+3. Update hub/src/server.js to integrate sync worker
+4. Update docker-compose.yml or .env.example if new env vars are needed
+5. Commit all related files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: hub/src/sync.js, hub/src/fetchers/*.js, hub/src/server.js
+
+---
+id: mework-workflow-add-or-enhance-dashboard-feature
+trigger: "when doing add or enhance dashboard feature"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Enhance Dashboard Feature
+
+## Action
+
+Follow the add-or-enhance-dashboard-feature workflow:
+1. Create or update dashboard/app.py for Streamlit UI
+2. Update dashboard/requirements.txt for new dependencies
+3. Update dashboard/Dockerfile if needed
+4. Update docker-compose.yml if dashboard service changes
+5. Commit all related files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: dashboard/app.py, dashboard/requirements.txt, dashboard/Dockerfile
+
+---
+id: mework-workflow-add-or-update-docker-orchestration
+trigger: "when doing add or update docker orchestration"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Update Docker Orchestration
+
+## Action
+
+Follow the add-or-update-docker-orchestration workflow:
+1. Update docker-compose.yml with new/changed services or env vars
+2. Update service Dockerfiles as needed (api/Dockerfile, dashboard/Dockerfile, hub/Dockerfile)
+3. Update .env.example for new environment variables
+4. Commit all related files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: docker-compose.yml, api/Dockerfile, dashboard/Dockerfile
+
+---
+id: mework-workflow-add-or-update-backend-service-logic
+trigger: "when doing add or update backend service logic"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/jaayslaughter-cpu/mework
+---
+
+# Mework Workflow Add Or Update Backend Service Logic
+
+## Action
+
+Follow the add-or-update-backend-service-logic workflow:
+1. Create or update api/services/*.py with new logic
+2. Update api/services/predictor.py to integrate new logic
+3. Update or create tests if needed
+4. Commit all related files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: api/services/*.py
+

@@ -15,6 +15,8 @@ import logging
 import datetime
 import requests
 
+from .spring_training_constants import STAR_PLAYERS, LEAGUE_AVG_PRIORS, ST_WEIGHT, PRIOR_WEIGHT
+
 logger = logging.getLogger(__name__)
 
 OPENING_DAY        = datetime.date(2026, 3, 26)
@@ -34,22 +36,7 @@ LEAGUE_AVG_PRIORS = {
     "strikeout_rate":     0.225,
     "era":                4.20,
     "whip":               1.28,
-    "k_per_9":            9.1,
-    "bb_per_9":           3.1,
 }
-
-# Key players to seed (expanded at runtime from SportsData roster)
-STAR_PLAYERS = [
-    "Aaron Judge", "Rafael Devers", "Juan Soto", "Shohei Ohtani",
-    "Fernando Tatis Jr.", "Mookie Betts", "Freddie Freeman",
-    "Yordan Alvarez", "Vladimir Guerrero Jr.", "Bo Bichette",
-    "Pete Alonso", "Austin Riley", "Matt Olson", "Trea Turner",
-    "Bryce Harper", "Kyle Tucker", "Jose Altuve", "Jeremy Pena",
-    "Gerrit Cole", "Spencer Strider", "Corbin Burnes",
-    "Dylan Cease", "Zack Wheeler", "Kevin Gausman",
-    "Logan Webb", "Framber Valdez", "Tyler Glasnow",
-]
-
 
 class SpringTrainingSeeder:
     def __init__(self):
@@ -59,7 +46,8 @@ class SpringTrainingSeeder:
             decode_responses=True,
         )
 
-    def is_spring_training(self) -> bool:
+    @staticmethod
+    def is_spring_training() -> bool:
         return datetime.date.today() < OPENING_DAY
 
     def seed_all(self):
@@ -77,7 +65,7 @@ class SpringTrainingSeeder:
             self._pull_spring_training_stats()
 
         # 4. Write meta
-        meta = {
+        seed_meta = {
             "seeded_at":       datetime.datetime.utcnow().isoformat(),
             "mode":            "spring_training" if self.is_spring_training() else "regular_season",
             "all_records":     "0-0",
@@ -85,9 +73,9 @@ class SpringTrainingSeeder:
             "opening_day":     str(OPENING_DAY),
             "days_remaining":  max(0, (OPENING_DAY - datetime.date.today()).days),
         }
-        self.r.set("spring_training_meta", json.dumps(meta))
-        logger.info("✅ Seeding complete. Mode=%s", meta["mode"])
-        return meta
+        self.r.set("spring_training_meta", json.dumps(seed_meta))
+        logger.info("✅ Seeding complete. Mode=%s", seed_meta["mode"])
+        return seed_meta
 
     # ── team records ───────────────────────────────────────────────────────
     def _seed_team_records(self):

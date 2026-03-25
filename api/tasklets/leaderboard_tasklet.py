@@ -7,7 +7,6 @@ Top 3 agents get 2x capital. Bottom 2 get 0.5x.
 from __future__ import annotations
 import json
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -102,7 +101,6 @@ def run_leaderboard_tasklet() -> dict:
         win_rate = s.get("win_rate_pct", 0.0)
         profit = s.get("total_profit_units", 0.0)
         capital = capital_map.get(name, BASE_CAPITAL)
-        prev_capital = s.get("current_capital", BASE_CAPITAL)
         capital_change = capital - BASE_CAPITAL
 
         # Rank badge
@@ -147,11 +145,13 @@ def run_leaderboard_tasklet() -> dict:
         json.dump(output, f, indent=2)
 
     logger.info(
-        f"[leaderboard] Updated {len(leaderboard)} agents — "
-        f"Top: {leaderboard[0]['display_name'] if leaderboard else 'N/A'} "
-        f"({leaderboard[0]['roi_pct'] if leaderboard else 0:.1f}% ROI)"
+        "[leaderboard] Updated %d agents — Top: %s (%.1f%% ROI)",
+        len(leaderboard),
+        leaderboard[0]['display_name'] if leaderboard else 'N/A',
+        leaderboard[0]['roi_pct'] if leaderboard else 0
     )
     return output
+
 
 
 def read_leaderboard() -> dict:

@@ -39,8 +39,8 @@ class UnderMachine(BaseAgent):
             if home_era < ERA_THRESHOLD and away_era < ERA_THRESHOLD:
                 qualifying_games.append(game.get("game_id", ""))
                 logger.info(
-                    f"[under_machine] Qualifying duel: {away_pitcher} ({away_era:.2f} ERA) "
-                    f"vs {home_pitcher} ({home_era:.2f} ERA)"
+                    "[under_machine] Qualifying duel: %s (%.2f ERA) vs %s (%.2f ERA)",
+                    away_pitcher, away_era, home_pitcher, home_era
                 )
 
         if not qualifying_games:
@@ -154,7 +154,9 @@ class UnderMachine(BaseAgent):
                 ))
 
         logger.info(
-            f"[under_machine] {len(qualifying_games)} qualifying duels, "
-            f"{len(under_legs)} under legs → {len(slips)} slips"
+            "[under_machine] %s qualifying duels, %s under legs → %s slips",
+            len(qualifying_games),
+            len(under_legs),
+            len(slips),
         )
         return slips
