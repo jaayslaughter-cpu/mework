@@ -141,6 +141,18 @@ except ImportError:
 
     logger.warning("[FG] fangraphs_layer not found — FanGraphs adjustments disabled.")
 
+# ── Layer 7: Sportsbook Reference (The Odds API — vig-stripped sharp market) ──
+try:
+    from sportsbook_reference_layer import enrich_props_with_sportsbook as _sb_enrich
+    _SB_REF_AVAILABLE = True
+    logger.info("[SB_REF] Sportsbook reference layer loaded.")
+except ImportError:
+    _SB_REF_AVAILABLE = False
+
+    def _sb_enrich(props: list, date: str | None = None) -> list: return props  # noqa: E704
+
+    logger.warning("[SB_REF] sportsbook_reference_layer not found — Layer 7 disabled.")
+
 # ── Phase 35: Operations layer (agent config, risk manager, decision logger) ──
 try:
     import yaml as _yaml
@@ -290,8 +302,15 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "📐",
         "max_legs": 4,
         "entry_type": "FLEX",
-        "filter": lambda r: r.implied_prob >= 0.55,
-        "note": "Sharp line gaps — best of PP vs Underdog",
+        # Phase 39: sportsbook reference upgrade.
+        # Qualifies if our model is confident (≥ 0.55) OR if the sharp sportsbook
+        # market ALSO shows ≥ 0.55 implied while our model clears the base gate (≥ 0.53).
+        # sb_implied_prob comes from The Odds API (vig-stripped DK/FD/BetMGM consensus).
+        "filter": lambda r: (
+            r.implied_prob >= 0.55
+            or (getattr(r, "sb_implied_prob", 0.0) >= 0.55 and r.implied_prob >= 0.53)
+        ),
+        "note": "Sharp line gaps — sportsbook consensus vs DFS line (The Odds API Layer 7)",
     },
     {
         "name": "BullpenAgent",
@@ -1086,6 +1105,9 @@ class PropLeg:
     prob_pre_form:  float = 0.0   # prob after Statcast — before form & FG layers
     # Phase 37: confirmed batting order position (1-9, 0 = unconfirmed)
     batting_order_pos: int = 0
+    # Phase 39 (Layer 7): Sportsbook reference signals (The Odds API)
+    sb_implied_prob: float = 0.0   # vig-stripped sportsbook consensus prob (Over)
+    sb_line_gap:     float = 0.0   # DFS line - SB line (negative = DFS favorable for Over)
 
 
 def build_parlay(
@@ -1128,6 +1150,9 @@ def build_parlay(
                 "de_boost":           l.de_boost,
                 # Phase 37: batting order position for LineupAgent
                 "batting_order_pos":  l.batting_order_pos,
+                # Phase 39 (Layer 7): sportsbook reference for LineValueAgent
+                "sb_implied_prob":    l.sb_implied_prob,
+                "sb_line_gap":        l.sb_line_gap,
             })()
         )
         # Hard exclusion: leg already used by a previous agent
@@ -1406,6 +1431,21 @@ class LiveDispatcher:
                         confirmed, len(all_raw))
         except Exception as exc:
             logger.warning("[Lineups] Batting order attachment failed: %s", exc)
+
+        # Step 2c: Sportsbook reference — sharp market comparison (Layer 7)
+        # Fetches DK/FD/BetMGM player prop lines via The Odds API and strips vig.
+        # Adds sb_implied_prob, sb_line, sb_line_gap to each prop for LineValueAgent.
+        # Consumes ~16 requests/day (1 event list + 1 per game). Cached daily.
+        if _SB_REF_AVAILABLE:
+            try:
+                all_raw = _sb_enrich(all_raw, date)
+                _sb_matched = sum(1 for p in all_raw if p.get("sb_implied_prob", 0) > 0)
+                logger.info(
+                    "[SB_REF] Enrichment complete — %d/%d props matched to sportsbook lines",
+                    _sb_matched, len(all_raw),
+                )
+            except Exception as _sb_exc:
+                logger.warning("[SB_REF] Enrichment failed: %s — Layer 7 skipped", _sb_exc)
 
         # Step 3: SportsBettingDime public trends (FadeAgent precision upgrade)
         sbd_game_df = None
@@ -1773,6 +1813,10 @@ class LiveDispatcher:
                     "sc_avg_launch_speed": float(raw.get("sc_avg_launch_speed", 0.0) or 0.0),
                     "sc_xiso":            float(raw.get("sc_xiso",            0.0) or 0.0),
                     "batting_order_pos":  int(raw.get("batting_order_pos",    0)   or 0),
+                    # Phase 39 (Layer 7): sportsbook reference fields
+                    "sb_implied_prob":    float(raw.get("sb_implied_prob",    0.0) or 0.0),
+                    "sb_line":            float(raw.get("sb_line",            0.0) or 0.0),
+                    "sb_line_gap":        float(raw.get("sb_line_gap",        0.0) or 0.0),
                 }
 
         # ── Pre-fetch hot/cold form data for all unique players ─────────────
@@ -2041,6 +2085,9 @@ class LiveDispatcher:
                     prob_pre_form=round(_prob_pre_form, 4),
                     # Phase 37: confirmed batting order position
                     batting_order_pos=int(chosen_entry.get("batting_order_pos", 0) or 0),
+                    # Phase 39 (Layer 7): sportsbook reference signals
+                    sb_implied_prob=float(chosen_entry.get("sb_implied_prob", 0.0) or 0.0),
+                    sb_line_gap=float(chosen_entry.get("sb_line_gap", 0.0) or 0.0),
                 ))
                 # Phase 35: log INCLUDED leg with full feature trail
                 if _DL_AVAILABLE:
