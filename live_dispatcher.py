@@ -1108,6 +1108,9 @@ class PropLeg:
     # Phase 39 (Layer 7): Sportsbook reference signals (The Odds API)
     sb_implied_prob: float = 0.0   # vig-stripped sportsbook consensus prob (Over)
     sb_line_gap:     float = 0.0   # DFS line - SB line (negative = DFS favorable for Over)
+    # Phase 44 (Layer 9): CV consistency gate
+    mlbam_id:        int   = 0     # MLBAM player ID (for CV game log fetch)
+    cv_nudge:        float = 0.0   # probability nudge from CV consistency layer
 
 
 def build_parlay(
@@ -1464,6 +1467,38 @@ class LiveDispatcher:
         leg_pool: list[PropLeg] = self._evaluate_props(all_raw, sbd_game_df, sbd_prop_df)
         logger.info("Leg pool: %d evaluated legs (min prob %.0f%%)",
                     len(leg_pool), MIN_PROB * 100)
+
+        # ── Layer 9: CV Consistency Gate ──────────────────────────────────────
+        # CV = std/mean over last 10 games for the relevant stat per player.
+        # Very consistent (CV < 0.50) → +0.01  |  Normal (0.50–0.80) → ±0
+        # Volatile (0.81–1.10) → −0.02          |  Very volatile (>1.10) → −0.04
+        # Zero-mean L10 treated as maximally volatile (sentinel CV = 2.0).
+        # Uses MLB Stats API game logs (free, no key). Cached daily per player.
+        try:
+            from cv_consistency_layer import apply_cv_consistency_layer
+            import datetime as _cv_dt
+            _cv_season = _cv_dt.datetime.now(_cv_dt.timezone.utc).year
+            _cv_props = [
+                {
+                    "player_id": l.mlbam_id,
+                    "prop_type": l.prop_type,
+                    "implied_prob": l.implied_prob,
+                    "description": f"{l.player_name} {l.prop_type} {l.side} {l.line}",
+                }
+                for l in leg_pool
+            ]
+            _cv_enriched = apply_cv_consistency_layer(_cv_props, season=_cv_season)
+            for leg, cv_data in zip(leg_pool, _cv_enriched):
+                leg.implied_prob = cv_data["implied_prob"]
+                leg.cv_nudge = cv_data.get("cv_nudge", 0.0)
+            _cv_nudged = sum(1 for l in leg_pool if getattr(l, "cv_nudge", 0.0) != 0.0)
+            logger.info(
+                "Layer 9 (CV consistency) — %d/%d legs nudged.",
+                _cv_nudged, len(leg_pool),
+            )
+        except Exception as _cv_err:
+            logger.warning("Layer 9 CV skipped (fallback): %s", _cv_err)
+        # ── End Layer 9 ───────────────────────────────────────────────────────
 
         if not leg_pool:
             logger.warning("No legs passed EV/prob gates — no alerts today.")
@@ -2092,6 +2127,7 @@ class LiveDispatcher:
                     # Phase 39 (Layer 7): sportsbook reference signals
                     sb_implied_prob=float(chosen_entry.get("sb_implied_prob", 0.0) or 0.0),
                     sb_line_gap=float(chosen_entry.get("sb_line_gap", 0.0) or 0.0),
+                    mlbam_id=int(chosen_entry.get("mlbam_id", 0) or 0),
                 ))
                 # Phase 35: log INCLUDED leg with full feature trail
                 if _DL_AVAILABLE:
