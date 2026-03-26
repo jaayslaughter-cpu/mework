@@ -112,13 +112,13 @@ _PITCHING_PARAMS = {
 # Daily cache path template
 _CACHE_PATH_TMPL = "/tmp/propiq_fg_cache_{year}.json"
 
-# ─── Module-level caches ─────────────────────────────────────────────────────────────────────
-None_BATTER_CACHE: dict[str, dict[str, float]] = {}
+# ─── Module-level caches ──────────────────────────────────────────────────────
+_BATTER_CACHE: dict[str, dict[str, float]] = {}
 _PITCHER_CACHE: dict[str, dict[str, float]] = {}
 _loaded: bool = False
 _data_year: int = 0
 
-# ─── League-average baselines (2025 season) ────────────────────────────────────────────
+# ─── League-average baselines (2025 season) ──────────────────────────────────
 LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
     "pitcher": {
         "csw_pct":   0.280,
@@ -172,7 +172,7 @@ def _fetch_season(stats: str, season: int) -> list[dict]:
 
 
 def _parse_batters(rows: list[dict]) -> dict[str, dict[str, float]]:
-    """Parse batter rows into normalised-name → stats dict."""
+    """Parse batter rows into normalised-name -> stats dict."""
     bd = LEAGUE_DEFAULTS["batter"]
     cache: dict[str, dict[str, float]] = {}
     for row in rows:
@@ -195,7 +195,7 @@ def _parse_batters(rows: list[dict]) -> dict[str, dict[str, float]]:
 
 
 def _parse_pitchers(rows: list[dict]) -> dict[str, dict[str, float]]:
-    """Parse pitcher rows into normalised-name → stats dict."""
+    """Parse pitcher rows into normalised-name -> stats dict."""
     pd_ = LEAGUE_DEFAULTS["pitcher"]
     cache: dict[str, dict[str, float]] = {}
     for row in rows:
@@ -225,7 +225,7 @@ def _load() -> None:
     season = date.today().year
     cache_path = _CACHE_PATH_TMPL.format(year=season)
 
-    # ── Try disk cache first ────────────────────────────────────────────────────────────────────────
+    # ── Try disk cache first ─────────────────────────────────────────────────
     if os.path.exists(cache_path):
         try:
             with open(cache_path) as fh:
@@ -242,9 +242,9 @@ def _load() -> None:
         except Exception as exc:
             logger.warning("[FG] Cache read failed (%s) — fetching live", exc)
 
-    # ── Live fetch — try current year, fall back to previous ────────────────────────────────────
+    # ── Live fetch — try current year, fall back to previous ────────────────
     for yr in (season, season - 1):
-        logger.info("[FG] Fetching season %d from FanGraphs API…", yr)
+        logger.info("[FG] Fetching season %d from FanGraphs API...", yr)
 
         bat_rows = _fetch_season("bat", yr)
         pit_rows = _fetch_season("pit", yr)
@@ -263,7 +263,7 @@ def _load() -> None:
             len(_BATTER_CACHE), len(_PITCHER_CACHE), yr,
         )
 
-        # ── Persist cache ────────────────────────────────────────────────────────────────────────────
+        # ── Persist cache ────────────────────────────────────────────────────
         try:
             with open(cache_path, "w") as fh:
                 json.dump(
@@ -285,7 +285,7 @@ def _load() -> None:
     _loaded = True
 
 
-# ─── Public getters ───────────────────────────────────────────────────────────────────────────────
+# ─── Public getters ───────────────────────────────────────────────────────────
 
 def get_batter(name: str) -> dict[str, float]:
     """Return FanGraphs batting stats for name. Empty dict if not found."""
@@ -303,9 +303,9 @@ def get_pitcher(name: str) -> dict[str, float]:
     return _PITCHER_CACHE.get(_normalise_name(name), {})
 
 
-# ─── Probability adjustment engine ───────────────────────────────────────────────────────────────────
+# ─── Probability adjustment engine ───────────────────────────────────────────
 
-# Hard cap: no single FanGraphs nudge exceeds ±0.030
+# Hard cap: no single FanGraphs nudge exceeds +/-0.030
 _FG_CAP = 0.030
 
 _PROP_GROUPS: dict[str, list[str]] = {
