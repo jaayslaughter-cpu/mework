@@ -42,6 +42,20 @@ except ImportError:
     def _unit_record_result(*a, **kw):  # noqa: E302
         return {"tier_change": None}
 
+# Phase 47: per-agent temperature calibration
+try:
+    from temperature_calibration import (
+        run as _run_temperature_calibration,
+        write_leg_outcomes as _write_leg_outcomes,
+        _ensure_schema as _temp_cal_ensure_schema,
+    )
+    _TEMP_CAL_AVAILABLE = True
+    _temp_cal_ensure_schema()
+except ImportError:
+    _TEMP_CAL_AVAILABLE = False
+    def _run_temperature_calibration(*a, **kw): return {}  # noqa: E302
+    def _write_leg_outcomes(*a, **kw): return 0             # noqa: E302
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -290,6 +304,26 @@ def run(settle_date: Optional[str] = None) -> None:
             logger.warning("[Phase43] Unit tier update error for %s: %s", agent_name, _unit_err)
         # ── End Phase 43 ─────────────────────────────────────────────────
 
+        # Phase 47: Write per-leg calibration data
+        if _TEMP_CAL_AVAILABLE and result.outcome in ("WIN", "LOSS"):
+            try:
+                _cal_legs = [
+                    {"prop_type": lr.prop_type,
+                     "raw_prob": getattr(lr, "implied_prob", 0.55),
+                     "outcome": result.outcome}
+                    for lr in result.legs
+                ]
+                _written = _write_leg_outcomes(
+                    agent_name=agent_name,
+                    parlay_id=str(parlay_id),
+                    date=settle_date,
+                    legs=_cal_legs,
+                )
+                logger.debug("[Phase47] %d cal rows written for %s", _written, agent_name)
+            except Exception as _p47e:
+                logger.warning("[Phase47] Cal write error: %s", _p47e)
+        # End Phase 47 cal write
+
         logger.info(
             "[%s] %s → %s (%+.1fu)",
             agent_name, parlay_id, result.outcome, result.units_profit,
@@ -344,6 +378,21 @@ def run(settle_date: Optional[str] = None) -> None:
         "=== Settlement complete: %dW-%dL-%dP  %+.1fu | %d tier changes ===",
         wins, losses, pushes, units, len(tier_change_msgs),
     )
+
+    # Phase 47: Live Temperature Calibration
+    if _TEMP_CAL_AVAILABLE:
+        try:
+            logger.info("[Phase47] Running temperature calibration...")
+            _temp_updates = _run_temperature_calibration(quiet=False)
+            _nd = {a: t for a, t in _temp_updates.items() if abs(t - 1.5) > 0.05}
+            if _nd:
+                _t5 = sorted(_nd.items(), key=lambda x: abs(x[1]-1.0), reverse=True)[:5]
+                logger.info("[Phase47] T updates: %s", ", ".join(f"{a}->{t:.2f}" for a, t in _t5))
+            else:
+                logger.info("[Phase47] All agents at default T=1.5 (accumulating data).")
+        except Exception as _tc_err:
+            logger.warning("[Phase47] Temperature calibration failed: %s", _tc_err)
+    # End Phase 47
 
     # ── StreakAgent settlement (19th agent) ────────────────────────────────
     try:
