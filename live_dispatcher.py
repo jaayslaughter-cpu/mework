@@ -319,14 +319,7 @@ AGENT_CONFIGS: list[dict] = [
                             and r.implied_prob >= 0.54,
         "note": "Wind & park-factor adjustments via Open-Meteo",
     },
-    {
-        "name": "SteamAgent",
-        "emoji": "♨️",
-        "max_legs": 3,
-        "entry_type": "STANDARD",
-        "filter": lambda r: r.implied_prob >= 0.57,
-        "note": "Sharp line-movement velocity — max 3 legs",
-    },
+
     {
         "name": "ArsenalAgent",
         "emoji": "⚾",
@@ -1112,11 +1105,9 @@ def build_parlay(
 
     # Phase 36: agents that must not be nudged by hot/cold form or FanGraphs.
     #   BullpenAgent — form (player recency) conflicts with bullpen fatigue signal
-    #   SteamAgent   — form double-counts market movement (steam is already a
-    #                  market signal; player perf nudge adds noise, not edge)
     #   StreakAgent  — precision over volume; form/FG can inflate marginal picks
     #                  past the 0.80 gate, hurting win-rate with lower-quality legs
-    _SKIP_NUDGE_AGENTS = {"BullpenAgent", "SteamAgent", "StreakAgent"}
+    _SKIP_NUDGE_AGENTS = {"BullpenAgent", "StreakAgent"}
     _use_pre_form = agent["name"] in _SKIP_NUDGE_AGENTS
 
     def _eff_prob(leg: PropLeg) -> float:
