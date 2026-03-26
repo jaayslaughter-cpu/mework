@@ -7,6 +7,8 @@ Runs at midnight ET every night.
 2. Settles all PENDING parlays from that date (WIN / LOSS / PUSH)
 3. Posts a summary recap embed to Discord
 4. Updates the propiq_season_record table with final results
+5. Phase 43: Updates per-agent unit tier (Tier 1–5, $5–$20) based on
+   consecutive W/L streaks, and posts tier promotions/demotions to Discord.
 
 Run directly: python3 nightly_recap.py [YYYY-MM-DD]
 If no date given, defaults to yesterday (UTC-7).
@@ -30,6 +32,15 @@ from season_record import (
     get_overall_season_stats,
 )
 from clv_tracker import get_daily_clv_summary
+
+# Phase 43: per-agent unit tier management
+try:
+    from agent_unit_sizing import record_result as _unit_record_result
+    _UNIT_SIZING_AVAILABLE = True
+except ImportError:
+    _UNIT_SIZING_AVAILABLE = False
+    def _unit_record_result(*a, **kw):  # noqa: E302
+        return {"tier_change": None}
 
 # ---------------------------------------------------------------------------
 # Config
@@ -56,7 +67,6 @@ _AGENT_EMOJI: dict[str, str] = {
     "LineValueAgent": "📊",
     "BullpenAgent":  "🔥",
     "WeatherAgent":  "🌬️",
-    "SteamAgent":    "♨️",
     "ArsenalAgent":  "⚔️",
     "PlatoonAgent":  "🤝",
     "CatcherAgent":  "🧤",
@@ -68,6 +78,9 @@ _AGENT_EMOJI: dict[str, str] = {
 }
 
 _OUTCOME_EMOJI = {"WIN": "✅", "LOSS": "❌", "PUSH": "⏩"}
+
+# Phase 43: tier display
+_TIER_EMOJI = {1: "🌱", 2: "🌿", 3: "⭐", 4: "🔥", 5: "👑"}
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +112,7 @@ def _build_recap_embed(
     results: list[dict],
     season_stats: dict,
     clv_summary: dict | None = None,
+    tier_change_msgs: list[str] | None = None,
 ) -> dict:
     """Build the nightly recap Discord embed."""
     wins   = sum(1 for r in results if r["outcome"] == "WIN")
@@ -128,7 +142,11 @@ def _build_recap_embed(
         profit = r["units_profit"]
         profit_str = f"{'+' if profit >= 0 else ''}{profit:.1f}u"
 
-        # Leg summary (max 3 lines)
+        # Phase 43: show unit size per agent result
+        unit_size = r.get("unit_dollars", 5.0)
+        unit_str = f" · ${unit_size:.0f}/unit"
+
+        # Leg summary (max 4 lines)
         leg_lines = []
         for leg in r.get("legs", [])[:4]:
             act = leg.get("actual", -1)
@@ -138,7 +156,7 @@ def _build_recap_embed(
             )
 
         fields.append({
-            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} — {profit_str}",
+            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} — {profit_str}{unit_str}",
             "value":  "\n".join(leg_lines) or "No leg details available",
             "inline": False,
         })
@@ -155,6 +173,14 @@ def _build_recap_embed(
                 f"({beat_pct:.0f}%)** · "
                 f"Avg CLV: **{'+' if avg_clv >= 0 else ''}{avg_clv:.2f}**"
             ),
+            "inline": False,
+        })
+
+    # Phase 43: tier change notifications
+    if tier_change_msgs:
+        fields.append({
+            "name": "📊 Agent Tier Updates",
+            "value": "\n".join(tier_change_msgs),
             "inline": False,
         })
 
@@ -224,6 +250,10 @@ def run(settle_date: Optional[str] = None) -> None:
 
     # 3. Settle each parlay
     settled_results = []
+    # Phase 43: collect tier promotion/demotion messages to display in Discord
+    tier_change_msgs: list[str] = []
+    _outcome_to_result = {"WIN": "W", "LOSS": "L", "PUSH": "P"}
+
     for parlay_row in pending:
         parlay_id  = parlay_row["id"]
         agent_name = parlay_row["agent_name"]
@@ -245,6 +275,20 @@ def run(settle_date: Optional[str] = None) -> None:
             status=result.outcome,
             units_profit=result.units_profit,
         )
+
+        # ── Phase 43: Update per-agent unit tier ─────────────────────────
+        # Consecutive wins climb the ladder ($5→$8→$12→$16→$20).
+        # Consecutive losses descend back down (floor: $5).
+        # 3 in a row either direction triggers a tier move.
+        try:
+            wl = _outcome_to_result.get(result.outcome, "P")
+            tier_update = _unit_record_result(agent_name, wl)
+            if tier_update.get("tier_change"):
+                tier_change_msgs.append(tier_update["tier_change"])
+                logger.info("[Phase43] %s", tier_update["tier_change"])
+        except Exception as _unit_err:
+            logger.warning("[Phase43] Unit tier update error for %s: %s", agent_name, _unit_err)
+        # ── End Phase 43 ─────────────────────────────────────────────────
 
         logger.info(
             "[%s] %s → %s (%+.1fu)",
@@ -268,6 +312,7 @@ def run(settle_date: Optional[str] = None) -> None:
             "agent_name":   agent_name,
             "outcome":      result.outcome,
             "units_profit": result.units_profit,
+            "unit_dollars": stake,     # Phase 43: pass through for embed display
             "legs":         leg_summaries,
         })
 
@@ -279,8 +324,11 @@ def run(settle_date: Optional[str] = None) -> None:
     # 5. Fetch CLV summary (available if line_stream ran today)
     clv_summary = get_daily_clv_summary(settle_date)
 
-    # 6. Post Discord recap
-    embed = _build_recap_embed(settle_date, settled_results, season_stats, clv_summary)
+    # 6. Post Discord recap (Phase 43: includes tier change messages)
+    embed = _build_recap_embed(
+        settle_date, settled_results, season_stats, clv_summary,
+        tier_change_msgs=tier_change_msgs if tier_change_msgs else None,
+    )
     ok = _send_discord_embed(embed)
     if ok:
         logger.info("Recap sent to Discord for %s", settle_date)
@@ -293,13 +341,11 @@ def run(settle_date: Optional[str] = None) -> None:
     pushes = sum(1 for r in settled_results if r["outcome"] == "PUSH")
     units  = sum(r["units_profit"] for r in settled_results)
     logger.info(
-        "=== Settlement complete: %dW-%dL-%dP  %+.1fu ===",
-        wins, losses, pushes, units,
+        "=== Settlement complete: %dW-%dL-%dP  %+.1fu | %d tier changes ===",
+        wins, losses, pushes, units, len(tier_change_msgs),
     )
 
     # ── StreakAgent settlement (19th agent) ────────────────────────────────
-    # Grade today's Streaks pick via ESPN box scores, update streak state,
-    # and post a settlement embed to Discord.
     try:
         from streak_agent import settle_streak_picks
         logger.info("[StreakAgent] Running streak settlement for %s", settle_date)
@@ -310,12 +356,10 @@ def run(settle_date: Optional[str] = None) -> None:
         logger.warning("[StreakAgent] Settlement error: %s", _streak_settle_err)
 
     # ── Phase 35: Calibration + Edge Health (post-settlement) ────────────────
-    # Run after every settlement to check if our probabilities are well-calibrated
-    # and flag agents that are statistically underperforming their backtest baseline.
     try:
         from calibration_monitor import run as run_calibration
         logger.info("[Phase35] Running calibration monitor (30-day window)...")
-        run_calibration(days=30, quiet=False)  # posts to Discord if degraded
+        run_calibration(days=30, quiet=False)
     except ImportError:
         logger.debug("[Phase35] calibration_monitor.py not found — skipping.")
     except Exception as _cal_err:
@@ -325,8 +369,7 @@ def run(settle_date: Optional[str] = None) -> None:
         from edge_health_monitor import run as run_edge_health
         from risk_manager import RiskManager
         logger.info("[Phase35] Running edge health monitor...")
-        edge_metrics = run_edge_health(days=30, quiet=False)  # posts Discord report
-        # Apply cool-downs to any agents that breached ROI/CLV/Brier thresholds
+        edge_metrics = run_edge_health(days=30, quiet=False)
         if edge_metrics:
             rm = RiskManager()
             rm.check_and_apply_cool_downs(edge_metrics)
