@@ -25,6 +25,7 @@ PropIQ integration (Layer 8a, fires after FanGraphs Layer 6):
 Max adjustment: ±0.018 per prop — subtle refinement layered on top of Layers 1-7.
 Never overrides or replaces; always additive.
 
+"""
 Data source:
   FanGraphs JSON API — https://www.fangraphs.com/api/leaders/major-league/data
   Public endpoint, no API key required.
@@ -49,7 +50,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import time
 from datetime import datetime, timezone
@@ -61,33 +61,6 @@ logger = logging.getLogger("propiq.marcel")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-_FG_BASE_URL: str = "https://www.fangraphs.com/api/leaders/major-league/data"
-
-_HEADERS: dict = {
-    "User-Agent": "Mozilla/5.0 (compatible; PropIQ/1.0)",
-    "Accept": "application/json, */*",
-    "Referer": "https://www.fangraphs.com/leaders/major-league",
-}
-
-_TIMEOUT: int = 20
-_REQUEST_DELAY: float = 1.5   # between FanGraphs calls
-
-# Marcel year weights (index 0 = most recent)
-_MARCEL_WEIGHTS: tuple = (5, 4, 3)
-
-# Regression constants — how many PA/BF it takes to fully trust the player data.
-# Below this threshold, their projection is pulled back toward league average.
-# From baseball-sims marcel.py: BATTER_REGRESSION_PA=1200, PITCHER_REGRESSION_BF=450
-_BATTER_REGRESSION_PA: int   = 1200
-_PITCHER_REGRESSION_BF: int  = 450
-
-# Age peak and adjustment rates (from Tango's original Marcel specification)
-_AGE_PEAK: int        = 29
-_AGE_YOUNG_RATE: float = 0.006   # +0.6% per year under peak
-_AGE_OLD_RATE: float  = 0.003   # -0.3% per year over peak
-
-_CACHE_DIR: str = "/tmp"
 
 # 2024–2025 MLB baseline rates used as regression anchors
 _LEAGUE_AVG: dict = {
@@ -108,11 +81,11 @@ _LEAGUE_AVG: dict = {
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _get_cache_path(year: int) -> str:
-    """Weekly cache path — refreshed on Monday of each new week."""
+def _get_cache_path(year: int):
+    """Weekly cache file — refreshed on Monday of each new week."""
     today = datetime.now(timezone.utc)
     iso = today.isocalendar()
-    return os.path.join(_CACHE_DIR, f"marcel_{year}_{iso[0]}w{iso[1]}.json")
+    return tempfile.TemporaryFile(mode='w+')
 
 
 # ---------------------------------------------------------------------------
@@ -487,23 +460,6 @@ class MarcelLayer:
             except Exception as exc:
                 logger.warning("[Marcel] Cache load failed: %s", exc)
         return False
-
-    def _save_cache(self) -> None:
-        try:
-            with open(self._cache_path, "w") as f:
-                json.dump(
-                    {"batters": self._batters, "pitchers": self._pitchers},
-                    f, indent=2,
-                )
-            logger.info(
-                "[Marcel] Cache saved: %d batters, %d pitchers",
-                len(self._batters), len(self._pitchers),
-            )
-        except Exception as exc:
-            logger.warning("[Marcel] Cache save failed: %s", exc)
-
-    # ── public API ─────────────────────────────────────────────────────────
-
     def prefetch(self) -> None:
         """
         Load Marcel projections. Reads from weekly cache if available;
@@ -512,9 +468,8 @@ class MarcelLayer:
         FanGraphs data: prior 3 seasons relative to projection year.
         (e.g. for 2026 projections: 2023 + 2024 + 2025 data)
         """
-        if not self._loaded:
-            if self._load_cache():
-                return  # valid weekly cache exists
+        if not self._loaded and self._load_cache():
+            return  # valid weekly cache exists
 
         season_end   = self._year - 1    # most recent complete season
         season_start = season_end - 2    # 3 years back

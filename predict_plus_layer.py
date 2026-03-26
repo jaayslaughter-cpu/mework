@@ -1,43 +1,3 @@
-"""
-predict_plus_layer.py
-=====================
-Pitcher Unpredictability Score (Predict+) for PropIQ Analytics Engine.
-
-Ported from jaime12minaya/PredictPlus (R → Python).
-Methodology: github.com/jaime12minaya/PredictPlus/blob/main/METHODOLOGY.md
-
-Core idea:
-  A pitcher is "unpredictable" if a well-trained model that knows count,
-  runners, batter hand, and pitch-sequencing history STILL can't predict
-  what they'll throw — measured by comparing "surprise" (negative log-
-  likelihood) of a complex model vs a simple count-state baseline.
-
-  Predict+ > 110 → pitcher breaks patterns → batters can't sit on a pitch
-               → more swinging strikes → +K Over probability boost
-  Predict+ < 90  → predictable arsenal → batters read the sequencing
-               → +K Under probability boost
-
-Integration:
-  - ArsenalAgent: strikeout Over props get a nudge for high-Predict+ starters
-  - UmpireAgent:  K environment signals enhanced when pitcher Predict+ is high
-
-Data source:
-  Baseball Savant statcast_search/csv (pitch-level, per-pitcher, free, no key)
-
-Cache:
-  /tmp/predict_plus_{year}_{iso_year}w{iso_week}.json — refreshed weekly.
-  Only today's starting pitchers are fetched; cache prevents re-computation.
-
-Dependencies:
-  scikit-learn >= 1.4.0  (LogisticRegression, LabelEncoder)
-  requests
-
-Usage:
-    layer = PredictPlusLayer(season=2026)
-    layer.prefetch([(543272, "Spencer Strider"), (656756, "Paul Skenes")])
-    score = layer.get_score(543272)   # e.g. 112.4
-    adj   = predict_plus_adjustment("strikeouts", "Over", score)  # +0.010
-"""
 
 from __future__ import annotations
 
@@ -48,6 +8,7 @@ import logging
 import math
 import os
 import time
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -62,8 +23,6 @@ logger = logging.getLogger("propiq.predict_plus")
 _MIN_TEST_PITCHES: int = 80    # minimum test-set pitches to produce a score
 _MIN_TRAIN_PITCHES: int = 200  # minimum training pitches to fit the full model
 _MIN_CLASS_FREQ: float = 0.03  # pitch types below 3% of training set are dropped
-
-_CACHE_DIR: str = "/tmp"
 
 _SAVANT_CSV_URL: str = "https://baseballsavant.mlb.com/statcast_search/csv"
 
@@ -89,6 +48,7 @@ _PITCH_FAMILIES: dict[str, str] = {
     "FC": "CT",  # cutter
     "SL": "SL",  # slider
     "ST": "SL",  # sweeper → slider family
+}
     "SV": "SL",  # slurve → slider family
     "CU": "CB",  # curveball
     "KC": "CB",  # knuckle-curve
@@ -227,7 +187,7 @@ def _build_features(pitches: list[dict]) -> list[dict]:
         ab_idx[ab_key] += 1
 
         # Runners bitmask (0 = empty, 7 = bases loaded)
-        def _on(key: str) -> int:
+        def _on(key: str, p=p) -> int:
             v = p.get(key, "")
             return 0 if v in (None, "", "null", "None") else 1
 
@@ -317,7 +277,7 @@ def _compute_predict_plus_ratio(feature_rows: list[dict]) -> float | None:
         return None
 
     # Build last_pitch_type integer encoding (consistent across train/test)
-    all_lpt = sorted(set(r["last_pitch_type"] for r in train_rows) | {"NONE"})
+    all_lpt = sorted({r["last_pitch_type"] for r in train_rows} | {"NONE"})
     lpt_enc = {lpt: i for i, lpt in enumerate(all_lpt)}
 
     def _to_arrays(rows: list[dict], full: bool) -> tuple:
@@ -362,7 +322,6 @@ def _compute_predict_plus_ratio(feature_rows: list[dict]) -> float | None:
             return None
         try:
             clf = LogisticRegression(
-                multi_class="multinomial",
                 solver="lbfgs",
                 max_iter=600,
                 C=1.0,
