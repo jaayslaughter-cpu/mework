@@ -950,158 +950,6 @@ def normalise_stat(raw: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# ArbitrageAgent — module-level base-rate helpers
-# ---------------------------------------------------------------------------
-
-# Single source of truth for MLB per-game prop base rates.
-# Used by both _evaluate_props (agent parlays) and ArbitrageAgent.
-# Format: {prop_type: [(line_threshold, over_prob), ...]} — interpolated linearly.
-_BASE_RATES: dict[str, list[tuple[float, float]]] = {
-    "hits":            [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
-    "home_runs":       [(0.5, 0.22), (1.5, 0.04)],
-    "rbis":            [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
-    "runs":            [(0.5, 0.55), (1.5, 0.23), (2.5, 0.09)],
-    "total_bases":     [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
-    "stolen_bases":    [(0.5, 0.14), (1.5, 0.03)],
-    "hits_runs_rbis":  [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
-    "strikeouts":      [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
-    "earned_runs":     [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
-    "fantasy_hitter":  [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
-    "fantasy_pitcher": [(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
-    "walks":           [(0.5, 0.68), (1.5, 0.42), (2.5, 0.22)],
-}
-
-_ARB_MIN_MARGIN:   float = 0.005   # 0.5% guaranteed margin minimum
-_ARB_MIN_LEG_PROB: float = 0.54    # each individual leg must clear this gate
-_ARB_MAX_PICKS:    int   = 3       # maximum arb opportunities per day
-_ARB_MIN_GAP:      float = 0.5     # minimum line gap between PP and UD to qualify
-
-
-def _arb_base_prob(prop_type: str, line: float, side: str) -> float:
-    """Interpolate MLB base-rate probability for ArbitrageAgent calculations."""
-    rates = _BASE_RATES.get(prop_type, [])
-    if not rates:
-        return 0.50
-    xs = [r[0] for r in rates]
-    ys = [r[1] for r in rates]
-    if line <= xs[0]:
-        p_over = ys[0]
-    elif line >= xs[-1]:
-        p_over = ys[-1]
-    else:
-        p_over = 0.50
-        for i in range(len(xs) - 1):
-            if xs[i] <= line <= xs[i + 1]:
-                t = (line - xs[i]) / (xs[i + 1] - xs[i])
-                p_over = ys[i] + t * (ys[i + 1] - ys[i])
-                break
-    return p_over if side == "Over" else (1.0 - p_over)
-
-
-def build_arbitrage_picks(all_raw: list[dict]) -> list[dict]:
-    """
-    ArbitrageAgent (16th agent): find same player+stat where PP and UD
-    have meaningfully different lines.
-
-    When PP_line < UD_line:
-      → Over  on PrizePicks (lower line, easier to clear)
-      → Under on Underdog   (higher line, more room to stay under)
-
-    Arb margin = P(Over lower_line) + P(Under higher_line) − 1.0
-               = P(lower_line < actual ≤ upper_line)
-               → guaranteed both-leg win zone.
-
-    Gates:
-      - line gap  ≥ 0.5 units
-      - arb margin ≥ 0.5%
-      - each leg's base probability ≥ 0.54
-
-    Returns up to _ARB_MAX_PICKS arb dicts sorted by margin desc.
-    """
-    from collections import defaultdict
-
-    by_player: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-    for raw in all_raw:
-        pname    = raw.get("player_name", "").strip()
-        raw_stat = raw.get("stat_type", "")
-        line_val = float(raw.get("line") or 0)
-        source   = raw.get("source", "")
-        etype    = raw.get("entry_type", "FLEX")
-
-        prop_type = normalise_stat(raw_stat)
-        if not prop_type or line_val <= 0:
-            continue
-        if source not in ("prizepicks", "underdog"):
-            continue
-
-        key = (pname.lower(), prop_type)
-        existing = by_player[key].get(source)
-        # Keep the entry with the largest line per platform (rarest dupe case)
-        if existing is None or line_val > existing["line"]:
-            by_player[key][source] = {
-                "player_name": pname,
-                "prop_type":   prop_type,
-                "line":        line_val,
-                "entry_type":  etype,
-            }
-
-    candidates: list[dict] = []
-    for (_pname_lower, prop_type), platforms in by_player.items():
-        if "prizepicks" not in platforms or "underdog" not in platforms:
-            continue
-
-        pp_data = platforms["prizepicks"]
-        ud_data = platforms["underdog"]
-        pp_line = pp_data["line"]
-        ud_line = ud_data["line"]
-        gap     = abs(pp_line - ud_line)
-
-        if gap < _ARB_MIN_GAP:
-            continue
-
-        # Over on lower line, Under on higher line
-        if pp_line < ud_line:
-            over_line, over_plat, over_etype   = pp_line, "PrizePicks", pp_data["entry_type"]
-            under_line, under_plat, under_etype = ud_line, "Underdog",   ud_data["entry_type"]
-            display_name = pp_data["player_name"]
-        else:
-            over_line, over_plat, over_etype   = ud_line, "Underdog",   ud_data["entry_type"]
-            under_line, under_plat, under_etype = pp_line, "PrizePicks", pp_data["entry_type"]
-            display_name = ud_data["player_name"]
-
-        p_over  = _arb_base_prob(prop_type, over_line,  "Over")
-        p_under = _arb_base_prob(prop_type, under_line, "Under")
-        margin  = p_over + p_under - 1.0
-
-        if margin < _ARB_MIN_MARGIN:
-            continue
-        if p_over < _ARB_MIN_LEG_PROB or p_under < _ARB_MIN_LEG_PROB:
-            continue
-
-        # Confidence: 7.0 at 0.5% margin → 9.0 at 5% margin
-        conf = round(min(10.0, 7.0 + (margin - 0.005) / 0.045 * 2.0), 1)
-
-        candidates.append({
-            "player_name":  display_name,
-            "prop_type":    prop_type,
-            "over_line":    over_line,
-            "over_plat":    over_plat,
-            "over_etype":   over_etype,
-            "under_line":   under_line,
-            "under_plat":   under_plat,
-            "under_etype":  under_etype,
-            "p_over":       round(p_over,  4),
-            "p_under":      round(p_under, 4),
-            "arb_margin":   round(margin,  4),
-            "confidence":   conf,
-            "gap":          round(gap, 2),
-        })
-
-    candidates.sort(key=lambda x: -x["arb_margin"])
-    return candidates[:_ARB_MAX_PICKS]
-
-
-# ---------------------------------------------------------------------------
 # EV & Kelly math
 # ---------------------------------------------------------------------------
 
@@ -1444,7 +1292,7 @@ class LiveDispatcher:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         # Phase 47: load per-agent temperature scalars (single bulk query at startup)
         _all_agent_names = [a["name"] for a in AGENT_CONFIGS] + [
-            "OmegaStack", "ArbitrageAgent", "StreakAgent"
+            "OmegaStack", "StreakAgent"
         ]
         self._agent_temperatures = _load_all_temperatures(_all_agent_names)
         logger.info(
@@ -1644,7 +1492,7 @@ class LiveDispatcher:
 
         candidate_parlays: list[dict] = []
 
-        # ── 19 specialist agents — collect without sending ─────────────────
+        # ── 17 specialist agents — collect without sending ─────────────────
         for agent in AGENT_CONFIGS:
             if _active_agents is not None and agent["name"] not in _active_agents:
                 logger.info("[RISK] %s — skipped (disabled or in cool-down)", agent["name"])
@@ -1684,62 +1532,6 @@ class LiveDispatcher:
                 )
         else:
             logger.info("[OmegaStack] No triple-confirmation legs today.")
-
-        # ── ArbitrageAgent — collect before claim pass ─────────────────────
-        try:
-            arb_picks = build_arbitrage_picks(all_raw)
-            if arb_picks:
-                logger.info("[ArbitrageAgent] %d arb opportunities found", len(arb_picks))
-                for arb in arb_picks:
-                    arb_conf       = arb["confidence"]
-                    arb_margin_pct = arb["arb_margin"] * 100
-                    if arb_conf < 7.0:
-                        logger.info(
-                            "[ArbitrageAgent] %s %s margin=%.2f%% conf=%.1f/10 — below gate",
-                            arb["player_name"], arb["prop_type"],
-                            arb_margin_pct, arb_conf,
-                        )
-                        continue
-                    arb_parlay = {
-                        "agent_name":  "ArbitrageAgent",
-                        "agent_emoji": "🔄",
-                        "entry_type":  "FLEX",
-                        "ev_pct":      round(arb_margin_pct, 2),
-                        "confidence":  arb_conf,
-                        "_agent_meta": None,
-                        "_arb_meta":   arb,
-                        "notes": (
-                            f"Cross-platform split — {arb['gap']:.1f}-unit line gap. "
-                            f"Both legs win when result lands between the two lines."
-                        ),
-                        "legs": [
-                            {
-                                "player_name":  arb["player_name"],
-                                "prop_type":    arb["prop_type"],
-                                "side":         "Over",
-                                "line":         arb["over_line"],
-                                "platform":     arb["over_plat"],
-                                "implied_prob": arb["p_over"],
-                                "entry_type":   arb["over_etype"],
-                                "fantasy_pts":  0.0,
-                            },
-                            {
-                                "player_name":  arb["player_name"],
-                                "prop_type":    arb["prop_type"],
-                                "side":         "Under",
-                                "line":         arb["under_line"],
-                                "platform":     arb["under_plat"],
-                                "implied_prob": arb["p_under"],
-                                "entry_type":   arb["under_etype"],
-                                "fantasy_pts":  0.0,
-                            },
-                        ],
-                    }
-                    candidate_parlays.append(arb_parlay)
-            else:
-                logger.info("[ArbitrageAgent] No qualifying cross-platform discrepancies today.")
-        except Exception as _arb_err:
-            logger.warning("[ArbitrageAgent] Build error: %s", _arb_err, exc_info=True)
 
         # ── Exclusive pick claiming pass ───────────────────────────────────
         # Sort highest confidence first — that agent wins any contested pick.
@@ -1882,7 +1674,7 @@ class LiveDispatcher:
         """
         # ── MLB historical base-rate probabilities ─────────────────────────
         # Uses module-level _BASE_RATES (single source of truth shared with
-        # ArbitrageAgent).  See top of file for full table + documentation.
+        # See top of file for full table + documentation.
 
         # ── Per-game line range validation ────────────────────────────────
         # Lines outside these ranges are season-long or special markets.
