@@ -1,13 +1,19 @@
 """
 fangraphs_layer.py
 ------------------
-Phase 34 - FanGraphs season statistics via pybaseball.
+Phase 40 - FanGraphs season statistics via direct HTTP API.
 
-Provides per-agent signal enhancement for all 19 agents:
+Replaces pybaseball with direct calls to FanGraphs internal JSON API.
+No library dependencies. No CSV export issues. Consistent daily updates.
+
+API: https://www.fangraphs.com/api/leaders/major-league/data
+Cached to /tmp/propiq_fg_cache_{year}.json daily.
+
+Provides per-agent signal enhancement for all 18 agents:
 
   Pitchers
   --------
-  csw_pct    : Called Strikes + Whiffs % (best single K predictor)
+  csw_pct    : Called Strikes + Whiffs % (C+SwStr% in FanGraphs — best single K predictor)
   swstr_pct  : Swinging Strike %
   k_bb_pct   : K% minus BB% (true command metric)
   xfip       : Expected FIP - strips HR variance (true skill ERA)
@@ -35,13 +41,16 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import date
 from typing import Any
+
+import requests
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Inline helpers (replaces broken relative imports from Phase 34)
+# Inline helpers
 # ---------------------------------------------------------------------------
 
 def _normalise_name(s: str) -> str:
@@ -50,22 +59,66 @@ def _normalise_name(s: str) -> str:
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
-    """Convert *val* to float; return *default* on failure."""
+    """Convert val to float; return default on failure."""
     try:
         return float(val)
     except (TypeError, ValueError):
         return default
 
 
-# Daily JSON cache stored in /tmp (ephemeral, fine — reloads once per process)
-cache_path: str = os.path.join("/tmp", "propiq_fg_cache.json")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+_FG_API_BASE = "https://www.fangraphs.com/api/leaders/major-league/data"
+_FG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.fangraphs.com/leaders/major-league",
+    "Accept": "application/json",
+}
+
+_BATTING_PARAMS = {
+    "age": "0",
+    "pos": "all",
+    "stats": "bat",
+    "lg": "all",
+    "qual": "20",
+    "startdate": "",
+    "enddate": "",
+    "month": "0",
+    "hand": "",
+    "team": "0",
+    "pageitems": "500",
+    "pagenum": "1",
+    "ind": "0",
+    "rost": "0",
+    "players": "0",
+    "type": "8",
+    "postseason": "",
+    "sortdir": "default",
+    "sortstat": "WAR",
+}
+
+_PITCHING_PARAMS = {
+    **_BATTING_PARAMS,
+    "stats": "pit",
+    "qual": "10",
+}
+
+# Daily cache path template
+_CACHE_PATH_TMPL = "/tmp/propiq_fg_cache_{year}.json"
 
 # ─── Module-level caches ──────────────────────────────────────────────────────
 _BATTER_CACHE: dict[str, dict[str, float]] = {}
 _PITCHER_CACHE: dict[str, dict[str, float]] = {}
 _loaded: bool = False
+_data_year: int = 0
 
-# ─── League-average baselines (2024 season) ──────────────────────────────────
+# ─── League-average baselines (2025 season) ──────────────────────────────────
 LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
     "pitcher": {
         "csw_pct":   0.280,
@@ -92,9 +145,85 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Internal fetch helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_season(stats: str, season: int) -> list[dict]:
+    """Fetch one season of batter or pitcher data from FanGraphs API.
+    Returns list of player dicts, or empty list on failure.
+    """
+    params = dict(_BATTING_PARAMS if stats == "bat" else _PITCHING_PARAMS)
+    params["season"] = str(season)
+    params["season1"] = str(season)
+    try:
+        resp = requests.get(
+            _FG_API_BASE,
+            params=params,
+            headers=_FG_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        return payload.get("data") or []
+    except Exception as exc:
+        logger.warning("[FG] API fetch failed (stats=%s, season=%d): %s", stats, season, exc)
+        return []
+
+
+def _parse_batters(rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Parse batter rows into normalised-name -> stats dict."""
+    bd = LEAGUE_DEFAULTS["batter"]
+    cache: dict[str, dict[str, float]] = {}
+    for row in rows:
+        name = str(row.get("PlayerName") or row.get("Name") or "")
+        key = _normalise_name(name)
+        if not key:
+            continue
+        cache[key] = {
+            "wrc_plus":  _safe_float(row.get("wRC+"),       bd["wrc_plus"]),
+            "woba":      _safe_float(row.get("wOBA"),       bd["woba"]),
+            "iso":       _safe_float(row.get("ISO"),        bd["iso"]),
+            "babip":     _safe_float(row.get("BABIP"),      bd["babip"]),
+            "o_swing":   _safe_float(row.get("O-Swing%"),   bd["o_swing"]),
+            "z_contact": _safe_float(row.get("Z-Contact%"), bd["z_contact"]),
+            "hr_fb_pct": _safe_float(row.get("HR/FB"),      bd["hr_fb_pct"]),
+            "k_pct":     _safe_float(row.get("K%"),         bd["k_pct"]),
+            "bb_pct":    _safe_float(row.get("BB%"),        bd["bb_pct"]),
+        }
+    return cache
+
+
+def _parse_pitchers(rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Parse pitcher rows into normalised-name -> stats dict."""
+    pd_ = LEAGUE_DEFAULTS["pitcher"]
+    cache: dict[str, dict[str, float]] = {}
+    for row in rows:
+        name = str(row.get("PlayerName") or row.get("Name") or "")
+        key = _normalise_name(name)
+        if not key:
+            continue
+        cache[key] = {
+            # C+SwStr% is FanGraphs' column name for CSW%
+            "csw_pct":   _safe_float(row.get("C+SwStr%"),  pd_["csw_pct"]),
+            "swstr_pct": _safe_float(row.get("SwStr%"),    pd_["swstr_pct"]),
+            "k_bb_pct":  _safe_float(row.get("K-BB%"),     pd_["k_bb_pct"]),
+            "xfip":      _safe_float(row.get("xFIP"),      pd_["xfip"]),
+            "siera":     _safe_float(row.get("SIERA"),     pd_["siera"]),
+            "fip":       _safe_float(row.get("FIP"),       pd_["fip"]),
+            "hr_fb_pct": _safe_float(row.get("HR/FB"),     pd_["hr_fb_pct"]),
+            "lob_pct":   _safe_float(row.get("LOB%"),      pd_["lob_pct"]),
+            "babip":     _safe_float(row.get("BABIP"),     pd_["babip"]),
+        }
+    return cache
+
+
 def _load() -> None:
-    """Fetch or load from daily cache.  Sets _loaded = True on completion."""
-    global _BATTER_CACHE, _PITCHER_CACHE, _loaded
+    """Fetch or load from daily cache. Sets _loaded = True on completion."""
+    global _BATTER_CACHE, _PITCHER_CACHE, _loaded, _data_year
+
+    season = date.today().year
+    cache_path = _CACHE_PATH_TMPL.format(year=season)
 
     # ── Try disk cache first ─────────────────────────────────────────────────
     if os.path.exists(cache_path):
@@ -103,83 +232,63 @@ def _load() -> None:
                 data = json.load(fh)
             _BATTER_CACHE  = data.get("batters", {})
             _PITCHER_CACHE = data.get("pitchers", {})
+            _data_year     = data.get("season", season)
             logger.info(
-                "[FG] Loaded from cache — %d batters  %d pitchers",
-                len(_BATTER_CACHE), len(_PITCHER_CACHE),
+                "[FG] Cache hit — %d batters  %d pitchers (season=%d)",
+                len(_BATTER_CACHE), len(_PITCHER_CACHE), _data_year,
             )
             _loaded = True
             return
         except Exception as exc:
             logger.warning("[FG] Cache read failed (%s) — fetching live", exc)
 
-    # ── Live fetch via pybaseball ────────────────────────────────────────────
-    try:
-        import pybaseball as pb  # noqa: PLC0415
+    # ── Live fetch — try current year, fall back to previous ────────────────
+    for yr in (season, season - 1):
+        logger.info("[FG] Fetching season %d from FanGraphs API...", yr)
 
-        # Silence pybaseball's progress bar in production
-        pb.cache.enable()
+        bat_rows = _fetch_season("bat", yr)
+        pit_rows = _fetch_season("pit", yr)
 
-        season = date.today().year
+        if not bat_rows and not pit_rows:
+            logger.warning("[FG] No data returned for season %d — trying %d", yr, yr - 1)
+            time.sleep(0.5)
+            continue
 
-        # ── Batting stats ───────────────────────────────────────────────────
-        bd = LEAGUE_DEFAULTS["batter"]
-        bat_df = pb.batting_stats(season, qual=20)
-        for _, row in bat_df.iterrows():
-            key = _normalise_name(str(row.get("Name", "")))
-            if not key:
-                continue
-            _BATTER_CACHE[key] = {
-                "wrc_plus":  _safe_float(row.get("wRC+"),        bd["wrc_plus"]),
-                "woba":      _safe_float(row.get("wOBA"),        bd["woba"]),
-                "iso":       _safe_float(row.get("ISO"),         bd["iso"]),
-                "babip":     _safe_float(row.get("BABIP"),       bd["babip"]),
-                "o_swing":   _safe_float(row.get("O-Swing%"),    bd["o_swing"]),
-                "z_contact": _safe_float(row.get("Z-Contact%"),  bd["z_contact"]),
-                "hr_fb_pct": _safe_float(row.get("HR/FB"),       bd["hr_fb_pct"]),
-                "k_pct":     _safe_float(row.get("K%"),          bd["k_pct"]),
-                "bb_pct":    _safe_float(row.get("BB%"),         bd["bb_pct"]),
-            }
-
-        # ── Pitching stats ───────────────────────────────────────────────────
-        pd_ = LEAGUE_DEFAULTS["pitcher"]
-        pit_df = pb.pitching_stats(season, qual=10)
-        for _, row in pit_df.iterrows():
-            key = _normalise_name(str(row.get("Name", "")))
-            if not key:
-                continue
-            _PITCHER_CACHE[key] = {
-                "csw_pct":   _safe_float(row.get("CSW%"),    pd_["csw_pct"]),
-                "swstr_pct": _safe_float(row.get("SwStr%"),  pd_["swstr_pct"]),
-                "k_bb_pct":  _safe_float(row.get("K-BB%"),   pd_["k_bb_pct"]),
-                "xfip":      _safe_float(row.get("xFIP"),    pd_["xfip"]),
-                "siera":     _safe_float(row.get("SIERA"),   pd_["siera"]),
-                "fip":       _safe_float(row.get("FIP"),     pd_["fip"]),
-                "hr_fb_pct": _safe_float(row.get("HR/FB"),   pd_["hr_fb_pct"]),
-                "lob_pct":   _safe_float(row.get("LOB%"),    pd_["lob_pct"]),
-                "babip":     _safe_float(row.get("BABIP"),   pd_["babip"]),
-            }
-
-        # ── Persist cache ───────────────────────────────────────────────────
-        with open(cache_path, "w") as fh:
-            json.dump({"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE}, fh)
+        _BATTER_CACHE  = _parse_batters(bat_rows)
+        _PITCHER_CACHE = _parse_pitchers(pit_rows)
+        _data_year = yr
 
         logger.info(
-            "[FG] Fetched live — %d batters  %d pitchers  cached→%s",
-            len(_BATTER_CACHE), len(_PITCHER_CACHE), cache_path,
+            "[FG] Loaded %d batters  %d pitchers from season %d",
+            len(_BATTER_CACHE), len(_PITCHER_CACHE), yr,
         )
 
-    except ImportError:
-        logger.warning("[FG] pybaseball not installed — FanGraphs layer disabled")
-    except Exception as exc:
-        logger.warning("[FG] FanGraphs fetch failed: %s — continuing without", exc)
+        # ── Persist cache ────────────────────────────────────────────────────
+        try:
+            with open(cache_path, "w") as fh:
+                json.dump(
+                    {
+                        "batters":  _BATTER_CACHE,
+                        "pitchers": _PITCHER_CACHE,
+                        "season":   yr,
+                    },
+                    fh,
+                )
+            logger.info("[FG] Cached to %s", cache_path)
+        except Exception as exc:
+            logger.warning("[FG] Cache write failed: %s", exc)
 
-    _loaded = True  # Always set True so we don't retry on every prop
+        break
+    else:
+        logger.error("[FG] Failed to fetch any FanGraphs data — layer disabled")
+
+    _loaded = True
 
 
 # ─── Public getters ───────────────────────────────────────────────────────────
 
 def get_batter(name: str) -> dict[str, float]:
-    """Return FanGraphs batting stats for *name*.  Empty dict if not found."""
+    """Return FanGraphs batting stats for name. Empty dict if not found."""
     global _loaded
     if not _loaded:
         _load()
@@ -187,7 +296,7 @@ def get_batter(name: str) -> dict[str, float]:
 
 
 def get_pitcher(name: str) -> dict[str, float]:
-    """Return FanGraphs pitching stats for *name*.  Empty dict if not found."""
+    """Return FanGraphs pitching stats for name. Empty dict if not found."""
     global _loaded
     if not _loaded:
         _load()
@@ -196,11 +305,9 @@ def get_pitcher(name: str) -> dict[str, float]:
 
 # ─── Probability adjustment engine ───────────────────────────────────────────
 
-# Hard cap: no single FanGraphs nudge exceeds ±0.030
+# Hard cap: no single FanGraphs nudge exceeds +/-0.030
 _FG_CAP = 0.030
 
-# Per-agent signal routing
-# Maps (player_type, prop_type_group) → adjustment logic key
 _PROP_GROUPS: dict[str, list[str]] = {
     "k_props":     ["strikeouts", "pitcher_strikeouts"],
     "er_props":    ["earned_runs", "earned_runs_allowed"],
@@ -219,14 +326,14 @@ def _in_group(prop_type: str, group: str) -> bool:
 
 def fangraphs_adjustment(
     prop_type: str,
-    direction: str,           # "Over" or "Under"
-    player_type: str,         # "pitcher" or "batter"
+    direction: str,       # "Over" or "Under"
+    player_type: str,     # "pitcher" or "batter"
     fg: dict[str, float],
 ) -> float:
     """
     Compute a probability nudge from FanGraphs season stats.
 
-    Returns float in [-0.030, +0.030].  Returns 0.0 if fg is empty.
+    Returns float in [-0.030, +0.030]. Returns 0.0 if fg is empty.
     """
     if not fg:
         return 0.0
@@ -239,7 +346,6 @@ def fangraphs_adjustment(
     flip    = -1.0 if not is_over else 1.0
 
     if player_type == "pitcher":
-        # ── K props: CSW% (primary) + SwStr% (secondary) + K-BB% (tertiary) ──
         if _in_group(prop_type, "k_props"):
             csw   = fg.get("csw_pct",   ld_p["csw_pct"])
             swstr = fg.get("swstr_pct", ld_p["swstr_pct"])
@@ -249,7 +355,6 @@ def fangraphs_adjustment(
             k_bb_adj  = (k_bb  - 0.130) / 0.050 * 0.006
             adj += flip * (csw_adj + swstr_adj + k_bb_adj)
 
-        # ── ER allowed: xFIP primary + SIERA secondary ───────────────────────
         elif _in_group(prop_type, "er_props"):
             xfip  = fg.get("xfip",  ld_p["xfip"])
             siera = fg.get("siera", ld_p["siera"])
@@ -257,7 +362,6 @@ def fangraphs_adjustment(
             siera_adj = (4.20 - siera) / 0.70 * 0.008
             adj += flip * (xfip_adj + siera_adj)
 
-        # ── Hits/walks allowed: SwStr% + BABIP luck flag ─────────────────────
         elif _in_group(prop_type, "hits_allow"):
             swstr = fg.get("swstr_pct", ld_p["swstr_pct"])
             babip = fg.get("babip",     ld_p["babip"])
@@ -267,7 +371,6 @@ def fangraphs_adjustment(
             adj -= babip_adj
 
     else:  # batter
-        # ── Hitting props (hits/singles/doubles): wRC+ + wOBA ────────────────
         if _in_group(prop_type, "hit_props"):
             wrc  = fg.get("wrc_plus", ld_b["wrc_plus"])
             woba = fg.get("woba",     ld_b["woba"])
@@ -275,9 +378,8 @@ def fangraphs_adjustment(
             woba_adj = (woba - 0.320) / 0.060 * 0.010
             adj += flip * (wrc_adj + woba_adj)
 
-        # ── Power props (HR/TB): ISO + HR/FB% + wRC+ ─────────────────────────
         elif _in_group(prop_type, "power_props"):
-            iso   = fg.get("iso",     ld_b["iso"])
+            iso   = fg.get("iso",      ld_b["iso"])
             hr_fb = fg.get("hr_fb_pct", ld_b["hr_fb_pct"])
             wrc   = fg.get("wrc_plus", ld_b["wrc_plus"])
             iso_adj   = (iso   - 0.150) / 0.070 * 0.014
@@ -285,7 +387,6 @@ def fangraphs_adjustment(
             wrc_adj   = (wrc   - 100.0) / 30.0  * 0.006
             adj += flip * (iso_adj + hr_fb_adj + wrc_adj)
 
-        # ── RBI / runs: wOBA + wRC+ ───────────────────────────────────────────
         elif _in_group(prop_type, "rbi_run"):
             wrc  = fg.get("wrc_plus", ld_b["wrc_plus"])
             woba = fg.get("woba",     ld_b["woba"])
@@ -294,7 +395,6 @@ def fangraphs_adjustment(
                 + (woba - 0.320) / 0.060 * 0.010
             )
 
-        # ── Batter strikeouts: O-Swing% + K% ─────────────────────────────────
         elif _in_group(prop_type, "batter_k"):
             o_swing = fg.get("o_swing", ld_b["o_swing"])
             k_pct   = fg.get("k_pct",   ld_b["k_pct"])
@@ -302,10 +402,8 @@ def fangraphs_adjustment(
             k_adj = (k_pct   - 0.230) / 0.050 * 0.012
             adj += flip * (o_adj + k_adj)
 
-        # ── Stolen bases: BB% (on-base dependency) + speed proxy ─────────────
         elif _in_group(prop_type, "sb_props"):
             bb_pct = fg.get("bb_pct", ld_b["bb_pct"])
             adj += flip * (bb_pct - 0.085) / 0.030 * 0.010
 
-    # ── Hard cap ─────────────────────────────────────────────────────────────
     return max(-_FG_CAP, min(_FG_CAP, adj))
