@@ -564,7 +564,7 @@ def fetch_player_season_stats(player_id: int) -> dict[str, float]:
     try:
         resp = requests.get(
             f"{_MLBAPI_BASE}/people/{player_id}/stats",
-            params={"stats": "season", "group": "hitting,pitching", "season": "2025"},
+            params={"stats": "season", "group": "hitting,pitching", "season": str(datetime.now(timezone.utc).year)},
             headers=_HEADERS, timeout=10,
         )
         if resp.status_code != 200:
@@ -2014,11 +2014,15 @@ class LiveDispatcher:
                 #   EVHunter / StreakAgent      → full signal set
                 if _FG_AVAILABLE:
                     try:
-                        if player_type == "pitcher":
+                        # Phase 150 fix: cfg["player_type"] was "hitter"|"pitcher"
+                        # player_type was previously undefined (NameError silently caught)
+                        _fg_ptype = cfg["player_type"]
+                        if _fg_ptype == "pitcher":
                             _fg_data = _fg_get_pitcher(pname)
                         else:
                             _fg_data = _fg_get_batter(pname)
-                        _fg_adj = _fg_adjustment(prop_type, side, player_type, _fg_data)
+                        _fg_adj_ptype = "pitcher" if _fg_ptype == "pitcher" else "batter"
+                        _fg_adj = _fg_adjustment(prop_type, side, _fg_adj_ptype, _fg_data)
                         if _fg_adj != 0.0:
                             logger.debug(
                                 "[FG] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
