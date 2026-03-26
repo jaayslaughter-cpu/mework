@@ -188,6 +188,27 @@ except ImportError:
 
     logger.warning("[PP+] predict_plus_layer not found — Layer 8b disabled.")
 
+# ── Phase 47: Live temperature calibration ───────────────────────────────────
+# Loads per-agent T scalars from DB at dispatcher startup (single bulk query).
+# T is fitted nightly by nightly_recap.py after each settlement.
+# Applies Platt scaling inside build_parlay._eff_prob() to compress
+# overconfident raw probabilities before the agent claiming pass.
+try:
+    from temperature_calibration import (
+        load_all_temperatures as _load_all_temperatures,
+        apply_temperature as _apply_temperature,
+        T_DEFAULT as _T_DEFAULT,
+    )
+    _TEMP_CAL_AVAILABLE = True
+    logger.info("[Phase47] Temperature calibration module loaded.")
+except ImportError:
+    _TEMP_CAL_AVAILABLE = False
+    def _load_all_temperatures(names): return {n: 1.5 for n in names}  # noqa: E302
+    def _apply_temperature(p, T): return p                              # noqa: E302
+    _T_DEFAULT = 1.5
+    logger.warning("[Phase47] temperature_calibration not found — using T=%.1f default.", _T_DEFAULT)
+
+
 # ── Phase 35: Operations layer (agent config, risk manager, decision logger) ──
 try:
     import yaml as _yaml
@@ -1152,6 +1173,7 @@ def build_parlay(
     legs: list[PropLeg],
     agent: dict,
     excluded_keys: set[tuple] | None = None,
+    agent_T: float = 1.5,
 ) -> dict | None:
     """
     From a list of candidate legs, apply agent filter and build a parlay dict
@@ -1171,8 +1193,15 @@ def build_parlay(
     _use_pre_form = agent["name"] in _SKIP_NUDGE_AGENTS
 
     def _eff_prob(leg: PropLeg) -> float:
-        """Return the probability appropriate for this agent's signal model."""
-        return leg.prob_pre_form if _use_pre_form else leg.implied_prob
+        """Return the probability appropriate for this agent's signal model.
+        Phase 47: applies Platt temperature scaling to compress overconfident
+        raw probabilities.  T=1.5 by default (conservative prior); refitted
+        nightly after ≥ 30 graded picks per agent.
+        """
+        raw = leg.prob_pre_form if _use_pre_form else leg.implied_prob
+        if _TEMP_CAL_AVAILABLE and agent_T != 1.0:
+            return _apply_temperature(raw, agent_T)
+        return raw
 
     filtered = [
         l for l in legs
@@ -1253,6 +1282,7 @@ def build_parlay(
 def build_omega_parlay(
     legs: list[PropLeg],
     excluded_keys: set[tuple] | None = None,
+    agent_T: float = 1.5,
 ) -> dict | None:
     """
     OmegaStack — 18th agent: true ensemble meta-model.
@@ -1307,6 +1337,10 @@ def build_omega_parlay(
             + OMEGA_STACK_WEIGHTS["UmpireAgent"]  * umpire_eff
             + OMEGA_STACK_WEIGHTS["FadeAgent"]    * fade_eff
         )
+
+        # Phase 47: apply T to stacked probability as final calibration step
+        if _TEMP_CAL_AVAILABLE and agent_T != 1.0:
+            stacked_prob = _apply_temperature(stacked_prob, agent_T)
 
         if stacked_prob < OMEGA_STACK_MIN_PROB:
             continue
@@ -1408,6 +1442,16 @@ class LiveDispatcher:
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Phase 47: load per-agent temperature scalars (single bulk query at startup)
+        _all_agent_names = [a["name"] for a in AGENT_CONFIGS] + [
+            "OmegaStack", "ArbitrageAgent", "StreakAgent"
+        ]
+        self._agent_temperatures = _load_all_temperatures(_all_agent_names)
+        logger.info(
+            "[Phase47] Temperatures loaded (%d agents, avg T=%.2f)",
+            len(self._agent_temperatures),
+            sum(self._agent_temperatures.values()) / max(len(self._agent_temperatures), 1),
+        )
         logger.info("=" * 60)
         logger.info("PropIQ LiveDispatcher — %s", date)
         logger.info("=" * 60)
@@ -1605,7 +1649,8 @@ class LiveDispatcher:
             if _active_agents is not None and agent["name"] not in _active_agents:
                 logger.info("[RISK] %s — skipped (disabled or in cool-down)", agent["name"])
                 continue
-            parlay = build_parlay(leg_pool, agent)
+            _agent_T = self._agent_temperatures.get(agent["name"], _T_DEFAULT)
+            parlay = build_parlay(leg_pool, agent, agent_T=_agent_T)
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
                 continue
@@ -1624,7 +1669,8 @@ class LiveDispatcher:
             candidate_parlays.append(parlay)
 
         # ── OmegaStack — triple-confirmation ensemble ──────────────────────
-        omega = build_omega_parlay(leg_pool)
+        _omega_T = self._agent_temperatures.get("OmegaStack", _T_DEFAULT)
+        omega = build_omega_parlay(leg_pool, agent_T=_omega_T)
         if omega:
             ev_o   = omega.get("ev_pct", 0)
             conf_o = omega.get("confidence", 0)
