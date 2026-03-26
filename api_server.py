@@ -16,7 +16,6 @@ POST /api/ml/game-prob        — Team win probability
 POST /api/ml/anomaly-detect   — Stat anomaly detection
 POST /api/ml/backtest-audit   — SHAP feature importance audit (BacktestTasklet)
 POST /trigger/dispatch        — Run live_dispatcher.py (19-agent parlay build)
-POST /trigger/stream          — Run line_stream.py (line snapshots + steam detection)
 POST /trigger/settle          — Run nightly_recap.py (settlement + calibration)
 GET  /replay                  — Decision replay for a given date
 GET  /config                  — Dump agent_config.yaml as JSON
@@ -331,20 +330,6 @@ def trigger_dispatch(background_tasks: BackgroundTasks) -> TriggerResponse:
         message="live_dispatcher.py started in background — Discord alerts will post on completion.",
     )
 
-
-@app.post("/trigger/stream", response_model=TriggerResponse)
-def trigger_stream(background_tasks: BackgroundTasks) -> TriggerResponse:
-    """Fire the line stream snapshot (line_stream.py).
-
-    Snapshots current lines, detects steam moves, and posts alerts to Discord.
-    """
-    background_tasks.add_task(_run_script, "line_stream.py")
-    logger.info("[trigger/stream] Dispatched line_stream.py")
-    return TriggerResponse(
-        status="accepted",
-        trigger="stream",
-        message="line_stream.py started in background — steam alerts will post on detection.",
-    )
 
 
 @app.post("/trigger/settle", response_model=TriggerResponse)

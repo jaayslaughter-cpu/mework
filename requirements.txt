@@ -1,8 +1,7 @@
 # PropIQ Python ML Service — production dependencies
 # RabbitMQ (pika) REMOVED — Phase 29 HTTP migration complete
 # confluent-kafka REMOVED — never used in production code
-# pybaseball REMOVED temporarily (hotfix) — caused nixpacks build failure
-# Will be re-added after confirming Railway compatibility
+# pybaseball REMOVED — Phase 40 FanGraphs HTTP rewrite eliminated this dependency
 
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
@@ -29,5 +28,4 @@ apscheduler>=3.10.4
 aiohttp>=3.9.5
 tenacity>=8.3.0
 structlog>=24.1.0
-pybaseball>=2.2.7
 pyyaml>=6.0.2
