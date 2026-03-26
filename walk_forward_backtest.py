@@ -32,8 +32,6 @@ import requests
 import json
 import numpy as np
 import pandas as pd
-from datetime import date, timedelta
-from collections import defaultdict
 import time
 import warnings
 import sys
@@ -93,7 +91,7 @@ def fetch_pitcher_game_log(game_pk: int) -> list:
     try:
         resp = requests.get(url, timeout=15)
         data = resp.json()
-        results = []
+        pitcher_logs = []
         for side in ["home", "away"]:
             team_data = data.get("teams", {}).get(side, {})
             pitchers = team_data.get("pitchers", [])
@@ -113,7 +111,7 @@ def fetch_pitcher_game_log(game_pk: int) -> list:
             # Only count starters who pitched ≥ 3 innings
             if ip < 3.0:
                 continue
-            results.append({
+            pitcher_logs.append({
                 "player_id":       sp_id,
                 "player_name":     player.get("person", {}).get("fullName", "Unknown"),
                 "team":            side,
@@ -123,7 +121,7 @@ def fetch_pitcher_game_log(game_pk: int) -> list:
                 "hits_allowed":    int(stats.get("hits", 0)),
                 "walks":           int(stats.get("baseOnBalls", 0)),
             })
-        return results
+        return pitcher_logs
     except Exception:
         return []
 
@@ -192,7 +190,7 @@ def build_rolling_features(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
 
 def empirical_bayes_k_prob(
     roll_k_mean: float,
-    roll_k_std: float,
+    _roll_k_std: float,
     line: float,
     pa_estimate: int = 27
 ) -> float:
@@ -410,37 +408,12 @@ def run_walk_forward_fold(
         }
 
         print(
-            f"  {agent:16s}: n={n:4d} | win={win_rate:.1%} | "
-            f"ROI={roi:+.1%} | Brier={brier:.4f} | "
-            f"MaxDD=${max_dd:.0f} ({max_dd_pct:.1%}) | Sharpe={sharpe:.3f}"
-        )
-
-    return {"fold": fold_label, "metrics": metrics, "raw": fold_results}
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def run_full_backtest(use_cached: bool = False) -> dict:
-    """
-    Run 3 walk-forward folds.
-    Returns complete results dict for analysis.
-    """
-    print("\n" + "="*60)
-    print("PropIQ Walk-Forward Backtest — Phase 45")
-    print("="*60)
-    print("Prop type: Pitcher Strikeouts (K/game vs synthetic trailing line)")
-    print("Data source: MLB Stats API (real game logs)")
-    print("Line source: Rolling 30-game trailing average ± 0.5 (SYNTHETIC — disclosed)")
-    print("Folds: 2022→2023, 2022-23→2024, 2022-24→2025")
-    print("="*60)
-
-    import os
-    cache_file = "/tmp/backtest_data_cache.json"
-
-    if use_cached and os.path.exists(cache_file):
+import tempfile
+with tempfile.TemporaryFile(mode="w+") as tmp:
+    if use_cached:
         print("\nLoading cached game data...")
-        with open(cache_file) as f:
-            season_data = json.load(f)
+        tmp.seek(0)
+        season_data = json.load(tmp)
         season_dfs = {}
         for season, records in season_data.items():
             season_dfs[int(season)] = pd.DataFrame(records)
@@ -455,11 +428,10 @@ def run_full_backtest(use_cached: bool = False) -> dict:
             if not df.empty:
                 season_dfs[season] = df
 
-        # Cache for reuse
         cache = {str(k): v.to_dict(orient="records") for k, v in season_dfs.items()}
-        with open(cache_file, "w") as f:
-            json.dump(cache, f)
-        print("  Data cached to /tmp/backtest_data_cache.json")
+        json.dump(cache, tmp)
+        tmp.flush()
+        print("  Data cached")
 
     # Sanity check
     for season, df in season_dfs.items():

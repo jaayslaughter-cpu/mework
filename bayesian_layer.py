@@ -9,6 +9,17 @@ Adapted for Railway deployment constraints:
   - KMeans pitch archetypes (k=8) from Baseball Savant arsenal CSV
   - 1,000 Monte Carlo draws from Beta posteriors → P(over line)
   - 70/30 blend with existing 9-layer pipeline (Bayes is informative prior, not override)
+"""
+Layer 10 — Hierarchical Bayesian Prop Adjustment
+PropIQ Phase 45
+
+Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
+Adapted for Railway deployment constraints:
+  - No full MCMC (PyMC too slow for daily dispatch)
+  - Empirical Bayes conjugate update replaces MCMC sampling (same pooling math, ~200x faster)
+  - KMeans pitch archetypes (k=8) from Baseball Savant arsenal CSV
+  - 1,000 Monte Carlo draws from Beta posteriors → P(over line)
+  - 70/30 blend with existing 9-layer pipeline (Bayes is informative prior, not override)
   - ±0.025 nudge cap to prevent overshooting existing signals
 
 Architecture map (kekoa-santana → PropIQ adaptation):
@@ -20,24 +31,20 @@ Integration position: After Layer 9 (CV Gate), before agent claiming phase.
 """
 
 import numpy as np
-from scipy import stats
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import requests
 import pandas as pd
 import json
 import os
-from datetime import date, timedelta
 import warnings
 from io import StringIO
+import tempfile
 
 warnings.filterwarnings("ignore")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-CACHE_DIR = "/tmp"
-ARCHETYPE_CACHE = os.path.join(CACHE_DIR, "pitch_archetypes_v2.json")
-PLAYER_STATS_CACHE = os.path.join(CACHE_DIR, "bayes_player_stats_{date}.json")
 ARCHETYPE_CACHE_DAYS = 7    # Re-cluster weekly (Arsenal data doesn't change daily)
 N_ARCHETYPES = 8             # 8 archetypal pitch shapes (matches kekoa-santana paper)
 N_MC_DRAWS = 1_000           # 1k draws — fast on Railway, tight enough CI
@@ -53,6 +60,7 @@ LEAGUE_PRIORS = {
     "h_rate":  {"alpha": 24.2, "beta": 75.8},   # ~24.2% H rate per PA
     "hr_rate": {"alpha":  3.1, "beta": 96.9},   # ~3.1%  HR rate per PA
     "tb_rate": {"alpha": 38.5, "beta": 61.5},   # ~38.5% TB rate per PA
+}
     "bb_rate": {"alpha":  8.5, "beta": 91.5},   # ~8.5%  BB rate per PA
 }
 
@@ -152,7 +160,7 @@ def _fetch_pitch_archetypes() -> dict:
         type_col = next((c for c in df.columns if "pitch_type" in c.lower() or "pitch_name" in c.lower()), None)
 
         if not name_col or not type_col:
-            print(f"[BayesLayer] Missing name/pitch_type columns")
+            print("[BayesLayer] Missing name/pitch_type columns")
             return {}
 
         df_clean = df[[name_col, type_col] + feature_cols].dropna()
@@ -177,22 +185,23 @@ def _fetch_pitch_archetypes() -> dict:
         centroids_orig = scaler.inverse_transform(centroids_scaled)
         centroid_list = centroids_orig.tolist()
 
-        result = {
+        archetype_cache_data = {
             "date": today.isoformat(),
             "archetypes": archetypes,
             "centroids": centroid_list,
             "feature_order": list(col_map.keys()),
         }
         with open(ARCHETYPE_CACHE, "w") as f:
-            json.dump(result, f)
+            json.dump(archetype_cache_data, f)
 
-        _build_archetype_modifiers(centroid_list)
+        archetype_k_modifier = _build_archetype_modifiers(centroid_list)
         print(f"[BayesLayer] Clustered {len(df_clean)} pitch types → {N_ARCHETYPES} archetypes")
         return archetypes
 
     except Exception as e:
         print(f"[BayesLayer] Pitch archetype clustering failed: {e}")
         return {}
+
 
 
 def _build_archetype_modifiers(centroids: list):
@@ -202,24 +211,25 @@ def _build_archetype_modifiers(centroids: list):
     Soft contact clusters → easier to hit → negative modifier.
     Uses centroid[0] = velocity, centroid[2] = horizontal break as proxies.
     """
-    global ARCHETYPE_K_MODIFIER
     if not centroids:
-        return
+        return {}
 
     try:
         velos = [c[0] if len(c) > 0 else 92.0 for c in centroids]
         mean_velo = np.mean(velos)
         std_velo = np.std(velos) or 1.0
 
-        ARCHETYPE_K_MODIFIER = {}
+        k_modifiers = {}
         for i, c in enumerate(centroids):
             velo = c[0] if len(c) > 0 else mean_velo
             z_velo = (velo - mean_velo) / std_velo
             # High velo → harder to hit → +modifier on K props
             # Scale: ±1 z-score → ±0.01 modifier
-            ARCHETYPE_K_MODIFIER[i] = round(z_velo * 0.01, 4)
+            k_modifiers[i] = round(z_velo * 0.01, 4)
+        return k_modifiers
     except Exception as e:
         print(f"[BayesLayer] Archetype modifier build failed: {e}")
+        return {}
 
 
 # ── Empirical Bayes Shrinkage ─────────────────────────────────────────────────
@@ -314,42 +324,21 @@ def monte_carlo_prop_prob(
 def apply_bayesian_layer(legs: list, player_stats_cache: dict = None) -> list:
     """
     Apply Bayesian adjustment to all prop legs.
-
-    Args:
-        legs: List of PropLeg objects or dicts. Required fields:
-              player, prop_type, line, implied_prob
-              Optional: stat_rate (player's rate this season), pa (plate appearances)
-
-        player_stats_cache: Optional pre-fetched dict:
-              {player_name: {"stat_rate": float, "pa": int}}
-              Built by dispatcher from FanGraphs/MLB Stats API data.
-
-    Returns:
-        Same list with per-leg additions:
-          bayes_prob          Raw Bayesian P(over line)
-          bayes_ci_lower      5th percentile credible interval
-          bayes_ci_upper      95th percentile credible interval
-          bayes_nudge         Final nudge applied (capped ±0.025)
-          pitch_archetype_id  KMeans cluster label (None if not found)
-          implied_prob        Updated (blended)
-
-    Layer position: 10 of 10 (after CV Gate, before agent claiming)
-    """
     archetypes = _fetch_pitch_archetypes()
     updated = 0
     skipped = 0
 
-    for leg in legs:
+    for prop_leg in legs:
         try:
             # Normalize: works with both objects and dicts
             def get(field, default=None):
-                return getattr(leg, field, None) if hasattr(leg, "__dict__") else leg.get(field, default)
+                return getattr(prop_leg, field, None) if hasattr(prop_leg, "__dict__") else prop_leg.get(field, default)
 
             def set_field(field, value):
-                if hasattr(leg, "__dict__"):
-                    setattr(leg, field, value)
+                if hasattr(prop_leg, "__dict__"):
+                    setattr(prop_leg, field, value)
                 else:
-                    leg[field] = value
+                    prop_leg[field] = value
 
             prop_type    = (get("prop_type") or "hits").lower()
             player       = get("player") or ""
