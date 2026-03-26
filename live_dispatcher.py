@@ -153,6 +153,41 @@ except ImportError:
 
     logger.warning("[SB_REF] sportsbook_reference_layer not found — Layer 7 disabled.")
 
+# ── Layer 8a: Marcel 3-year projections (baseball-sims algorithm, no BHQ) ────
+# Derived from thomasosbot/baseball-sims src/features/marcel.py.
+# Uses only public FanGraphs JSON API — no subscription required.
+try:
+    from marcel_layer import MarcelLayer as _MarcelLayer
+    from marcel_layer import marcel_adjustment as _marcel_adjustment
+    _marcel_layer = _MarcelLayer()
+    _MARCEL_AVAILABLE = True
+    logger.info("[Marcel] Marcel projection layer loaded.")
+except ImportError:
+    _MARCEL_AVAILABLE = False
+    _marcel_layer = None  # type: ignore[assignment]
+
+    def _marcel_adjustment(*_a, **_kw) -> float: return 0.0  # noqa: E704
+
+    logger.warning("[Marcel] marcel_layer not found — Layer 8a disabled.")
+
+# ── Layer 8b: Predict+ pitcher unpredictability (PredictPlus port) ────────────
+# Ported from jaime12minaya/PredictPlus (R → Python).
+# Measures pitch-sequence unpredictability via multinomial LR surprise ratio.
+# High Predict+ (≥110) → K Over boost; Low Predict+ (≤90) → K Under boost.
+try:
+    from predict_plus_layer import PredictPlusLayer as _PredictPlusLayer
+    from predict_plus_layer import predict_plus_adjustment as _pp_adjustment
+    _pp_layer = _PredictPlusLayer()
+    _PP_AVAILABLE = True
+    logger.info("[PP+] Predict+ layer loaded.")
+except ImportError:
+    _PP_AVAILABLE = False
+    _pp_layer = None  # type: ignore[assignment]
+
+    def _pp_adjustment(*_a, **_kw) -> float: return 0.0  # noqa: E704
+
+    logger.warning("[PP+] predict_plus_layer not found — Layer 8b disabled.")
+
 # ── Phase 35: Operations layer (agent config, risk manager, decision logger) ──
 try:
     import yaml as _yaml
@@ -1463,6 +1498,54 @@ class LiveDispatcher:
                 logger.warning("[Phase27] SBD fetch failed: %s", exc)
         # ── End Phase 27 enrichment ────────────────────────────────────────
 
+        # ── Phase 42: Layer 8a — Marcel projections prefetch ──────────────────
+        # Loads 3-year weighted FanGraphs projections (weekly cache).
+        # No MLBAM ID needed — name-based lookup matches existing prop data.
+        if _MARCEL_AVAILABLE and _marcel_layer is not None:
+            try:
+                _marcel_layer.prefetch()
+                logger.info("[Marcel] Marcel projections ready.")
+            except Exception as _marcel_err:
+                logger.warning(
+                    "[Marcel] Prefetch failed: %s — Layer 8a degraded.", _marcel_err
+                )
+
+        # ── Phase 42: Layer 8b — Predict+ prefetch & score attachment ─────────
+        # Computes pitcher unpredictability scores from Savant pitch sequences.
+        # Weekly cache means Savant CSV is only fetched once per week per pitcher.
+        # Scores are attached to pitcher props as `predict_plus_score` field.
+        if _PP_AVAILABLE and _pp_layer is not None:
+            try:
+                _ud_pitcher_pos = {"SP", "RP", "P", "CP"}
+                _seen_pp_ids: set[int] = set()
+                _unique_pitchers: list[tuple[int, str]] = []
+                for _p in all_raw:
+                    if _p.get("position", "") in _ud_pitcher_pos:
+                        _mid = int(_p.get("mlbam_id") or 0)
+                        if _mid > 0 and _mid not in _seen_pp_ids:
+                            _seen_pp_ids.add(_mid)
+                            _unique_pitchers.append(
+                                (_mid, _p.get("player_name", ""))
+                            )
+                if _unique_pitchers:
+                    _pp_layer.prefetch(_unique_pitchers)
+                    logger.info(
+                        "[PP+] Predict+ prefetch complete (%d pitchers).",
+                        len(_unique_pitchers),
+                    )
+                # Attach scores to every raw prop (0.0 for non-pitchers or cache miss)
+                for _p in all_raw:
+                    _mid = int(_p.get("mlbam_id") or 0)
+                    _p["predict_plus_score"] = (
+                        _pp_layer.get_score(_mid, _p.get("player_name", ""))
+                        if _mid > 0 else 0.0
+                    )
+            except Exception as _pp_err:
+                logger.warning(
+                    "[PP+] Prefetch/attach failed: %s — Layer 8b degraded.", _pp_err
+                )
+        # ── End Phase 42 prefetch ──────────────────────────────────────────────
+
         # 3. Build evaluated leg pool (enrichment data flows through)
         leg_pool: list[PropLeg] = self._evaluate_props(all_raw, sbd_game_df, sbd_prop_df)
         logger.info("Leg pool: %d evaluated legs (min prob %.0f%%)",
@@ -2067,6 +2150,50 @@ class LiveDispatcher:
                     except Exception:
                         pass  # FanGraphs is additive — never let it crash the leg
                 # ── End Layer 5 ──────────────────────────────────────────────
+
+                # ── Layer 8a: Marcel projection adjustment (Phase 42) ─────────
+                # 3-year weighted FanGraphs projection (baseball-sims algorithm).
+                # Compares player's Marcel-projected rate to league average and
+                # applies a subtle nudge (max ±0.018) based on multi-season history.
+                # Fires after all 7 real-time layers so it never overrides context.
+                _prob_after_fg = prob   # snapshot before 8a/8b for decision logging
+                if _MARCEL_AVAILABLE and _marcel_layer is not None:
+                    try:
+                        _fg_ptype = cfg["player_type"]
+                        if _fg_ptype == "pitcher":
+                            _marcel_data = _marcel_layer.get_pitcher(pname)
+                        else:
+                            _marcel_data = _marcel_layer.get_batter(pname)
+                        _m_ptype = "pitcher" if _fg_ptype == "pitcher" else "batter"
+                        _marcel_adj = _marcel_adjustment(
+                            prop_type, side, _m_ptype, _marcel_data
+                        )
+                        if _marcel_adj != 0.0:
+                            logger.debug(
+                                "[Marcel] %-22s  %-16s  adj=%+.3f  %.3f→%.3f",
+                                pname, prop_type, _marcel_adj, prob, prob + _marcel_adj,
+                            )
+                        prob = min(0.80, max(0.40, prob + _marcel_adj))
+                    except Exception:
+                        pass   # Marcel is additive — never crash a leg
+
+                # ── Layer 8b: Predict+ adjustment (Phase 42, K props only) ─────
+                # Pitcher unpredictability score from pitch-sequence multinomial LR.
+                # Ported from jaime12minaya/PredictPlus (R → Python).
+                # Only fires for strikeout props where pitcher MLBAM ID is known.
+                if _PP_AVAILABLE and prop_type == "strikeouts":
+                    try:
+                        _pp_score = float(chosen_entry.get("predict_plus_score", 0.0) or 0.0)
+                        _pp_adj = _pp_adjustment(prop_type, side, _pp_score)
+                        if _pp_adj != 0.0:
+                            logger.debug(
+                                "[PP+] %-22s  K %-5s  score=%.1f  adj=%+.3f  %.3f→%.3f",
+                                pname, side, _pp_score, _pp_adj, prob, prob + _pp_adj,
+                            )
+                        prob = min(0.80, max(0.40, prob + _pp_adj))
+                    except Exception:
+                        pass   # Predict+ is additive — never crash a leg
+                # ── End Layers 8a / 8b ───────────────────────────────────────
 
                 # Gate checks — Phase 35: log all decisions with full feature trail
                 if prob < cfg["min_prob"]:
