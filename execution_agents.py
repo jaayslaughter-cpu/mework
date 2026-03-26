@@ -732,61 +732,6 @@ class EVHunter(BaseSlipBuilder):
 
 
 # ---------------------------------------------------------------------------
-# Agent 1b — ArbitrageAgent (True Cross-Book Arbitrage)
-# ---------------------------------------------------------------------------
-
-class ArbitrageAgent(BaseSlipBuilder):
-    """
-    Identifies and builds slips from true cross-book arbitrage opportunities.
-
-    Consumes PropEdges with ``source == "arbitrage"`` from the
-    MarketFusionEngine.arbitrage_scan() pipeline.  These are props where
-    the best available Over on one book + best Under on another book
-    combine to a total implied probability < 1.0 — a guaranteed edge
-    regardless of outcome.
-
-    Filters:
-        - source == "arbitrage"
-        - arb_margin ≥ ARB_GATE (0.5 % guaranteed return)
-        - min_providers ≥ 2 (confirmed cross-book, not a data artefact)
-
-    Slip construction:
-        - MAX_LEGS = 3  (keeps arb slips tight; wider slips dilute the edge)
-        - Builds Over legs only; the guaranteed margin is captured on the
-          over side where the dislocation is largest.
-    """
-
-    MAX_LEGS: int  = 3
-    ARB_GATE: float = 0.005   # 0.5 % minimum guaranteed margin
-
-    @property
-    def agent_name(self) -> str:
-        return "ArbitrageAgent"
-
-    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
-        """
-        Filter to confirmed arbitrage edges with positive margin.
-
-        Args:
-            props: Full prop pool from all inbound sources.
-
-        Returns:
-            Arbitrage props sorted by ``arb_margin`` descending.
-        """
-        arb_props = [
-            p for p in props
-            if getattr(p, "source", "") == "arbitrage"
-            and getattr(p, "arb_margin", 0.0) >= self.ARB_GATE
-            and len(getattr(p, "providers_sampled", [])) >= 2
-        ]
-        arb_props.sort(
-            key=lambda p: getattr(p, "arb_margin", 0.0),
-            reverse=True,
-        )
-        return arb_props
-
-
-# ---------------------------------------------------------------------------
 # Agent 2 — UnderMachine (All-Under Specialist)
 # ---------------------------------------------------------------------------
 
@@ -2011,7 +1956,6 @@ class ExecutionSquad:
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
             MLEdgeAgent(amqp_url=amqp_url),
-            ArbitrageAgent(amqp_url=amqp_url),
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
             MLEdgeAgent(amqp_url=amqp_url),

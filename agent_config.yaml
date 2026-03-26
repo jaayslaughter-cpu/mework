@@ -224,17 +224,6 @@ agents:
     cool_down_until: null
     notes: "Schedule anomaly — Unders on travel days."
 
-  ArbitrageAgent:
-    enabled: true
-    min_prob: 0.54
-    min_edge_pct: 0.005    # 0.5% guaranteed margin
-    max_legs: 2
-    confidence_gate: 7
-    depends_on_feeds: [prizepicks, underdog]
-    cool_down_active: false
-    cool_down_until: null
-    notes: "Cross-platform arbitrage. Both platforms required."
-
   VultureStack:
     enabled: true
     min_prob: 0.57
