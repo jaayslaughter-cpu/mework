@@ -86,7 +86,6 @@ _AGENT_EMOJI: dict[str, str] = {
     "CatcherAgent":  "🧤",
     "LineupAgent":   "📋",
     "GetawayAgent":  "✈️",
-    "ArbitrageAgent": "💰",
     "VultureStack":  "🦅",
     "OmegaStack":    "🔱",
 }
