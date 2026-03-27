@@ -1,0 +1,4 @@
+git add api/agents/three_leg.py api/services/statcast_hub.py api/tasklets/backtest_tasklet.py bayesian_layer.py context_modifiers.py discord_dispatcher.py edge_health_monitor.py market_scanners.py predict_plus_layer.py tasklets.py walk_forward_backtest.py
+git checkout -- ml_pipeline/streak_agent.py execution_agents.py
+git commit -m "fix: syntax errors batch 3 - indentation, docstrings, unicode"
+git push origin main
