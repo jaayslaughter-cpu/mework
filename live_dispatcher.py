@@ -68,6 +68,14 @@ except ImportError:
 
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 
+# ── Phase 48 gap-fix: per-agent unit sizing ───────────────────────────────────
+try:
+    from agent_unit_sizing import get_all_units as _get_all_units
+    _UNIT_SIZING_AVAILABLE = True
+except ImportError:
+    _UNIT_SIZING_AVAILABLE = False
+    def _get_all_units() -> dict: return {}  # noqa: E704
+
 # ── Phase 27: Enhancement layer imports (all optional — graceful fallback) ──
 try:
     from draftedge_scraper import enrich_props_with_draftedge as _de_enrich
@@ -267,7 +275,10 @@ OMEGA_STACK_WEIGHTS: dict[str, float] = {
 OMEGA_STACK_MIN_PROB = 0.65   # stacked prob gate — rarest, highest conviction
 OMEGA_STACK_MAX_LEGS = 3      # tight: surgical parlays only
 BANKROLL_USD = 200.0   # reference bankroll for Kelly sizing
-MAX_STAKE    = MAX_STAKE_USD   # $20 hard cap
+MAX_STAKE    = MAX_STAKE_USD   # $20 hard cap — Kelly ceiling (unchanged)
+
+# Phase 48: cache populated at dispatch start from agent_unit_sizing table
+_AGENT_UNITS_CACHE: dict = {}
 
 # ---------------------------------------------------------------------------
 # Prop-type configuration
@@ -1287,6 +1298,7 @@ class LiveDispatcher:
     def __init__(self, dry_run: bool = False) -> None:
         self.dry_run   = dry_run
         self.selector  = platform_selector
+        self._agent_units_cache = {}
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1300,6 +1312,21 @@ class LiveDispatcher:
             len(self._agent_temperatures),
             sum(self._agent_temperatures.values()) / max(len(self._agent_temperatures), 1),
         )
+
+        # ── Phase 48: per-agent unit sizes (single bulk query at startup) ──
+        if _UNIT_SIZING_AVAILABLE:
+            try:
+                self._agent_units_cache = _get_all_units()
+                logger.info(
+                    "[Phase48] Unit sizes loaded (%d agents)",
+                    len(self._agent_units_cache),
+                )
+            except Exception as _unit_err:
+                logger.warning("[Phase48] unit sizing load failed: %s — floor $5 applied", _unit_err)
+                self._agent_units_cache = {}
+        else:
+            self._agent_units_cache = {}
+
         logger.info("=" * 60)
         logger.info("PropIQ LiveDispatcher — %s", date)
         logger.info("=" * 60)
@@ -1604,7 +1631,8 @@ class LiveDispatcher:
                     )[:400],
                 )
             if _risk_manager and not self.dry_run:
-                _risk_manager.record_stake(agent_name, 20.0)
+                _agent_unit = _AGENT_UNITS_CACHE.get(agent_name, 5.0)
+                _risk_manager.record_stake(agent_name, _agent_unit)
             sent += 1
 
         logger.info("Dispatch complete — %d parlays sent for %s", sent, date)

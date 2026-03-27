@@ -37,6 +37,23 @@ from tasklets import (
 )
 from DiscordAlertService import discord_alert
 
+# ── Gap-fix: line_stream + monthly_leaderboard (Phase 48 – Gap Closure) ──────
+try:
+    from line_stream import main as _run_line_stream
+    _LINE_STREAM_AVAILABLE = True
+except ImportError:
+    _LINE_STREAM_AVAILABLE = False
+    def _run_line_stream():
+        raise NotImplementedError("line_stream module not available")
+
+try:
+    from monthly_leaderboard import run_monthly_leaderboard as _run_monthly_leaderboard
+    _LEADERBOARD_AVAILABLE = True
+except ImportError:
+    _LEADERBOARD_AVAILABLE = False
+    def _run_monthly_leaderboard():
+        raise NotImplementedError("monthly_leaderboard module not available")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -99,6 +116,22 @@ async def job_xgboost():
     await _safe_run("XGBoostTasklet", run_xgboost_tasklet)
 
 
+async def job_line_stream():
+    """Runs every 30 min 10 AM–10 PM PT — steam detection + CLV + in-game tracking."""
+    if _LINE_STREAM_AVAILABLE:
+        await _safe_run("LineStream", _run_line_stream)
+    else:
+        logger.warning("[orchestrator] line_stream not available — skipping")
+
+
+async def job_monthly_leaderboard():
+    """Fires 9 AM PT on the 1st of each month — Discord agent performance report."""
+    if _LEADERBOARD_AVAILABLE:
+        await _safe_run("MonthlyLeaderboard", _run_monthly_leaderboard)
+    else:
+        logger.warning("[orchestrator] monthly_leaderboard not available — skipping")
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -112,6 +145,19 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(job_backtest, CronTrigger(hour=0, minute=1), id="backtest")
     scheduler.add_job(job_grading, CronTrigger(hour=1, minute=5), id="grading")
     scheduler.add_job(job_xgboost, CronTrigger(day_of_week="sun", hour=2), id="xgboost")
+
+    # Gap-fix: line_stream every 30 min 10 AM–10 PM PT
+    scheduler.add_job(
+        job_line_stream,
+        CronTrigger(hour="10-22", minute="0,30", timezone="America/Los_Angeles"),
+        id="line_stream",
+    )
+    # Gap-fix: monthly leaderboard on 1st of each month at 9 AM PT
+    scheduler.add_job(
+        job_monthly_leaderboard,
+        CronTrigger(day=1, hour=9, timezone="America/Los_Angeles"),
+        id="monthly_leaderboard",
+    )
 
     scheduler.start()
 
@@ -300,6 +346,25 @@ async def trigger_settle():
 
     asyncio.create_task(_run())
     return JSONResponse({"status": "started", "message": "Settlement engine triggered in background"})
+
+
+@app.post("/trigger/leaderboard")
+async def trigger_leaderboard():
+    """Trigger monthly leaderboard — called by Tasklet schedule on 1st of month."""
+    async def _run():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "/app/monthly_leaderboard.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("[leaderboard] monthly_leaderboard.py failed: %s", stderr.decode()[-500:])
+        else:
+            logger.info("[leaderboard] monthly_leaderboard.py completed successfully")
+
+    asyncio.create_task(_run())
+    return JSONResponse({"status": "started", "message": "Monthly leaderboard triggered in background"})
 
 
 @app.get("/propiq/status")
