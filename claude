@@ -1,0 +1,2 @@
+cd /path/to/mework
+git log --oneline
