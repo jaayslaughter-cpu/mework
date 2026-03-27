@@ -1,0 +1,30 @@
+cd /path/to/mework
+
+git add -A
+
+git commit -m "fix: syntax errors, tiered stakes, ABS layer, Bayesian layer, dispatch scheduling
+
+- bayesian_layer.py: fixed duplicate docstring, split LEAGUE_PRIORS dict, function body trapped in docstring
+- tasklets.py: removed duplicate _confidence stub, duplicate run_agent_tasklet, duplicate for loop
+- api/agents/three_leg.py: removed leading space on module-level function
+- api/services/statcast_hub.py: fixed try block missing body before except
+- api/tasklets/backtest_tasklet.py: fixed over-indented if block
+- context_modifiers.py: fixed docstring closed prematurely leaving formula as bare code
+- discord_dispatcher.py: removed duplicate malformed fields.append block
+- edge_health_monitor.py: fixed lines.append with triple-quoted string spanning function def
+- market_scanners.py: removed @staticmethod decorator from instance method duplicate
+- predict_plus_layer.py: fixed dict split by premature closing brace
+- walk_forward_backtest.py: removed unclosed print() with misplaced import as argument
+- ml_pipeline/streak_agent.py: replaced en-dash and other unicode math chars
+- execution_agents.py: replaced em-dash and unicode chars
+- marcel_layer.py: replaced em-dash and unicode chars
+- api/services/market_fusion.py: replaced em-dash and unicode chars
+- api/services/odds_fetcher.py: replaced em-dash and unicode chars
+- api/services/prop_model.py: replaced em-dash and unicode chars
+- DiscordAlertService.py: added MAX_STAKE_USD export, updated send_parlay_alert with tier badges and stake display
+- live_dispatcher.py: wired Layer 10 Bayesian, Layer 11 ABS, tiered stakes from agent_unit_sizing
+- line_stream.py: disabled steam/line movement Discord alerts
+- abs_layer.py: new file - ABS challenge system MLB 2026
+- DispatchTasklet.java: new file - @Scheduled cron 8AM PT daily dispatch trigger"
+
+git push origin main
