@@ -1,0 +1,4 @@
+cd /path/to/mework
+git add -A
+git commit -m "fix: partial syntax fixes batch 3 - in progress"
+git push origin main
