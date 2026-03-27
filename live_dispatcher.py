@@ -1298,6 +1298,7 @@ class LiveDispatcher:
     def __init__(self, dry_run: bool = False) -> None:
         self.dry_run   = dry_run
         self.selector  = platform_selector
+        self._agent_units_cache = {}
 
     def run(self, date_str: str | None = None) -> None:
         date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1313,19 +1314,18 @@ class LiveDispatcher:
         )
 
         # ── Phase 48: per-agent unit sizes (single bulk query at startup) ──
-        global _AGENT_UNITS_CACHE
         if _UNIT_SIZING_AVAILABLE:
             try:
-                _AGENT_UNITS_CACHE = _get_all_units()
+                self._agent_units_cache = _get_all_units()
                 logger.info(
                     "[Phase48] Unit sizes loaded (%d agents)",
-                    len(_AGENT_UNITS_CACHE),
+                    len(self._agent_units_cache),
                 )
             except Exception as _unit_err:
                 logger.warning("[Phase48] unit sizing load failed: %s — floor $5 applied", _unit_err)
-                _AGENT_UNITS_CACHE = {}
+                self._agent_units_cache = {}
         else:
-            _AGENT_UNITS_CACHE = {}
+            self._agent_units_cache = {}
 
         logger.info("=" * 60)
         logger.info("PropIQ LiveDispatcher — %s", date)

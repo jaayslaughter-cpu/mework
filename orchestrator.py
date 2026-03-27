@@ -43,14 +43,16 @@ try:
     _LINE_STREAM_AVAILABLE = True
 except ImportError:
     _LINE_STREAM_AVAILABLE = False
-    def _run_line_stream(): pass  # noqa: E704
+    def _run_line_stream():
+        raise NotImplementedError("line_stream module not available")
 
 try:
     from monthly_leaderboard import run_monthly_leaderboard as _run_monthly_leaderboard
     _LEADERBOARD_AVAILABLE = True
 except ImportError:
     _LEADERBOARD_AVAILABLE = False
-    def _run_monthly_leaderboard(): pass  # noqa: E704
+    def _run_monthly_leaderboard():
+        raise NotImplementedError("monthly_leaderboard module not available")
 
 logging.basicConfig(
     level=logging.INFO,
