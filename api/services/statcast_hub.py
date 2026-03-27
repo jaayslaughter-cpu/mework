@@ -237,7 +237,7 @@ class StatcastDataHub:
         def _f(key: str, default: float = 0.0) -> float:
             try:
                 return float(row.get(key, default) or default)
-        except Exception:
+            except Exception:
                 return default
 
         fb_pct = _f("n_ff_formatted", _f("fastball_pct"))
