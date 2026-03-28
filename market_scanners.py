@@ -557,8 +557,6 @@ class FadeScanner:
     # Private helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _best_sharp_under(sharp_odds: Dict[str, int]) -> Optional[int]:
     def _best_sharp_under(self, sharp_odds: Dict[str, int]) -> Optional[int]:
         """Find the most aggressively priced Under across sharp books.
 
@@ -816,7 +814,6 @@ class MarketScannerOrchestrator:
                 )
                 self.process_snapshot(snapshot)
             ch.basic_ack(delivery_tag=method.delivery_tag)
-        except (KeyError, TypeError, ValueError) as exc:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.error("MarketScannerOrchestrator: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)

@@ -47,7 +47,6 @@ class BullpenFatigueScorer:
 
     Formula:
         base_score  = min(pitch_count_3d / PITCH_LIMIT_3D, 1.0)
-"""
                       Ratio of 3-day pitch count to the exhaustion threshold.
         rest_penalty = max(0, 1 - avg_rest_days / REST_FULL)
                       Penalises arms that haven't had adequate recovery.

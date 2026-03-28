@@ -48,7 +48,6 @@ _PITCH_FAMILIES: dict[str, str] = {
     "FC": "CT",  # cutter
     "SL": "SL",  # slider
     "ST": "SL",  # sweeper → slider family
-}
     "SV": "SL",  # slurve → slider family
     "CU": "CB",  # curveball
     "KC": "CB",  # knuckle-curve

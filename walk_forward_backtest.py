@@ -407,7 +407,7 @@ def run_walk_forward_fold(
             "insufficient": False,
         }
 
-        print(
+        print(f"  {agent}: {n} picks | {win_rate:.1%} WR | ROI {roi:+.1%} | Brier {brier:.3f}")
 import tempfile
 with tempfile.TemporaryFile(mode="w+") as tmp:
     if use_cached:

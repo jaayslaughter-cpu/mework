@@ -25,7 +25,6 @@ PropIQ integration (Layer 8a, fires after FanGraphs Layer 6):
 Max adjustment: ±0.018 per prop — subtle refinement layered on top of Layers 1-7.
 Never overrides or replaces; always additive.
 
-"""
 Data source:
   FanGraphs JSON API — https://www.fangraphs.com/api/leaders/major-league/data
   Public endpoint, no API key required.

@@ -14,7 +14,7 @@ logger = logging.getLogger("propiq.agent.three_leg")
 CORRELATION_MAP = {
     # Positive correlations (stack)
     ("pitcher_strikeouts", "batter_strikeouts"): 0.65,
-    ("pitcher_strikeouts", "batter_total_bases"): -0.30,  # negative: K pitcher = bad for batters
+    ("pitcher_strikeouts", "batter_total_bases"): -0.30,
     ("batter_hits", "batter_runs_batted_in"): 0.55,
     ("batter_hits", "batter_total_bases"): 0.70,
     ("batter_home_runs", "batter_runs_batted_in"): 0.80,
@@ -22,54 +22,52 @@ CORRELATION_MAP = {
 }
 
 
- def _correlation_bonus(legs: list[Leg]) -> float:
-     """Estimate correlation adjustment for a set of legs from the same game."""
-     if len(legs) != 3:
-         return 1.0
-     bonus = 1.0
-     for a, b in itertools.combinations(legs, 2):
-         key = tuple(sorted([a.prop_type, b.prop_type]))
-         corr = CORRELATION_MAP.get(key, 0.0)
-         bonus += abs(corr) * 0.03   # Each positive correlation adds 3%
-     return round(bonus, 4)
+def _correlation_bonus(legs: list[Leg]) -> float:
+    """Estimate correlation adjustment for a set of legs from the same game."""
+    if len(legs) != 3:
+        return 1.0
+    bonus = 1.0
+    for a, b in itertools.combinations(legs, 2):
+        key = tuple(sorted([a.prop_type, b.prop_type]))
+        corr = CORRELATION_MAP.get(key, 0.0)
+        bonus += abs(corr) * 0.03
+    return round(bonus, 4)
 
 
- class ThreeLeg(BaseAgent):
-     name = "three_leg"
-     strategy = "Correlated 3-Leg"
-     max_legs = 3
-     min_legs = 3        # EXACTLY 3 legs — no exceptions
-     ev_threshold = 0.08  # 8% minimum (higher bar for parlays)
+class ThreeLeg(BaseAgent):
+    name = "three_leg"
+    strategy = "Correlated 3-Leg"
+    max_legs = 3
+    min_legs = 3
+    ev_threshold = 0.08
 
-     def analyze(self, hub_data: dict) -> list[BetSlip]:
-         props: list[dict] = hub_data.get("player_props", [])
-         predictions: dict = hub_data.get("model_predictions", [])
+    def analyze(self, hub_data: dict) -> list[BetSlip]:
+        props: list[dict] = hub_data.get("player_props", [])
+        predictions: dict = hub_data.get("model_predictions", [])
 
-         # Group props by game_id
-         by_game: dict[str, list[dict]] = {}
-         for prop in props:
-             gid = prop.get("game_id", "unknown")
-             by_game.setdefault(gid, []).append(prop)
+        by_game: dict[str, list[dict]] = {}
+        for prop in props:
+            gid = prop.get("game_id", "unknown")
+            by_game.setdefault(gid, []).append(prop)
 
-         slips: list[BetSlip] = []
+        slips: list[BetSlip] = []
 
-         for game_id, game_props in by_game.items():
-             # Build qualified legs for this game
-             candidate_legs: list[Leg] = []
-             for prop in game_props:
-                 for direction in ("over", "under"):
-                     american = prop.get(f"{direction}_odds")
-                     if not american:
-                         continue
-                     decimal = self.american_to_decimal(int(american))
-                     if decimal < 1.50:
-                         continue
+        for game_id, game_props in by_game.items():
+            candidate_legs: list[Leg] = []
+            for prop in game_props:
+                for direction in ("over", "under"):
+                    american = prop.get(f"{direction}_odds")
+                    if not american:
+                        continue
+                    decimal = self.american_to_decimal(int(american))
+                    if decimal < 1.50:
+                        continue
 
-                     book_prob = self.decimal_to_prob(decimal)
-                     line = prop.get("line", 0.0)
-                     player = prop.get("player_name", "")
-                     prop_type = prop.get("prop_type", "")
-                     book = prop.get("bookmaker", "draftkings")
+                    book_prob = self.decimal_to_prob(decimal)
+                    line = prop.get("line", 0.0)
+                    player = prop.get("player_name", "")
+                    prop_type = prop.get("prop_type", "")
+                    book = prop.get("bookmaker", "draftkings")
 
                     key = f"{player}|{prop_type}|{line}|{direction}"
                     model_prob = predictions.get(key, {}).get("calibrated_prob")
@@ -87,14 +85,11 @@ CORRELATION_MAP = {
             if len(candidate_legs) < 3:
                 continue
 
-            # Sort by model_prob desc, pick top combos
             candidate_legs.sort(key=lambda x: x.model_prob, reverse=True)
             top = candidate_legs[:6]
 
-            # Try all 3-leg combos from top candidates
             for combo in itertools.combinations(top, 3):
                 legs = list(combo)
-                # Ensure no duplicate players on same prop
                 seen = set()
                 valid = True
                 for leg in legs:
@@ -127,11 +122,10 @@ CORRELATION_MAP = {
                         metadata={
                             "game_id": game_id,
                             "correlation_bonus": _correlation_bonus(legs),
-                            "source": "three_leg_correlated"
-                        }
+                            "source": "three_leg_correlated",
+                        },
                     ))
 
-        # Return top 5 by EV
         slips.sort(key=lambda x: x.expected_value, reverse=True)
         top_slips = slips[:5]
         logger.info(f"[three_leg] {len(slips)} candidate combos → {len(top_slips)} slips filed")

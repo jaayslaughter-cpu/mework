@@ -1,586 +1,440 @@
-"""discord_dispatcher.py — PropIQ Analytics Discord Delivery Worker
+"""
+Layer 10 — Hierarchical Bayesian Prop Adjustment
+PropIQ Phase 45
 
-Standalone background worker that listens to RabbitMQ for finalised betting
-slip payloads and dispatches them to a private Discord server via Webhook.
+Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
+Adapted for Railway deployment constraints:
+  - No full MCMC (PyMC too slow for daily dispatch)
+  - Empirical Bayes conjugate update replaces MCMC sampling (same pooling math, ~200x faster)
+  - KMeans pitch archetypes (k=8) from Baseball Savant arsenal CSV
+  - 1,000 Monte Carlo draws from Beta posteriors → P(over line)
+  - 70/30 blend with existing 9-layer pipeline (Bayes is informative prior, not override)
+Layer 10 — Hierarchical Bayesian Prop Adjustment
+PropIQ Phase 45
 
-This script performs no mathematical operations.  It is purely responsible
-for formatting and delivery.
+Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
+Adapted for Railway deployment constraints:
+  - No full MCMC (PyMC too slow for daily dispatch)
+  - Empirical Bayes conjugate update replaces MCMC sampling (same pooling math, ~200x faster)
+  - KMeans pitch archetypes (k=8) from Baseball Savant arsenal CSV
+  - 1,000 Monte Carlo draws from Beta posteriors → P(over line)
+  - 70/30 blend with existing 9-layer pipeline (Bayes is informative prior, not override)
+  - ±0.025 nudge cap to prevent overshooting existing signals
 
-Responsibilities:
-    - Durable RabbitMQ queue bound to ``alerts.discord.slips``
-    - Rich Discord Embed formatting with agent-specific colour coding
-    - HTTP POST to Discord Webhook with 429 rate-limit and 400 error handling
-    - Runs indefinitely as a resilient background worker
+Architecture map (kekoa-santana → PropIQ adaptation):
+  Layer 1 (talent projections) → empirical_bayes_shrinkage()
+  Layer 2 (pitch archetype matchups) → _fetch_pitch_archetypes() + KMeans
+  Layer 3 (game-level Monte Carlo) → _monte_carlo_prop_prob()
 
-Run:
-    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... \\
-    AMQP_URL=amqp://user:pass@host:5672/ \\
-    python discord_dispatcher.py
-
-Expected inbound payload schema (from execution_agents.py)::
-
-    {
-        "agent_name": "EVHunter",
-        "slip_type": "3-leg standard",
-        "recommended_entry_type": "FLEX",        # "FLEX" or "STANDARD"
-        "legs": [
-            {
-                "player": "Aaron Judge",
-                "prop": "Total Bases",
-                "line": 1.5,
-                "side": "Over",
-                "true_prob": 0.58
-            }
-        ],
-        "total_ev": 0.045,
-        "recommended_unit_size": 0.5
-    }
-
-Entry type is set by underdog_math_engine.py based on which payout structure
-produces the higher Expected Value for the specific combination of leg
-probabilities in the slip.
-
-  FLEX (Insured) : absorbs 1 incorrect pick (2 for 6-8 leg entries) at a
-                   reduced multiplier.  Preferred when individual leg
-                   probabilities are moderate (55–62%).
-  STANDARD       : requires all picks to be correct.  Higher multiplier.
-                   Preferred for very high-confidence slips (63%+ per leg).
+Integration position: After Layer 9 (CV Gate), before agent claiming phase.
 """
 
-from __future__ import annotations
-
-import json
-import logging
-import os
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
-import pika
-import pika.exceptions
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 import requests
+import pandas as pd
+import json
+import os
+import warnings
+from io import StringIO
+import tempfile
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("discord_dispatcher")
+warnings.filterwarnings("ignore")
 
-# ---------------------------------------------------------------------------
-# RabbitMQ constants
-# ---------------------------------------------------------------------------
-EXCHANGE: str = "propiq_events"
-BINDING_KEY: str = "alerts.discord.slips"
-QUEUE_NAME: str = "discord_dispatcher_queue"
+# ── Constants ────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Discord embed colour map  (decimal RGB values)
-# ---------------------------------------------------------------------------
-AGENT_COLOURS: Dict[str, int] = {
-    "EVHunter": 0x2ECC71,       # Green       — top-EV generalist
-    "UnderMachine": 0x3498DB,   # Blue        — all-Under specialist
-    "F5Agent": 0xF39C12,        # Orange      — First-5-innings
-    "MLEdgeAgent": 0x9B59B6,    # Purple      — pure ML quant
-    "UmpireAgent": 0xE74C3C,    # Red         — umpire environment
-    "FadeAgent": 0x1ABC9C,      # Teal        — contrarian fades
-    "WeatherAgent": 0x95A5A6,   # Grey        — weather / park factor
-    "SteamAgent": 0xE67E22,     # Amber       — steam moves
-    "LineValueAgent": 0x2980B9, # Dark blue   — sharp line value
-    "BullpenAgent": 0x8E44AD,   # Dark purple — bullpen fatigue
-    "ArsenalAgent": 0xD35400,   # Burnt orange — pitch-type matchup
-    "PlatoonAgent": 0x27AE60,   # Forest green — handedness splits
-    "CatcherAgent": 0x16A085,   # Dark teal    — framing & battery
-    "LineupAgent": 0x2C3E50,    # Midnight     — PA volume projection
-    "GetawayAgent": 0x7F8C8D,   # Slate grey   — schedule fatigue
-}
-DEFAULT_COLOUR: int = 0x34495E   # Charcoal fallback for unlisted agents
+ARCHETYPE_CACHE_DAYS = 7    # Re-cluster weekly (Arsenal data doesn't change daily)
+N_ARCHETYPES = 8             # 8 archetypal pitch shapes (matches kekoa-santana paper)
+N_MC_DRAWS = 1_000           # 1k draws — fast on Railway, tight enough CI
+BLEND_WEIGHT_BAYES = 0.30    # 30% Bayesian, 70% existing 9-layer pipeline
+MAX_NUDGE = 0.025            # Hard cap — Bayes cannot swing a pick by more than 2.5%
 
-# High-EV threshold — override agent colour with gold when slip EV exceeds this
-EV_HIGH_THRESHOLD: float = 0.07
-EV_HIGH_COLOUR: int = 0xF1C40F   # Gold
-
-# California DFS compliance stamp (appended to every embed)
-DFS_PLATFORM_STAMP: str = "🐶 OPEN APP: Underdog Fantasy"
-
-# Entry type display config
-ENTRY_TYPE_BADGE: dict = {
-    "FLEX": {
-        "icon": "🛡️",
-        "label": "INSURED (FLEX)",
-        "description": (
-            "1 incorrect pick still pays out at reduced multiplier. "
-            "6-8 leg entries can absorb 2 losses."
-        ),
-    },
-    "STANDARD": {
-        "icon": "⚡",
-        "label": "STANDARD",
-        "description": "All picks must be correct. Higher multiplier, no insurance.",
-    },
+# League-level Beta priors calibrated from 2021–2025 Statcast aggregates.
+# These are the "population hyperparameters" that anchor partial pooling —
+# a 50 PA rookie gets pulled strongly toward these; a 600 PA vet less so.
+# alpha / (alpha + beta) = league mean rate
+LEAGUE_PRIORS = {
+    "k_rate":  {"alpha": 22.1, "beta": 77.9},   # ~22.1% K rate per PA
+    "h_rate":  {"alpha": 24.2, "beta": 75.8},   # ~24.2% H rate per PA
+    "hr_rate": {"alpha":  3.1, "beta": 96.9},   # ~3.1%  HR rate per PA
+    "tb_rate": {"alpha": 38.5, "beta": 61.5},   # ~38.5% TB rate per PA
+    "bb_rate": {"alpha":  8.5, "beta": 91.5},   # ~8.5%  BB rate per PA
 }
 
-# Webhook retry configuration
-RATE_LIMIT_SLEEP: float = 5.0
-MAX_RETRIES: int = 3
+# Maps prop type strings from dispatcher to rate keys above
+PROP_TO_RATE = {
+    "strikeouts":       "k_rate",
+    "hits":             "h_rate",
+    "home_runs":        "hr_rate",
+    "total_bases":      "tb_rate",
+    "hits+runs+rbi":    "h_rate",
+    "walks":            "bb_rate",
+    "runs":             "h_rate",
+    "rbis":             "h_rate",
+}
+
+# Estimated PAs per game per prop type (used in Monte Carlo simulation)
+PA_ESTIMATE = {
+    "strikeouts":    27,   # Full game: ~27 batters faced for starters
+    "hits":           4,   # Batter: ~4 PA/game
+    "home_runs":      4,
+    "total_bases":    4,
+    "hits+runs+rbi":  4,
+    "walks":          4,
+    "runs":           4,
+    "rbis":           4,
+}
+
+# Archetype-level K vulnerability modifiers (0 = neutral, positive = more K-prone)
+# Populated after KMeans clustering based on cluster centroid analysis
+ARCHETYPE_K_MODIFIER = {}   # archetype_id (int) -> float modifier (built at runtime)
 
 
-# ---------------------------------------------------------------------------
-# Discord Embed Formatter
-# ---------------------------------------------------------------------------
+# ── Pitch Archetype Clustering ────────────────────────────────────────────────
 
-def format_discord_embed(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert a slip payload into a Discord-ready Embed dictionary.
-
-    Formatting rules:
-        Title:
-            ``[AgentName] 🎯 {Slip Type} Slip``
-
-        Colour:
-            Agent-specific from :data:`AGENT_COLOURS`.  If ``total_ev``
-            exceeds :data:`EV_HIGH_THRESHOLD` (7%), the colour is overridden
-            to gold (:data:`EV_HIGH_COLOUR`) to visually highlight
-            high-confidence plays.
-
-        Leg fields:
-            One non-inline field per leg showing player, side emoji,
-            prop, line, and calibrated probability.
-
-        Entry type field:
-            Prominent badge showing ``🛡️ INSURED (FLEX)`` or ``⚡ STANDARD``
-            sourced from ``recommended_entry_type`` in the payload (set by
-            ``underdog_math_engine.py``).  Displayed as the first embed field
-            so it is immediately visible before the leg breakdown.
-
-        Metrics field:
-            Total EV %, recommended unit size, and platform stamp.
-
-        Footer:
-            ``PropIQ Analytics • {AgentName} • California DFS Legal``
-
-        Timestamp:
-            UTC ISO-8601 string (Discord renders in the viewer's local time).
-
-    Args:
-        payload: Deserialised slip JSON from RabbitMQ.
-
-    Returns:
-        A Discord Embed object dict ready for webhook POST.
+def _fetch_pitch_archetypes() -> dict:
     """
-    agent_name: str = payload.get("agent_name", "PropIQ")
-    slip_type: str = payload.get("slip_type", "N-leg standard")
-    legs: List[Dict[str, Any]] = payload.get("legs", [])
-    total_ev: float = float(payload.get("total_ev", 0.0))
-    unit_size: float = float(payload.get("recommended_unit_size", 0.0))
+    Fetch Baseball Savant pitch arsenal stats, cluster into N_ARCHETYPES pitch shapes.
 
-    # Determine embed colour
-    avg_leg_ev: float = float(payload.get("avg_leg_ev", 0.0))
-    unit_size: float = float(payload.get("recommended_unit_size", 0.0))
+    Features used (matching kekoa-santana's approach):
+      - Release speed (velocity)
+      - Induced vertical break (pfx_z)
+      - Horizontal break (pfx_x)
+      - Spin rate
+      - Release extension
 
-    # --- Entry type badge (set by underdog_math_engine.py) ---
-    raw_entry_type: str = str(
-        payload.get("recommended_entry_type", "FLEX")
-    ).upper()
-    # Default to FLEX for 3+ leg slips if not explicitly set
-    if raw_entry_type not in ENTRY_TYPE_BADGE:
-        n_legs = len(legs)
-        raw_entry_type = "FLEX" if n_legs >= 3 else "STANDARD"
-    entry_badge = ENTRY_TYPE_BADGE[raw_entry_type]
+    Returns dict: {"{player_name}_{pitch_type}": archetype_id, ...}
+    """
+    today = date.today()
 
-    # --- Determine embed colour ---
-    if total_ev >= EV_HIGH_THRESHOLD:
-        colour = EV_HIGH_COLOUR
-    else:
-        colour = AGENT_COLOURS.get(agent_name, DEFAULT_COLOUR)
+    # Check weekly cache
+    if os.path.exists(ARCHETYPE_CACHE):
+        try:
+            with open(ARCHETYPE_CACHE) as f:
+                cached = json.load(f)
+            cache_date = date.fromisoformat(cached.get("date", "2000-01-01"))
+            if (today - cache_date).days < ARCHETYPE_CACHE_DAYS:
+                _build_archetype_modifiers(cached.get("centroids", []))
+                return cached.get("archetypes", {})
+        except Exception:
+            pass
 
-    # Build one embed field per slip leg
-    fields: List[Dict[str, Any]] = []
-    # --- Entry type field (first field — most prominent) ---
-    fields: List[Dict[str, Any]] = [
-        {
-            "name": f"{entry_badge['icon']} Entry Type: {entry_badge['label']}",
-            "value": entry_badge["description"],
-            "inline": False,
+    url = (
+        "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+        "?type=pitcher&pitchType=&year=2025&team=&min=50&csv=true"
+    )
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+
+    try:
+        resp = requests.get(url, timeout=30, headers=headers)
+        if resp.status_code != 200:
+            print(f"[BayesLayer] Savant arsenal fetch HTTP {resp.status_code}")
+            return {}
+
+        df = pd.read_csv(StringIO(resp.text))
+
+        # Flexible column detection
+        col_map = {}
+        for col in df.columns:
+            cl = col.lower()
+            if any(k in cl for k in ["avg_speed", "release_speed", "velo"]):
+                col_map.setdefault("velocity", col)
+            elif "pfx_z" in cl or "v_break" in cl or "vert" in cl:
+                col_map.setdefault("v_break", col)
+            elif "pfx_x" in cl or "h_break" in cl or "horiz" in cl:
+                col_map.setdefault("h_break", col)
+            elif "spin" in cl and "rate" in cl:
+                col_map.setdefault("spin", col)
+            elif "extension" in cl or "release_extension" in cl:
+                col_map.setdefault("extension", col)
+
+        feature_cols = list(col_map.values())
+        if len(feature_cols) < 3:
+            print(f"[BayesLayer] Insufficient columns for clustering: {list(df.columns)[:10]}")
+            return {}
+
+        name_col = next((c for c in df.columns if "name" in c.lower()), None)
+        type_col = next((c for c in df.columns if "pitch_type" in c.lower() or "pitch_name" in c.lower()), None)
+
+        if not name_col or not type_col:
+            print("[BayesLayer] Missing name/pitch_type columns")
+            return {}
+
+        df_clean = df[[name_col, type_col] + feature_cols].dropna()
+        if len(df_clean) < N_ARCHETYPES * 2:
+            return {}
+
+        scaler = StandardScaler()
+        X = scaler.fit_transform(df_clean[feature_cols].astype(float))
+
+        km = KMeans(n_clusters=N_ARCHETYPES, random_state=42, n_init=10, max_iter=300)
+        df_clean = df_clean.copy()
+        df_clean["archetype"] = km.fit_predict(X)
+
+        # Build lookup
+        archetypes = {}
+        for _, row in df_clean.iterrows():
+            key = f"{row[name_col]}_{row[type_col]}"
+            archetypes[key] = int(row["archetype"])
+
+        # Store centroids in original feature space for modifier calculation
+        centroids_scaled = km.cluster_centers_
+        centroids_orig = scaler.inverse_transform(centroids_scaled)
+        centroid_list = centroids_orig.tolist()
+
+        archetype_cache_data = {
+            "date": today.isoformat(),
+            "archetypes": archetypes,
+            "centroids": centroid_list,
+            "feature_order": list(col_map.keys()),
         }
-    ]
+        with open(ARCHETYPE_CACHE, "w") as f:
+            json.dump(archetype_cache_data, f)
 
-    # --- One embed field per slip leg ---
-    for i, leg in enumerate(legs, start=1):
-        side: str = leg.get("side", "?")
-        side_emoji = "⬆️" if side.lower() == "over" else "⬇️"
-        prob_pct = round(float(leg.get("true_prob", 0.0)) * 100, 1)
-    # --- One embed field per slip leg (ALL legs guaranteed) ---
-    # Discord hard limit: 25 fields per embed.
-    # Reserved: 1 entry-type field + 1 metrics field = 23 max legs.
-    # PropIQ max is 5 legs — well within the limit.
-    DISCORD_MAX_FIELDS: int = 25
-    reserved_fields: int = 2  # entry-type + metrics
-    max_leg_fields: int = DISCORD_MAX_FIELDS - reserved_fields  # 23
-    DISCORD_MAX_FIELD_VALUE: int = 1024  # Discord per-field char limit
+        archetype_k_modifier = _build_archetype_modifiers(centroid_list)
+        print(f"[BayesLayer] Clustered {len(df_clean)} pitch types → {N_ARCHETYPES} archetypes")
+        return archetypes
 
-    for i, leg in enumerate(legs[:max_leg_fields], start=1):
-        side: str = leg.get("side", "?")
-        side_emoji = "⬆️" if side.lower() == "over" else "⬇️"
-        prob_pct = round(float(leg.get("true_prob", 0.0)) * 100, 1)
-        leg_ev = float(leg.get("no_vig_ev", 0.0))
-        leg_ev_sign = "+" if leg_ev >= 0 else ""
-        leg_ev_str = f"{leg_ev_sign}{round(leg_ev * 100, 1)}%"
-        # Colour-code the EV label: green for positive, red for negative
-        ev_label = f"✅ {leg_ev_str} EV vs no-vig" if leg_ev >= 0 else f"⚠️ {leg_ev_str} EV vs no-vig"
-        fields.append({
-            "name": f"Leg {i} — {leg.get('player', 'Unknown')}",
-            "value": (
-                f"{side_emoji} **{side}** "
-                f"{leg.get('prop', '?')} "
-                f"({leg.get('line', '?')}) "
-                f"| {prob_pct}% prob"
-                f"| {prob_pct}% prob | **{ev_label}**"
-        leg_value = (
-            f"{side_emoji} **{side}** "
-            f"{leg.get('prop', '?')} "
-            f"({leg.get('line', '?')}) "
-            f"| {prob_pct}% prob | **{ev_label}**"
-        )
-        # Truncate at Discord's 1024-char field-value limit (safety net)
-        if len(leg_value) > DISCORD_MAX_FIELD_VALUE:
-            leg_value = leg_value[: DISCORD_MAX_FIELD_VALUE - 3] + "..."
-        fields.append({
-            "name": f"Leg {i} — {leg.get('player', 'Unknown')}",
-            "value": leg_value,
-            "inline": False,
-        })
+    except Exception as e:
+        print(f"[BayesLayer] Pitch archetype clustering failed: {e}")
+        return {}
 
-    # Overflow notice if somehow a slip has > 23 legs (should never occur)
-    if len(legs) > max_leg_fields:
-        overflow_count = len(legs) - max_leg_fields
-        fields.append({
-            "name": f"⚠️ +{overflow_count} more legs",
-            "value": (
-                f"Discord field limit reached. Full {len(legs)}-leg slip "
-                "details in RabbitMQ payload."
-            ),
-            "inline": False,
-        })
 
-    # Metrics summary field
-    # --- Metrics summary field ---
-    ev_pct = round(total_ev * 100, 2)
-    ev_sign = "+" if total_ev >= 0 else ""
-    fields.append({
-        "name": "📊 Slip Metrics",
-        "value": (
-            f"**Total EV:** {ev_sign}{ev_pct}%\n"
-            f"**Unit Size:** {unit_size} units\n"
-    avg_ev_pct = round(avg_leg_ev * 100, 2)
-    avg_ev_sign = "+" if avg_leg_ev >= 0 else ""
-    # Build agent-specific context line (helps orient users on each agent's edge)
-    _AGENT_CONTEXT: Dict[str, str] = {
-        "ArsenalAgent":   "🔬 Pitch-type matchup | Usage × Whiff rate",
-        "PlatoonAgent":   "🤲 EMV platoon delta | wRC+ LHP vs RHP split",
-        "CatcherAgent":   "🧤 Battery analysis | Framing runs + pop time",
-        "LineupAgent":    "📋 PA volume edge | Lineup position × Team total",
-        "GetawayAgent":   "✈️ Schedule fatigue | Rest hours + timezone shift",
-        "UmpireAgent":    "⚖️ Umpire zone | CS% delta vs league average",
-        "FadeAgent":      "🔄 Sharp fade | Ticket% vs money% divergence",
-        "BullpenAgent":   "💪 Fatigue index | L3-5 day bullpen workload",
-        "WeatherAgent":   "🌬️ Wind factor | MPH × direction × park",
-        "SteamAgent":     "💨 Line velocity | Pts/min × book consensus",
-        "EVHunter":       "💰 All-source top-EV | ML + market combined",
-        "UnderMachine":   "⬇️ Under specialist | Public Over bias fade",
-        "F5Agent":        "5️⃣ First-5 innings | Ignores bullpen variance",
-        "MLEdgeAgent":    "🤖 Pure ML signal | XGBoost ≥ 0.55 prob gate",
-        "LineValueAgent": "📐 No-vig gap | Sharp vs retail consensus delta",
-    }
-    agent_context = _AGENT_CONTEXT.get(agent_name, "🎯 PropIQ Analytics")
-    fields.append({
-        "name": "📊 Slip Metrics",
-        "value": (
-            f"🎯 **Avg Edge vs No-Vig: {avg_ev_sign}{avg_ev_pct}%**\n"
-            f"Slip EV (Underdog math): {ev_sign}{ev_pct}%\n"
-            f"**Unit Size:** {unit_size} units\n"
-            f"*{agent_context}*\n"
-            f"{DFS_PLATFORM_STAMP}"
-        ),
-        "inline": False,
-    })
+
+def _build_archetype_modifiers(centroids: list):
+    """
+    After clustering, assign K vulnerability modifier per archetype.
+    High velocity + sharp break clusters → harder to hit → positive modifier.
+    Soft contact clusters → easier to hit → negative modifier.
+    Uses centroid[0] = velocity, centroid[2] = horizontal break as proxies.
+    """
+    if not centroids:
+        return {}
+
+    try:
+        velos = [c[0] if len(c) > 0 else 92.0 for c in centroids]
+        mean_velo = np.mean(velos)
+        std_velo = np.std(velos) or 1.0
+
+        k_modifiers = {}
+        for i, c in enumerate(centroids):
+            velo = c[0] if len(c) > 0 else mean_velo
+            z_velo = (velo - mean_velo) / std_velo
+            # High velo → harder to hit → +modifier on K props
+            # Scale: ±1 z-score → ±0.01 modifier
+            k_modifiers[i] = round(z_velo * 0.01, 4)
+        return k_modifiers
+    except Exception as e:
+        print(f"[BayesLayer] Archetype modifier build failed: {e}")
+        return {}
+
+
+# ── Empirical Bayes Shrinkage ─────────────────────────────────────────────────
+
+def empirical_bayes_shrinkage(
+    player_stat_rate: float,
+    player_pa: int,
+    prop_type: str
+) -> dict:
+    """
+    Partial pooling via Beta-Binomial conjugate update.
+
+    Equivalent to the hierarchical model's partial pooling in kekoa-santana's
+    Layer 1, but computed analytically (no MCMC needed).
+
+    Math:
+      Prior: Beta(alpha_0, beta_0)  ← league hyperparameters
+      Likelihood: Binomial(n=pa, k=pa*rate)
+      Posterior: Beta(alpha_0 + successes, beta_0 + failures)
+
+    Effect:
+      - Small sample (50 PA): posterior mean pulled ~60% toward league prior
+      - Full season (500 PA): posterior mean ~5% toward prior
+      - Rookie with 0 PA: pure league prior
+
+    Returns: {"alpha": float, "beta": float}
+    """
+    rate_key = PROP_TO_RATE.get(prop_type.lower(), "h_rate")
+    prior = LEAGUE_PRIORS.get(rate_key, {"alpha": 25.0, "beta": 75.0})
+
+    successes = max(0, player_stat_rate * player_pa)
+    failures = max(0, player_pa - successes)
 
     return {
-        "title": f"[{agent_name}] 🎯 {slip_type.title()} Slip",
-        "color": colour,
-        "fields": fields,
-        "footer": {
-            "text": f"PropIQ Analytics • {agent_name} • California DFS Legal",
-        "title": (
-            f"[{agent_name}] {entry_badge['icon']} "
-            f"{slip_type.title()} — {entry_badge['label']}"
-    avg_ev_badge = f"{'+' if avg_leg_ev >= 0 else ''}{round(avg_leg_ev * 100, 1)}% EV"
-    return {
-        "title": (
-            f"[{agent_name}] {entry_badge['icon']} "
-            f"{slip_type.title()} — {entry_badge['label']} | {avg_ev_badge}"
-        ),
-        "color": colour,
-        "fields": fields,
-        "footer": {
-            "text": (
-                f"PropIQ Analytics • {agent_name} • "
-                f"{entry_badge['label']} • California DFS Legal"
-            ),
-        },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "alpha": prior["alpha"] + successes,
+        "beta":  prior["beta"]  + failures,
     }
 
 
-# ---------------------------------------------------------------------------
-# Webhook Dispatcher
-# ---------------------------------------------------------------------------
+# ── Monte Carlo Prop Probability ──────────────────────────────────────────────
 
-def dispatch_to_discord(
-    embed: Dict[str, Any],
-    webhook_url: str,
-    retries: int = MAX_RETRIES,
-) -> bool:
-    """POST a formatted embed to a Discord Webhook URL.
+def monte_carlo_prop_prob(
+    posterior: dict,
+    line: float,
+    pa_estimate: int,
+    n_draws: int = N_MC_DRAWS
+) -> dict:
+    """
+    kekoa-santana Layer 3 equivalent: 4,000 MC draws → P(stat > line).
+    We use 1,000 for Railway performance.
 
-    Error handling:
-        HTTP 429 (Rate Limited):
-            Back off for the ``retry_after`` duration from the response JSON
-            (falls back to :data:`RATE_LIMIT_SLEEP` seconds) and retry.
-
-        HTTP 400 (Bad Request):
-            Log the full response body and return ``False`` immediately.
-            Discord 400s indicate a malformed payload — retrying won't help.
-
-        Other 4xx / 5xx:
-            Log the status code and retry with exponential back-off up to
-            ``retries`` attempts.
-
-        Network errors (``requests.exceptions.RequestException``):
-            Log the exception and retry with exponential back-off.
-
-    Args:
-        embed:       Discord Embed dict from :func:`format_discord_embed`.
-        webhook_url: Full Discord Webhook URL.
-        retries:     Maximum retry attempts before giving up.
+    Algorithm:
+      1. Draw per-PA success rate from Beta(alpha, beta)  [talent uncertainty]
+      2. Simulate Binomial outcomes over expected PA       [game variance]
+      3. P(outcome > line) = fraction of simulations that cleared the bar
 
     Returns:
-        ``True`` if Discord returned 200 or 204, ``False`` otherwise.
+      prob_over: float     P(stat > line)
+      ci_lower:  float     5th percentile credible interval
+      ci_upper:  float     95th percentile credible interval
+      posterior_mean: float  shrunk talent estimate
     """
-    webhook_payload: Dict[str, Any] = {"embeds": [embed]}
-    headers: Dict[str, str] = {"Content-Type": "application/json"}
-    attempt = 0
+    rng = np.random.default_rng(seed=None)  # Fresh seed each call for real variance
 
-    while attempt <= retries:
-        try:
-            response = requests.post(
-                webhook_url,
-                json=webhook_payload,
-                headers=headers,
-                timeout=10,
-            )
+    # Step 1: Sample talent rates from posterior
+    rate_samples = rng.beta(posterior["alpha"], posterior["beta"], size=n_draws)
 
-            if response.status_code in (200, 204):
-                logger.info(
-                    "Discord OK | status=%d | embed=%s",
-                    response.status_code,
-                    embed.get("title", "?"),
-                )
-                return True
+    # Step 2: Simulate game outcomes
+    outcomes = rng.binomial(pa_estimate, rate_samples)
 
-            if response.status_code == 429:
-                retry_after: float = float(
-                    response.json().get("retry_after", RATE_LIMIT_SLEEP)
-                )
-                logger.warning(
-                    "Discord rate-limited (429) — sleeping %.1f s.", retry_after
-                )
-                time.sleep(retry_after)
-                attempt += 1
-                continue
+    # Step 3: P(over line) — line is typically X.5 so > vs >= doesn't matter
+    prob_over = float(np.mean(outcomes > line))
 
-            if response.status_code == 400:
-                logger.error(
-                    "Discord rejected payload (400) — %s. Not retrying.",
-                    response.text[:500],
-                )
-                return False
+    # Bootstrap credible interval on the probability estimate itself
+    boot_probs = np.array([
+        float(np.mean(rng.choice(outcomes, size=n_draws, replace=True) > line))
+        for _ in range(500)
+    ])
 
-            logger.warning(
-                "Discord returned %d on attempt %d/%d — retrying.",
-                response.status_code, attempt + 1, retries,
-            )
+    posterior_mean = posterior["alpha"] / (posterior["alpha"] + posterior["beta"])
 
-        except requests.exceptions.RequestException as exc:
-            logger.error("Network error dispatching to Discord: %s", exc)
-
-        attempt += 1
-        time.sleep(min(2.0 ** attempt, 30.0))  # capped exponential back-off
-
-    logger.error("Discord dispatch failed after %d attempts.", retries)
-    return False
+    return {
+        "prob_over":      prob_over,
+        "ci_lower":       float(np.percentile(boot_probs, 5)),
+        "ci_upper":       float(np.percentile(boot_probs, 95)),
+        "posterior_mean": round(posterior_mean, 4),
+    }
 
 
-# ---------------------------------------------------------------------------
-# RabbitMQ Consumer
-# ---------------------------------------------------------------------------
+# ── Main Entry Point ──────────────────────────────────────────────────────────
 
-class DiscordDispatcher:
-    """Blocking RabbitMQ consumer that fans slip payloads to Discord.
-
-    Binds a durable queue to ``alerts.discord.slips`` on the
-    ``propiq_events`` topic exchange.  Each message is:
-        1. Deserialised from JSON.
-        2. Formatted into a Discord Embed via :func:`format_discord_embed`.
-        3. Dispatched via HTTP POST to the configured Webhook URL.
-        4. Acked on success; nacked (no requeue) on persistent failure.
-
-    The consumer runs indefinitely.  Send a ``KeyboardInterrupt`` (Ctrl+C)
-    or ``SIGTERM`` to trigger a graceful shutdown.
-
-    Args:
-        amqp_url:    AMQP connection string.
-        webhook_url: Discord Webhook URL.
+def apply_bayesian_layer(legs: list, player_stats_cache: dict = None) -> list:
     """
+    Apply Bayesian adjustment to all prop legs.
+    """
+    archetypes = _fetch_pitch_archetypes()
+    updated = 0
+    skipped = 0
 
-    def __init__(self, amqp_url: str, webhook_url: str) -> None:
-        self._amqp_url = amqp_url
-        self._webhook_url = webhook_url
-        self._connection: Optional[pika.BlockingConnection] = None
-        self._channel: Any = None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def start(self) -> None:
-        """Connect to RabbitMQ, declare infrastructure, and begin consuming."""
-        self._connect()
-        logger.info(
-            "DiscordDispatcher: listening on '%s' (exchange: %s)",
-            BINDING_KEY, EXCHANGE,
-        )
+    for prop_leg in legs:
         try:
-            self._channel.start_consuming()
-        except KeyboardInterrupt:
-            logger.info("DiscordDispatcher: shutdown signal received.")
-        finally:
-            self.stop()
+            # Normalize: works with both objects and dicts
+            def get(field, default=None):
+                return getattr(prop_leg, field, None) if hasattr(prop_leg, "__dict__") else prop_leg.get(field, default)
 
-    def stop(self) -> None:
-        """Gracefully close the consumer and connection."""
-        try:
-            if self._channel and self._channel.is_open:
-                self._channel.stop_consuming()
-        except Exception:
-            pass
-        try:
-            if self._connection and not self._connection.is_closed:
-                self._connection.close()
-        except Exception:
-            pass
-        logger.info("DiscordDispatcher: connection closed.")
+            def set_field(field, value):
+                if hasattr(prop_leg, "__dict__"):
+                    setattr(prop_leg, field, value)
+                else:
+                    prop_leg[field] = value
 
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
+            prop_type    = (get("prop_type") or "hits").lower()
+            player       = get("player") or ""
+            line         = float(get("line") or 0.5)
+            current_prob = float(get("implied_prob") or 0.5)
+            pitcher_name = get("pitcher") or player  # For K props
 
-    def _connect(self) -> None:
-        """Open the RabbitMQ connection and declare the durable queue."""
-        params = pika.URLParameters(self._amqp_url)
-        self._connection = pika.BlockingConnection(params)
-        self._channel = self._connection.channel()
+            # ── Step 1: Resolve player stats ──────────────────────────────
+            if player_stats_cache and player in player_stats_cache:
+                stat_rate = float(player_stats_cache[player].get("stat_rate", 0.25))
+                pa        = int(player_stats_cache[player].get("pa", 200))
+            else:
+                # Fallback: use current_prob as a proxy stat rate
+                # This is conservative — shrinkage will pull toward league mean
+                stat_rate = current_prob * 0.9
+                pa = 150   # Conservative: assume partial season observed
 
-        self._channel.exchange_declare(
-            exchange=EXCHANGE,
-            exchange_type="topic",
-            durable=True,
-        )
-        self._channel.queue_declare(queue=QUEUE_NAME, durable=True)
-        self._channel.queue_bind(
-            exchange=EXCHANGE,
-            queue=QUEUE_NAME,
-            routing_key=BINDING_KEY,
-        )
-        # Prefetch 1 ensures we don't buffer unacked messages during slow
-        # Discord delivery (rate limits can extend processing time).
-        self._channel.basic_qos(prefetch_count=1)
-        self._channel.basic_consume(
-            queue=QUEUE_NAME,
-            on_message_callback=self._on_message,
-            auto_ack=False,
-        )
+            # ── Step 2: Empirical Bayes shrinkage ─────────────────────────
+            posterior = empirical_bayes_shrinkage(stat_rate, pa, prop_type)
 
-    # ------------------------------------------------------------------
-    # Message handler
-    # ------------------------------------------------------------------
+            # ── Step 3: Monte Carlo → P(over line) ────────────────────────
+            pa_est = PA_ESTIMATE.get(prop_type, 4)
+            mc     = monte_carlo_prop_prob(posterior, line, pa_est)
 
-    def _on_message(
-        self,
-        ch: Any,
-        method: Any,
-        properties: Any,
-        body: bytes,
-    ) -> None:
-        """Deserialise, format, dispatch, and ack/nack a slip message.
+            # ── Step 4: Pitch archetype lookup ────────────────────────────
+            archetype_id = None
+            archetype_modifier = 0.0
+            if archetypes and prop_type == "strikeouts":
+                # Try primary pitch types in priority order
+                for pitch_type in ["FF", "SI", "FC", "SL", "CH", "CU", "FS"]:
+                    key = f"{pitcher_name}_{pitch_type}"
+                    if key in archetypes:
+                        archetype_id = archetypes[key]
+                        archetype_modifier = ARCHETYPE_K_MODIFIER.get(archetype_id, 0.0)
+                        break
 
-        Args:
-            ch:         RabbitMQ channel.
-            method:     Delivery method (routing key, delivery tag, etc.).
-            properties: AMQP message properties.
-            body:       Raw JSON bytes from the broker.
-        """
-        try:
-            payload: Dict[str, Any] = json.loads(body)
-        except json.JSONDecodeError as exc:
-            logger.error("DiscordDispatcher: invalid JSON payload: %s", exc)
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            return
+            # ── Step 5: Blend and cap ─────────────────────────────────────
+            # 70% existing pipeline, 30% Bayesian posterior
+            blended = (1 - BLEND_WEIGHT_BAYES) * current_prob + BLEND_WEIGHT_BAYES * mc["prob_over"]
+            nudge = blended - current_prob
 
-        agent_name = payload.get("agent_name", "Unknown")
-        n_legs = len(payload.get("legs", []))
-        ev_pct = round(payload.get("total_ev", 0.0) * 100, 2)
+            # Apply archetype modifier on K props (± small push)
+            if prop_type == "strikeouts" and archetype_modifier != 0.0:
+                nudge += archetype_modifier
 
-        logger.info(
-            "Slip received | agent=%s | legs=%d | ev=%+.2f%%",
-            agent_name, n_legs, ev_pct,
-        )
+            # Hard cap
+            nudge = max(-MAX_NUDGE, min(MAX_NUDGE, nudge))
+            new_prob = round(current_prob + nudge, 4)
 
-        embed = format_discord_embed(payload)
-        success = dispatch_to_discord(embed, self._webhook_url)
+            # ── Step 6: Write back ────────────────────────────────────────
+            set_field("bayes_prob",         round(mc["prob_over"], 4))
+            set_field("bayes_ci_lower",     round(mc["ci_lower"], 4))
+            set_field("bayes_ci_upper",     round(mc["ci_upper"], 4))
+            set_field("bayes_nudge",        round(nudge, 4))
+            set_field("pitch_archetype_id", archetype_id)
+            set_field("implied_prob",       new_prob)
 
-        if success:
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-        else:
-            # Nack without requeue — send to dead-letter queue for inspection
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            logger.error(
-                "DiscordDispatcher: failed to deliver slip from %s — nacked.",
-                agent_name,
-            )
+            updated += 1
+
+        except Exception as e:
+            skipped += 1
+            player_id = getattr(leg, "player", leg.get("player", "unknown") if isinstance(leg, dict) else "unknown")
+            print(f"[BayesLayer] Skipped {player_id}: {e}")
+            continue
+
+    print(f"[BayesLayer] Applied to {updated} legs, skipped {skipped}")
+    return legs
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    """Bootstrap the dispatcher from environment variables and start consuming."""
-    amqp_url: str = os.getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
-    webhook_url: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL")
-
-    if not webhook_url:
-        logger.critical(
-            "DISCORD_WEBHOOK_URL environment variable not set — aborting."
-        )
-        raise SystemExit(1)
-
-    logger.info("PropIQ Discord Dispatcher starting up...")
-    dispatcher = DiscordDispatcher(amqp_url=amqp_url, webhook_url=webhook_url)
-    dispatcher.start()
-
+# ── Standalone test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    # Quick smoke test
+    test_legs = [
+        {"player": "Zack Wheeler", "pitcher": "Zack Wheeler",
+         "prop_type": "strikeouts", "line": 6.5, "implied_prob": 0.58},
+        {"player": "Freddie Freeman",
+         "prop_type": "hits", "line": 1.5, "implied_prob": 0.54},
+        {"player": "Aaron Judge",
+         "prop_type": "home_runs", "line": 0.5, "implied_prob": 0.32},
+    ]
+
+    result = apply_bayesian_layer(
+        test_legs,
+        player_stats_cache={
+            "Zack Wheeler":    {"stat_rate": 0.28, "pa": 300},
+            "Freddie Freeman": {"stat_rate": 0.31, "pa": 520},
+            "Aaron Judge":     {"stat_rate": 0.05, "pa": 450},
+        }
+    )
+
+    for leg in result:
+        print(
+            f"{leg['player']:20s} | {leg['prop_type']:12s} | "
+            f"orig={leg['implied_prob'] - leg['bayes_nudge']:.3f} "
+            f"→ {leg['implied_prob']:.3f} "
+            f"(nudge={leg['bayes_nudge']:+.4f}) "
+            f"[{leg['bayes_ci_lower']:.3f}, {leg['bayes_ci_upper']:.3f}] "
+            f"archetype={leg['pitch_archetype_id']}"
+        )

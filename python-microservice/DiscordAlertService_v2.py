@@ -259,8 +259,7 @@ class DiscordAlertService:
             "embeds": [{
                 "title": f"🐶 {agent_name} — {leg_count}-Leg Underdog Slip",
                 "description": (
-                    "Sharp consensus confirms mispricing vs Underdog lines.
-"
+                    "Sharp consensus confirms mispricing vs Underdog lines. "
                     "**Open Underdog Fantasy to enter this slip.**"
                 ),
                 "color": _COLOUR_BLUE,

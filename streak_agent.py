@@ -43,7 +43,6 @@ Discord alerts:
   • Streak milestones  : 5/11 and 8/11 celebration pings
 
 Standalone run:
-  python streak_agent.py [--date 2026-04-01] [--dry-run] [--entry 1|5|10]
 """
 
 from __future__ import annotations
@@ -249,6 +248,7 @@ def _is_game_prop(prop_type: str, line: float) -> bool:
 # Confidence scoring
 # ---------------------------------------------------------------------------
 
+
 def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
     """
     Single-leg Streaks confidence  (1.0 – 10.0).
@@ -268,6 +268,27 @@ def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
     signal_bonus = min(signal_count * 0.1, 1.0)
     return round(min(10.0, max(1.0, prob_score + ev_bonus + signal_bonus)), 1)
 
+# ---------------------------------------------------------------------------
+# helper functions for underdog fetch
+# ---------------------------------------------------------------------------
+
+def _fetch_underdog_response():
+    try:
+        resp = requests.get(_UD_LINES_URL, headers=_HEADERS, timeout=25)
+    except requests.RequestException:
+        return None, None
+    if resp.status_code != 200:
+        return None, resp.status_code
+    try:
+        return resp.json(), None
+    except ValueError:
+        return None, None
+
+def _fallback_props_with_empty_team():
+    base = fetch_underdog_props()
+    for p in base:
+        p.setdefault("team", "")
+    return base
 
 # ---------------------------------------------------------------------------
 # Underdog prop fetch with team enrichment
@@ -284,22 +305,17 @@ def fetch_underdog_props_with_teams() -> list[dict]:
     Falls back to live_dispatcher.fetch_underdog_props() if team is unavailable,
     filling team with "" (team-diversity check skipped gracefully).
     """
+    data, status = _fetch_underdog_response()
+    if data is None:
+        logger.warning("[Streak] Underdog HTTP %s — trying dispatcher fallback", status)
+        if _DISPATCHER_AVAILABLE:
+            return _fallback_props_with_empty_team()
+        return []
+
+    players_map: dict[str, dict]     = {p["id"]: p for p in data.get("players", [])}
+    appearances_map: dict[str, dict] = {a["id"]: a for a in data.get("appearances", [])}
+
     try:
-        resp = requests.get(_UD_LINES_URL, headers=_HEADERS, timeout=25)
-        if resp.status_code != 200:
-            logger.warning("[Streak] Underdog HTTP %d — trying dispatcher fallback", resp.status_code)
-            if _DISPATCHER_AVAILABLE:
-                base = fetch_underdog_props()
-                for p in base:
-                    p.setdefault("team", "")
-                return base
-            return []
-
-        data = resp.json()
-
-        players_map: dict[str, dict]     = {p["id"]: p for p in data.get("players", [])}
-        appearances_map: dict[str, dict] = {a["id"]: a for a in data.get("appearances", [])}
-
         # Build team_id → abbreviation from any 'teams' or 'match_teams' array
         teams_map: dict[str, str] = {}
         for t in data.get("teams", []):
@@ -394,13 +410,13 @@ def _count_signals(prop_type: str, side: str, implied_prob: float) -> int:
     count = 0
     # Build a minimal SelectionResult-like object for filter evaluation
     class _SR:  # noqa: N801
-        pass
+        def __init__(self, side: str, prop_type: str, implied_prob: float):
+            self.side = side
+            self.prop_type = prop_type
+            self.implied_prob = implied_prob
+            self.fantasy_pts_edge = 0.0
 
-    sr = _SR()
-    sr.side         = side
-    sr.prop_type    = prop_type
-    sr.implied_prob = implied_prob
-    sr.fantasy_pts_edge = 0.0
+    sr = _SR(side, prop_type, implied_prob)
 
     for agent in AGENT_CONFIGS:
         try:
@@ -452,7 +468,7 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
 
     candidates: list[StreakCandidate] = []
 
-    for (player_lower, prop_type), info in groups.items():
+    for (_, prop_type), info in groups.items():
         line     = info["line"]
         team     = info["team"]
         position = info["position"]
@@ -942,11 +958,11 @@ def post_settlement_alert(
     _send_webhook({"embeds": [embed]})
 
 
-def post_milestone_alert(pick_number: int, wins_in_row: int, entry_amount: int) -> None:
+def post_milestone_alert(_pick_number: int, wins_in_row: int, entry_amount: int) -> None:
     """Post a milestone celebration at picks 5/11 and 8/11."""
     if wins_in_row not in (5, 8):
         return
-    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
+    _, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
     remaining = STREAK_TOTAL_WINS - wins_in_row
 
     milestone_msg = {
@@ -964,23 +980,20 @@ def post_milestone_alert(pick_number: int, wins_in_row: int, entry_amount: int) 
     _send_webhook({"embeds": [embed]})
 
 
-# ---------------------------------------------------------------------------
-# Settlement
-# ---------------------------------------------------------------------------
-
 _PROP_TO_ESPN_STAT: dict[str, str] = {
-    "hits":           "hits",
-    "home_runs":      "homeRuns",
-    "rbis":           "RBIs",
-    "runs":           "runs",
-    "total_bases":    "totalBases",
-    "stolen_bases":   "stolenBases",
-    "hits_runs_rbis": "hits",        # composite: H+R+RBI computed manually
-    "strikeouts":     "strikeouts",  # pitcher Ks
-    "earned_runs":    "earnedRuns",
-    "walks":          "baseOnBalls",
+    "hits":            "hits",
+    "home_runs":       "homeRuns",
+    "rbis":            "RBIs",
+    "runs":            "runs",
+    "total_bases":     "totalBases",
+    "stolen_bases":    "stolenBases",
+    "hits_runs_rbis":  "hits",          # composite: H+R+RBI computed manually
+    "strikeouts":      "strikeouts",    # pitcher Ks
+    "earned_runs":     "earnedRuns",
+    "walks":           "baseOnBalls",
+    "fantasy_hitter":  "",              # not in ESPN boxscore
+    "fantasy_pitcher": "",              # not in ESPN boxscore
 }
-
 
 def fetch_espn_boxscore_stats(game_date: str) -> dict[str, dict]:
     """
@@ -1245,8 +1258,8 @@ def run_streak_pick(
     Fetches props → scores → selects best pick → persists → alerts Discord.
     Returns the pick dict, or None if no qualifying pick exists today.
     """
-    date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    logger.info("[Streak] === StreakAgent run for %s ===", date)
+    picked_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    logger.info("[Streak] === StreakAgent run for %s ===", picked_date)
 
     # Ensure DB tables exist
     ensure_streak_tables()
@@ -1262,8 +1275,8 @@ def run_streak_pick(
     pick_number = wins_in_row + 1    # next pick needed
 
     # Already picked today?
-    if already_picked_today(streak_id, date):
-        logger.info("[Streak] Already picked today (%s) — skipping.", date)
+    if already_picked_today(streak_id, picked_date):
+        logger.info("[Streak] Already picked today (%s) — skipping.", picked_date)
         return None
 
     # Check for streak completion (shouldn't happen here, but guard)
