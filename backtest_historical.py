@@ -179,7 +179,6 @@ class RollingWindow:
     """Maintains per-player rolling stat windows."""
 
     def __init__(self) -> None:
-        # {player_id: {prop_type: deque[float]}}
         self._data: dict[int, dict[str, deque]] = defaultdict(
             lambda: defaultdict(lambda: deque(maxlen=L30))
         )

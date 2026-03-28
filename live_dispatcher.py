@@ -1890,10 +1890,8 @@ class LiveDispatcher:
                     p_over = 0.50
             return p_over if side == "Over" else (1.0 - p_over)
 
-        # ── Group props by (player, prop_type) ────────────────────────────
         from collections import defaultdict
         groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
-        # dict[(player_lower, prop_type)][platform] = {line, entry_type, position}
 
         for raw in raw_props:
             pname    = raw.get("player_name", "")
@@ -1917,7 +1915,6 @@ class LiveDispatcher:
                 groups[key][platform] = {
                     "line": line_val, "entry_type": etype,
                     "player_name": pname, "position": position,
-                    # Phase 27: preserve enrichment fields through grouping
                     "de_hit_pct":   float(raw.get("de_hit_pct",  0.0) or 0.0),
                     "de_hr_pct":    float(raw.get("de_hr_pct",   0.0) or 0.0),
                     "de_k_pct":     float(raw.get("de_k_pct",    0.0) or 0.0),
