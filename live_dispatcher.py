@@ -763,6 +763,8 @@ _PP_MLB_STAT_TYPES = {
     "earned runs allowed", "earned runs",  # keep old form as fallback
     "hits allowed", "walks allowed", "pitching outs",
     "walks",
+    "singles",
+    "hitter strikeouts",
 }
 
 # Underdog stat -> our internal prop_type
@@ -880,11 +882,10 @@ def _fetch_prizepicks_via_apify() -> list[dict]:
                 continue
             if "inning" in stat_key:
                 continue
-            # Skip alt lines and promo (goblin / demon) lines — main board only
-            board = str(item.get("board_type", "") or "").lower().strip()
-            if board and board != "standard":
+            # Skip goblin/demon alt lines — only odds_tier=standard
+            if item.get("odds_tier", "standard") != "standard":
                 continue
-            if item.get("is_promo", False):
+            if item.get("adjusted_odds", False):
                 continue
 
             line_val = item.get("line")
@@ -960,11 +961,10 @@ def fetch_prizepicks_props() -> list[dict]:
                 continue
             if "inning" in stat_raw.lower():
                 continue
-            # Skip alt lines and promo (goblin / demon) lines — main board only
-            board = str(attrs.get("board_type", "") or "").lower().strip()
-            if board and board != "standard":
+            # Skip goblin/demon alt lines — only odds_tier=standard
+            if attrs.get("odds_tier", "standard") != "standard":
                 continue
-            if attrs.get("is_promo", False):
+            if attrs.get("adjusted_odds", False):
                 continue
 
             line_val = attrs.get("line_score")
