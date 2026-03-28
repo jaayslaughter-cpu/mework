@@ -1768,7 +1768,7 @@ class LiveDispatcher:
                     )[:400],
                 )
             if _risk_manager and not self.dry_run:
-                _agent_unit = _AGENT_UNITS_CACHE.get(agent_name, 5.0)
+                _agent_unit = self._agent_units_cache.get(agent_name, 5.0)
                 _risk_manager.record_stake(agent_name, _agent_unit)
             sent += 1
 

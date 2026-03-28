@@ -43,14 +43,19 @@ from typing import Any
 
 logger = logging.getLogger("propiq.temperature_calibration")
 
-# ── SQL DB access (same runtime as agent tools) ───────────────────────────────
-# Railway injects DATABASE_URL; the agent SQL helper abstracts the connection.
-try:
-    from agent_db import get_connection as _get_conn
-    _DB_AVAILABLE = True
-except ImportError:
-    _DB_AVAILABLE = False
-    logger.warning("[TempCal] agent_db not available — DB operations will be skipped.")
+# ── SQL DB access — Postgres via psycopg2 (same backend as agent_unit_sizing) ─
+import os as _os
+import psycopg2 as _psycopg2
+
+_DATABASE_URL = _os.environ.get("DATABASE_URL", "")
+
+def _get_conn():
+    """Open a Postgres connection to the Railway DATABASE_URL."""
+    return _psycopg2.connect(_DATABASE_URL, sslmode="require")
+
+_DB_AVAILABLE = bool(_DATABASE_URL)
+if not _DB_AVAILABLE:
+    logger.warning("[TempCal] DATABASE_URL not set — DB operations will be skipped.")
 
 # ── Temperature scaling math (from temperature_scaling.py) ───────────────────
 try:
@@ -87,14 +92,14 @@ def _ensure_schema() -> None:
     # Create calibration data table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS agent_calibration_data (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            id          SERIAL PRIMARY KEY,
             agent_name  TEXT    NOT NULL,
             parlay_id   TEXT,
             date        TEXT    NOT NULL,
             prop_type   TEXT,
             raw_prob    REAL    NOT NULL,
             outcome     INTEGER NOT NULL,
-            created_at  TEXT    DEFAULT (datetime('now'))
+            created_at  TEXT    DEFAULT (now()::text)
         )
     """)
 
@@ -448,7 +453,7 @@ def get_temperature(agent_name: str) -> float:
         conn = _get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT temperature FROM agent_unit_sizing WHERE agent_name = ?",
+            "SELECT temperature FROM agent_unit_sizing WHERE agent_name = %s",
             (agent_name,),
         )
         row = cur.fetchone()

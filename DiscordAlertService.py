@@ -3,22 +3,23 @@ DiscordAlertService.py
 ======================
 Outbound-only Discord webhook integration for PropIQ Analytics Engine.
 
-Reads DISCORD_WEBHOOK_URL from environment.  All methods are safe to call
-even when the env var is missing or the webhook is unreachable — failures
-are logged as warnings and silently swallowed so they never crash the engine.
+Reads DISCORD_WEBHOOK_URL from environment (with hardcoded fallback).
+All methods are safe to call even when the webhook is unreachable --
+failures are logged as warnings and silently swallowed so they never
+crash the engine.
 
 Public API
 ----------
-  send_startup_ping()              → fires on application boot
-  send_bet_alert(bet: dict)        → called by AgentTasklet for every queued bet
-  send_daily_recap(results, profit, date_str)  → called by GradingTasklet
+  send_startup_ping()
+  send_bet_alert(bet: dict)
+  send_daily_recap(results, profit, date_str)
+  send_parlay_alert(parlay: dict)
 
 Usage
 -----
-  from DiscordAlertService import discord_alert
+  from DiscordAlertService import discord_alert, MAX_STAKE_USD
   discord_alert.send_startup_ping()
-  discord_alert.send_bet_alert(bet_dict)
-  discord_alert.send_daily_recap(results, total_profit, "2026-03-21")
+  discord_alert.send_parlay_alert(parlay_dict)
 """
 
 from __future__ import annotations
@@ -32,12 +33,21 @@ import requests
 
 logger = logging.getLogger("propiq.discord")
 
+# ── Exported constant (imported by live_dispatcher.py) ────────────────────────
+MAX_STAKE_USD: float = 20.0   # Tier 5 ceiling ($20/unit)
+
 # ── Colour palette ────────────────────────────────────────────────────────────
 _COLOUR_GREEN  = 0x2ECC71   # win / online
 _COLOUR_RED    = 0xE74C3C   # loss / warning
 _COLOUR_BLUE   = 0x3498DB   # bet alert
 _COLOUR_GOLD   = 0xF1C40F   # daily recap
 _COLOUR_GREY   = 0x95A5A6   # push / neutral
+
+# ── Fallback webhook (used when DISCORD_WEBHOOK_URL env var is absent) ────────
+_FALLBACK_WEBHOOK = (
+    "https://discordapp.com/api/webhooks/1484795164961800374/"
+    "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
+)
 
 # ── Platform emoji map ────────────────────────────────────────────────────────
 _PLATFORM_EMOJI = {
@@ -46,21 +56,21 @@ _PLATFORM_EMOJI = {
     "sleeper":    "😴",
 }
 
+# ── Tier badge map ────────────────────────────────────────────────────────────
+_TIER_BADGE = {1: "🌱", 2: "🌿", 3: "⭐", 4: "🔥", 5: "👑"}
+
 
 class DiscordAlertService:
     """Thin wrapper around a single Discord incoming webhook URL."""
 
     def __init__(self) -> None:
-        self._url: str = os.getenv("DISCORD_WEBHOOK_URL", "")
+        self._url: str = os.getenv("DISCORD_WEBHOOK_URL", _FALLBACK_WEBHOOK)
 
     # ── Internal helper ───────────────────────────────────────────────────────
 
     def _post(self, payload: dict[str, Any]) -> bool:
         """POST payload to the webhook.  Returns True on success."""
-        url = os.getenv("DISCORD_WEBHOOK_URL", self._url)
-        if not url:
-            logger.warning("[Discord] DISCORD_WEBHOOK_URL not set — skipping alert.")
-            return False
+        url = os.getenv("DISCORD_WEBHOOK_URL", self._url) or _FALLBACK_WEBHOOK
         try:
             resp = requests.post(
                 url,
@@ -80,16 +90,13 @@ class DiscordAlertService:
     # ── Public methods ────────────────────────────────────────────────────────
 
     def send_startup_ping(self) -> None:
-        """
-        Fire a test message the absolute second the application is ready.
-        Called from orchestrator.py lifespan startup.
-        """
+        """Fire a test message the absolute second the application is ready."""
         ok = self._post({
             "embeds": [{
                 "title": "✅ PropIQ Engine Online: Webhook Connected!",
                 "description": (
                     "All tasklets are scheduled and running.\n"
-                    "Redis / Kafka degradation mode active until services are available."
+                    "17-Agent Army armed and ready for 11 AM dispatch."
                 ),
                 "color": _COLOUR_GREEN,
                 "footer": {"text": "PropIQ Analytics Engine"},
@@ -100,10 +107,7 @@ class DiscordAlertService:
             logger.info("[Discord] Startup ping sent successfully.")
 
     def send_bet_alert(self, bet: dict) -> None:
-        """
-        Send a formatted embed for a single queued bet.
-        Called by AgentTasklet immediately after each bet is pushed to the queue.
-        """
+        """Send a formatted embed for a single queued bet."""
         player    = bet.get("player", "Unknown")
         prop_type = bet.get("prop_type", "")
         line      = bet.get("line", "")
@@ -117,18 +121,11 @@ class DiscordAlertService:
         odds_raw  = bet.get("odds_american", -110)
         model_prob = bet.get("model_prob", 50.0)
 
-        # Odds display
         odds_str = f"+{odds_raw}" if isinstance(odds_raw, int) and odds_raw > 0 else str(odds_raw)
-
-        # Platform display
         plat_lower  = str(platform).lower()
         plat_emoji  = _PLATFORM_EMOJI.get(plat_lower, "🎯")
         plat_label  = platform.capitalize()
 
-        # Side colour
-        colour = _COLOUR_BLUE
-
-        # Confidence bar  ████░░░░░░  (10 blocks)
         filled   = round(conf)
         conf_bar = "█" * filled + "░" * (10 - filled)
 
@@ -141,7 +138,7 @@ class DiscordAlertService:
         self._post({
             "embeds": [{
                 "title": f"{plat_emoji} OPEN APP: {plat_label}",
-                "color": colour,
+                "color": _COLOUR_BLUE,
                 "fields": [
                     {"name": "🧑 Player",        "value": player,                                "inline": True},
                     {"name": "📊 Prop",           "value": f"{prop_type} {side} {line}",         "inline": True},
@@ -165,10 +162,7 @@ class DiscordAlertService:
         total_profit: float,
         date_str: str,
     ) -> None:
-        """
-        Send end-of-day settlement recap after GradingTasklet finishes.
-        One embed per day with a line-by-line breakdown.
-        """
+        """Send end-of-day settlement recap."""
         wins   = sum(1 for r in results if r.get("status") == "WIN")
         losses = sum(1 for r in results if r.get("status") == "LOSS")
         pushes = sum(1 for r in results if r.get("status") == "PUSH")
@@ -212,62 +206,175 @@ class DiscordAlertService:
     def send_parlay_alert(self, parlay: dict) -> None:
         """
         Send a formatted Discord embed for a DFS parlay slip.
-        Called by AgentTasklet when an agent builds a valid slip.
+        Called by live_dispatcher.py for each agent parlay.
 
-        Embed shows:
-          - Agent name as title
-          - Each leg: Player | Stat | Over/Under | Underdog Line | Leg EV%
-          - Combined EV% across all legs
+        Expected parlay dict keys (from live_dispatcher.py build_parlay()):
+            agent_name      str   — e.g. "EVHunter"
+            legs            list  — list of leg dicts
+            confidence      float — 0–10 score
+            ev_pct          float — average EV% across legs
+            stake           float — dollar stake from agent tier ($5–$20)
+            tier            int   — agent tier 1–5 (optional, derived from stake)
+            platform        str   — "prizepicks" or "underdog"
+            season_stats    dict  — {wins, losses, pushes, roi} (optional)
+
+        Each leg dict keys:
+            player_name     str
+            prop_type       str
+            side            str   — "Over" or "Under"
+            line            float
+            ev_pct          float
+            model_prob      float (0–1)
+            platform        str
         """
-        agent_name   = parlay.get("agent", "The Correlated Parlay Agent")
-        legs         = parlay.get("legs", [])
-        combined_ev  = parlay.get("combined_ev_pct", 0.0)
-        leg_count    = parlay.get("leg_count", len(legs))
+        # --- Parlay-level fields ---
+        agent_name  = parlay.get("agent_name") or parlay.get("agent", "Unknown Agent")
+        legs        = parlay.get("legs", [])
+        confidence  = parlay.get("confidence", 0.0)
+        ev_pct      = parlay.get("ev_pct") or parlay.get("combined_ev_pct", 0.0)
+        stake       = parlay.get("stake", parlay.get("unit_dollars", 5.0))
+        leg_count   = len(legs)
+
+        if not legs:
+            return
+
+        # Derive tier badge from stake amount
+        stake_to_tier = {5.0: 1, 8.0: 2, 12.0: 3, 16.0: 4, 20.0: 5}
+        tier = parlay.get("tier", stake_to_tier.get(float(stake), 1))
+        tier_badge = _TIER_BADGE.get(tier, "🌱")
+
+        # Confidence bar  ████░░░░░░  (10 blocks)
+        filled   = max(0, min(10, round(confidence)))
+        conf_bar = "█" * filled + "░" * (10 - filled)
+
+        # Platform
+        platform   = parlay.get("platform", "underdog")
+        plat_lower = str(platform).lower()
+        plat_emoji = _PLATFORM_EMOJI.get(plat_lower, "🎯")
+        plat_label = "PrizePicks" if "prize" in plat_lower else "Underdog Fantasy"
+
+        # --- Season record footer ---
+        season = parlay.get("season_stats", {})
+        s_wins   = season.get("wins", 0)
+        s_losses = season.get("losses", 0)
+        s_pushes = season.get("pushes", 0)
+        s_roi    = season.get("roi_pct", season.get("roi", 0.0))
+        season_str = f"{agent_name} Season: {s_wins}W-{s_losses}L-{s_pushes}P | ROI {s_roi:+.1f}%"
+
+        # --- Leg fields ---
+        fields: list[dict] = []
+        for i, leg in enumerate(legs, 1):
+            player    = (leg.get("player_name") or leg.get("player", "?")).title()
+            prop_type = leg.get("prop_type", "?").replace("_", " ").title()
+            side      = leg.get("side", "?")
+            line      = leg.get("line", "?")
+            leg_ev    = leg.get("ev_pct", 0.0)
+            model_p   = leg.get("model_prob", 0.0)
+            # model_prob may be 0-1 or 0-100
+            if isinstance(model_p, float) and model_p <= 1.0:
+                model_p *= 100.0
+            leg_plat  = leg.get("platform", platform)
+            lp_lower  = str(leg_plat).lower()
+            lp_emoji  = _PLATFORM_EMOJI.get(lp_lower, "🎯")
+
+            fields.append({
+                "name": f"Leg {i} — {player}",
+                "value": (
+                    f"**{prop_type} {side} {line}**  {lp_emoji}\n"
+                    f"Model: `{model_p:.1f}%`  |  EV: `+{leg_ev:.1f}%`"
+                ),
+                "inline": False,
+            })
+
+        fields.append({
+            "name": f"📊 Summary — {leg_count}-Leg Slip",
+            "value": (
+                f"Avg EV: **+{ev_pct:.1f}%**  |  "
+                f"Confidence: {conf_bar} {confidence:.1f}/10  |  "
+                f"Stake: **${stake:.0f}**"
+            ),
+            "inline": False,
+        })
+
+        # Colour by confidence
+        if confidence >= 8.5:
+            color = _COLOUR_GOLD
+        elif confidence >= 7.0:
+            color = _COLOUR_GREEN
+        else:
+            color = _COLOUR_BLUE
+
+        self._post({
+            "embeds": [{
+                "title": f"{tier_badge} {agent_name} — {leg_count}-Leg {plat_label} Slip",
+                "description": (
+                    f"{plat_emoji} **Open {plat_label} to enter this slip**\n"
+                    f"Stake: **${stake:.0f}** | EV: **+{ev_pct:.1f}%**"
+                ),
+                "color": color,
+                "fields": fields,
+                "footer": {"text": season_str},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }]
+        })
+        logger.info("[Discord] Parlay alert sent — %s | %d legs | +%.1f%% EV | $%.0f stake | %s T%d",
+                    agent_name, leg_count, ev_pct, stake, tier_badge, tier)
+
+    def send_parlay_alert_streak(self, parlay: dict) -> None:
+        """
+        Streak-specific Discord embed with Underdog Streaks branding.
+        Same field contract as send_parlay_alert() above.
+        """
+        agent_name = parlay.get("agent_name", "StreakAgent")
+        legs       = parlay.get("legs", [])
+        confidence = parlay.get("confidence", 0.0)
+        ev_pct     = parlay.get("ev_pct", 0.0)
+        stake      = parlay.get("stake", 5.0)
+        leg_count  = len(legs)
 
         if not legs:
             return
 
         fields: list[dict] = []
         for i, leg in enumerate(legs, 1):
-            player    = leg.get("player", "?")
-            prop_type = leg.get("prop_type", "?")
+            player    = (leg.get("player_name") or leg.get("player", "?")).title()
+            prop_type = leg.get("prop_type", "?").replace("_", " ").title()
             side      = leg.get("side", "?")
             line      = leg.get("line", "?")
-            ud_raw    = leg.get("underdog_line", leg.get("odds_american", -120))
-            ud_str    = (f"+{ud_raw}" if isinstance(ud_raw, int) and ud_raw > 0
-                         else str(ud_raw))
-            leg_ev    = leg.get("ev_pct", 0.0)
+            streak_n  = leg.get("streak_length", leg.get("streak", "?"))
             fields.append({
                 "name": f"Leg {i} — {player}",
                 "value": (
-                    f"**{prop_type} {side} {line}**  |  "
-                    f"Underdog: `{ud_str}`  |  "
-                    f"Leg EV: `+{leg_ev:.1f}%`"
+                    f"**{prop_type} {side} {line}**\n"
+                    f"Streak: `{streak_n} consecutive`"
                 ),
                 "inline": False,
             })
 
         fields.append({
-            "name": f"🎯 Combined EV — {leg_count}-Leg Slip",
-            "value": f"**+{combined_ev:.1f}%** total edge vs sharp consensus",
+            "name": f"🔥 Streak Summary — {leg_count}-Leg",
+            "value": f"EV: **+{ev_pct:.1f}%** | Confidence: **{confidence:.1f}/10** | Stake: **${stake:.0f}**",
             "inline": False,
         })
 
+        season = parlay.get("season_stats", {})
+        s_wins   = season.get("wins", 0)
+        s_losses = season.get("losses", 0)
+        s_roi    = season.get("roi_pct", season.get("roi", 0.0))
+        footer_str = f"StreakAgent Season: {s_wins}W-{s_losses}L | ROI {s_roi:+.1f}%"
+
         self._post({
             "embeds": [{
-                "title": f"🐶 {agent_name} — {leg_count}-Leg Underdog Slip",
-                "description": (
-                    "Sharp consensus confirms mispricing vs Underdog lines.\n"
-                    "**Open Underdog Fantasy to enter this slip.**"
-                ),
-                "color": _COLOUR_BLUE,
+                "title": f"🔥 StreakAgent — {leg_count}-Leg Underdog Streak",
+                "description": "🐶 **Open Underdog Fantasy → Streaks tab**",
+                "color": _COLOUR_GOLD,
                 "fields": fields,
-                "footer": {"text": "PropIQ Analytics Engine • Underdog Fantasy"},
+                "footer": {"text": footer_str},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }]
         })
-        logger.info("[Discord] Parlay alert sent — %d legs, combined EV +%.1f%%",
-                    leg_count, combined_ev)
+        logger.info("[Discord] Streak alert sent — %d legs, +%.1f%% EV, $%.0f stake",
+                    leg_count, ev_pct, stake)
 
 
 # Module-level singleton — import this everywhere
