@@ -74,6 +74,9 @@ _last_hub_run: str | None = None
 _last_agent_run: str | None = None
 _last_leaderboard_run: str | None = None
 
+# Dispatch guard — prevents double/triple firing (Problem 7 & 15)
+_dispatch_running: bool = False
+
 
 async def _safe_run(name: str, fn, *args, **kwargs):
     """Run a tasklet with error logging."""
@@ -111,21 +114,44 @@ async def _run_subprocess(name: str, script_path: str) -> None:
 
 
 async def job_data_hub():
+    """Run DataHub in a thread so it never blocks the event loop."""
     global _last_hub_run
-    await _safe_run("DataHubTasklet", run_data_hub_tasklet)
-    _last_hub_run = datetime.utcnow().isoformat()
+    loop = asyncio.get_event_loop()
+    try:
+        logger.info("[orchestrator] Running DataHubTasklet...")
+        start = time.time()
+        await loop.run_in_executor(None, run_data_hub_tasklet)
+        elapsed = time.time() - start
+        logger.info("[orchestrator] DataHubTasklet done in %.2fs", elapsed)
+        _last_hub_run = datetime.utcnow().isoformat()
+    except Exception as exc:
+        logger.error("[orchestrator] DataHubTasklet FAILED: %s", exc, exc_info=True)
 
 
 async def job_agents():
+    """Run AgentTasklet in a thread so it runs independently of DataHub."""
     global _last_agent_run
-    await _safe_run("AgentTasklet", run_agent_tasklet)
-    _last_agent_run = datetime.utcnow().isoformat()
+    loop = asyncio.get_event_loop()
+    try:
+        logger.info("[orchestrator] Running AgentTasklet...")
+        start = time.time()
+        await loop.run_in_executor(None, run_agent_tasklet)
+        elapsed = time.time() - start
+        logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
+        _last_agent_run = datetime.utcnow().isoformat()
+    except Exception as exc:
+        logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
 
 async def job_leaderboard():
+    """Run LeaderboardTasklet in a thread."""
     global _last_leaderboard_run
-    await _safe_run("LeaderboardTasklet", run_leaderboard_tasklet)
-    _last_leaderboard_run = datetime.utcnow().isoformat()
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, run_leaderboard_tasklet)
+        _last_leaderboard_run = datetime.utcnow().isoformat()
+    except Exception as exc:
+        logger.error("[orchestrator] LeaderboardTasklet FAILED: %s", exc, exc_info=True)
 
 
 async def job_backtest():
@@ -159,27 +185,59 @@ async def job_monthly_leaderboard():
 
 async def _startup_dispatch_if_ready() -> None:
     """
-    On startup, poll until DataHub has PrizePicks data, then fire dispatch.
+    On startup, poll until DataHub is populated, then fire dispatch once.
     Ensures plays go out even when Railway redeploys after 8 AM PT.
-    Max wait: 3 minutes (6 × 30s attempts).
+    Reads in-memory cache directly — does not depend on Redis being up.
+    Max wait: 3 minutes (6 x 30s attempts).
     """
     await asyncio.sleep(30)  # give DataHub one full cycle to populate
     for attempt in range(1, 7):
-        hub = read_hub()
-        # Check context (ESPN games) — reliably populated; prizepicks may be [] on first cycle
-        if hub.get("context") or hub.get("dfs", {}).get("prizepicks"):
-            logger.info("[orchestrator] DataHub ready — firing startup dispatch (attempt %d)", attempt)
+        # Read hub directly from in-memory fallback (_mem_get) — avoids
+        # Redis dependency that caused "waiting" loops in prior deployments
+        try:
+            from tasklets import _mem_get  # noqa: PLC0415
+            hub = _mem_get("mlb_hub") or {}
+        except Exception:
+            hub = read_hub()
+
+        # DataHub is ready when game_states is populated (ESPN always works)
+        game_states = hub.get("game_states", {})
+        has_context = bool(hub.get("context"))
+        has_games = bool(game_states)
+        has_props = bool(hub.get("dfs", {}).get("prizepicks"))
+
+        if has_games or has_context or has_props:
+            logger.info(
+                "[orchestrator] DataHub ready — firing startup dispatch (attempt %d) "
+                "games=%d context=%s props=%s",
+                attempt, len(game_states), has_context, has_props,
+            )
             await job_dispatch()
             return
-        logger.info("[orchestrator] Startup dispatch waiting for DataHub... attempt %d/6", attempt)
+
+        logger.info(
+            "[orchestrator] Startup dispatch waiting for DataHub... attempt %d/6 "
+            "(games=%d context=%s)",
+            attempt, len(game_states), has_context,
+        )
         await asyncio.sleep(30)
     logger.warning("[orchestrator] Startup dispatch skipped — DataHub not ready after 3 min")
 
 
 async def job_dispatch():
-    """8:00 AM PT (11:00 AM ET) daily — build parlays and post to Discord."""
+    """8:00 AM PT (11:00 AM ET) daily — build parlays and post to Discord.
+    Guard prevents double/triple firing from APScheduler + startup dispatch racing.
+    """
+    global _dispatch_running
+    if _dispatch_running:
+        logger.warning("[orchestrator] Dispatch already running — skipping duplicate trigger")
+        return
+    _dispatch_running = True
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_dispatcher.py")
-    asyncio.create_task(_run_subprocess("LiveDispatch", script))
+    try:
+        await _run_subprocess("LiveDispatch", script)
+    finally:
+        _dispatch_running = False
 
 
 async def job_settle():

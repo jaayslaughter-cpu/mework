@@ -82,7 +82,7 @@ TTL_PHYSICS  = 900    # 15 min
 TTL_CONTEXT  = 600    # 10 min
 TTL_MARKET   = 300    #  5 min
 TTL_DFS      = 480    #  8 min
-TTL_HUB      = 120    #  2 min — master hub key
+TTL_HUB      = 600    # 10 min — master hub key
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -349,6 +349,228 @@ def _fetch_espn_games() -> dict:
         logger.warning("[DataHub] ESPN scoreboard error: %s", exc)
         return {}
 
+def _fetch_mlb_lineups_today() -> list[dict]:
+    """Fetch today's confirmed batting order lineups from MLB Stats API (free, no key)."""
+    import datetime as _dt  # noqa: PLC0415
+    today = _dt.date.today().strftime("%Y-%m-%d")
+    try:
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": today, "hydrate": "lineups,team,venue"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        lineups = []
+        for date_block in resp.json().get("dates", []):
+            for game in date_block.get("games", []):
+                game_lineups = game.get("lineups", {})
+                home = game.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+                away = game.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+                for side_key, team_name in (("homePlayers", home), ("awayPlayers", away)):
+                    for pos, player in enumerate(game_lineups.get(side_key, []), start=1):
+                        lineups.append({
+                            "player_id":   player.get("id"),
+                            "full_name":   player.get("fullName", ""),
+                            "team":        team_name,
+                            "batting_pos": pos,
+                        })
+        logger.info("[DataHub] MLB lineups: %d confirmed players", len(lineups))
+        return lineups
+    except Exception as exc:
+        logger.warning("[DataHub] MLB lineups fetch failed: %s", exc)
+        return []
+
+
+def _fetch_mlb_probable_starters() -> list[dict]:
+    """Fetch today's probable starting pitchers from MLB Stats API (free, no key)."""
+    import datetime as _dt  # noqa: PLC0415
+    today = _dt.date.today().strftime("%Y-%m-%d")
+    try:
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": today, "hydrate": "probablePitcher,team,venue"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        starters = []
+        for date_block in resp.json().get("dates", []):
+            for game in date_block.get("games", []):
+                home_team = game.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+                away_team = game.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+                venue = (game.get("venue") or {}).get("name", "")
+                home_sp = game.get("teams", {}).get("home", {}).get("probablePitcher", {})
+                away_sp = game.get("teams", {}).get("away", {}).get("probablePitcher", {})
+                if home_sp:
+                    starters.append({
+                        "player_id": home_sp.get("id"),
+                        "full_name": home_sp.get("fullName", ""),
+                        "team": home_team, "side": "home", "venue": venue,
+                    })
+                if away_sp:
+                    starters.append({
+                        "player_id": away_sp.get("id"),
+                        "full_name": away_sp.get("fullName", ""),
+                        "team": away_team, "side": "away", "venue": venue,
+                    })
+        logger.info("[DataHub] Probable starters: %d pitchers", len(starters))
+        return starters
+    except Exception as exc:
+        logger.warning("[DataHub] Probable starters fetch failed: %s", exc)
+        return []
+
+
+def _fetch_mlb_standings() -> list[dict]:
+    """Fetch current MLB standings from MLB Stats API (free, no key).
+    Replaces Apify actor ToDC6ydulO79igDoX.
+    """
+    import datetime as _dt  # noqa: PLC0415
+    season = _dt.date.today().year
+    try:
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/standings",
+            params={"leagueId": "103,104", "season": season, "standingsTypes": "regularSeason"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        standings = []
+        for record in resp.json().get("records", []):
+            division = record.get("division", {}).get("name", "")
+            for team_record in record.get("teamRecords", []):
+                team = team_record.get("team", {})
+                standings.append({
+                    "team_id":    team.get("id"),
+                    "team_name":  team.get("name", ""),
+                    "division":   division,
+                    "wins":       team_record.get("wins", 0),
+                    "losses":     team_record.get("losses", 0),
+                    "pct":        float(team_record.get("winningPercentage", "0.000") or 0),
+                    "gb":         team_record.get("gamesBack", "-"),
+                    "streak":     team_record.get("streak", {}).get("streakCode", ""),
+                    "last_10":    team_record.get("records", {}).get("splitRecords", [{}])[0].get("wins", 0),
+                })
+        logger.info("[DataHub] Standings: %d teams", len(standings))
+        return standings
+    except Exception as exc:
+        logger.warning("[DataHub] Standings fetch failed: %s", exc)
+        return []
+
+
+def _fetch_prizepicks_direct() -> list[dict]:
+    """Fetch PrizePicks MLB props directly (free, no key required).
+    Railway IPs may get 403 — returns empty list gracefully so agents
+    fall back to sportsbook_reference_layer data.
+    """
+    _PP_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": "https://app.prizepicks.com/",
+        "Origin": "https://app.prizepicks.com",
+    }
+    try:
+        resp = requests.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            headers=_PP_HEADERS,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.info("[DataHub] PrizePicks direct returned %d — no props this cycle", resp.status_code)
+            return []
+        data = resp.json()
+        player_map: dict[str, str] = {}
+        for item in data.get("included", []):
+            if item.get("type") == "new_player":
+                pid = item["id"]
+                name = item.get("attributes", {}).get("display_name", "")
+                if name:
+                    player_map[pid] = name
+        props = []
+        for proj in data.get("data", []):
+            attrs = proj.get("attributes", {})
+            stat_raw = str(attrs.get("stat_type", "") or "").lower()
+            line_val = attrs.get("line_score")
+            if line_val is None:
+                continue
+            pid = (
+                proj.get("relationships", {})
+                    .get("new_player", {})
+                    .get("data", {})
+                    .get("id", "")
+            )
+            pname = player_map.get(pid, "")
+            if not pname:
+                continue
+            props.append({
+                "player_name": pname,
+                "stat":        stat_raw,
+                "line":        float(line_val),
+            })
+        logger.info("[DataHub] PrizePicks direct: %d props", len(props))
+        return props
+    except Exception as exc:
+        logger.info("[DataHub] PrizePicks direct fetch failed: %s", exc)
+        return []
+
+
+def _fetch_underdog_props_direct() -> list[dict]:
+    """Fetch Underdog Fantasy MLB over/under lines (free, no key required)."""
+    _UD_HEADERS = {
+        "User-Agent": "Underdog Fantasy/3.0 (iPhone; iOS 17.0) CFNetwork/1474 Darwin/23.0.0",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "x-api-key": "KeepItSecret",
+    }
+    try:
+        resp = requests.get(
+            "https://api.underdogfantasy.com/beta/v5/over_under_lines",
+            headers=_UD_HEADERS,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            logger.info("[DataHub] Underdog returned %d — no props this cycle", resp.status_code)
+            return []
+        data = resp.json()
+        players_map = {p["id"]: p for p in data.get("players", [])}
+        appearances_map = {a["id"]: a for a in data.get("appearances", [])}
+        props = []
+        seen: set = set()
+        for line in data.get("over_under_lines", []):
+            if line.get("status") != "active":
+                continue
+            stable_id = line.get("stable_id", line.get("id", ""))
+            if stable_id in seen:
+                continue
+            seen.add(stable_id)
+            ou = line.get("over_under") or {}
+            app_stat = ou.get("appearance_stat") or {}
+            stat_ud = app_stat.get("stat", "")
+            app_id = app_stat.get("appearance_id", "")
+            appearance = appearances_map.get(app_id, {})
+            player_id = appearance.get("player_id", "")
+            player = players_map.get(player_id, {})
+            if player.get("sport_id") != "MLB":
+                continue
+            name = f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+            if not name:
+                continue
+            props.append({
+                "player":        name,
+                "stat_type":     stat_ud,
+                "line":          float(line.get("stat_value") or ou.get("stat_value") or 1.5),
+                "over_american": int(line.get("over_american", -115) or -115),
+                "under_american":int(line.get("under_american", -115) or -115),
+            })
+        logger.info("[DataHub] Underdog direct: %d props", len(props))
+        return props
+    except Exception as exc:
+        logger.info("[DataHub] Underdog direct fetch failed: %s", exc)
+        return []
+
+
 def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     """Call The Odds API for MLB lines."""
     key = os.getenv("ODDS_API_KEY", "673bf195062e60e666399be40f763545")
@@ -366,12 +588,28 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
 
 
 def _load_xgb_model():
-    """Lazy-load trained XGBoost model from disk."""
-    path = os.getenv("XGB_MODEL_PATH", "/tmp/xgb_propiq.pkl")
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return pickle.load(f)
-    return None
+    """Lazy-load trained XGBoost model from disk.
+    Supports both .json (XGBoost native) and .pkl (legacy pickle) formats.
+    """
+    path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
+    if not os.path.exists(path):
+        logger.warning("[XGB] Model not found at %s — agents using flat 50%% probability", path)
+        return None
+    try:
+        if path.endswith(".json"):
+            import xgboost as xgb  # noqa: PLC0415
+            booster = xgb.Booster()
+            booster.load_model(path)
+            logger.info("[XGB] Loaded XGBoost model from %s", path)
+            return booster
+        else:
+            with open(path, "rb") as f:
+                model = pickle.load(f)
+            logger.info("[XGB] Loaded pickle model from %s", path)
+            return model
+    except Exception as exc:
+        logger.warning("[XGB] Model load failed (%s): %s — using flat 50%%", path, exc)
+        return None
 
 
 # ── In-memory state (persisted to Redis) ──────────────────────────────────────
@@ -430,28 +668,12 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, context_key):
         logger.info("[DataHub] Scraping context / environment data…")
         context = {
-            "weather":   [],  # no actor yet — Open-Meteo called per-game in dispatcher
-            "umpires":   [],  # no actor yet
-            "injuries":  [],  # no actor yet
-            # ESPN MLB schedule actor — timezone MUST be America/Los_Angeles
-            "lineups": _fetch_apify("IaUStoP4x1RVhXMJM", {
-                "dateMode": "today",
-                "gameStatus": ["pre", "in", "post"],
-                "leagues": ["mlb"],
-                "liveOnly": False,
-                "nationalTvOnly": False,
-                "timezone": "America/Los_Angeles",
-                "teams": [],
-                "homeAwayFilter": "all",
-                "networkFilter": [],
-            }),
-            "projected_starters": [],  # no actor yet
-            # MLB standings 2026
-            "standings": _fetch_apify("ToDC6ydulO79igDoX", {
-                "mode": "standings",
-                "season": 2026,
-                "stat_type": "all",
-            }),
+            "weather":            [],  # Open-Meteo called per-game in dispatcher
+            "umpires":            [],  # no source yet
+            "injuries":           [],  # no source yet
+            "lineups":            _fetch_mlb_lineups_today(),
+            "projected_starters": _fetch_mlb_probable_starters(),
+            "standings":          _fetch_mlb_standings(),
         }
         _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
 
@@ -472,11 +694,10 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, dfs_key):
         logger.info("[DataHub] Scraping DFS target data…")
         dfs = {
-            "underdog":  [],  # fetched directly via live_dispatcher HTTP session
-            # PrizePicks via Apify actor (6,500+ MLB props, ~$0.38/run)
-            "prizepicks": _fetch_apify("4AmgQeem8dEgMEiRF", {"leagues": ["MLB"]}),
-            "sleeper":   [],  # removed per DFS compliance directive
-            "optimizer": [],  # no actor yet
+            "underdog":   _fetch_underdog_props_direct(),
+            "prizepicks": _fetch_prizepicks_direct(),
+            "sleeper":    [],  # removed per DFS compliance directive
+            "optimizer":  [],  # no actor yet
         }
         _hub_setex(r, dfs_key, TTL_DFS, json.dumps(dfs))
 
@@ -530,8 +751,18 @@ class _BaseAgent:
     def _model_prob(self, player: str, prop_type: str) -> float:
         if self.model:
             try:
-                feats = [0.0] * 20  # placeholder — real feature pipeline
-                return float(self.model.predict_proba([feats])[0][1]) * 100
+                import xgboost as xgb  # noqa: PLC0415
+                import numpy as np     # noqa: PLC0415
+                feats = np.array([[0.0] * 20], dtype=np.float32)
+                if isinstance(self.model, xgb.Booster):
+                    dmat = xgb.DMatrix(feats)
+                    prob = float(self.model.predict(dmat)[0])
+                    # If output > 1 it's raw score, sigmoid it
+                    if prob > 1.0 or prob < 0.0:
+                        prob = 1.0 / (1.0 + np.exp(-prob))
+                    return prob * 100
+                else:
+                    return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
         return 50.0
@@ -1001,7 +1232,41 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
 
 
 def _get_props(hub: dict) -> list[dict]:
-    return _extract_underdog_props(hub) or _build_synthetic_props(hub)
+    """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
+    # 1. Try PrizePicks from hub (6,500+ real MLB props)
+    pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+    if pp_picks and isinstance(pp_picks, list):
+        props = []
+        for pick in pp_picks:
+            if not isinstance(pick, dict):
+                continue
+            player = pick.get("player_name", pick.get("player", pick.get("name", "")))
+            prop_type = pick.get("stat", pick.get("stat_type", pick.get("prop_type", "H")))
+            line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
+            if not player or not prop_type:
+                continue
+            props.append({
+                "player":        player,
+                "prop_type":     str(prop_type).lower(),
+                "line":          float(line or 1.5),
+                "over_american":  -115,
+                "under_american": -115,
+                "team":          pick.get("player_team", pick.get("team", "")),
+                "venue":         "",
+                "platform":      "prizepicks",
+            })
+        if props:
+            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
+            return props
+
+    # 2. Try Underdog from hub
+    ud_props = _extract_underdog_props(hub)
+    if ud_props:
+        return ud_props
+
+    # 3. Last resort — synthetic (logs warning so we notice)
+    logger.warning("[AgentTasklet] No real props in hub — using synthetic fallback")
+    return _build_synthetic_props(hub)
 
 
 def run_agent_tasklet() -> None:
@@ -1308,20 +1573,47 @@ def run_backtest_tasklet() -> None:
 
 def run_grading_tasklet() -> None:
     """
-    Fetch final boxscores, grade open bets, calculate CLV,
-    then send daily recap to Discord.
+    Fetch final boxscores via ESPN (free, no key), grade open bets,
+    calculate CLV, then send daily recap to Discord.
+    SportsData.io replaced — was returning 403 on all calls.
     """
     today = datetime.date.today().strftime("%Y-%m-%d")
+    espn_date = today.replace("-", "")
 
-    boxscores = _sportsdata_get(f"stats/json/PlayerGameStatsByDate/{today}") or []
-    if not boxscores:
-        logger.info("[GradingTasklet] No boxscores for %s — nothing to grade.", today)
+    # Use ESPN box score scraper (same source as nightly_recap.py)
+    try:
+        from espn_scraper import get_all_player_stats  # noqa: PLC0415
+        raw_stats = get_all_player_stats(espn_date)
+    except Exception as exc:
+        logger.warning("[GradingTasklet] ESPN stats fetch failed: %s", exc)
+        raw_stats = {}
+
+    if not raw_stats:
+        logger.info("[GradingTasklet] No ESPN boxscores for %s — nothing to grade.", today)
         return
 
+    # Build stat_lookup keyed by player name (ESPN returns lowercase keys)
+    # Map ESPN stat dict to the format _get_stat() expects
     stat_lookup: dict[str, dict] = {}
-    for bs in boxscores:
-        name = f"{bs.get('FirstName', '')} {bs.get('LastName', '')}".strip()
-        stat_lookup[name] = bs
+    for name_lower, espn in raw_stats.items():
+        # Normalise to title case for _get_stat key matching
+        display_name = espn.get("full_name", name_lower.title())
+        mapped = {
+            "Hits":           espn.get("hits", 0.0),
+            "HomeRuns":       espn.get("home_runs", 0.0),
+            "RunsBattedIn":   espn.get("rbis", espn.get("rbi", 0.0)),
+            "Runs":           espn.get("runs", 0.0),
+            "StolenBases":    espn.get("stolen_bases", 0.0),
+            "TotalBases":     espn.get("total_bases", 0.0),
+            "Walks":          espn.get("base_on_balls", 0.0),
+            "Strikeouts":     espn.get("strikeouts", 0.0),
+            "InningsPitched": espn.get("innings_pitched", 0.0),
+            "EarnedRuns":     espn.get("earned_runs", 0.0),
+            "HitsAllowed":    espn.get("hits_allowed", 0.0),
+            "WalksAllowed":   espn.get("base_on_balls", 0.0),
+        }
+        stat_lookup[display_name] = mapped
+        stat_lookup[name_lower] = mapped  # also index by lowercase
 
     open_bets: list[tuple] = []
     try:
@@ -1541,7 +1833,7 @@ def run_xgboost_tasklet() -> None:
     preds    = model.predict(X_test)
     accuracy = accuracy_score(y_test, preds)
 
-    model_path = os.getenv("XGB_MODEL_PATH", "/tmp/xgb_propiq.pkl")
+    model_path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     with open(model_path, "wb") as f:
         pickle.dump(model, f)

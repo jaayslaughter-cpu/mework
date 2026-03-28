@@ -162,134 +162,25 @@ def _get_db() -> sqlite3.Connection:
 # Prop fetching
 # ---------------------------------------------------------------------------
 
-def _fetch_prizepicks_via_apify_ls() -> list[dict]:
-    """Apify fallback for PrizePicks when Railway IP is 403-blocked."""
-    import json as _json
-    api_key = os.getenv("APIFY_API_KEY", "")
-    if not api_key:
-        logger.warning("[PP/Apify] No APIFY_API_KEY set")
-        return []
-    actor_id = "4AmgQeem8dEgMEiRF"
-    run_url = f"https://api.apify.com/v2/acts/{actor_id}/runs"
-    try:
-        run_resp = requests.post(
-            run_url,
-            params={"token": api_key},
-            json={"memory": 512},
-            timeout=30,
-        )
-        if run_resp.status_code not in (200, 201):
-            logger.warning("[PP/Apify] Run start HTTP %d", run_resp.status_code)
-            return []
-        run_id = run_resp.json()["data"]["id"]
-        dataset_id = run_resp.json()["data"]["defaultDatasetId"]
-
-        # Poll for completion (max 120s)
-        for _ in range(24):
-            time.sleep(5)
-            status_resp = requests.get(
-                f"https://api.apify.com/v2/actor-runs/{run_id}",
-                params={"token": api_key},
-                timeout=15,
-            )
-            if status_resp.json().get("data", {}).get("status") in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-                break
-
-        items_resp = requests.get(
-            f"https://api.apify.com/v2/datasets/{dataset_id}/items",
-            params={"token": api_key, "format": "json", "limit": 500},
-            timeout=30,
-        )
-        if items_resp.status_code != 200:
-            logger.warning("[PP/Apify] Dataset HTTP %d", items_resp.status_code)
-            return []
-        items = items_resp.json() if isinstance(items_resp.json(), list) else []
-    except Exception as exc:
-        logger.warning("[PP/Apify] Error: %s", exc)
-        return []
-
-    _LS_STAT_TYPES = frozenset({
-        "hits", "home runs", "total bases", "runs", "rbi",
-        "hits+runs+rbis", "strikeouts", "earned runs",
-        "pitching outs", "walks allowed", "stolen bases",
-        "singles", "hitter strikeouts",
-    })
-    props = []
-    for item in items:
-        odds_tier = str(item.get("odds_tier", "")).lower()
-        if odds_tier != "standard":
-            continue
-        if item.get("adjusted_odds", False):
-            continue
-        stat_raw = str(item.get("stat", "") or "").lower()
-        if stat_raw not in _LS_STAT_TYPES:
-            continue
-        line_val = item.get("line") or item.get("line_score")
-        pname = item.get("player_name", "")
-        if not pname or line_val is None:
-            continue
-        props.append({
-            "player_name": pname,
-            "prop_type":   stat_raw,
-            "platform":    "prizepicks",
-            "line":        float(line_val),
-        })
-    logger.info("[PP/Apify] %d standard props fetched via Apify", len(props))
-    return props
-
-
 def _fetch_prizepicks() -> list[dict]:
-    """Fetch active PrizePicks MLB props. Returns list of prop dicts."""
+    """Fetch active PrizePicks MLB props.
+    Uses live_dispatcher's fetch_prizepicks_props() which has correct
+    session warm-up and handles Railway IP blocks gracefully.
+    Falls back to empty list on any error.
+    """
     try:
-        data = None
-        resp = requests.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
-            headers=_PP_HEADERS,
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-        else:
-            logger.info("[PP] HTTP %d — routing to Apify fallback", resp.status_code)
-            return _fetch_prizepicks_via_apify_ls()
-        if data is None:
-            return _fetch_prizepicks_via_apify_ls()
-
-        player_map: dict[str, str] = {}
-        for item in data.get("included", []):
-            if item.get("type") == "new_player":
-                pid = item["id"]
-                name = item.get("attributes", {}).get("display_name", "")
-                if name:
-                    player_map[pid] = name
-
-        props: list[dict] = []
-        for proj in data.get("data", []):
-            attrs = proj.get("attributes", {})
-            stat_raw = str(attrs.get("stat_type", "") or "").lower()
-            if stat_raw not in _PP_MLB_STAT_TYPES or "inning" in stat_raw:
-                continue
-            line_val = attrs.get("line_score")
-            if line_val is None:
-                continue
-            pid = (
-                proj.get("relationships", {})
-                    .get("new_player", {})
-                    .get("data", {})
-                    .get("id", "")
-            )
-            pname = player_map.get(pid, "")
-            if not pname:
-                continue
+        from live_dispatcher import fetch_prizepicks_props  # noqa: PLC0415
+        raw = fetch_prizepicks_props()
+        # Normalise keys to line_stream format
+        props = []
+        for p in raw:
             props.append({
-                "player_name": pname,
-                "prop_type":   stat_raw,
+                "player_name": p.get("player_name", p.get("player", "")),
+                "prop_type":   str(p.get("prop_type", p.get("stat_type", ""))).lower(),
                 "platform":    "prizepicks",
-                "line":        float(line_val),
+                "line":        float(p.get("line", p.get("line_score", 1.5)) or 1.5),
             })
-
-        logger.info("[PP] %d props fetched", len(props))
+        logger.info("[PP] %d props fetched via live_dispatcher", len(props))
         return props
     except Exception as exc:
         logger.warning("[PP] fetch failed: %s", exc)
@@ -297,59 +188,26 @@ def _fetch_prizepicks() -> list[dict]:
 
 
 def _fetch_underdog() -> list[dict]:
-    """Fetch active Underdog Fantasy MLB props."""
+    """Fetch active Underdog Fantasy MLB props.
+    Uses live_dispatcher's fetch_underdog_props() which has the correct
+    beta/v5 endpoint and proper join chain through appearances/players maps.
+    The v1 endpoint used here previously returned empty body from Railway.
+    """
     try:
-        resp = requests.get(
-            "https://api.underdogfantasy.com/v1/over_under_lines",
-            headers=_HEADERS,
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            logger.warning("[UD] HTTP %d", resp.status_code)
-            return []
-
-        data = resp.json()
-        players_map = {p["id"]: p for p in data.get("players", [])}
-        appearances_map = {a["id"]: a for a in data.get("appearances", [])}
-
-        props: list[dict] = []
-        seen: set[str] = set()
-
-        for line in data.get("over_under_lines", []):
-            if line.get("status") != "active":
-                continue
-            stable_id = line.get("stable_id", line.get("id", ""))
-            if stable_id in seen:
-                continue
-            seen.add(stable_id)
-
-            ou = line.get("over_under") or {}
-            app_stat = ou.get("appearance_stat") or {}
-            stat_ud = app_stat.get("stat", "").lower()
-            app_id = app_stat.get("appearance_id", "")
-            if not stat_ud or not app_id or "inning" in stat_ud:
-                continue
-
-            appearance = appearances_map.get(app_id, {})
-            player_id = appearance.get("player_id", "")
-            player = players_map.get(player_id, {})
-            if player.get("sport_id") != "MLB":
-                continue
-
-            pname = (
-                f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
-            )
-            if not pname:
-                continue
-
+        from live_dispatcher import fetch_underdog_props  # noqa: PLC0415
+        raw = fetch_underdog_props()
+        # Normalise keys to line_stream format
+        props = []
+        for p in raw:
             props.append({
-                "player_name": pname,
-                "prop_type":   stat_ud,
-                "platform":    "underdog",
-                "line":        float(line.get("stat_value") or 0),
+                "player_name":   p.get("player_name", p.get("player", "")),
+                "prop_type":     str(p.get("prop_type", p.get("stat_type", ""))).lower(),
+                "platform":      "underdog",
+                "line":          float(p.get("line", 1.5) or 1.5),
+                "over_american": int(p.get("over_american", -115) or -115),
+                "under_american":int(p.get("under_american", -115) or -115),
             })
-
-        logger.info("[UD] %d props fetched", len(props))
+        logger.info("[UD] %d props fetched via live_dispatcher", len(props))
         return props
     except Exception as exc:
         logger.warning("[UD] fetch failed: %s", exc)
