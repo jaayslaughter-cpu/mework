@@ -408,153 +408,162 @@ def run_walk_forward_fold(
         }
 
         print(f"  {agent}: {n} picks | {win_rate:.1%} WR | ROI {roi:+.1%} | Brier {brier:.3f}")
-import tempfile
-with tempfile.TemporaryFile(mode="w+") as tmp:
-    if use_cached:
-        print("\nLoading cached game data...")
-        tmp.seek(0)
-        season_data = json.load(tmp)
-        season_dfs = {}
-        for season, records in season_data.items():
-            season_dfs[int(season)] = pd.DataFrame(records)
-            print(f"  {season}: {len(records)} appearances (cached)")
-    else:
-        print("\nFetching real game data from MLB Stats API...")
-        season_dfs = {}
-        for season in SEASONS:
-            # 2025 is partial — fetch fewer games
-            limit = 80 if season == 2025 else 180
-            df = build_season_dataset(season, limit_games=limit)
+    return {"fold": fold_label, "metrics": metrics}
+
+
+def run_full_backtest(use_cached: bool = False) -> dict:
+    """
+    Full walk-forward backtest across 3 folds.
+    Pass use_cached=True to load from disk instead of fetching from MLB API.
+    """
+
+    import tempfile
+    with tempfile.TemporaryFile(mode="w+") as tmp:
+        if use_cached:
+            print("\nLoading cached game data...")
+            tmp.seek(0)
+            season_data = json.load(tmp)
+            season_dfs = {}
+            for season, records in season_data.items():
+                season_dfs[int(season)] = pd.DataFrame(records)
+                print(f"  {season}: {len(records)} appearances (cached)")
+        else:
+            print("\nFetching real game data from MLB Stats API...")
+            season_dfs = {}
+            for season in SEASONS:
+                # 2025 is partial — fetch fewer games
+                limit = 80 if season == 2025 else 180
+                df = build_season_dataset(season, limit_games=limit)
+                if not df.empty:
+                    season_dfs[season] = df
+
+            cache = {str(k): v.to_dict(orient="records") for k, v in season_dfs.items()}
+            json.dump(cache, tmp)
+            tmp.flush()
+            print("  Data cached")
+
+        # Sanity check
+        for season, df in season_dfs.items():
             if not df.empty:
-                season_dfs[season] = df
+                k_mean = df["strikeouts"].mean()
+                k_std  = df["strikeouts"].std()
+                print(f"  Season {season}: {len(df)} starters, K/game={k_mean:.2f}±{k_std:.2f} "
+                      f"[{df['strikeouts'].min()}-{df['strikeouts'].max()}]")
 
-        cache = {str(k): v.to_dict(orient="records") for k, v in season_dfs.items()}
-        json.dump(cache, tmp)
-        tmp.flush()
-        print("  Data cached")
+        # ── Walk-forward folds ────────────────────────────────────────────────
+        folds = []
 
-    # Sanity check
-    for season, df in season_dfs.items():
-        if not df.empty:
-            k_mean = df["strikeouts"].mean()
-            k_std  = df["strikeouts"].std()
-            print(f"  Season {season}: {len(df)} starters, K/game={k_mean:.2f}±{k_std:.2f} "
-                  f"[{df['strikeouts'].min()}-{df['strikeouts'].max()}]")
+        # Fold 1: Train 2022 → Test 2023
+        if 2022 in season_dfs and 2023 in season_dfs:
+            fold = run_walk_forward_fold(
+                train_df=season_dfs[2022],
+                test_df=season_dfs[2023],
+                fold_label="Train:2022 → Test:2023",
+            )
+            folds.append(fold)
 
-    # ── Walk-forward folds ────────────────────────────────────────────────
-    folds = []
+        # Fold 2: Train 2022-23 → Test 2024
+        if all(y in season_dfs for y in [2022, 2023, 2024]):
+            train = pd.concat([season_dfs[2022], season_dfs[2023]])
+            fold = run_walk_forward_fold(
+                train_df=train,
+                test_df=season_dfs[2024],
+                fold_label="Train:2022-23 → Test:2024",
+            )
+            folds.append(fold)
 
-    # Fold 1: Train 2022 → Test 2023
-    if 2022 in season_dfs and 2023 in season_dfs:
-        fold = run_walk_forward_fold(
-            train_df=season_dfs[2022],
-            test_df=season_dfs[2023],
-            fold_label="Train:2022 → Test:2023",
-        )
-        folds.append(fold)
+        # Fold 3: Train 2022-24 → Test 2025 (partial)
+        if all(y in season_dfs for y in [2022, 2023, 2024, 2025]):
+            train = pd.concat([season_dfs[2022], season_dfs[2023], season_dfs[2024]])
+            fold = run_walk_forward_fold(
+                train_df=train,
+                test_df=season_dfs[2025],
+                fold_label="Train:2022-24 → Test:2025 (partial)",
+            )
+            folds.append(fold)
 
-    # Fold 2: Train 2022-23 → Test 2024
-    if all(y in season_dfs for y in [2022, 2023, 2024]):
-        train = pd.concat([season_dfs[2022], season_dfs[2023]])
-        fold = run_walk_forward_fold(
-            train_df=train,
-            test_df=season_dfs[2024],
-            fold_label="Train:2022-23 → Test:2024",
-        )
-        folds.append(fold)
+        # ── Cross-fold summary ────────────────────────────────────────────────
+        print("\n" + "="*60)
+        print("CROSS-FOLD SUMMARY")
+        print("="*60)
 
-    # Fold 3: Train 2022-24 → Test 2025 (partial)
-    if all(y in season_dfs for y in [2022, 2023, 2024, 2025]):
-        train = pd.concat([season_dfs[2022], season_dfs[2023], season_dfs[2024]])
-        fold = run_walk_forward_fold(
-            train_df=train,
-            test_df=season_dfs[2025],
-            fold_label="Train:2022-24 → Test:2025 (partial)",
-        )
-        folds.append(fold)
+        agents = ["UmpireAgent", "ArsenalAgent", "MLEdgeAgent", "all"]
+        for agent in agents:
+            fold_rois = []
+            fold_win_rates = []
+            fold_briers = []
+            fold_max_dds = []
 
-    # ── Cross-fold summary ────────────────────────────────────────────────
-    print("\n" + "="*60)
-    print("CROSS-FOLD SUMMARY")
-    print("="*60)
+            for fold in folds:
+                m = fold.get("metrics", {}).get(agent, {})
+                if m.get("insufficient") or not m:
+                    continue
+                fold_rois.append(m["roi"])
+                fold_win_rates.append(m["win_rate"])
+                fold_briers.append(m["brier"])
+                fold_max_dds.append(m["max_dd_pct"])
 
-    agents = ["UmpireAgent", "ArsenalAgent", "MLEdgeAgent", "all"]
-    for agent in agents:
-        fold_rois = []
-        fold_win_rates = []
-        fold_briers = []
-        fold_max_dds = []
+            if not fold_rois:
+                continue
+
+            print(f"\n{agent}:")
+            print(f"  ROI by fold:      {[f'{r:+.1%}' for r in fold_rois]} → mean {np.mean(fold_rois):+.1%} ± {np.std(fold_rois):.1%}")
+            print(f"  Win rate by fold: {[f'{w:.1%}' for w in fold_win_rates]} → mean {np.mean(fold_win_rates):.1%}")
+            print(f"  Brier by fold:    {[f'{b:.4f}' for b in fold_briers]} → mean {np.mean(fold_briers):.4f}")
+            print(f"  MaxDD% by fold:   {[f'{d:.1%}' for d in fold_max_dds]} → worst {max(fold_max_dds):.1%}")
+
+            # Edge degradation check (is ROI trending down across folds?)
+            if len(fold_rois) >= 2:
+                roi_trend = fold_rois[-1] - fold_rois[0]
+                trend_label = "⚠️ Edge degrading" if roi_trend < -0.02 else "✅ Edge stable"
+                print(f"  Edge trend:       {roi_trend:+.1%} across folds → {trend_label}")
+
+        print("\n" + "="*60)
+        print("CALIBRATION AUDIT")
+        print("="*60)
+        print("(A well-calibrated model: 55% confidence picks should win ~55% of the time)")
 
         for fold in folds:
-            m = fold.get("metrics", {}).get(agent, {})
-            if m.get("insufficient") or not m:
-                continue
-            fold_rois.append(m["roi"])
-            fold_win_rates.append(m["win_rate"])
-            fold_briers.append(m["brier"])
-            fold_max_dds.append(m["max_dd_pct"])
+            print(f"\n  {fold.get('fold', '')}")
+            for agent in ["UmpireAgent", "ArsenalAgent"]:
+                m = fold.get("metrics", {}).get(agent, {})
+                if m.get("insufficient") or not m:
+                    continue
+                cal = m.get("calibration", {})
+                for tier, vals in cal.items():
+                    gap = vals["gap"]
+                    gap_label = "OVERCONFIDENT" if gap > 0.05 else ("UNDERCONFIDENT" if gap < -0.05 else "CALIBRATED")
+                    print(f"    {agent} [{tier}]: predicted={vals['mean_pred']:.3f} actual={vals['actual_rate']:.3f} "
+                          f"gap={gap:+.3f} → {gap_label} (n={vals['n']})")
 
-        if not fold_rois:
-            continue
+        print("\n" + "="*60)
+        print("HONEST ASSESSMENT")
+        print("="*60)
+        print("""
+      What these numbers mean:
+      - Brier < 0.22 = useful model (random = 0.25, perfect = 0.0)
+      - Win rate consistently > 54.2% = profitable on PrizePicks (breakeven validated by mlb-betting-bot)
+      - Max drawdown > 20% = size down, strategy is too volatile
+      - ROI variation across folds = GOOD — means parameters are updating, not fixed
+      - Calibration gap > ±0.05 = model is overconfident or underconfident at that tier
 
-        print(f"\n{agent}:")
-        print(f"  ROI by fold:      {[f'{r:+.1%}' for r in fold_rois]} → mean {np.mean(fold_rois):+.1%} ± {np.std(fold_rois):.1%}")
-        print(f"  Win rate by fold: {[f'{w:.1%}' for w in fold_win_rates]} → mean {np.mean(fold_win_rates):.1%}")
-        print(f"  Brier by fold:    {[f'{b:.4f}' for b in fold_briers]} → mean {np.mean(fold_briers):.4f}")
-        print(f"  MaxDD% by fold:   {[f'{d:.1%}' for d in fold_max_dds]} → worst {max(fold_max_dds):.1%}")
+      Limitations of this backtest:
+      ✗ Synthetic lines (rolling avg) ≠ actual DFS lines — real lines are sharper
+      ✗ No umpire/weather/bullpen features (would require per-game API calls)
+      ✗ No parlay construction — tests individual prop signals only
+      ✗ 2025 fold is partial season data
 
-        # Edge degradation check (is ROI trending down across folds?)
-        if len(fold_rois) >= 2:
-            roi_trend = fold_rois[-1] - fold_rois[0]
-            trend_label = "⚠️ Edge degrading" if roi_trend < -0.02 else "✅ Edge stable"
-            print(f"  Edge trend:       {roi_trend:+.1%} across folds → {trend_label}")
+      What to watch on live deployment (April 1 start):
+      → Log actual PrizePicks lines vs model predictions daily
+      → After 30 games, compare live ROI to these backtest figures
+      → If live Brier > 0.24, recalibrate before scaling units
+      → If live max drawdown > 25%, throttle to Tier 1 ($5) universally
+      """)
 
-    print("\n" + "="*60)
-    print("CALIBRATION AUDIT")
-    print("="*60)
-    print("(A well-calibrated model: 55% confidence picks should win ~55% of the time)")
-
-    for fold in folds:
-        print(f"\n  {fold.get('fold', '')}")
-        for agent in ["UmpireAgent", "ArsenalAgent"]:
-            m = fold.get("metrics", {}).get(agent, {})
-            if m.get("insufficient") or not m:
-                continue
-            cal = m.get("calibration", {})
-            for tier, vals in cal.items():
-                gap = vals["gap"]
-                gap_label = "OVERCONFIDENT" if gap > 0.05 else ("UNDERCONFIDENT" if gap < -0.05 else "CALIBRATED")
-                print(f"    {agent} [{tier}]: predicted={vals['mean_pred']:.3f} actual={vals['actual_rate']:.3f} "
-                      f"gap={gap:+.3f} → {gap_label} (n={vals['n']})")
-
-    print("\n" + "="*60)
-    print("HONEST ASSESSMENT")
-    print("="*60)
-    print("""
-  What these numbers mean:
-  - Brier < 0.22 = useful model (random = 0.25, perfect = 0.0)
-  - Win rate consistently > 54.2% = profitable on PrizePicks (breakeven validated by mlb-betting-bot)
-  - Max drawdown > 20% = size down, strategy is too volatile
-  - ROI variation across folds = GOOD — means parameters are updating, not fixed
-  - Calibration gap > ±0.05 = model is overconfident or underconfident at that tier
-
-  Limitations of this backtest:
-  ✗ Synthetic lines (rolling avg) ≠ actual DFS lines — real lines are sharper
-  ✗ No umpire/weather/bullpen features (would require per-game API calls)
-  ✗ No parlay construction — tests individual prop signals only
-  ✗ 2025 fold is partial season data
-
-  What to watch on live deployment (April 1 start):
-  → Log actual PrizePicks lines vs model predictions daily
-  → After 30 games, compare live ROI to these backtest figures
-  → If live Brier > 0.24, recalibrate before scaling units
-  → If live max drawdown > 25%, throttle to Tier 1 ($5) universally
-  """)
-
-    return {
-        "folds": folds,
-        "seasons": list(season_dfs.keys()),
-    }
+        return {
+            "folds": folds,
+            "seasons": list(season_dfs.keys()),
+        }
 
 
 if __name__ == "__main__":

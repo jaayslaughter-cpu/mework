@@ -1,7 +1,7 @@
 """
 Agent Tasklet — Runs every 30 seconds
 ---------------------------------------
-Runs all 7 agents against the latest hub data.
+Runs all 6 agents against the latest hub data.
 Outputs bet slips to the queue.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .data_hub_tasklet import read_hub
-from ..agents import EVHunter, UnderMachine, ThreeLeg, ParlayAgent, LiveAgent, ArbAgent, GradingAgent
+from ..agents import EVHunter, UnderMachine, ThreeLeg, ParlayAgent, LiveAgent, GradingAgent
 
 logger = logging.getLogger("propiq.tasklet.agent")
 
@@ -26,7 +26,6 @@ _agents = {
     "three_leg": ThreeLeg(),
     "parlay": ParlayAgent(),
     "live": LiveAgent(),
-    "arb": ArbAgent(),
     "grading": GradingAgent(),  # Passive — grades via scheduled task
 }
 
@@ -36,7 +35,7 @@ def get_agents() -> dict:
 
 
 def run_agent_tasklet() -> dict:
-    """Run all 7 agents and write slips to bet_queue.jsonl."""
+    """Run all 6 agents and write slips to bet_queue.jsonl."""
     start = time.time()
     hub_data = read_hub()
 
@@ -72,7 +71,7 @@ def run_agent_tasklet() -> dict:
     logger.info(
         "[agents] %d slips filed across %d agents in %.2fs",
         len(all_slips),
-        len([k for k, v in agent_results.items() if 'error' not in v]),
+        len([k for k, v in agent_results.items() if "error" not in v]),
         elapsed,
     )
 

@@ -221,7 +221,7 @@ def _sportsdata_get(path: str) -> Any:
 
 def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     """Call The Odds API for MLB lines."""
-    key = os.getenv("ODDS_API_KEY", "e4e30098807a9eece674d85e30471f03")
+    key = os.getenv("ODDS_API_KEY", "14d35c33111760aca07e9547fff1561a")
     try:
         resp = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
@@ -1415,49 +1415,6 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     except Exception:
         pass
     return None
-
-
-def _send_telegram_recap(results: list[dict], total_profit: float, today: str) -> None:
-    """Post daily recap to Telegram bot."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
-        logger.info("[GradingTasklet] Telegram not configured — skipping recap.")
-        return
-
-    wins   = sum(1 for r in results if r["status"] == "WIN")
-    losses = sum(1 for r in results if r["status"] == "LOSS")
-    pushes = sum(1 for r in results if r["status"] == "PUSH")
-
-    sign = "+" if total_profit >= 0 else ""
-    lines = [
-        f"📊 *PropIQ Daily Recap — {today}*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📈 Units: {sign}{total_profit:.2f}u",
-        f"🏆 Record: {wins}-{losses}-{pushes} (W-L-P)",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for r in results:
-        emoji = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(r["status"], "❓")
-        pl_sign = "+" if r["profit_loss"] >= 0 else ""
-        odds_str = _fmt_american(int(r.get("odds_american") or -110))
-        lines.append(
-            f"{emoji} {r['player']} — {r['prop_type']} @ {odds_str} | {pl_sign}{r['profit_loss']:.2f}u"
-        )
-
-    lines += ["━━━━━━━━━━━━━━━━━━━━━━", "Powered by PropIQ Analytics 🤖"]
-    text = "\n".join(lines)
-
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=15,
-        )
-        logger.info("[GradingTasklet] Telegram daily recap sent.")
-    except Exception as e:
-        logger.warning("[GradingTasklet] Telegram send error: %s", e)
 
 
 def _fmt_american(american: int) -> str:

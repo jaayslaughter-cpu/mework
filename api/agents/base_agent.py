@@ -172,41 +172,47 @@ class AgentDB:
 
     def update_agent_stats(self, agent_name: str):
         """Recalculate stats from settled bets."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT outcome, stake_units, profit_units
-            FROM bets WHERE agent_name=? AND outcome != 'pending'
-        """, (agent_name,)).fetchall()
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT outcome, stake_units, profit_units
+                FROM bets WHERE agent_name=? AND outcome != 'pending'
+            """, (agent_name,)).fetchall()
 
-        wins = sum(1 for r in rows if r["outcome"] == "win")
-        losses = sum(1 for r in rows if r["outcome"] == "loss")
-        pushes = sum(1 for r in rows if r["outcome"] == "push")
-        total = wins + losses + pushes
-        total_wagered = sum(r["stake_units"] for r in rows)
-        total_profit = sum(r["profit_units"] for r in rows)
-        roi = (total_profit / total_wagered * 100) if total_wagered > 0 else 0.0
-        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
+            wins = sum(1 for r in rows if r["outcome"] == "win")
+            losses = sum(1 for r in rows if r["outcome"] == "loss")
+            pushes = sum(1 for r in rows if r["outcome"] == "push")
+            total = wins + losses + pushes
+            total_wagered = sum(r["stake_units"] for r in rows)
+            total_profit = sum(r["profit_units"] for r in rows)
+            roi = (total_profit / total_wagered * 100) if total_wagered > 0 else 0.0
+            win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
 
-        existing = conn.execute(
-            "SELECT current_capital, base_capital FROM agent_stats WHERE agent_name=?",
-            (agent_name,)
-        ).fetchone()
-        base_capital = existing["base_capital"] if existing else 100.0
-        current_capital = base_capital + total_profit
+            existing = conn.execute(
+                "SELECT current_capital, base_capital FROM agent_stats WHERE agent_name=?",
+                (agent_name,)
+            ).fetchone()
+            base_capital = existing["base_capital"] if existing else 100.0
+            current_capital = base_capital + total_profit
 
-        with conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO agent_stats
-                (agent_name, total_bets, wins, losses, pushes, total_units_wagered,
-                 total_profit_units, roi_pct, win_rate_pct, current_capital, base_capital, last_updated)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                agent_name, total, wins, losses, pushes, total_wagered,
-                total_profit, roi, win_rate, current_capital, base_capital,
-                datetime.utcnow().isoformat()
-            ))
-        conn.close()
+            with conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO agent_stats
+                    (agent_name, total_bets, wins, losses, pushes, total_units_wagered,
+                     total_profit_units, roi_pct, win_rate_pct, current_capital, base_capital, last_updated)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    agent_name, total, wins, losses, pushes, total_wagered,
+                    total_profit, roi, win_rate, current_capital, base_capital,
+                    datetime.utcnow().isoformat()
+                ))
+        except Exception as exc:
+            logger.warning("[AgentDB] update_agent_stats error for %s: %s", agent_name, exc)
+        finally:
+            if conn:
+                conn.close()
 
     def log_error(self, agent_name: str, error_type: str, message: str, tb: str = ""):
         conn = sqlite3.connect(self.db_path)
