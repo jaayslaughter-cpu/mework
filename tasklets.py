@@ -1061,18 +1061,31 @@ class _MLEdgeAgent(_BaseAgent):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_underdog_props(hub: dict) -> list[dict]:
-    """Parse Underdog Fantasy lines from hub DFS data."""
+    """Parse Underdog Fantasy lines from hub DFS data.
+    Handles both 'over_odds'/'under_odds' (old) and
+    'over_american'/'under_american' (new _fetch_underdog_props_direct) key names.
+    """
     picks = hub.get("dfs", {}).get("underdog", [])
     props: list[dict] = []
     for pick in picks:
         if not isinstance(pick, dict):
             continue
-        over_odds  = int(pick.get("over_odds",  -120) or -120)
-        under_odds = int(pick.get("under_odds", -120) or -120)
+        # Support both key naming conventions
+        over_odds = int(
+            pick.get("over_american", pick.get("over_odds", -115)) or -115
+        )
+        under_odds = int(
+            pick.get("under_american", pick.get("under_odds", -115)) or -115
+        )
+        player = pick.get("player", pick.get("name", "Unknown"))
+        prop_type = pick.get("stat_type", pick.get("prop_type", pick.get("prop", "H")))
+        line = float(pick.get("line", pick.get("value", 1.5)) or 1.5)
+        if not player or player == "Unknown":
+            continue
         props.append({
-            "player":         pick.get("player", pick.get("name", "Unknown")),
-            "prop_type":      pick.get("stat_type", pick.get("prop", "H")),
-            "line":           float(pick.get("line", pick.get("value", 1.5)) or 1.5),
+            "player":         player,
+            "prop_type":      str(prop_type).lower(),
+            "line":           line,
             "over_american":  over_odds,
             "under_american": under_odds,
             "team":           pick.get("team", ""),

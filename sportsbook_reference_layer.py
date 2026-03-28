@@ -45,11 +45,11 @@ logger = logging.getLogger("propiq.sb_ref")
 # 3-key fallback chain: primary (14d35c33) -> backup1 (673bf195) -> backup2 (e4e30098)
 ODDS_API_KEY = (
     os.getenv("ODDS_API_KEY")
-    or os.getenv("ODDS_API_KEY_PRIMARY", "14d35c33111760aca07e9547fff1561a")
+    or os.getenv("ODDS_API_KEY_PRIMARY", "673bf195062e60e666399be40f763545")
 )
 _ODDS_KEY_FALLBACKS = [
     os.getenv("ODDS_API_KEY_BACKUP1", "673bf195062e60e666399be40f763545"),
-    os.getenv("ODDS_API_KEY_BACKUP2", "e4e30098807a9eece674d85e30471f03"),
+    os.getenv("ODDS_API_KEY_BACKUP2", "673bf195062e60e666399be40f763545"),
 ]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT         = "baseball_mlb"

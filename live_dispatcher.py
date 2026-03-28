@@ -791,123 +791,41 @@ _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 def _fetch_prizepicks_via_apify() -> list[dict]:
     """
-    Fallback: run the Apify PrizePicks MLB scraper actor when the direct
-    API call is blocked (Railway datacenter IP gets 403 from DataDome).
-
-    Actor ID : 4AmgQeem8dEgMEiRF
-    Input    : {"leagues": ["MLB"]}
-    Returns  : same format as fetch_prizepicks_props()
+    APIFY MEMORY EXHAUSTED — replaced with sportsbook_reference_layer fallback.
+    Fetches MLB player prop lines from The Odds API (sportsbooks: DK, FD, Pinnacle).
+    Returns same format as original Apify implementation so all downstream code works.
     """
-    apify_key = os.environ.get("APIFY_API_KEY", "")
-    if not apify_key:
-        logger.warning("[PP-Apify] APIFY_API_KEY not set — skipping fallback")
-        return []
-
-    # ── Apify stat label → our internal stat_type ─────────────────────────
-    _APIFY_STAT_MAP: dict[str, str] = {
-        "hitter fantasy score":   "hitter fantasy score",
-        "pitcher fantasy score":  "pitcher fantasy score",
-        "hits":                   "hits",
-        "home runs":              "home runs",
-        "total bases":            "total bases",
-        "rbis":                   "rbis",
-        "rbi":                    "rbi",
-        "runs":                   "runs",
-        "stolen bases":           "stolen bases",
-        "hits+runs+rbis":         "hits+runs+rbis",
-        "hits + runs + rbis":     "hits + runs + rbis",
-        "pitcher strikeouts":     "pitcher strikeouts",
-        "strikeouts":             "strikeouts",
-        "earned runs allowed":    "earned runs allowed",
-        "earned runs":            "earned runs",
-        "hits allowed":           "hits allowed",
-        "walks allowed":          "walks allowed",
-        "pitching outs":          "pitching outs",
-        "walks":                  "walks",
-        "doubles":                "doubles",
-        "triples":                "triples",
-    }
-
     try:
-        run_url = (
-            f"https://api.apify.com/v2/acts/4AmgQeem8dEgMEiRF/runs"
-            f"?token={apify_key}&waitForFinish=120"
-        )
-        r = requests.post(
-            run_url,
-            json={"leagues": ["MLB"]},
-            timeout=130,
-        )
-        if r.status_code not in (200, 201):
-            logger.warning("[PP-Apify] Run start HTTP %d", r.status_code)
+        from sportsbook_reference_layer import build_sportsbook_reference  # noqa: PLC0415
+        sb_ref = build_sportsbook_reference()
+        if not sb_ref:
+            logger.warning("[PP-SB] Sportsbook reference returned empty — no props")
             return []
 
-        run_data  = r.json().get("data", {})
-        dataset_id = run_data.get("defaultDatasetId", "")
-        run_status = run_data.get("status", "")
-        run_id     = run_data.get("id", "")
+        # Convert (player_lower, prop_type, side) -> {sb_implied_prob, sb_line}
+        # into the flat prop list format expected by the dispatcher
+        props_by_player: dict[str, dict] = {}
+        for (player_norm, prop_type, side), data in sb_ref.items():
+            if side != "over":
+                continue
+            line = data.get("sb_line")
+            if line is None:
+                continue
+            key = f"{player_norm}|{prop_type}"
+            if key not in props_by_player:
+                props_by_player[key] = {
+                    "source":      "sportsbook",
+                    "player_name": player_norm.title(),
+                    "stat_type":   prop_type,
+                    "line":        float(line),
+                }
 
-        # Poll until SUCCEEDED (waitForFinish handles most of this, but be safe)
-        if run_status not in ("SUCCEEDED", "READY"):
-            for _ in range(20):
-                time.sleep(6)
-                poll = requests.get(
-                    f"https://api.apify.com/v2/actor-runs/{run_id}?token={apify_key}",
-                    timeout=15,
-                )
-                run_status = poll.json().get("data", {}).get("status", "")
-                dataset_id = poll.json().get("data", {}).get("defaultDatasetId", dataset_id)
-                if run_status == "SUCCEEDED":
-                    break
-            else:
-                logger.warning("[PP-Apify] Run %s never finished (status=%s)", run_id, run_status)
-                return []
-
-        # Fetch dataset items
-        items_url = (
-            f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-            f"?token={apify_key}&limit=8000&clean=true"
-        )
-        resp = requests.get(items_url, timeout=30)
-        if resp.status_code != 200:
-            logger.warning("[PP-Apify] Dataset fetch HTTP %d", resp.status_code)
-            return []
-
-        items = resp.json()
-        props: list[dict] = []
-        for item in items:
-            stat_raw = str(item.get("stat", "") or "").strip()
-            stat_key = stat_raw.lower()
-            if stat_key not in _PP_MLB_STAT_TYPES:
-                continue
-            if "inning" in stat_key:
-                continue
-            # Skip goblin/demon alt lines — only odds_tier=standard
-            if item.get("odds_tier", "standard") != "standard":
-                continue
-            if item.get("adjusted_odds", False):
-                continue
-
-            line_val = item.get("line")
-            if line_val is None:
-                continue
-            pname = str(item.get("player_name", "") or "").strip()
-            if not pname:
-                continue
-            # Normalise stat label to match our internal naming
-            stat_out = _APIFY_STAT_MAP.get(stat_key, stat_raw)
-            props.append({
-                "source":      "prizepicks",
-                "player_name": pname,
-                "stat_type":   stat_out,
-                "line":        float(line_val),
-            })
-
-        logger.info("[PP-Apify] Fetched %d MLB props via Apify", len(props))
+        props = list(props_by_player.values())
+        logger.info("[PP-SB] Fetched %d MLB props via sportsbook_reference_layer", len(props))
         return props
 
     except Exception as exc:
-        logger.warning("[PP-Apify] Fallback failed: %s", exc)
+        logger.warning("[PP-SB] Sportsbook reference fallback failed: %s", exc)
         return []
 
 
@@ -916,7 +834,7 @@ def fetch_prizepicks_props() -> list[dict]:
     Fetch PrizePicks MLB projections.
 
     Primary  : Direct API with session-cookie warm-up.
-    Fallback : Apify actor 4AmgQeem8dEgMEiRF when Railway IP is 403-blocked.
+    Fallback : sportsbook_reference_layer (Odds API) when Railway IP is 403-blocked.
 
     Returns raw list of dicts (same format either way).
     """
@@ -933,7 +851,7 @@ def fetch_prizepicks_props() -> list[dict]:
         if resp.status_code == 200:
             data = resp.json()
         else:
-            logger.info("[PP] HTTP %d — routing to Apify (no retries)", resp.status_code)
+            logger.info("[PP] HTTP %d — routing to sportsbook fallback (no retries)", resp.status_code)
             return _fetch_prizepicks_via_apify()
 
         # Build player id -> name map from included resources
@@ -982,7 +900,7 @@ def fetch_prizepicks_props() -> list[dict]:
         logger.info("[PP] Fetched %d MLB props", len(props))
         return props
     except Exception as exc:
-        logger.warning("[PP] Fetch failed: %s — trying Apify fallback", exc)
+        logger.warning("[PP] Fetch failed: %s — trying sportsbook fallback", exc)
         return _fetch_prizepicks_via_apify()
 
 
