@@ -326,26 +326,11 @@ def run_data_hub_tasklet() -> None:
     if not r.exists(physics_key):
         logger.info("[DataHub] Scraping physics / arsenal data…")
         physics = {
-            "pitch_arsenal": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "advanced_stats": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/stats-advanced.php"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "bvp": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/stats-bvp.php"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "batted_ball": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/stats-batted-ball.php"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "second_half": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/stats-second-half.php"}],
-                "maxCrawlingDepth": 0,
-            }),
+            "pitch_arsenal":  [],  # no Statcast actor yet
+            "advanced_stats": [],  # no actor yet
+            "bvp":            [],  # no actor yet
+            "batted_ball":    [],  # no actor yet
+            "second_half":    [],  # no actor yet
         }
         r.setex(physics_key, TTL_PHYSICS, json.dumps(physics))
 
@@ -354,25 +339,27 @@ def run_data_hub_tasklet() -> None:
     if not r.exists(context_key):
         logger.info("[DataHub] Scraping context / environment data…")
         context = {
-            "weather": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/weather.php"}],
-                "maxCrawlingDepth": 0,
+            "weather":   [],  # no actor yet — Open-Meteo called per-game in dispatcher
+            "umpires":   [],  # no actor yet
+            "injuries":  [],  # no actor yet
+            # ESPN MLB schedule actor — timezone MUST be America/Los_Angeles
+            "lineups": _fetch_apify("IaUStoP4x1RVhXMJM", {
+                "dateMode": "today",
+                "gameStatus": ["pre", "in", "post"],
+                "leagues": ["mlb"],
+                "liveOnly": False,
+                "nationalTvOnly": False,
+                "timezone": "America/Los_Angeles",
+                "teams": [],
+                "homeAwayFilter": "all",
+                "networkFilter": [],
             }),
-            "umpires": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/umpire-stats-daily.php"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "injuries": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/news.php?injuries=all"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "lineups": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/batting-orders.php"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "projected_starters": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/baseball/projected-starters.php"}],
-                "maxCrawlingDepth": 0,
+            "projected_starters": [],  # no actor yet
+            # MLB standings 2026
+            "standings": _fetch_apify("ToDC6ydulO79igDoX", {
+                "mode": "standings",
+                "season": 2026,
+                "stat_type": "all",
             }),
         }
         r.setex(context_key, TTL_CONTEXT, json.dumps(context))
@@ -383,14 +370,8 @@ def run_data_hub_tasklet() -> None:
         logger.info("[DataHub] Scraping market / steam data…")
         market = {
             "public_betting": _fetch_sbd_public_trends(),
-            "sharp_report": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.actionnetwork.com/mlb/sharp-report"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "prop_projections": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.actionnetwork.com/mlb/prop-projections"}],
-                "maxCrawlingDepth": 0,
-            }),
+            "sharp_report":    [],  # no actor yet
+            "prop_projections": [],  # no actor yet
             "odds": _odds_api_get(),
         }
         r.setex(market_key, TTL_MARKET, json.dumps(market))
@@ -400,22 +381,11 @@ def run_data_hub_tasklet() -> None:
     if not r.exists(dfs_key):
         logger.info("[DataHub] Scraping DFS target data…")
         dfs = {
-            "underdog": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/picks/underdog/"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "prizepicks": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/picks/prizepicks/"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "sleeper": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/picks/sleeper/"}],
-                "maxCrawlingDepth": 0,
-            }),
-            "optimizer": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.rotowire.com/daily/mlb/optimizer.php"}],
-                "maxCrawlingDepth": 0,
-            }),
+            "underdog":  [],  # fetched directly via live_dispatcher HTTP session
+            # PrizePicks via Apify actor (6,500+ MLB props, ~$0.38/run)
+            "prizepicks": _fetch_apify("4AmgQeem8dEgMEiRF", {"leagues": ["MLB"]}),
+            "sleeper":   [],  # removed per DFS compliance directive
+            "optimizer": [],  # no actor yet
         }
         r.setex(dfs_key, TTL_DFS, json.dumps(dfs))
 
