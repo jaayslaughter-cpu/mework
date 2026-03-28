@@ -451,6 +451,9 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
             continue
         if not _is_game_prop(prop_type, line_val):
             continue
+        # STANDARD entry type only — skip FLEX / boosted alt lines
+        if str(etype).upper() != "STANDARD":
+            continue
 
         key = (pname.lower().strip(), prop_type)
         if key not in groups:
