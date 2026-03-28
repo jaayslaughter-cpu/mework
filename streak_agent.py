@@ -552,7 +552,14 @@ def _pg_conn():
 
 
 def ensure_streak_tables() -> None:
-    """Create streak_state + streak_picks tables if they don't exist."""
+    """Create streak_state + streak_picks tables if they don't exist.
+    Silently skips if psycopg2 unavailable (local dev without Postgres)."""
+    if not _PG_AVAILABLE:
+        logger.info("[Streak] psycopg2 not available — skipping table setup (local dev mode)")
+        return
+    if not os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL", "")):
+        logger.info("[Streak] No DATABASE_URL — skipping table setup (local dev mode)")
+        return
     ddl = """
     CREATE TABLE IF NOT EXISTS streak_state (
         id              SERIAL PRIMARY KEY,
@@ -600,8 +607,11 @@ def ensure_streak_tables() -> None:
 def get_or_create_active_streak(entry_amount: int = DEFAULT_ENTRY) -> dict | None:
     """
     Return the current ACTIVE streak state dict, or create one if none exists.
-    Returns None on DB error.
+    Returns None on DB error or when Postgres is unavailable (local dev).
     """
+    if not _PG_AVAILABLE or not os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL", "")):
+        logger.info("[Streak] Postgres unavailable — skipping streak state (local dev mode)")
+        return None
     try:
         conn = _pg_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

@@ -1,10 +1,5 @@
 """execution_agents.py — PropIQ Analytics Execution Tier
 
-Four independent execution agents that consume ML probability outputs and
-Market Scanner alerts from RabbitMQ, filter by their specific strategy
-"""execution_agents.py — PropIQ Analytics Execution Tier
-
-Four independent execution agents that consume ML probability outputs and
 Ten independent execution agents that consume ML probability outputs and
 Market Scanner alerts from RabbitMQ, filter by their specific strategy
 criteria, generate Underdog Fantasy slip combinations, validate expected
@@ -17,8 +12,6 @@ Classes:
     UnderMachine      – Specialist: all-Under contrarian slips only
     F5Agent           – First-5-innings props only (ignores bullpen data)
     MLEdgeAgent       – Pure ML calibrated probability slips (no market scanner)
-    SlipPublisher     – RabbitMQ publisher to alerts.discord.slips
-    ExecutionSquad    – Orchestrates all four agents on a shared consumer loop
     UmpireAgent       – Umpire K-rate and run-environment tendencies
     FadeAgent         – Contrarian fades against public consensus
     LineValueAgent    – Sharp consensus gap plays (no-vig line value)
@@ -41,13 +34,11 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pika
 import pika.exceptions
-from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
 from odds_math import MIN_EV_THRESHOLD, calculate_no_vig_ev  # noqa: E402
 from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
 from apify_scrapers import DataEnricher  # noqa: E402
@@ -94,61 +85,6 @@ class PropEdge:
     is_f5: bool = False
     kelly_fraction: float = 0.0
 
-
-# ---------------------------------------------------------------------------
-# Mock UnderdogMathEngine (contract boundary)
-# ---------------------------------------------------------------------------
-
-def _underdog_payout_multiplier(n_legs: int) -> float:
-    """Return Underdog Fantasy's gross payout multiplier for an n-leg slip.
-
-    Payouts are based on Underdog's published payout table for their
-    Higher/Lower Power Play format.
-
-    Args:
-        n_legs: Number of legs (3, 4, or 5).
-
-    Returns:
-        Gross payout multiplier (stake × multiplier = gross return).
-    """
-    multipliers: Dict[int, float] = {3: 5.45, 4: 10.5, 5: 19.5}
-    return multipliers.get(n_legs, 5.45)
-
-
-class UnderdogMathEngine:
-    """Evaluates the expected value of a multi-leg Underdog Fantasy slip.
-
-    In production this class is imported from ``underdog_math_engine.py``.
-    This stub mirrors the public interface so agents can be tested in isolation.
-
-    EV Calculation:
-        combined_prob = product of each leg's true_prob
-        gross_payout  = _underdog_payout_multiplier(n_legs)
-        total_ev      = (combined_prob × gross_payout) − 1.0
-    """
-
-    @staticmethod
-    def evaluate_slip(legs: List[PropEdge]) -> Dict[str, float]:
-        """Estimate expected value and payout for a slip combination.
-
-        Args:
-            legs: List of :class:`PropEdge` objects forming one slip.
-
-        Returns:
-            Dict with:
-                - ``total_ev``                (float) — net EV (e.g., 0.045 = +4.5%)
-                - ``implied_payout_multiplier`` (float) — gross payout multiple
-        """
-        if not legs:
-            return {"total_ev": 0.0, "implied_payout_multiplier": 1.0}
-
-        combined_prob = 1.0
-        for leg in legs:
-            combined_prob *= leg.true_prob
-
-        payout = _underdog_payout_multiplier(len(legs))
-        total_ev = (combined_prob * payout) - 1.0
-        return {"total_ev": round(total_ev, 4), "implied_payout_multiplier": payout}
     # --- Sportsbook odds (required for true no-vig EV calculation) ---
     # Defaults to standard -110/-110 juice when live odds are unavailable.
     odds_over: float = -110.0
@@ -387,16 +323,6 @@ class BaseSlipBuilder(ABC):
         for combo in self.generate_combinations(filtered):
             if not self.validate_correlation(combo):
                 continue
-            ev_result = self.math_engine.evaluate_slip(list(combo))
-            if ev_result["total_ev"] <= self.min_ev:
-                continue
-            payload = self._format_payload(list(combo), ev_result)
-            self.publisher.publish(payload)
-            published.append(payload)
-
-        logger.info(
-            "%s: %d props → %d slips published",
-            self.agent_name, len(filtered), len(published),
             leg_probs = [leg.true_prob for leg in combo]
             try:
                 slip_eval: SlipEvaluation = self.math_engine.evaluate_slip(leg_probs)
@@ -405,13 +331,6 @@ class BaseSlipBuilder(ABC):
                 continue
             if slip_eval.total_ev <= self.min_ev:
                 continue
-            payload = self._format_payload(list(combo), slip_eval)
-            self.publisher.publish(payload)
-            published.append(payload)
-
-        best_ev = max((p["total_ev"] for p in published), default=0.0)
-        logger.info(
-            "%s: %d props → %d slips published (best EV: %.2f%%)",
 
             # ------------------------------------------------------------------
             # No-vig EV gate — compare XGBoost model probability against the
@@ -516,7 +435,6 @@ class BaseSlipBuilder(ABC):
             )
             return False
 
-        # TODO: add game_id-based correlation check when PropEdge carries game_id
         # game_id correlation: block if ≥4 legs from the same game.
         # Same-game parlays carry high leg-to-leg correlation that understates
         # true combined probability, especially when all props belong to the
@@ -543,7 +461,6 @@ class BaseSlipBuilder(ABC):
     def _format_payload(
         self,
         legs: List[PropEdge],
-        ev_result: Dict[str, float],
         slip_eval: SlipEvaluation,
         leg_evs: List[float],
         avg_leg_ev: float,
@@ -551,19 +468,6 @@ class BaseSlipBuilder(ABC):
         """Serialise a validated slip into the standard Discord-bound JSON.
 
         Args:
-            legs:      Validated list of :class:`PropEdge` objects.
-            ev_result: Output from :meth:`UnderdogMathEngine.evaluate_slip`.
-
-        Returns:
-            Slip payload conforming to the Discord dispatcher schema.
-        """
-        slip_type = f"{len(legs)}-leg standard"
-        unit_size = self._fractional_kelly(ev_result["total_ev"], legs)
-        return {
-            "agent_name": self.agent_name,
-            "slip_type": slip_type,
-            slip_eval: :class:`SlipEvaluation` from
-                       :meth:`UnderdogMathEngine.evaluate_slip`.
             legs:        Validated list of :class:`PropEdge` objects.
             slip_eval:   :class:`SlipEvaluation` from
                          :meth:`UnderdogMathEngine.evaluate_slip`.
@@ -592,47 +496,7 @@ class BaseSlipBuilder(ABC):
                     "line": leg.line,
                     "side": leg.side,
                     "true_prob": round(leg.true_prob, 4),
-                }
-                for leg in legs
-            ],
-            "total_ev": ev_result["total_ev"],
-            "recommended_unit_size": unit_size,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    @staticmethod
-    def _fractional_kelly(total_ev: float, legs: List[PropEdge]) -> float:
-        """Calculate a half-Kelly recommended unit size.
-
-        The full Kelly formula for a binary bet is:
-            f* = edge / net_odds
-
-        We apply ½ Kelly as a standard risk management guardrail, capping
-        the output at 10% of bankroll to prevent ruin on a single slip.
-
-        Args:
-            total_ev: Net expected value of the slip (e.g., 0.045 = +4.5%).
-            legs:     Legs in the slip (used to derive payout odds).
-
-        Returns:
-            Fractional unit size clamped to [0.0, 0.10].
-        """
-        net_odds = _underdog_payout_multiplier(len(legs)) - 1.0
-        if net_odds <= 0.0:
-            return 0.0
-        full_kelly = total_ev / net_odds
-        half_kelly = full_kelly / 2.0
-        return round(max(0.0, min(half_kelly, 0.10)), 4)
-
                     "edge_pct": round(leg.edge_pct, 4),
-                }
-                for leg in legs
-            ],
-            # EV breakdown for Discord embed
-            "total_ev": slip_eval.total_ev,
-            "flex_ev": slip_eval.flex_ev,
-            "standard_ev": slip_eval.standard_ev,
-            # Probability breakdown
                     # No-vig EV for this leg: (model_prob / true_no_vig_prob) - 1
                     # This is the number shown on the Discord message per leg.
                     "no_vig_ev": round(ev, 4),
@@ -665,9 +529,6 @@ class EVHunter(BaseSlipBuilder):
     """Builds maximum-EV slips regardless of prop type, side, or source.
 
     Subscribes to both ML Engine calibrated probability alerts and all
-    Market Scanner (LineValue, Steam, Fade) alerts.  Selects the top-N
-    props by edge percentage across the entire MLB slate and constructs
-    every valid 3/4/5-leg combination.
     Market Scanner (LineValue, Steam, Fade) alerts.  Also ingests
     market_fusion CLV edges and dislocation-scored props from the
     multi-provider OddsFetcher pipeline.
@@ -684,7 +545,6 @@ class EVHunter(BaseSlipBuilder):
         the single most profitable combination available on any given day.
     """
 
-    TOP_N: int = 10
     TOP_N: int              = 10
     DISLOCATION_WEIGHT: float = 0.5   # weight applied to dislocation_score bonus
     CLV_SOURCES: frozenset  = frozenset({
@@ -695,18 +555,6 @@ class EVHunter(BaseSlipBuilder):
     def agent_name(self) -> str:
         return "EVHunter"
 
-    def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Select the top-N props by edge percentage.
-
-        Args:
-            props: Full unfiltered prop pool.
-
-        Returns:
-            Top :attr:`TOP_N` props ranked by ``edge_pct`` descending,
-            requiring positive edge.
-        """
-        eligible = [p for p in props if p.edge_pct > 0]
-        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
     def _composite_score(self, p: "PropEdge") -> float:
         """Composite ranking score blending edge_pct + CLV dislocation bonus."""
         dis_score = getattr(p, "dislocation_score", 0.0) or 0.0
@@ -729,6 +577,61 @@ class EVHunter(BaseSlipBuilder):
         eligible = [p for p in props if p.edge_pct > 0]
         eligible.sort(key=self._composite_score, reverse=True)
         return eligible[: self.TOP_N]
+
+
+# ---------------------------------------------------------------------------
+# Agent 1b — ArbitrageAgent (True Cross-Book Arbitrage)
+# ---------------------------------------------------------------------------
+
+class ArbitrageAgent(BaseSlipBuilder):
+    """
+    Identifies and builds slips from true cross-book arbitrage opportunities.
+
+    Consumes PropEdges with ``source == "arbitrage"`` from the
+    MarketFusionEngine.arbitrage_scan() pipeline.  These are props where
+    the best available Over on one book + best Under on another book
+    combine to a total implied probability < 1.0 — a guaranteed edge
+    regardless of outcome.
+
+    Filters:
+        - source == "arbitrage"
+        - arb_margin ≥ ARB_GATE (0.5 % guaranteed return)
+        - min_providers ≥ 2 (confirmed cross-book, not a data artefact)
+
+    Slip construction:
+        - MAX_LEGS = 3  (keeps arb slips tight; wider slips dilute the edge)
+        - Builds Over legs only; the guaranteed margin is captured on the
+          over side where the dislocation is largest.
+    """
+
+    MAX_LEGS: int  = 3
+    ARB_GATE: float = 0.005   # 0.5 % minimum guaranteed margin
+
+    @property
+    def agent_name(self) -> str:
+        return "ArbitrageAgent"
+
+    def filter_props(self, props: List["PropEdge"]) -> List["PropEdge"]:
+        """
+        Filter to confirmed arbitrage edges with positive margin.
+
+        Args:
+            props: Full prop pool from all inbound sources.
+
+        Returns:
+            Arbitrage props sorted by ``arb_margin`` descending.
+        """
+        arb_props = [
+            p for p in props
+            if getattr(p, "source", "") == "arbitrage"
+            and getattr(p, "arb_margin", 0.0) >= self.ARB_GATE
+            and len(getattr(p, "providers_sampled", [])) >= 2
+        ]
+        arb_props.sort(
+            key=lambda p: getattr(p, "arb_margin", 0.0),
+            reverse=True,
+        )
+        return arb_props
 
 
 # ---------------------------------------------------------------------------
@@ -870,11 +773,6 @@ class MLEdgeAgent(BaseSlipBuilder):
 
 
 # ---------------------------------------------------------------------------
-# Execution Squad — Shared RabbitMQ Consumer
-# ---------------------------------------------------------------------------
-
-class ExecutionSquad:
-    """Orchestrates all four agents on a shared RabbitMQ consumer loop.
 # Agent 5 — UmpireAgent (Umpire Tendencies)
 # ---------------------------------------------------------------------------
 
@@ -898,7 +796,6 @@ class UmpireAgent(BaseSlipBuilder):
     UMPIRE_PROP_TYPES: frozenset = frozenset({
         "strikeouts", "ks", "walks", "bb", "earned_runs", "er",
     })
-    MIN_PROB: float = 0.54
     PITCHER_ZONE_PROPS: frozenset = frozenset({"strikeouts", "ks"})
     HITTER_ZONE_PROPS: frozenset = frozenset({"walks", "bb"})
     TOTAL_PROPS: frozenset = frozenset({"earned_runs", "er", "total", "runs_scored"})
@@ -915,14 +812,6 @@ class UmpireAgent(BaseSlipBuilder):
         return "UmpireAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Retain umpire-source props and umpire-sensitive ML props.
-
-        Criteria:
-            1. ``source == "umpire"`` — explicit umpire context signal.
-            2. ``source == "ml_engine"`` + ``prop_type`` is strikeout, walk,
-               or earned-run — umpire environment already baked into the
-               XGBoost probability.
-            3. ``true_prob >= MIN_PROB`` and positive ``edge_pct``.
         """Retain umpire-relevant props with directional zone validation.
 
         Strategy mirrors the Environment Dictator spec:
@@ -950,18 +839,6 @@ class UmpireAgent(BaseSlipBuilder):
         Returns:
             Umpire-relevant props sorted by ``edge_pct`` descending.
         """
-        eligible = [
-            p for p in props
-            if p.edge_pct > 0
-            and p.true_prob >= self.MIN_PROB
-            and (
-                p.source == "umpire"
-                or (
-                    p.source == "ml_engine"
-                    and p.prop_type.lower() in self.UMPIRE_PROP_TYPES
-                )
-            )
-        ]
         eligible: List[PropEdge] = []
         for p in props:
             if p.edge_pct <= 0 or p.true_prob < self.MIN_PROB:
@@ -1028,7 +905,6 @@ class FadeAgent(BaseSlipBuilder):
         return "FadeAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Retain only FadeScanner contrarian props.
         """Retain contrarian props where public tickets diverge from sharp money.
 
         Core contrarian gauge logic:
@@ -1051,16 +927,6 @@ class FadeAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
-            Fade props with ``edge_pct > 0`` and ``true_prob >= 0.52``,
-            sorted by ``edge_pct`` descending.
-        """
-        fade_props = [
-            p for p in props
-            if p.source == "fade"
-            and p.edge_pct > 0
-            and p.true_prob >= self.MIN_PROB
-        ]
-        fade_props.sort(key=lambda p: p.edge_pct, reverse=True)
             Contrarian fade props sorted by ``fade_signal`` descending
             (strongest divergence first).
         """
@@ -1154,13 +1020,6 @@ class BullpenAgent(BaseSlipBuilder):
         return "BullpenAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Retain bullpen-source props and bullpen-sensitive full-game ML props.
-
-        Criteria:
-            1. ``source == "bullpen"`` — explicit fatigue signal.
-            2. ``source == "ml_engine"`` + prop_type is bullpen-sensitive
-               + ``is_f5 == False`` (full-game props only).
-            3. ``true_prob >= MIN_PROB`` and positive ``edge_pct``.
         """Retain props where bullpen fatigue creates late-inning value.
 
         Rest & Usage Tracker logic:
@@ -1181,22 +1040,6 @@ class BullpenAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
-            Bullpen-relevant props sorted by ``edge_pct`` descending.
-        """
-        eligible = [
-            p for p in props
-            if p.edge_pct > 0
-            and p.true_prob >= self.MIN_PROB
-            and not p.is_f5
-            and (
-                p.source == "bullpen"
-                or (
-                    p.source == "ml_engine"
-                    and p.prop_type.lower() in self.BULLPEN_SENSITIVE_PROPS
-                )
-            )
-        ]
-        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
             Bullpen-relevant props sorted by ``fatigue_index`` descending
             (most fatigued bullpen first), then by ``edge_pct``.
         """
@@ -1246,7 +1089,6 @@ class WeatherAgent(BaseSlipBuilder):
         "home_runs", "total_bases", "hits", "runs_scored",
         "singles", "doubles", "xbh",
     })
-    MIN_PROB: float = 0.54
     POWER_PROPS: frozenset = frozenset({"home_runs", "total_bases", "xbh", "doubles"})
     MIN_PROB: float = 0.54
     #: Wind speed (MPH) that triggers strong wind adjustments.
@@ -1261,12 +1103,6 @@ class WeatherAgent(BaseSlipBuilder):
         return "WeatherAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Retain weather-source props and weather-sensitive ML props.
-
-        Criteria:
-            1. ``source == "weather"`` — explicit park/weather signal.
-            2. ``source == "ml_engine"`` + prop_type is weather-sensitive.
-            3. ``true_prob >= MIN_PROB`` and positive ``edge_pct``.
         """Retain props where atmospheric conditions create measurable edge.
 
         Atmospheric Adjuster logic:
@@ -1288,21 +1124,6 @@ class WeatherAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
-            Weather-relevant props sorted by ``edge_pct`` descending.
-        """
-        eligible = [
-            p for p in props
-            if p.edge_pct > 0
-            and p.true_prob >= self.MIN_PROB
-            and (
-                p.source == "weather"
-                or (
-                    p.source == "ml_engine"
-                    and p.prop_type.lower() in self.WEATHER_SENSITIVE_PROPS
-                )
-            )
-        ]
-        eligible.sort(key=lambda p: p.edge_pct, reverse=True)
             Weather-relevant props sorted by wind speed descending,
             then by ``edge_pct``.
         """
@@ -1379,7 +1200,6 @@ class SteamAgent(BaseSlipBuilder):
         return "SteamAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Retain only SteamScanner props with a 4%+ edge gap.
         """Retain props where rapid uniform line movement signals sharp action.
 
         Velocity Tracker logic:
@@ -1406,14 +1226,6 @@ class SteamAgent(BaseSlipBuilder):
             props: Full prop pool from all inbound sources.
 
         Returns:
-            Steam props sorted by ``edge_pct`` descending.
-        """
-        steam_props = [
-            p for p in props
-            if p.source == "steam"
-            and p.edge_pct >= self.MIN_EDGE_PCT
-        ]
-        steam_props.sort(key=lambda p: p.edge_pct, reverse=True)
             Steam props sorted by velocity descending (fastest-moving first),
             then by book count for tie-breaking.  Max 3 legs enforced at
             combination stage.
@@ -1913,7 +1725,6 @@ class ExecutionSquad:
 
     Processing model:
         Messages are consumed and buffered into an in-memory prop pool.
-        The pool is flushed to all four agents every ``FLUSH_EVERY_N``
         The pool is flushed to all ten agents every ``FLUSH_EVERY_N``
         messages or every ``FLUSH_EVERY_S`` seconds, whichever comes first.
         This batching model reduces redundant combination generation while
@@ -1953,9 +1764,7 @@ class ExecutionSquad:
         self._last_flush: float = time.time()
         self._agents: List[BaseSlipBuilder] = [
             EVHunter(amqp_url=amqp_url),
-            UnderMachine(amqp_url=amqp_url),
-            F5Agent(amqp_url=amqp_url),
-            MLEdgeAgent(amqp_url=amqp_url),
+            ArbitrageAgent(amqp_url=amqp_url),
             UnderMachine(amqp_url=amqp_url),
             F5Agent(amqp_url=amqp_url),
             MLEdgeAgent(amqp_url=amqp_url),
@@ -2045,7 +1854,6 @@ class ExecutionSquad:
                 self._flush_to_agents()
             ch.basic_ack(delivery_tag=method.delivery_tag)
         except (KeyError, TypeError, ValueError) as exc:
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.error("ExecutionSquad: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
@@ -2058,7 +1866,6 @@ class ExecutionSquad:
         )
 
     def _flush_to_agents(self) -> None:
-        """Distribute the current prop pool to all four agents, then clear."""
         """Distribute the current prop pool to all ten agents, then clear."""
         if not self._prop_pool:
             return
@@ -2076,8 +1883,6 @@ class ExecutionSquad:
     # Parsing
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _parse_prop_edge(data: Dict[str, Any]) -> Optional[PropEdge]:
     def _parse_prop_edge(self, data: Dict[str, Any]) -> Optional[PropEdge]:
         """Convert a raw RabbitMQ message dict into a :class:`PropEdge`.
 
@@ -2122,57 +1927,6 @@ class ExecutionSquad:
         ) or "ml_engine"
 
         return PropEdge(
-            player_id=data["player_id"],
-            player_name=data.get("player_name", data["player_id"]),
-            prop_type=data["prop_type"],
-            line=float(data.get("underdog_line", 0.0)),
-            side=data["side"],
-            true_prob=float(data["true_prob"]),
-            edge_pct=float(data["edge_percentage"]),
-            source=source,
-            is_f5=bool(data.get("is_f5", False)),
-            # --- Sportsbook odds for no-vig EV calculation ---
-            odds_over=float(data.get("odds_over", -110.0)),
-            odds_under=float(data.get("odds_under", -110.0)),
-            # --- UmpireAgent ---
-            umpire_cs_pct=float(data.get("umpire_cs_pct", 0.0)),
-            # --- FadeAgent ---
-            ticket_pct=float(data.get("ticket_pct", 0.0)),
-            money_pct=float(data.get("money_pct", 0.0)),
-            # --- BullpenAgent ---
-            fatigue_index=float(data.get("fatigue_index", 0.0)),
-            # --- WeatherAgent ---
-            wind_speed=float(data.get("wind_speed", 0.0)),
-            wind_direction=str(data.get("wind_direction", "")),
-            # --- SteamAgent ---
-            steam_velocity=float(data.get("steam_velocity", 0.0)),
-            steam_book_count=int(data.get("steam_book_count", 0)),
-            # --- ArsenalAgent ---
-            pitcher_arsenal_json=str(data.get("pitcher_arsenal_json", "{}")),
-            batter_whiff_json=str(data.get("batter_whiff_json", "{}")),
-            # --- PlatoonAgent ---
-            wrc_plus_vl=float(data.get("wrc_plus_vl", 100.0)),
-            wrc_plus_vr=float(data.get("wrc_plus_vr", 100.0)),
-            wrc_plus_overall=float(data.get("wrc_plus_overall", 100.0)),
-            batter_handedness=str(data.get("batter_handedness", "")),
-            pitcher_handedness=str(data.get("pitcher_handedness", "")),
-            pa_starter=float(data.get("pa_starter", 2.5)),
-            pa_total=float(data.get("pa_total", 4.0)),
-            p_lhp_bullpen=float(data.get("p_lhp_bullpen", 0.30)),
-            p_rhp_bullpen=float(data.get("p_rhp_bullpen", 0.70)),
-            pinch_hit_risk=float(data.get("pinch_hit_risk", 0.0)),
-            # --- CatcherAgent ---
-            catcher_framing_runs=float(data.get("catcher_framing_runs", 0.0)),
-            catcher_pop_time=float(data.get("catcher_pop_time", 1.90)),
-            pitcher_time_to_plate=float(data.get("pitcher_time_to_plate", 1.30)),
-            # --- LineupAgent ---
-            lineup_position=int(data.get("lineup_position", 5)),
-            team_total_runs=float(data.get("team_total_runs", 4.5)),
-            pa_average=float(data.get("pa_average", 3.8)),
-            # --- GetawayAgent ---
-            hours_rest=float(data.get("hours_rest", 24.0)),
-            time_zone_change=int(data.get("time_zone_change", 0)),
-            previous_game_innings=int(data.get("previous_game_innings", 9)),
             player_id=merged["player_id"],
             player_name=merged.get("player_name", merged["player_id"]),
             prop_type=merged["prop_type"],
