@@ -84,6 +84,56 @@ TTL_MARKET   = 300    #  5 min
 TTL_DFS      = 480    #  8 min
 TTL_HUB      = 120    #  2 min — master hub key
 
+# ── In-memory fallback cache (active when Redis is unavailable) ──────────────
+_MEM: dict = {}  # key → (expire_ts, data)
+
+
+def _mem_set(key: str, ttl: int, data) -> None:
+    _MEM[key] = (time.time() + ttl, data)
+
+
+def _mem_exists(key: str) -> bool:
+    entry = _MEM.get(key)
+    return entry is not None and time.time() < entry[0]
+
+
+def _mem_get(key: str):
+    entry = _MEM.get(key)
+    if entry and time.time() < entry[0]:
+        return entry[1]
+    return None
+
+
+def _hub_exists(r, key: str) -> bool:
+    """Check Redis first, fall back to in-memory."""
+    try:
+        if r.exists(key):
+            return True
+    except Exception:
+        pass
+    return _mem_exists(key)
+
+
+def _hub_setex(r, key: str, ttl: int, json_str: str) -> None:
+    """Write to Redis and always write to in-memory fallback."""
+    try:
+        r.setex(key, ttl, json_str)
+    except Exception:
+        pass
+    _mem_set(key, ttl, json.loads(json_str))
+
+
+def _hub_get(r, key: str):
+    """Read from Redis; fall back to in-memory."""
+    try:
+        raw = r.get(key)
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return _mem_get(key)
+
+
 # Agent config
 AGENT_NAMES = [
     "EVHunter",
@@ -211,7 +261,7 @@ def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
             f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items",
             params={"token": api_key},
             json=run_input,
-            timeout=60,
+            timeout=120,
         )
         resp.raise_for_status()
         return resp.json()
@@ -254,6 +304,50 @@ def _sportsdata_get(path: str) -> Any:
         logger.warning("SportsData.io error (%s): %s", path, e)
         return None
 
+
+
+
+def _fetch_espn_games() -> dict:
+    """Fetch today's MLB games from ESPN public API. No API key required."""
+    status_map = {
+        "STATUS_SCHEDULED":   "Scheduled",
+        "STATUS_IN_PROGRESS": "InProgress",
+        "STATUS_FINAL":       "Final",
+        "STATUS_POSTPONED":   "Postponed",
+        "STATUS_DELAYED":     "Delayed",
+    }
+    try:
+        url = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        games: dict = {}
+        for event in data.get("events", []):
+            game_id = str(event.get("id", ""))
+            competition = event.get("competitions", [{}])[0]
+            competitors  = competition.get("competitors", [])
+            home = next((t for t in competitors if t.get("homeAway") == "home"), {})
+            away = next((t for t in competitors if t.get("homeAway") == "away"), {})
+            raw_status = (
+                competition.get("status", {})
+                           .get("type", {})
+                           .get("name", "STATUS_SCHEDULED")
+            )
+            games[game_id] = {
+                "GameID":    game_id,
+                "HomeTeam":  home.get("team", {}).get("abbreviation", ""),
+                "AwayTeam":  away.get("team", {}).get("abbreviation", ""),
+                "DateTime":  event.get("date", ""),
+                "Status":    status_map.get(raw_status, "Scheduled"),
+                "HomeScore": home.get("score", 0),
+                "AwayScore": away.get("score", 0),
+                "Inning":    competition.get("status", {}).get("period", 0),
+            }
+        logger.info("[DataHub] ESPN: %d games today", len(games))
+        return games
+    except Exception as exc:
+        logger.warning("[DataHub] ESPN scoreboard error: %s", exc)
+        return {}
 
 def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     """Call The Odds API for MLB lines."""
@@ -306,11 +400,8 @@ def run_data_hub_tasklet() -> None:
     game_states: dict[str, str] = {}
     try:
         today = datetime.date.today().strftime("%Y-%m-%d")
-        games = _sportsdata_get(f"scores/json/GamesByDate/{today}") or []
-        for g in games:
-            gid   = str(g.get("GameID", ""))
-            state = g.get("Status", "Scheduled")
-            game_states[gid] = state
+        games_raw = _fetch_espn_games()
+        game_states.update({gid: g["Status"] for gid, g in games_raw.items()})
         logger.info("[DataHub] %d games today. States: %s",
                     len(game_states),
                     {s: list(game_states.values()).count(s) for s in set(game_states.values())})
@@ -323,7 +414,7 @@ def run_data_hub_tasklet() -> None:
 
     # ── Group 1: Physics / Arsenal (TTL 15 min) ────────────────────────────
     physics_key = "hub:physics"
-    if not r.exists(physics_key):
+    if not _hub_exists(r, physics_key):
         logger.info("[DataHub] Scraping physics / arsenal data…")
         physics = {
             "pitch_arsenal":  [],  # no Statcast actor yet
@@ -332,11 +423,11 @@ def run_data_hub_tasklet() -> None:
             "batted_ball":    [],  # no actor yet
             "second_half":    [],  # no actor yet
         }
-        r.setex(physics_key, TTL_PHYSICS, json.dumps(physics))
+        _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
 
     # ── Group 2: Context / Environment (TTL 10 min) ───────────────────────
     context_key = "hub:context"
-    if not r.exists(context_key):
+    if not _hub_exists(r, context_key):
         logger.info("[DataHub] Scraping context / environment data…")
         context = {
             "weather":   [],  # no actor yet — Open-Meteo called per-game in dispatcher
@@ -362,11 +453,11 @@ def run_data_hub_tasklet() -> None:
                 "stat_type": "all",
             }),
         }
-        r.setex(context_key, TTL_CONTEXT, json.dumps(context))
+        _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
 
     # ── Group 3: Market / Sharp steam (TTL 5 min) ─────────────────────────
     market_key = "hub:market"
-    if not r.exists(market_key):
+    if not _hub_exists(r, market_key):
         logger.info("[DataHub] Scraping market / steam data…")
         market = {
             "public_betting": _fetch_sbd_public_trends(),
@@ -374,11 +465,11 @@ def run_data_hub_tasklet() -> None:
             "prop_projections": [],  # no actor yet
             "odds": _odds_api_get(),
         }
-        r.setex(market_key, TTL_MARKET, json.dumps(market))
+        _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
 
     # ── Group 4: DFS targets (TTL 8 min) ──────────────────────────────────
     dfs_key = "hub:dfs"
-    if not r.exists(dfs_key):
+    if not _hub_exists(r, dfs_key):
         logger.info("[DataHub] Scraping DFS target data…")
         dfs = {
             "underdog":  [],  # fetched directly via live_dispatcher HTTP session
@@ -387,7 +478,7 @@ def run_data_hub_tasklet() -> None:
             "sleeper":   [],  # removed per DFS compliance directive
             "optimizer": [],  # no actor yet
         }
-        r.setex(dfs_key, TTL_DFS, json.dumps(dfs))
+        _hub_setex(r, dfs_key, TTL_DFS, json.dumps(dfs))
 
     # ── Merge all groups into master hub key ───────────────────────────────
     hub: dict[str, Any] = {
@@ -396,25 +487,28 @@ def run_data_hub_tasklet() -> None:
         "spring_training": _is_spring_training(),
     }
     for key in (physics_key, context_key, market_key, dfs_key):
-        raw = r.get(key)
-        if raw:
-            hub[key.replace("hub:", "")] = json.loads(raw)
+        data = _hub_get(r, key)
+        if data:
+            hub[key.replace("hub:", "")] = data
 
-    r.setex("mlb_hub", TTL_HUB, json.dumps(hub))
+    _hub_setex(r, "mlb_hub", TTL_HUB, json.dumps(hub))
     logger.info("[DataHub] Hub refreshed. Groups: physics=%s context=%s market=%s dfs=%s",
-                r.exists(physics_key), r.exists(context_key),
-                r.exists(market_key), r.exists(dfs_key))
+                _hub_exists(r, physics_key), _hub_exists(r, context_key),
+                _hub_exists(r, market_key), _hub_exists(r, dfs_key))
 
 
 def read_hub() -> dict:
-    """Read the master hub dict from Redis. Returns empty dict on miss."""
+    """Read the master hub dict from Redis (or in-memory fallback). Returns empty dict on miss."""
     try:
         r = _redis()
         raw = r.get("mlb_hub")
-        return json.loads(raw) if raw else {}
+        if raw:
+            return json.loads(raw)
     except Exception as e:
-        logger.warning("[DataHub] read_hub error: %s", e)
-        return {}
+        logger.warning("[DataHub] read_hub Redis error: %s", e)
+    # Fall back to in-memory cache when Redis is unavailable
+    mem = _mem_get("mlb_hub")
+    return mem if mem else {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

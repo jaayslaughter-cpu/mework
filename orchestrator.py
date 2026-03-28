@@ -156,6 +156,25 @@ async def job_monthly_leaderboard():
         logger.warning("[orchestrator] monthly_leaderboard not available — skipping")
 
 
+
+async def _startup_dispatch_if_ready() -> None:
+    """
+    On startup, poll until DataHub has PrizePicks data, then fire dispatch.
+    Ensures plays go out even when Railway redeploys after 8 AM PT.
+    Max wait: 3 minutes (6 × 30s attempts).
+    """
+    await asyncio.sleep(30)  # give DataHub one full cycle to populate
+    for attempt in range(1, 7):
+        hub = read_hub()
+        if hub.get("dfs", {}).get("prizepicks"):
+            logger.info("[orchestrator] DataHub ready — firing startup dispatch (attempt %d)", attempt)
+            await job_dispatch()
+            return
+        logger.info("[orchestrator] Startup dispatch waiting for DataHub... attempt %d/6", attempt)
+        await asyncio.sleep(30)
+    logger.warning("[orchestrator] Startup dispatch skipped — DataHub not ready after 3 min")
+
+
 async def job_dispatch():
     """8:00 AM PT (11:00 AM ET) daily — build parlays and post to Discord."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_dispatcher.py")
@@ -222,6 +241,8 @@ async def lifespan(_app: FastAPI):
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
+    # Fire dispatch once DataHub is ready (handles post-8AM redeploys)
+    asyncio.create_task(_startup_dispatch_if_ready())
 
     logger.info(
         "All jobs scheduled: dispatch@8AM PT, settle@11PM PT, "
