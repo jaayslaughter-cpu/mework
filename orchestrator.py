@@ -1,19 +1,22 @@
 """
 PropIQ Agent Army — Main Orchestrator
 =======================================
-Runs 6 tasklets on their defined schedules:
+Runs 8 tasklets on their defined schedules:
   - DataHubTasklet:      every 15s
   - AgentTasklet:        every 30s
   - LeaderboardTasklet:  every 60s
-  - BacktestTasklet:     daily  12:01AM
-  - GradingTasklet:      daily  1:05AM
-  - XGBoostTasklet:      weekly Sunday 2:00AM
+  - BacktestTasklet:     daily  12:01AM PT
+  - GradingTasklet:      daily   1:05AM PT
+  - XGBoostTasklet:      weekly Sunday 2:00AM PT
+  - LiveDispatch:        daily   8:00AM PT (11:00AM ET) → Discord parlays
+  - NightlyRecap:        daily  11:00PM PT ( 2:00AM ET) → Discord settlement
 
-Also exposes a FastAPI dashboard at localhost:8080.
+Also exposes a FastAPI dashboard on $PORT.
 """
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -86,6 +89,27 @@ async def _safe_run(name: str, fn, *args, **kwargs):
         return None
 
 
+async def _run_subprocess(name: str, script_path: str) -> None:
+    """Run a Python script as a subprocess with full logging."""
+    logger.info("[orchestrator] Launching %s (%s)...", name, script_path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, script_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error(
+                "[orchestrator] %s FAILED (exit %d): %s",
+                name, proc.returncode, stderr.decode()[-500:]
+            )
+        else:
+            logger.info("[orchestrator] %s completed successfully", name)
+    except Exception as exc:
+        logger.error("[orchestrator] %s subprocess error: %s", name, exc, exc_info=True)
+
+
 async def job_data_hub():
     global _last_hub_run
     await _safe_run("DataHubTasklet", run_data_hub_tasklet)
@@ -132,31 +156,60 @@ async def job_monthly_leaderboard():
         logger.warning("[orchestrator] monthly_leaderboard not available — skipping")
 
 
+async def job_dispatch():
+    """8:00 AM PT (11:00 AM ET) daily — build parlays and post to Discord."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_dispatcher.py")
+    asyncio.create_task(_run_subprocess("LiveDispatch", script))
+
+
+async def job_settle():
+    """11:00 PM PT (2:00 AM ET) daily — settle bets and post recap to Discord."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nightly_recap.py")
+    asyncio.create_task(_run_subprocess("NightlyRecap", script))
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
 
-    # Register tasklet jobs
-    scheduler.add_job(job_data_hub, IntervalTrigger(seconds=15), id="data_hub")
-    scheduler.add_job(job_agents, IntervalTrigger(seconds=30), id="agents")
+    # ── Tasklet interval jobs ─────────────────────────────────────────────────
+    scheduler.add_job(job_data_hub,   IntervalTrigger(seconds=15), id="data_hub")
+    scheduler.add_job(job_agents,     IntervalTrigger(seconds=30), id="agents")
     scheduler.add_job(job_leaderboard, IntervalTrigger(seconds=60), id="leaderboard")
-    scheduler.add_job(job_backtest, CronTrigger(hour=0, minute=1), id="backtest")
-    scheduler.add_job(job_grading, CronTrigger(hour=1, minute=5), id="grading")
-    scheduler.add_job(job_xgboost, CronTrigger(day_of_week="sun", hour=2), id="xgboost")
 
-    # Gap-fix: line_stream every 30 min 10 AM–10 PM PT
+    # ── Nightly maintenance jobs ──────────────────────────────────────────────
+    scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1),  id="backtest")
+    scheduler.add_job(job_grading,  CronTrigger(hour=1,  minute=5),  id="grading")
+    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2), id="xgboost")
+
+    # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(
         job_line_stream,
         CronTrigger(hour="10-22", minute="0,30", timezone="America/Los_Angeles"),
         id="line_stream",
     )
-    # Gap-fix: monthly leaderboard on 1st of each month at 9 AM PT
+
+    # ── Monthly leaderboard — 1st of month 9 AM PT ───────────────────────────
     scheduler.add_job(
         job_monthly_leaderboard,
         CronTrigger(day=1, hour=9, timezone="America/Los_Angeles"),
         id="monthly_leaderboard",
+    )
+
+    # ── Daily parlay dispatch — 8:00 AM PT (11:00 AM ET) ─────────────────────
+    scheduler.add_job(
+        job_dispatch,
+        CronTrigger(hour=8, minute=0, timezone="America/Los_Angeles"),
+        id="live_dispatch",
+    )
+
+    # ── Nightly settlement — 11:00 PM PT (2:00 AM ET) ────────────────────────
+    scheduler.add_job(
+        job_settle,
+        CronTrigger(hour=23, minute=0, timezone="America/Los_Angeles"),
+        id="nightly_recap",
     )
 
     scheduler.start()
@@ -170,7 +223,11 @@ async def lifespan(_app: FastAPI):
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
 
-    logger.info("All 6 tasklets scheduled and running.")
+    logger.info(
+        "All jobs scheduled: dispatch@8AM PT, settle@11PM PT, "
+        "line_stream@30min, leaderboard@monthly, "
+        "backtest@12:01AM, grading@1:05AM, xgboost@Sun2AM"
+    )
     yield
 
     scheduler.shutdown()
@@ -179,8 +236,8 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="PropIQ Agent Army",
-    description="7 competing MLB betting agents with auto-capital allocation",
-    version="2.0.0",
+    description="17-agent MLB DFS betting system with auto-schedule",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -196,11 +253,14 @@ app.add_middleware(
 async def root():
     return {
         "service": "PropIQ Agent Army",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "date": date.today().isoformat(),
         "status": "running",
-        "endpoints": ["/props", "/insights", "/leaderboard", "/backtest/latest", "/health",
-                      "/propiq/dispatch", "/propiq/settle", "/propiq/status", "/propiq/record"],
+        "endpoints": [
+            "/props", "/insights", "/leaderboard", "/backtest/latest",
+            "/health", "/propiq/dispatch", "/propiq/settle",
+            "/propiq/status", "/propiq/record",
+        ],
     }
 
 
@@ -272,7 +332,7 @@ async def trigger_backtest(start_date: str = None, end_date: str = None):
 
 
 @app.post("/grade")
-async def trigger_grading(game_date: str = None):
+async def trigger_grading_endpoint(game_date: str = None):
     result = await run_grading_tasklet(game_date=game_date)
     return JSONResponse(result)
 
@@ -300,70 +360,41 @@ async def health():
     })
 
 
-# ── PropIQ HTTP endpoints (consumed by Spring Boot PropIQHttpClient) ──────────
+# ── PropIQ HTTP endpoints (also callable via Tasklet HTTP triggers) ────────────
 
 @app.post("/propiq/dispatch")
 async def trigger_dispatch():
-    """Trigger the live dispatcher — called by Spring Boot HTTP client.
-
-    Runs live_dispatcher.py as a background subprocess.
-    No RabbitMQ required — pure HTTP.
-    """
-    async def _run():
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "/app/live_dispatcher.py",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error("[dispatch] live_dispatcher.py failed: %s", stderr.decode()[-500:])
-        else:
-            logger.info("[dispatch] live_dispatcher.py completed successfully")
-
-    asyncio.create_task(_run())
+    """Manual or Tasklet-triggered parlay dispatch."""
+    await job_dispatch()
     return JSONResponse({"status": "started", "message": "Live dispatcher triggered in background"})
 
 
 @app.post("/propiq/settle")
 async def trigger_settle():
-    """Trigger nightly settlement engine — called by Spring Boot HTTP client.
-
-    Runs nightly_recap.py as a background subprocess.
-    No RabbitMQ required — pure HTTP.
-    """
-    async def _run():
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "/app/nightly_recap.py",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error("[settle] nightly_recap.py failed: %s", stderr.decode()[-500:])
-        else:
-            logger.info("[settle] nightly_recap.py completed successfully")
-
-    asyncio.create_task(_run())
+    """Manual or Tasklet-triggered nightly settlement."""
+    await job_settle()
     return JSONResponse({"status": "started", "message": "Settlement engine triggered in background"})
+
+
+@app.post("/trigger/dispatch")
+async def trigger_dispatch_alt():
+    """Alias for /propiq/dispatch — matches Tasklet schedule trigger path."""
+    await job_dispatch()
+    return JSONResponse({"status": "started", "message": "Live dispatcher triggered"})
+
+
+@app.post("/trigger/settle")
+async def trigger_settle_alt():
+    """Alias for /propiq/settle — matches Tasklet schedule trigger path."""
+    await job_settle()
+    return JSONResponse({"status": "started", "message": "Settlement engine triggered"})
 
 
 @app.post("/trigger/leaderboard")
 async def trigger_leaderboard():
     """Trigger monthly leaderboard — called by Tasklet schedule on 1st of month."""
-    async def _run():
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "/app/monthly_leaderboard.py",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error("[leaderboard] monthly_leaderboard.py failed: %s", stderr.decode()[-500:])
-        else:
-            logger.info("[leaderboard] monthly_leaderboard.py completed successfully")
-
-    asyncio.create_task(_run())
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monthly_leaderboard.py")
+    asyncio.create_task(_run_subprocess("MonthlyLeaderboard", script))
     return JSONResponse({"status": "started", "message": "Monthly leaderboard triggered in background"})
 
 
@@ -374,7 +405,7 @@ async def get_propiq_status():
     lb = read_leaderboard()
     return JSONResponse({
         "service": "PropIQ Agent Army",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "healthy",
         "scheduler_running": scheduler.running,
         "hub_props": len(hub.get("player_props", [])),
@@ -389,7 +420,6 @@ async def get_propiq_status():
 @app.get("/propiq/record")
 async def get_season_record():
     """Season W/L record from Postgres — queried by Spring Boot."""
-    import os
     import psycopg2  # noqa: PLC0415
 
     db_url = os.environ.get("DATABASE_URL")
@@ -434,4 +464,5 @@ async def get_season_record():
 
 
 if __name__ == "__main__":
-    uvicorn.run("orchestrator:app", host="0.0.0.0", port=8080, reload=False)
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("orchestrator:app", host="0.0.0.0", port=port, reload=False)

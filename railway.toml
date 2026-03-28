@@ -2,8 +2,8 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "uvicorn api_server:app --host 0.0.0.0 --port 8080 --workers 1"
-healthcheckPath = "/status"
+startCommand = "python orchestrator.py"
+healthcheckPath = "/health"
 healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
