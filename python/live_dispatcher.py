@@ -15,10 +15,10 @@ Flow
   3. Merge and deduplicate player lines across both platforms
   4. Fetch baseline stat projections from MLB Stats API (season averages)
   5. Run platform_selector for each prop → pick PrizePicks or Underdog
-  6. Calculate fantasy-points expected value (hitter + pitcher scoring)
-  7. Apply 15 agent filters to build per-agent parlays
-  8. Validate EV gate (≥3%) and Kelly cap (≤10%)
-  9. Fire Discord alerts via DiscordAlertService
+ 6. Calculate fantasy-points expected value (hitter + pitcher scoring)
+ 7. Apply 15 agent filters to build per-agent parlays
+ 8. Validate EV gate (≥3%) and Kelly cap (≤10%)
+ 9. Fire Discord alerts via DiscordAlertService
 
 Supported prop types (innings_pitched REMOVED per Phase 19):
   Hitter:  hits, home_runs, rbis, runs, total_bases, stolen_bases,
@@ -40,9 +40,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -57,7 +56,7 @@ except ImportError:
     def record_parlay(*a, **kw): return False            # noqa: E704
     def get_agent_season_stats(agent): return {}         # noqa: E704
 
-from platform_selector import PlatformSelector, SelectionResult
+from platform_selector import PlatformSelector
 platform_selector = PlatformSelector()
 from DiscordAlertService import discord_alert, MAX_STAKE_USD
 

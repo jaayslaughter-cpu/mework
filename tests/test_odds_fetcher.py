@@ -171,7 +171,7 @@ class TestOddsFetcherMerge(unittest.TestCase):
 class TestMarketFusion(unittest.TestCase):
     @patch("api.services.market_fusion.OddsFetcher")
     def test_run_returns_prop_edges(self, MockFetcher):
-        from api.services.market_fusion import MarketFusionEngine, _merged_to_prop_edge
+        from api.services.market_fusion import MarketFusionEngine
         mock_instance = MockFetcher.return_value
         mock_instance.fetch_all.return_value = []
         mock_instance.merge_odds.return_value = [

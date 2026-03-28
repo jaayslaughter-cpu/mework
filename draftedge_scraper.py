@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 import re
 import time
 import urllib.request
 import urllib.error
 import http.cookiejar
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 

@@ -21,7 +21,6 @@ IMPORTANT: All data is publicly available on RotoWire.
 import re
 import logging
 from typing import Optional
-from datetime import datetime
 from bs4 import BeautifulSoup
 
 from .base_scraper import BaseScraper

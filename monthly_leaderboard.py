@@ -13,7 +13,7 @@ import os
 import json
 import requests
 import psycopg2
-from datetime import datetime, timezone, date
+from datetime import date
 from calendar import month_name
 
 DATABASE_URL = os.environ.get("DATABASE_URL")

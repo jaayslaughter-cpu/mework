@@ -14,6 +14,22 @@ FadeAgent integration:
   # Each prop now has: sbd_game_over_bets_pct, sbd_game_over_money_pct,
   #                    sbd_prop_over_bets_pct, sbd_prop_over_money_pct,
   #                    sbd_home_ml_bets_pct,   sbd_home_ml_money_pct
+"""
+public_trends_scraper.py — PropIQ Analytics: SportsBettingDime Public Betting Trends
+======================================================================================
+Fetches real BET% and MONEY% (ticket + stake percentages) from SportsBettingDime's
+internal WordPress REST API (/wp-json/adpt/v1/) — no Apify, no auth required.
+
+Provides two data layers:
+  1. Game-level splits:   moneyline/spread/total Over-Under bets% + money%
+  2. Player-level splits: per-prop bets% + money% (populated day-of by books)
+
+FadeAgent integration:
+  from public_trends_scraper import enrich_props_with_public_trends
+  props = enrich_props_with_public_trends(props)
+  # Each prop now has: sbd_game_over_bets_pct, sbd_game_over_money_pct,
+  #                    sbd_prop_over_bets_pct, sbd_prop_over_money_pct,
+  #                    sbd_home_ml_bets_pct,   sbd_home_ml_money_pct
 
 Anti-ban measures (8 layers):
   1. Daily Parquet cache   — zero re-hits after first successful fetch
@@ -39,7 +55,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 

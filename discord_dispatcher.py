@@ -13,6 +13,11 @@ Layer 10 — Hierarchical Bayesian Prop Adjustment
 PropIQ Phase 45
 
 Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
+"""
+Layer 10 — Hierarchical Bayesian Prop Adjustment
+PropIQ Phase 45
+
+Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
 Adapted for Railway deployment constraints:
   - No full MCMC (PyMC too slow for daily dispatch)
   - Empirical Bayes conjugate update replaces MCMC sampling (same pooling math, ~200x faster)
@@ -38,7 +43,6 @@ import json
 import os
 import warnings
 from io import StringIO
-import tempfile
 
 warnings.filterwarnings("ignore")
 

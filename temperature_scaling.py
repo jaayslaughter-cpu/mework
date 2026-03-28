@@ -19,7 +19,6 @@ Key constraint: T is fit on val fold only. Never see test fold during fitting.
 """
 
 import math
-import numpy as np
 from typing import List, Tuple
 
 

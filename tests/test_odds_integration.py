@@ -18,7 +18,7 @@ import os
 import types
 import unittest
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make api.services importable without a full package install
@@ -516,7 +516,7 @@ class TestMarketFusionEngine(unittest.TestCase):
 
     def test_dislocation_scan_source_tag(self):
         """dislocation_scan() stamps source='dislocation'."""
-        from api.services.market_fusion import MarketFusionEngine, _compute_dislocation_score
+        from api.services.market_fusion import MarketFusionEngine
         from api.services.odds_fetcher import OddsLine
 
         engine = MarketFusionEngine(dislocation_gate=0.03)
@@ -561,7 +561,7 @@ class TestEVHunterCompositeScore(unittest.TestCase):
     def test_dislocation_bonus_promotes_clv_prop(self):
         """Prop with lower edge_pct but high dislocation_score outranks pure-edge prop."""
         # Import the real EVHunter
-        import importlib.util, sys
+        import sys
         # We can't fully import execution_agents without pika, but pika is stubbed
         from execution_agents import EVHunter
 
