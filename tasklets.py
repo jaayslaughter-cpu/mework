@@ -19,7 +19,6 @@ Railway deployment notes
   All service addresses come from environment variables with safe defaults.
   Every external call is wrapped in try/except so a downed dependency
   degrades gracefully instead of crashing the whole process.
-degrades gracefully instead of crashing the whole process.
 """
 
 from __future__ import annotations
@@ -31,12 +30,16 @@ import math
 import os
 import pickle
 import time
-import os
-import pickle
 from typing import Any
 
 import requests
-import redis as redis_lib
+
+# Guard redis import — if not installed, _NullRedis handles all calls gracefully
+try:
+    import redis as redis_lib
+except ImportError:
+    redis_lib = None  # type: ignore[assignment]
+
 from DiscordAlertService import discord_alert
 from public_trends_scraper import PublicTrendsScraper, get_fade_signal
 
@@ -104,23 +107,15 @@ CAP_CEIL  = 2.0
 
 # ── Railway-safe service connections ─────────────────────────────────────────
 
-def _redis() -> redis_lib.Redis:
-    """Connect to Redis using Railway env var or explicit host/port."""
-    url = os.getenv("REDIS_URL")
-    if url:
-        return redis_lib.from_url(url, decode_responses=True)
-    return redis_lib.Redis(
-        host=os.getenv("REDIS_HOST", "redis"),
-        port=int(os.getenv("REDIS_PORT", 6379)),
-        db=int(os.getenv("REDIS_DB", 0)),
-        decode_responses=True,
-    )
 def _redis():
     """
     Connect to Redis using Railway env var or explicit host/port.
-    Returns _NullRedis() if the server is unreachable — allows the app
-    to boot successfully and run without cache/queue.
+    Returns _NullRedis() if redis is not installed or the server is unreachable
+    — allows the app to boot successfully and run without cache/queue.
     """
+    if redis_lib is None:
+        logger.warning("redis package not installed — running without cache.")
+        return _NullRedis()
     try:
         url = os.getenv("REDIS_URL")
         if url:
@@ -161,7 +156,6 @@ def _kafka_producer():
     try:
         from confluent_kafka import Producer
         bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-        return Producer({"bootstrap.servers": bootstrap})
         p = Producer({
             "bootstrap.servers": bootstrap,
             "socket.timeout.ms": 3000,
@@ -227,7 +221,7 @@ def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
 
 
 def _fetch_sbd_public_trends() -> dict:
-    """Fetch SportsBettingDime public betting splits (replaces Apify ActionNetwork call).
+    """Fetch SportsBettingDime public betting splits.
 
     Returns dict with keys: game_df, prop_df (pandas DataFrames as dicts for JSON storage).
     Caches via PublicTrendsScraper daily Parquet cache — zero re-hits after first fetch.
@@ -410,7 +404,6 @@ def run_data_hub_tasklet() -> None:
                 "startUrls": [{"url": "https://www.rotowire.com/picks/underdog/"}],
                 "maxCrawlingDepth": 0,
             }),
-            }),
             "prizepicks": _fetch_apify("apify/web-scraper", {
                 "startUrls": [{"url": "https://www.rotowire.com/picks/prizepicks/"}],
                 "maxCrawlingDepth": 0,
@@ -541,7 +534,6 @@ class _EVHunter(_BaseAgent):
         over_odds  = prop.get("over_american",  -110)
         under_odds = prop.get("under_american", -110)
         fair_over, _ = _no_vig(over_odds, under_odds)
-        _, _ = _no_vig(over_odds, under_odds)
         model_prob   = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         implied      = _american_to_implied(over_odds) / 100
         ev_pct       = (model_prob / 100 - implied) / implied
@@ -553,10 +545,6 @@ class _EVHunter(_BaseAgent):
 
 class _UnderMachine(_BaseAgent):
     name = "UnderMachine"
-
-    def evaluate(self, prop: dict) -> dict | None:
-        under_odds = prop.get("under_american", -110)
-        _, fair_under = _no_vig(prop.get("over_american", -110), under_odds)
 
     def evaluate(self, prop: dict) -> dict | None:
         under_odds = prop.get("under_american", -110)
@@ -576,12 +564,10 @@ class _UmpireAgent(_BaseAgent):
         umpires = self.hub.get("context", {}).get("umpires", [])
         if not umpires:
             return None
-        # Look for ump with large K zone (favours strikeout unders)
         prop_type = prop.get("prop_type", "")
         if "K" not in prop_type and "strikeout" not in prop_type.lower():
             return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type)
-        # Umpire adjustment: tight zone → boost under prob by 5 pp
         model_prob = min(model_prob + 5.0, 95.0)
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
@@ -599,7 +585,6 @@ class _F5Agent(_BaseAgent):
         """Targets first-5-innings run props."""
         if "f5" not in prop.get("prop_type", "").lower():
             return None
-        starters = self.hub.get("context", {}).get("projected_starters", [])
         model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
@@ -614,35 +599,17 @@ class _FadeAgent(_BaseAgent):
     name = "FadeAgent"
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Fades heavy public action (>70 % public on one side)."""
-        market    = self.hub.get("market", {})
-        public    = market.get("public_betting", [])
-        player    = prop.get("player", "")
-        pub_pct   = 0
-        for rec in public:
-            if isinstance(rec, dict) and player.lower() in str(rec).lower():
-                pub_pct = float(rec.get("over_public_pct", 0) or 0)
-                break
-        if pub_pct < 70:
-            return None
-        # Fade the public → take UNDER
-        model_prob = self._model_prob(player, prop.get("prop_type", ""))
-        fade_prob  = 100 - model_prob + 5.0   # boost by 5 pp for fade logic
         """Fades heavy public action using SportsBettingDime real BET%/MONEY% data.
 
-        Signal precedence:
-          1. Player-level prop bets% from SBD player-props API (most precise)
-          2. Game-level total Over bets% from SBD sport-event API (fallback)
-        Threshold: 65% (down from 70% — SBD data is more precise than Apify estimates).
+        Threshold: 65% public tickets on Over → fade signal.
         """
-        SBD_THRESHOLD = 65.0          # % public tickets on Over → fade signal
+        SBD_THRESHOLD = 65.0
         market   = self.hub.get("market", {})
         pub_data = market.get("public_betting", {})
         player   = prop.get("player", "")
         team     = prop.get("team", "")
         prop_type = prop.get("prop_type", "")
 
-        # Build lightweight DataFrames from cached SBD data stored in hub
         import pandas as pd
         game_records = pub_data.get("game_df", []) if isinstance(pub_data, dict) else []
         prop_records = pub_data.get("prop_df", []) if isinstance(pub_data, dict) else []
@@ -656,10 +623,7 @@ class _FadeAgent(_BaseAgent):
         if pub_pct < SBD_THRESHOLD:
             return None
 
-        # Fade the public → take UNDER
-        # Stronger fade when both bets% AND money% are lopsided (squares + whale action)
         model_prob = self._model_prob(player, prop_type)
-        # Apply stronger boost when signal comes from precise player-level data
         fade_boost = 6.0 if signal_src == "player_prop" else 5.0
         fade_prob  = 100 - model_prob + fade_boost
         under_odds = prop.get("under_american", -110)
@@ -700,18 +664,16 @@ class _BullpenAgent(_BaseAgent):
 
     def evaluate(self, prop: dict) -> dict | None:
         """Targets high-leverage relief situations (fatigue 0-4 scale)."""
-        # Bullpen fatigue from hub (populated by analytics layer)
         fatigue_map: dict = self.hub.get("bullpen_fatigue", {})
         player    = prop.get("player", "")
         team      = prop.get("team", "")
-        fatigue   = fatigue_map.get(team, 2)   # default mid-range
+        fatigue   = fatigue_map.get(team, 2)
 
         prop_type = prop.get("prop_type", "")
         if "HR" not in prop_type and "RBI" not in prop_type and "H" not in prop_type:
             return None
 
         model_prob = self._model_prob(player, prop_type)
-        # High bullpen fatigue → batters see worse pitching → boost OVER
         if fatigue >= 3:
             model_prob = min(model_prob + 6.0, 95.0)
         over_odds = prop.get("over_american", -110)
@@ -741,7 +703,6 @@ class _WeatherAgent(_BaseAgent):
                 break
 
         prop_type = prop.get("prop_type", "")
-        # 10+ mph blowing out → boost HR/TB OVER
         if wind_mph >= 10 and "out" in wind_dir.lower() and (
                 "HR" in prop_type or "TB" in prop_type):
             model_prob = self._model_prob(player, prop_type)
@@ -770,7 +731,7 @@ class _SteamAgent(_BaseAgent):
         if not rlm:
             return None
         model_prob = self._model_prob(player, prop.get("prop_type", ""))
-        model_prob = min(model_prob + 4.0, 95.0)   # +4 pp for confirmed RLM
+        model_prob = min(model_prob + 4.0, 95.0)
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
@@ -798,8 +759,6 @@ class _MLEdgeAgent(_BaseAgent):
         if ev_pct >= MIN_EV_THRESH:
             return self._build_bet(prop, side, model_prob, imp * 100, ev_pct * 100)
         return None
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -889,52 +848,6 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
     }
 
 
-def _build_parlays(ev_pool: list[dict], agent_name: str = "The Correlated Parlay Agent",
-                   min_legs: int = 2,
-                   max_legs: int = 3,
-                   max_parlays: int = 5) -> list[dict]:
-    """
-    Package individual +EV picks into 2-leg and 3-leg Underdog slips.
-    Avoids same-player correlation. Returns up to max_parlays slips sorted
-    by combined EV descending.
-    """
-    if len(ev_pool) < min_legs:
-        return []
-
-    top = sorted(ev_pool, key=lambda x: x["ev_pct"], reverse=True)[:12]
-    parlays: list[dict] = []
-
-    for i in range(len(top)):
-        for j in range(i + 1, len(top)):
-            two = [top[i], top[j]]
-            if _are_legs_correlated(two):
-                continue
-            parlays.append(_make_parlay(two, agent_name))
-            # Attempt 3-leg extension
-            if max_legs >= 3:
-                for k in range(j + 1, len(top)):
-                    three = two + [top[k]]
-                    if not _are_legs_correlated(three):
-                        parlays.append(_make_parlay(three, agent_name))
-                        break
-            if len(parlays) >= max_parlays * 2:
-                break
-        if len(parlays) >= max_parlays * 2:
-            break
-
-    # Deduplicate by player-set key, keep highest-EV version
-    seen: set[str] = set()
-    unique: list[dict] = []
-    for p in sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True):
-        key = "|".join(sorted(lg["player"] for lg in p["legs"]))
-        if key not in seen:
-            seen.add(key)
-            unique.append(p)
-
-    return unique[:max_parlays]
-
-
-
 def _build_agent_parlays(hits: list[dict], agent_name: str,
                           min_legs: int = 2, max_legs: int = 3,
                           max_parlays: int = 3) -> list[dict]:
@@ -960,7 +873,6 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
             if _are_legs_correlated(two):
                 continue
 
-            # Try to extend to 3 legs first (higher combined EV)
             if max_legs >= 3:
                 for k in range(j + 1, len(top)):
                     three = two + [top[k]]
@@ -971,7 +883,6 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
                             parlays.append(_make_parlay(three, agent_name))
                         break
 
-            # Also capture the 2-leg version
             key2 = "|".join(sorted(lg["player"] for lg in two))
             if key2 not in seen:
                 seen.add(key2)
@@ -987,14 +898,9 @@ _AGENT_CLASSES = [
 
 
 def _build_synthetic_props(hub: dict) -> list[dict]:
-    """
-    Build a list of evaluable prop dicts from hub data.
-    In production these come from DFS scrapes; here we synthesise from
-    what the market group already has.
-    """
+    """Build a list of evaluable prop dicts from hub data."""
     props: list[dict] = []
 
-    # Pull from DFS picks (prizepicks / underdog / sleeper)
     dfs = hub.get("dfs", {})
     for platform, picks in dfs.items():
         if not isinstance(picks, list):
@@ -1013,7 +919,6 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
                 "platform":        platform,
             })
 
-    # Fallback synthetic props if scrapes returned nothing
     if not props:
         sample_players = [
             ("Shohei Ohtani", "HR", 0.5, +140, -175, "LAD"),
@@ -1031,78 +936,7 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
     return props
 
 
-def run_agent_tasklet() -> None:
-    """
-    Run all 10 agents against current hub props.
-    Top bets pushed to Kafka bet_queue (Redis list fallback).
-    """
-    hub   = read_hub()
-    model = _load_xgb_model()
-    props = _build_synthetic_props(hub)
-
-    agents    = [cls(hub, model) for cls in _AGENT_CLASSES]
-    queue_out: list[dict] = []
-
-    for prop in props:
-        votes: list[dict] = []
-        for agent in agents:
-            try:
-                bet = agent.evaluate(prop)
-                if bet:
-                    votes.append(bet)
-            except Exception as e:
-                logger.debug("[AgentTasklet] %s error on %s: %s",
-                             agent.name, prop.get("player"), e)
-
-        if not votes:
-            continue
-
-        # Consensus: take the bet if ≥2 agents agree on the same side
-        over_votes  = [v for v in votes if v["side"] == "OVER"]
-        under_votes = [v for v in votes if v["side"] == "UNDER"]
-        winning     = over_votes if len(over_votes) >= len(under_votes) else under_votes
-
-        if len(winning) < 2:
-            continue
-
-        # Weighted average EV across voting agents
-        avg_ev    = sum(v["ev_pct"]  for v in winning) / len(winning)
-        avg_prob  = sum(v["model_prob"] for v in winning) / len(winning)
-        avg_kelly = sum(v["kelly_units"] for v in winning) / len(winning)
-        consensus = winning[0].copy()
-        consensus.update({
-            "ev_pct":      round(avg_ev, 2),
-            "model_prob":  round(avg_prob, 2),
-            "kelly_units": round(avg_kelly, 3),
-            "agent_count": len(winning),
-            "agents":      [v["agent"] for v in winning],
-        })
-        queue_out.append(consensus)
-
-    # Sort by EV desc, take top 10
-    queue_out.sort(key=lambda b: b["ev_pct"], reverse=True)
-    queue_out = queue_out[:10]
-
-    if not queue_out:
-        logger.info("[AgentTasklet] No qualifying bets this cycle.")
-        return
-
-    # Publish to Kafka bet_queue (or Redis fallback)
-    producer = _kafka_producer()
-    r        = _redis()
-
-    for bet in queue_out:
-        payload = json.dumps(bet)
-        if producer:
-            try:
-                producer.produce("bet_queue", key=bet["player"].encode(), value=payload.encode())
-            except Exception as e:
-                logger.warning("[AgentTasklet] Kafka produce error: %s — using Redis", e)
-    # No hardcoded test bets — engine only fires on real market data.
-    return props
-
-
-def _get_props(hub) -> list[dict]:
+def _get_props(hub: dict) -> list[dict]:
     return _extract_underdog_props(hub) or _build_synthetic_props(hub)
 
 
@@ -1130,7 +964,6 @@ def run_agent_tasklet() -> None:
 
     all_parlays: list[dict] = []
 
-    # ── Each agent runs independently ─────────────────────────────────────
     for cls in _AGENT_CLASSES:
         agent      = cls(hub, model)
         agent_hits: list[dict] = []
@@ -1144,7 +977,6 @@ def run_agent_tasklet() -> None:
                 if not bet:
                     continue
 
-                # Sharp consensus gate: confirm Underdog is mispriced
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is not None:
                     side    = bet["side"]
@@ -1153,7 +985,7 @@ def run_agent_tasklet() -> None:
                                else prop.get("under_american", -120))
                     edge = _underdog_edge(ud_odds, sharp_prob)
                     if edge < MIN_EV_THRESH * 100:
-                        continue   # sharps don't confirm — skip
+                        continue
                     bet["ev_pct"]          = round(edge, 2)
                     bet["model_prob"]      = round(sharp_prob, 1)
                     bet["sharp_consensus"] = True
@@ -1171,7 +1003,6 @@ def run_agent_tasklet() -> None:
                          agent.name, len(agent_hits))
             continue
 
-        # Build this agent's own branded parlays
         agent_parlays = _build_agent_parlays(agent_hits, agent.name)
         if agent_parlays:
             all_parlays.extend(agent_parlays)
@@ -1182,7 +1013,6 @@ def run_agent_tasklet() -> None:
         logger.info("[AgentTasklet] No qualifying slips this cycle.")
         return
 
-    # ── Publish to Kafka / Redis ────────────────────────────────────────────
     producer = _kafka_producer()
     r        = _redis()
     for parlay in all_parlays:
@@ -1201,13 +1031,6 @@ def run_agent_tasklet() -> None:
     if producer:
         producer.flush(timeout=5)
 
-    logger.info("[AgentTasklet] Queued %d bets. Top EV: %.1f%%  (%s %s %s)",
-                len(queue_out), queue_out[0]["ev_pct"],
-                queue_out[0]["player"], queue_out[0]["prop_type"], queue_out[0]["side"])
-    if producer:
-        producer.flush(timeout=5)
-
-    # ── Discord — one embed per agent per slip ──────────────────────────────
     for parlay in all_parlays:
         try:
             discord_alert.send_parlay_alert(parlay)
@@ -1240,7 +1063,6 @@ def get_agents() -> dict:
 
 def run_leaderboard_tasklet() -> None:
     """
-    ```
     Read 14-day settled bets from Postgres, compute per-agent ROI,
     update capital multipliers (0.5x – 2.0x), store in Redis.
     """
@@ -1263,7 +1085,6 @@ def run_leaderboard_tasklet() -> None:
     except Exception as e:
         logger.warning("[LeaderboardTasklet] Postgres error: %s", e)
 
-    # Aggregate per agent
     stats: dict[str, dict] = {}
     for name in AGENT_NAMES:
         stats[name] = {"wins": 0, "losses": 0, "pushes": 0,
@@ -1289,8 +1110,6 @@ def run_leaderboard_tasklet() -> None:
     for name, s in stats.items():
         wagered = s["wagered"] or 1
         roi     = s["profit"] / wagered
-        # Capital multiplier: linear scale from ROI
-        # ROI <= -20% → 0.5x,  ROI = 0% → 1.0x,  ROI >= +20% → 2.0x
         mult = max(CAP_FLOOR, min(CAP_CEIL, 1.0 + (roi / 0.20) * 0.5))
         _capital_multipliers[name] = mult
         total = s["wins"] + s["losses"] + s["pushes"]
@@ -1392,7 +1211,6 @@ def run_backtest_tasklet() -> None:
     logger.info("[BacktestTasklet] Out-of-sample accuracy: %.3f (threshold %.3f)",
                 accuracy, ACCURACY_THRESHOLD)
 
-    # SHAP feature importance — log features below threshold
     explainer    = shap.TreeExplainer(model)
     shap_values  = explainer.shap_values(X_test[:200])
     feat_importance = np.abs(shap_values).mean(axis=0)
@@ -1427,25 +1245,20 @@ def run_backtest_tasklet() -> None:
 def run_grading_tasklet() -> None:
     """
     Fetch final boxscores, grade open bets, calculate CLV,
-    run ML anomaly detection, then send daily recap to Telegram.
-    (Full Java version in GradingTasklet.java; this Python runner is
-    the ML-service companion that handles model-side grading.)
+    then send daily recap to Discord.
     """
     today = datetime.date.today().strftime("%Y-%m-%d")
 
-    # Fetch boxscores
     boxscores = _sportsdata_get(f"stats/json/PlayerGameStatsByDate/{today}") or []
     if not boxscores:
         logger.info("[GradingTasklet] No boxscores for %s — nothing to grade.", today)
         return
 
-    # Build player stat lookup
     stat_lookup: dict[str, dict] = {}
     for bs in boxscores:
         name = f"{bs.get('FirstName', '')} {bs.get('LastName', '')}".strip()
         stat_lookup[name] = bs
 
-    # Fetch open bets from Postgres
     open_bets: list[tuple] = []
     try:
         conn = _pg_conn()
@@ -1469,40 +1282,42 @@ def run_grading_tasklet() -> None:
         logger.info("[GradingTasklet] No open bets for %s.", today)
         return
 
-    # Grade each bet
     results: list[dict] = []
     try:
         conn = _pg_conn()
         with conn.cursor() as cur:
             for row in open_bets:
-                bid, player, ptype, line, side, odds, units, model_prob, ev_pct, agent = row
                 bid, player, ptype, line, side, odds, units, model_prob, _, agent = row
                 stats = stat_lookup.get(player, {})
                 actual = _get_stat(stats, ptype)
 
                 if actual is None:
-                    continue   # game not final yet
+                    continue
 
                 line   = float(line or 0)
                 units  = float(units or 1)
 
                 if side == "OVER":
                     if actual > line:
-                        status = "WIN";  pl = units * (_american_to_implied(int(odds or -110)) and
-                                                        (100 / _american_to_implied(int(odds or -110)) - 1))
+                        status = "WIN"
+                        pl = units * (100 / _american_to_implied(int(odds or -110)) - 1)
                     elif actual < line:
-                        status = "LOSS"; pl = -units
+                        status = "LOSS"
+                        pl = -units
                     else:
-                        status = "PUSH"; pl = 0.0
+                        status = "PUSH"
+                        pl = 0.0
                 else:
                     if actual < line:
-                        status = "WIN";  pl = units * (100 / _american_to_implied(int(odds or -110)) - 1)
+                        status = "WIN"
+                        pl = units * (100 / _american_to_implied(int(odds or -110)) - 1)
                     elif actual > line:
-                        status = "LOSS"; pl = -units
+                        status = "LOSS"
+                        pl = -units
                     else:
-                        status = "PUSH"; pl = 0.0
+                        status = "PUSH"
+                        pl = 0.0
 
-                # Closing line value (CLV) — compare model prob to final odds
                 closing_odds = _fetch_closing_odds(player, ptype, side) or odds
                 clv = float(model_prob or 50) - _american_to_implied(int(closing_odds or -110))
 
@@ -1541,9 +1356,6 @@ def run_grading_tasklet() -> None:
     logger.info("[GradingTasklet] Graded %d bets — W:%d L:%d P:%d  Profit: %+.2fu",
                 len(results), wins, losses, pushes, total_profit)
 
-    # Send daily recap via Telegram
-    _send_telegram_recap(results, total_profit, today)
-    # Send daily recap via Discord webhook
     try:
         discord_alert.send_daily_recap(results, total_profit, today)
     except Exception as _disc_err:
@@ -1558,12 +1370,10 @@ def _get_stat(stats: dict, prop_type: str) -> float | None:
         "BB": "Walks", "K": "Strikeouts",
     }
     prop_upper = prop_type.upper()
-    # Strip O/U prefix if present
     for prefix in ("O", "U", "OVER_", "UNDER_"):
         if prop_upper.startswith(prefix):
             prop_upper = prop_upper[len(prefix):]
 
-    # Strip line suffix (e.g. "1.5")
     for tok in prop_upper.split():
         field = mapping.get(tok)
         if field:
@@ -1595,49 +1405,6 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     except Exception:
         pass
     return None
-
-
-def _send_telegram_recap(results: list[dict], total_profit: float, today: str) -> None:
-    """Post daily recap to Telegram bot."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
-        logger.info("[GradingTasklet] Telegram not configured — skipping recap.")
-        return
-
-    wins   = sum(1 for r in results if r["status"] == "WIN")
-    losses = sum(1 for r in results if r["status"] == "LOSS")
-    pushes = sum(1 for r in results if r["status"] == "PUSH")
-
-    sign = "+" if total_profit >= 0 else ""
-    lines = [
-        f"📊 *PropIQ Daily Recap — {today}*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📈 Units: {sign}{total_profit:.2f}u",
-        f"🏆 Record: {wins}-{losses}-{pushes} (W-L-P)",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    for r in results:
-        emoji = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(r["status"], "❓")
-        pl_sign = "+" if r["profit_loss"] >= 0 else ""
-        odds_str = _fmt_american(int(r.get("odds_american") or -110))
-        lines.append(
-            f"{emoji} {r['player']} — {r['prop_type']} @ {odds_str} | {pl_sign}{r['profit_loss']:.2f}u"
-        )
-
-    lines += ["━━━━━━━━━━━━━━━━━━━━━━", "Powered by PropIQ Analytics 🤖"]
-    text = "\n".join(lines)
-
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=15,
-        )
-        logger.info("[GradingTasklet] Telegram daily recap sent.")
-    except Exception as e:
-        logger.warning("[GradingTasklet] Telegram send error: %s", e)
 
 
 def _fmt_american(american: int) -> str:
@@ -1715,7 +1482,6 @@ def run_xgboost_tasklet() -> None:
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
 
-    # Persist metadata to Redis
     r = _redis()
     r.setex("xgb_meta", 604800, json.dumps({
         "ts":            datetime.datetime.utcnow().isoformat(),
