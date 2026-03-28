@@ -75,16 +75,30 @@ _LEAGUE_AVG: dict = {
     "pitcher_hr9":    1.30,   # 1.30  HR/9
 }
 
+_FG_BASE_URL = "https://www.fangraphs.com/api/leaders/major-league/data"
+_HEADERS = {"User-Agent": "PropIQ/1.0 (analytics)"}
+_TIMEOUT = 20          # seconds for FanGraphs HTTP request
+_REQUEST_DELAY = 1.5   # pause between batter/pitcher fetches
+
+_AGE_PEAK       = 27   # peak age from Marcel spec
+_AGE_YOUNG_RATE = 0.006  # +0.6%/yr improvement under 27
+_AGE_OLD_RATE   = 0.003  # -0.3%/yr decline over 27
+
+_BATTER_REGRESSION_PA  = 200   # Marcel spec: regress batters at 200 PA
+_PITCHER_REGRESSION_BF = 250   # Marcel spec: regress pitchers at 250 BF
+
+_MARCEL_WEIGHTS = [5, 4, 3]    # most-recent year first
+
 
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _get_cache_path(year: int):
-    """Weekly cache file — refreshed on Monday of each new week."""
+def _get_cache_path(year: int) -> str:
+    """Weekly cache file path in /tmp — refreshed on Monday of each new week."""
     today = datetime.now(timezone.utc)
     iso = today.isocalendar()
-    return tempfile.TemporaryFile(mode='w+')
+    return f"/tmp/marcel_{year}_{iso.year}w{iso.week}.json"
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +473,19 @@ class MarcelLayer:
             except Exception as exc:
                 logger.warning("[Marcel] Cache load failed: %s", exc)
         return False
+    def _save_cache(self) -> None:
+        """Persist projections to weekly cache file."""
+        try:
+            with open(self._cache_path, "w") as f:
+                json.dump({"batters": self._batters, "pitchers": self._pitchers}, f)
+            logger.info(
+                "[Marcel] Cache saved: %d batters, %d pitchers → %s",
+                len(self._batters), len(self._pitchers),
+                os.path.basename(self._cache_path),
+            )
+        except Exception as exc:
+            logger.warning("[Marcel] Cache save failed: %s", exc)
+
     def prefetch(self) -> None:
         """
         Load Marcel projections. Reads from weekly cache if available;
