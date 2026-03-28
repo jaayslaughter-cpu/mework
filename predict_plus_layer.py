@@ -37,6 +37,10 @@ _HEADERS: dict = {
 
 _REQUEST_DELAY: float = 1.5  # seconds between Savant requests (IP protection)
 
+# Cache directory (writable in Railway containers)
+_CACHE_DIR: str = os.environ.get("PREDICT_PLUS_CACHE_DIR", "/tmp/predict_plus_cache")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+
 # Pitch-type family groupings — reduces class count for MLR stability.
 # Same pitcher with 90% FF / 10% FT shouldn't be penalized for one variant.
 _PITCH_FAMILIES: dict[str, str] = {
