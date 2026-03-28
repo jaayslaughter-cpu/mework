@@ -87,7 +87,7 @@ def record_parlay(
     agent: str,
     num_legs: int,
     confidence: float,
-    _ev_pct: float = 0.0,
+    ev_pct: float = 0.0,
     platform: str = "Mixed",
     stake: float = _DEFAULT_STAKE,
     legs: Optional[list] = None,
