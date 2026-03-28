@@ -1,6 +1,9 @@
 """
 PropIQ Agent Army — tasklets.py
 =================================
+"""
+PropIQ Agent Army — tasklets.py
+=================================
 Flat module exporting all 6 tasklet run-functions + 2 state readers
 consumed by the root orchestrator.py.
 
@@ -18,7 +21,7 @@ Railway deployment notes
 ------------------------
   All service addresses come from environment variables with safe defaults.
   Every external call is wrapped in try/except so a downed dependency
-  degrades gracefully instead of crashing the whole process.
+degrades gracefully instead of crashing the whole process.
 """
 
 from __future__ import annotations
@@ -26,10 +29,8 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import math
 import os
 import pickle
-import time
 from typing import Any
 
 import requests
@@ -53,7 +54,6 @@ class _NullRedis:
     def lrange(self, *a, **kw):  return []
     def delete(self, *a, **kw):  return None
     def ping(self, *a, **kw):    return False
-
 
 logger = logging.getLogger("propiq.tasklets")
 

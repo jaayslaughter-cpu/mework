@@ -10,7 +10,6 @@ Formula:
 """
 
 from typing import Optional
-import math
 import logging
 
 logger = logging.getLogger(__name__)

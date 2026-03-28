@@ -7,12 +7,10 @@ All external I/O (pika, redis, urllib) is stubbed.
 
 from __future__ import annotations
 
-import json
 import sys
 import types
 import unittest
-from collections import defaultdict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
 # Stubs (same pattern as test_odds_integration.py)
@@ -33,7 +31,6 @@ def _stub_redis_lib() -> None:
         mock_client.ping.return_value = True
         redis_mod.from_url = MagicMock(return_value=mock_client)  # type: ignore[attr-defined]
         sys.modules["redis"] = redis_mod
-
 
 _stub_pika()
 _stub_redis_lib()
