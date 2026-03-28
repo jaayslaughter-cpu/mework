@@ -347,12 +347,14 @@ async def trigger_xgboost():
 async def health():
     hub = read_hub()
     lb = read_leaderboard()
+    # read_leaderboard() returns a list of agent dicts, not a dict
+    lb_list = lb if isinstance(lb, list) else lb.get("leaderboard", [])
     return JSONResponse({
         "status": "healthy",
-        "hub_timestamp": hub.get("timestamp"),
-        "hub_props": len(hub.get("player_props", [])),
-        "hub_games": len(hub.get("games_today", [])),
-        "leaderboard_agents": len(lb.get("leaderboard", [])),
+        "hub_timestamp": hub.get("timestamp") if isinstance(hub, dict) else None,
+        "hub_props": len(hub.get("player_props", [])) if isinstance(hub, dict) else 0,
+        "hub_games": len(hub.get("games_today", [])) if isinstance(hub, dict) else 0,
+        "leaderboard_agents": len(lb_list),
         "last_hub_run": _last_hub_run,
         "last_agent_run": _last_agent_run,
         "last_leaderboard_run": _last_leaderboard_run,
