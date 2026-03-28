@@ -388,10 +388,6 @@ def run_data_hub_tasklet() -> None:
     if not r.exists(market_key):
         logger.info("[DataHub] Scraping market / steam data…")
         market = {
-            "public_betting": _fetch_apify("apify/web-scraper", {
-                "startUrls": [{"url": "https://www.actionnetwork.com/mlb/public-betting"}],
-                "maxCrawlingDepth": 0,
-            }),
             "public_betting": _fetch_sbd_public_trends(),
             "sharp_report": _fetch_apify("apify/web-scraper", {
                 "startUrls": [{"url": "https://www.actionnetwork.com/mlb/sharp-report"}],
@@ -413,6 +409,7 @@ def run_data_hub_tasklet() -> None:
             "underdog": _fetch_apify("apify/web-scraper", {
                 "startUrls": [{"url": "https://www.rotowire.com/picks/underdog/"}],
                 "maxCrawlingDepth": 0,
+            }),
             }),
             "prizepicks": _fetch_apify("apify/web-scraper", {
                 "startUrls": [{"url": "https://www.rotowire.com/picks/prizepicks/"}],
