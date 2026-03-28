@@ -3,11 +3,11 @@ open_meteo_weather.py
 =====================
 Weather data service using Open-Meteo (https://open-meteo.com).
 
-✅ Completely FREE — no API key required
+✅ Completely FREE -- no API key required
 ✅ Forecast API: https://api.open-meteo.com/v1/forecast
 ✅ Historical Archive API: https://archive-api.open-meteo.com/v1/archive
 ✅ Returns temperature, wind speed/direction, precipitation probability,
-   humidity — all fields needed for PropIQ's WeatherAgent
+   humidity -- all fields needed for PropIQ's WeatherAgent
 
 from __future__ import annotations
 
@@ -83,7 +83,95 @@ MLB_STADIUMS: dict[str, dict[str, Any]] = {
     "oracle_park":           {"lat": 37.7786,  "lon": -122.3893, "tz": "America/Los_Angeles",  "elev": 1,    "team": "SF",  "name": "Oracle Park"},
 }
 
-# Team abbreviation → stadium key (for quick lookup by team)
+# Team abbreviation -> stadium key (for quick lookup by team)
+_TEAM_TO_STADIUM: dict[str, str] = {
+    v["team"]: k for k, v in MLB_STADIUMS.items()
+}
+
+
+# ---------------------------------------------------------------------------
+# Data class
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GameWeather:
+    """
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from typing import Any
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Open-Meteo endpoint constants
+# ---------------------------------------------------------------------------
+
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+HOURLY_VARS = (
+    "temperature_2m,"
+    "windspeed_10m,"
+    "winddirection_10m,"
+    "precipitation_probability,"
+    "relativehumidity_2m,"
+    "precipitation"
+)
+
+REQUEST_TIMEOUT = 15
+MAX_RETRIES = 3
+RETRY_BACKOFF = 1.5
+
+# ---------------------------------------------------------------------------
+# MLB Stadium coordinates (lat, lon, elevation_m, timezone)
+# ---------------------------------------------------------------------------
+
+MLB_STADIUMS: dict[str, dict[str, Any]] = {
+    # American League East
+    "yankee_stadium":        {"lat": 40.8296,  "lon": -73.9262,  "tz": "America/New_York",     "elev": 15,   "team": "NYY", "name": "Yankee Stadium"},
+    "fenway_park":           {"lat": 42.3467,  "lon": -71.0972,  "tz": "America/New_York",     "elev": 9,    "team": "BOS", "name": "Fenway Park"},
+    "oriole_park":           {"lat": 39.2839,  "lon": -76.6217,  "tz": "America/New_York",     "elev": 9,    "team": "BAL", "name": "Oriole Park at Camden Yards"},
+    "rogers_centre":         {"lat": 43.6414,  "lon": -79.3894,  "tz": "America/Toronto",      "elev": 76,   "team": "TOR", "name": "Rogers Centre"},
+    "tropicana_field":       {"lat": 27.7683,  "lon": -82.6534,  "tz": "America/New_York",     "elev": 9,    "team": "TB",  "name": "Tropicana Field"},
+    # American League Central
+    "guaranteed_rate_field": {"lat": 41.8300,  "lon": -87.6339,  "tz": "America/Chicago",      "elev": 182,  "team": "CWS", "name": "Guaranteed Rate Field"},
+    "progressive_field":     {"lat": 41.4962,  "lon": -81.6852,  "tz": "America/New_York",     "elev": 197,  "team": "CLE", "name": "Progressive Field"},
+    "comerica_park":         {"lat": 42.3390,  "lon": -83.0485,  "tz": "America/Detroit",      "elev": 192,  "team": "DET", "name": "Comerica Park"},
+    "kauffman_stadium":      {"lat": 39.0517,  "lon": -94.4803,  "tz": "America/Chicago",      "elev": 330,  "team": "KC",  "name": "Kauffman Stadium"},
+    "target_field":          {"lat": 44.9817,  "lon": -93.2778,  "tz": "America/Chicago",      "elev": 264,  "team": "MIN", "name": "Target Field"},
+    # American League West
+    "minute_maid_park":      {"lat": 29.7573,  "lon": -95.3555,  "tz": "America/Chicago",      "elev": 12,   "team": "HOU", "name": "Minute Maid Park"},
+    "angel_stadium":         {"lat": 33.8003,  "lon": -117.8827, "tz": "America/Los_Angeles",  "elev": 47,   "team": "LAA", "name": "Angel Stadium"},
+    "oakland_coliseum":      {"lat": 37.7516,  "lon": -122.2005, "tz": "America/Los_Angeles",  "elev": 2,    "team": "OAK", "name": "Oakland Coliseum"},
+    "t_mobile_park":         {"lat": 47.5914,  "lon": -122.3325, "tz": "America/Los_Angeles",  "elev": 0,    "team": "SEA", "name": "T-Mobile Park"},
+    "globe_life_field":      {"lat": 32.7473,  "lon": -97.0837,  "tz": "America/Chicago",      "elev": 182,  "team": "TEX", "name": "Globe Life Field"},
+    # National League East
+    "truist_park":           {"lat": 33.8908,  "lon": -84.4678,  "tz": "America/New_York",     "elev": 302,  "team": "ATL", "name": "Truist Park"},
+    "citizens_bank_park":    {"lat": 39.9061,  "lon": -75.1665,  "tz": "America/New_York",     "elev": 9,    "team": "PHI", "name": "Citizens Bank Park"},
+    "nationals_park":        {"lat": 38.8730,  "lon": -77.0074,  "tz": "America/New_York",     "elev": 9,    "team": "WSH", "name": "Nationals Park"},
+    "citi_field":            {"lat": 40.7571,  "lon": -73.8458,  "tz": "America/New_York",     "elev": 4,    "team": "NYM", "name": "Citi Field"},
+    "marlins_park":          {"lat": 25.7781,  "lon": -80.2197,  "tz": "America/New_York",     "elev": 3,    "team": "MIA", "name": "loanDepot park"},
+    # National League Central
+    "wrigley_field":         {"lat": 41.9484,  "lon": -87.6553,  "tz": "America/Chicago",      "elev": 182,  "team": "CHC", "name": "Wrigley Field"},
+    "great_american":        {"lat": 39.0978,  "lon": -84.5082,  "tz": "America/New_York",     "elev": 201,  "team": "CIN", "name": "Great American Ball Park"},
+    "american_family_field": {"lat": 43.0280,  "lon": -87.9712,  "tz": "America/Chicago",      "elev": 185,  "team": "MIL", "name": "American Family Field"},
+    "pnc_park":              {"lat": 40.4469,  "lon": -80.0057,  "tz": "America/New_York",     "elev": 222,  "team": "PIT", "name": "PNC Park"},
+    "busch_stadium":         {"lat": 38.6226,  "lon": -90.1928,  "tz": "America/Chicago",      "elev": 142,  "team": "STL", "name": "Busch Stadium"},
+    # National League West
+    "chase_field":           {"lat": 33.4453,  "lon": -112.0667, "tz": "America/Phoenix",      "elev": 331,  "team": "ARI", "name": "Chase Field"},
+    "coors_field":           {"lat": 39.7559,  "lon": -104.9942, "tz": "America/Denver",       "elev": 1580, "team": "COL", "name": "Coors Field"},
+    "dodger_stadium":        {"lat": 34.0739,  "lon": -118.2400, "tz": "America/Los_Angeles",  "elev": 163,  "team": "LAD", "name": "Dodger Stadium"},
+    "petco_park":            {"lat": 32.7076,  "lon": -117.1570, "tz": "America/Los_Angeles",  "elev": 15,   "team": "SD",  "name": "Petco Park"},
+    "oracle_park":           {"lat": 37.7786,  "lon": -122.3893, "tz": "America/Los_Angeles",  "elev": 1,    "team": "SF",  "name": "Oracle Park"},
+}
+
+# Team abbreviation -> stadium key (for quick lookup by team)
 _TEAM_TO_STADIUM: dict[str, str] = {
     v["team"]: k for k, v in MLB_STADIUMS.items()
 }
@@ -100,14 +188,14 @@ class GameWeather:
 
     stadium_name: str
     game_date: str          # YYYY-MM-DD
-    game_hour_local: int    # 0–23 local time
+    game_hour_local: int    # 0-23 local time
     temp_c: float
     temp_f: float
     wind_speed_kph: float
     wind_speed_mph: float
     wind_direction_deg: float
     wind_cardinal: str      # "N", "NE", "E", …
-    precip_pct: int         # precipitation probability 0–100
+    precip_pct: int         # precipitation probability 0-100
     precipitation_mm: float
     humidity_pct: int
     elevation_m: int
@@ -140,7 +228,7 @@ class OpenMeteoWeatherService:
         Number of retry attempts on transient network errors.
     """
 
-    # Retractable roof / dome stadiums — weather is irrelevant
+    # Retractable roof / dome stadiums -- weather is irrelevant
     DOME_STADIUMS = {
         "tropicana_field",
         "rogers_centre",
@@ -181,7 +269,7 @@ class OpenMeteoWeatherService:
         game_date:
             Date string ``"YYYY-MM-DD"``.
         hour:
-            Local hour of first pitch (0–23). Default 13 = 1 PM.
+            Local hour of first pitch (0-23). Default 13 = 1 PM.
 
         Returns
         -------
@@ -221,7 +309,7 @@ class OpenMeteoWeatherService:
         stadium:
             Stadium key or team abbreviation.
         game_date:
-            ``"YYYY-MM-DD"`` — must be in the past.
+            ``"YYYY-MM-DD"`` -- must be in the past.
         hour:
             Local first-pitch hour.
 
@@ -451,8 +539,8 @@ class OpenMeteoWeatherService:
 
         Convention: most MLB parks have CF roughly to the North (from
         home plate perspective).  Wind FROM the South (≈180°) blows
-        toward CF → blowing out.  Wind FROM the North (≈0°/360°) blows
-        toward home plate → blowing in.
+        toward CF -> blowing out.  Wind FROM the North (≈0°/360°) blows
+        toward home plate -> blowing in.
 
         This is a reasonable approximation; park-specific orientation
         would require individual vectors.
@@ -461,9 +549,9 @@ class OpenMeteoWeatherService:
         """
         if wind_mph < threshold_mph:
             return False, False
-        # Blowing out: wind from roughly S/SW/SE sector (135°–225°)
+        # Blowing out: wind from roughly S/SW/SE sector (135°-225°)
         wind_blowing_out = 135 <= wind_dir_deg <= 225
-        # Blowing in: wind from roughly N/NW/NE sector (315°–360° or 0°–45°)
+        # Blowing in: wind from roughly N/NW/NE sector (315°-360° or 0°-45°)
         wind_blowing_in = wind_dir_deg >= 315 or wind_dir_deg <= 45
         return wind_blowing_out, wind_blowing_in
 
@@ -475,9 +563,9 @@ class OpenMeteoWeatherService:
         Estimate a multiplicative home run probability modifier.
 
         Factors:
-        - Wind blowing out ≥ 15 mph → +10% per 5 mph above threshold
-        - Altitude (Coors effect) — every 300m above sea level ≈ +3%
-        - Wind blowing in ≥ 15 mph → suppresses HRs
+        - Wind blowing out >= 15 mph -> +10% per 5 mph above threshold
+        - Altitude (Coors effect) -- every 300m above sea level ≈ +3%
+        - Wind blowing in >= 15 mph -> suppresses HRs
         """
         modifier = 1.0
         # Altitude boost (e.g. Coors at 1580m ≈ +15%)

@@ -1,5 +1,5 @@
 """
-Layer 10 — Hierarchical Bayesian Prop Adjustment
+Layer 10 -- Hierarchical Bayesian Prop Adjustment
 PropIQ Phase 45
 
 Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
@@ -7,40 +7,13 @@ Adapted for Railway deployment constraints:
   - No full MCMC (PyMC too slow for daily dispatch)
   - Empirical Bayes conjugate update replaces MCMC sampling (same pooling math, ~200x faster)
   - KMeans pitch archetypes (k=8) from Baseball Savant arsenal CSV
-  - 1,000 Monte Carlo draws from Beta posteriors → P(over line)
+  - 1,000 Monte Carlo draws from Beta posteriors -> P(over line)
   - 70/30 blend with existing 9-layer pipeline (Bayes is informative prior, not override)
-Layer 10 — Hierarchical Bayesian Prop Adjustment
+Layer 10 -- Hierarchical Bayesian Prop Adjustment
 PropIQ Phase 45
 
 Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
 """
-Layer 10 — Hierarchical Bayesian Prop Adjustment
-PropIQ Phase 45
-
-Inspired by mlb_projection_k (kekoa-santana) three-layer Bayesian architecture.
-Adapted for Railway deployment constraints:
-  - No full MCMC (PyMC too slow for daily dispatch)
-  - Empirical Bayes conjugate update replaces MCMC sampling (same pooling math, ~200x faster)
-  - KMeans pitch archetypes (k=8) from Baseball Savant arsenal CSV
-  - 1,000 Monte Carlo draws from Beta posteriors → P(over line)
-  - 70/30 blend with existing 9-layer pipeline (Bayes is informative prior, not override)
-  - ±0.025 nudge cap to prevent overshooting existing signals
-
-Architecture map (kekoa-santana → PropIQ adaptation):
-  Layer 1 (talent projections) → empirical_bayes_shrinkage()
-  Layer 2 (pitch archetype matchups) → _fetch_pitch_archetypes() + KMeans
-  Layer 3 (game-level Monte Carlo) → _monte_carlo_prop_prob()
-
-Integration position: After Layer 9 (CV Gate), before agent claiming phase.
-"""
-
-import numpy as np
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-import requests
-import pandas as pd
-import json
-import os
 import warnings
 from io import StringIO
 
@@ -50,12 +23,12 @@ warnings.filterwarnings("ignore")
 
 ARCHETYPE_CACHE_DAYS = 7    # Re-cluster weekly (Arsenal data doesn't change daily)
 N_ARCHETYPES = 8             # 8 archetypal pitch shapes (matches kekoa-santana paper)
-N_MC_DRAWS = 1_000           # 1k draws — fast on Railway, tight enough CI
+N_MC_DRAWS = 1_000           # 1k draws -- fast on Railway, tight enough CI
 BLEND_WEIGHT_BAYES = 0.30    # 30% Bayesian, 70% existing 9-layer pipeline
-MAX_NUDGE = 0.025            # Hard cap — Bayes cannot swing a pick by more than 2.5%
+MAX_NUDGE = 0.025            # Hard cap -- Bayes cannot swing a pick by more than 2.5%
 
-# League-level Beta priors calibrated from 2021–2025 Statcast aggregates.
-# These are the "population hyperparameters" that anchor partial pooling —
+# League-level Beta priors calibrated from 2021-2025 Statcast aggregates.
+# These are the "population hyperparameters" that anchor partial pooling --
 # a 50 PA rookie gets pulled strongly toward these; a 600 PA vet less so.
 # alpha / (alpha + beta) = league mean rate
 LEAGUE_PRIORS = {
@@ -197,7 +170,7 @@ def _fetch_pitch_archetypes() -> dict:
             json.dump(archetype_cache_data, f)
 
         archetype_k_modifier = _build_archetype_modifiers(centroid_list)
-        print(f"[BayesLayer] Clustered {len(df_clean)} pitch types → {N_ARCHETYPES} archetypes")
+        print(f"[BayesLayer] Clustered {len(df_clean)} pitch types -> {N_ARCHETYPES} archetypes")
         return archetypes
 
     except Exception as e:
@@ -209,8 +182,8 @@ def _fetch_pitch_archetypes() -> dict:
 def _build_archetype_modifiers(centroids: list):
     """
     After clustering, assign K vulnerability modifier per archetype.
-    High velocity + sharp break clusters → harder to hit → positive modifier.
-    Soft contact clusters → easier to hit → negative modifier.
+    High velocity + sharp break clusters -> harder to hit -> positive modifier.
+    Soft contact clusters -> easier to hit -> negative modifier.
     Uses centroid[0] = velocity, centroid[2] = horizontal break as proxies.
     """
     if not centroids:
@@ -225,8 +198,8 @@ def _build_archetype_modifiers(centroids: list):
         for i, c in enumerate(centroids):
             velo = c[0] if len(c) > 0 else mean_velo
             z_velo = (velo - mean_velo) / std_velo
-            # High velo → harder to hit → +modifier on K props
-            # Scale: ±1 z-score → ±0.01 modifier
+            # High velo -> harder to hit -> +modifier on K props
+            # Scale: +/-1 z-score -> +/-0.01 modifier
             k_modifiers[i] = round(z_velo * 0.01, 4)
         return k_modifiers
     except Exception as e:
@@ -248,7 +221,7 @@ def empirical_bayes_shrinkage(
     Layer 1, but computed analytically (no MCMC needed).
 
     Math:
-      Prior: Beta(alpha_0, beta_0)  ← league hyperparameters
+      Prior: Beta(alpha_0, beta_0)  <- league hyperparameters
       Likelihood: Binomial(n=pa, k=pa*rate)
       Posterior: Beta(alpha_0 + successes, beta_0 + failures)
 
@@ -280,7 +253,7 @@ def monte_carlo_prop_prob(
     n_draws: int = N_MC_DRAWS
 ) -> dict:
     """
-    kekoa-santana Layer 3 equivalent: 4,000 MC draws → P(stat > line).
+    kekoa-santana Layer 3 equivalent: 4,000 MC draws -> P(stat > line).
     We use 1,000 for Railway performance.
 
     Algorithm:
@@ -302,7 +275,7 @@ def monte_carlo_prop_prob(
     # Step 2: Simulate game outcomes
     outcomes = rng.binomial(pa_estimate, rate_samples)
 
-    # Step 3: P(over line) — line is typically X.5 so > vs >= doesn't matter
+    # Step 3: P(over line) -- line is typically X.5 so > vs >= doesn't matter
     prob_over = float(np.mean(outcomes > line))
 
     # Bootstrap credible interval on the probability estimate itself
@@ -355,14 +328,14 @@ def apply_bayesian_layer(legs: list, player_stats_cache: dict = None) -> list:
                 pa        = int(player_stats_cache[player].get("pa", 200))
             else:
                 # Fallback: use current_prob as a proxy stat rate
-                # This is conservative — shrinkage will pull toward league mean
+                # This is conservative -- shrinkage will pull toward league mean
                 stat_rate = current_prob * 0.9
                 pa = 150   # Conservative: assume partial season observed
 
             # ── Step 2: Empirical Bayes shrinkage ─────────────────────────
             posterior = empirical_bayes_shrinkage(stat_rate, pa, prop_type)
 
-            # ── Step 3: Monte Carlo → P(over line) ────────────────────────
+            # ── Step 3: Monte Carlo -> P(over line) ────────────────────────
             pa_est = PA_ESTIMATE.get(prop_type, 4)
             mc     = monte_carlo_prop_prob(posterior, line, pa_est)
 
@@ -383,7 +356,7 @@ def apply_bayesian_layer(legs: list, player_stats_cache: dict = None) -> list:
             blended = (1 - BLEND_WEIGHT_BAYES) * current_prob + BLEND_WEIGHT_BAYES * mc["prob_over"]
             nudge = blended - current_prob
 
-            # Apply archetype modifier on K props (± small push)
+            # Apply archetype modifier on K props (+/- small push)
             if prop_type == "strikeouts" and archetype_modifier != 0.0:
                 nudge += archetype_modifier
 
@@ -437,7 +410,7 @@ if __name__ == "__main__":
         print(
             f"{leg['player']:20s} | {leg['prop_type']:12s} | "
             f"orig={leg['implied_prob'] - leg['bayes_nudge']:.3f} "
-            f"→ {leg['implied_prob']:.3f} "
+            f"-> {leg['implied_prob']:.3f} "
             f"(nudge={leg['bayes_nudge']:+.4f}) "
             f"[{leg['bayes_ci_lower']:.3f}, {leg['bayes_ci_upper']:.3f}] "
             f"archetype={leg['pitch_archetype_id']}"

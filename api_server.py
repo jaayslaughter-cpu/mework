@@ -1,34 +1,8 @@
-"""api_server.py — PropIQ Python ML microservice HTTP layer.
+"""api_server.py -- PropIQ Python ML microservice HTTP layer.
 
 Exposes the FastAPI endpoints consumed by the Spring Boot XGBoostModelService.
 All prediction routes delegate to a singleton :class:`MLPipeline` instance
-"""api_server.py — PropIQ Python ML microservice HTTP layer.
-
-Exposes the FastAPI endpoints consumed by the Spring Boot XGBoostModelService.
-All prediction routes delegate to a singleton :class:`MLPipeline` instance
-that is trained/loaded at startup.  The backtest audit route runs a SHAP
-feature-importance analysis on historical settled-bet data.
-
-Endpoints
----------
-GET  /status                  — Railway healthcheck alias
-GET  /api/ml/health           — Liveness probe
-POST /api/ml/predict          — Single-prop probability prediction
-POST /api/ml/predict-live     — In-game live probability prediction
-POST /api/ml/correlation      — Prop-pair correlation score
-POST /api/ml/game-prob        — Team win probability
-POST /api/ml/anomaly-detect   — Stat anomaly detection
-POST /api/ml/backtest-audit   — SHAP feature importance audit (BacktestTasklet)
-POST /trigger/dispatch        — Run live_dispatcher.py (19-agent parlay build)
-POST /trigger/settle          — Run nightly_recap.py (settlement + calibration)
-GET  /replay                  — Decision replay for a given date
-GET  /config                  — Dump agent_config.yaml as JSON
-
-Usage
------
-    uvicorn api_server:app --host 0.0.0.0 --port 8080 --workers 1
 """
-
 from __future__ import annotations
 
 import logging
@@ -93,7 +67,7 @@ async def lifespan(application: FastAPI):
             logger.info("XGBoost model loaded from %s", model_path)
         else:
             logger.warning(
-                "Model file not found at %s — predictions will use fallback probability. "
+                "Model file not found at %s -- predictions will use fallback probability. "
                 "Train via ml_pipeline.py and save to PROPIQ_MODEL_PATH.",
                 model_path,
             )
@@ -260,14 +234,14 @@ def _run_script(script_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 _POSITIVE_CORRELATIONS: List[tuple] = [
-    # Pitcher strikeouts ↕ batter K props — same direction
+    # Pitcher strikeouts ↕ batter K props -- same direction
     ("strikeouts", "batter_strikeouts"),
     # Team totals and run props
     ("runs_scored", "total_runs"),
 ]
 
 _NEGATIVE_CORRELATIONS: List[tuple] = [
-    # K Over → fewer hits / total bases for batters (inverse)
+    # K Over -> fewer hits / total bases for batters (inverse)
     ("strikeouts", "total_bases"),
     ("strikeouts", "hits"),
     ("strikeouts", "singles"),
@@ -277,7 +251,7 @@ _CORRELATION_SCORE = 0.75  # returned when a known correlated pair is detected
 
 
 def _score_correlation(prop_type_a: str, prop_type_b: Optional[str] = None) -> float:
-    """Return a correlation score (0.0–1.0) for a given prop type pair."""
+    """Return a correlation score (0.0-1.0) for a given prop type pair."""
     if prop_type_b is None:
         return 0.0
     pair = tuple(sorted([prop_type_a.lower(), prop_type_b.lower()]))
@@ -330,7 +304,7 @@ def trigger_dispatch(background_tasks: BackgroundTasks) -> TriggerResponse:
     return TriggerResponse(
         status="accepted",
         trigger="dispatch",
-        message="live_dispatcher.py started in background — Discord alerts will post on completion.",
+        message="live_dispatcher.py started in background -- Discord alerts will post on completion.",
     )
 
 
@@ -347,7 +321,7 @@ def trigger_settle(background_tasks: BackgroundTasks) -> TriggerResponse:
     return TriggerResponse(
         status="accepted",
         trigger="settle",
-        message="nightly_recap.py started in background — settlement report will post to Discord.",
+        message="nightly_recap.py started in background -- settlement report will post to Discord.",
     )
 
 

@@ -1,8 +1,8 @@
 """
-public_trends_scraper.py — PropIQ Analytics: SportsBettingDime Public Betting Trends
+public_trends_scraper.py -- PropIQ Analytics: SportsBettingDime Public Betting Trends
 ======================================================================================
 Fetches real BET% and MONEY% (ticket + stake percentages) from SportsBettingDime's
-internal WordPress REST API (/wp-json/adpt/v1/) — no Apify, no auth required.
+internal WordPress REST API (/wp-json/adpt/v1/) -- no Apify, no auth required.
 
 Provides two data layers:
   1. Game-level splits:   moneyline/spread/total Over-Under bets% + money%
@@ -15,35 +15,6 @@ FadeAgent integration:
   #                    sbd_prop_over_bets_pct, sbd_prop_over_money_pct,
   #                    sbd_home_ml_bets_pct,   sbd_home_ml_money_pct
 """
-public_trends_scraper.py — PropIQ Analytics: SportsBettingDime Public Betting Trends
-======================================================================================
-Fetches real BET% and MONEY% (ticket + stake percentages) from SportsBettingDime's
-internal WordPress REST API (/wp-json/adpt/v1/) — no Apify, no auth required.
-
-Provides two data layers:
-  1. Game-level splits:   moneyline/spread/total Over-Under bets% + money%
-  2. Player-level splits: per-prop bets% + money% (populated day-of by books)
-
-FadeAgent integration:
-  from public_trends_scraper import enrich_props_with_public_trends
-  props = enrich_props_with_public_trends(props)
-  # Each prop now has: sbd_game_over_bets_pct, sbd_game_over_money_pct,
-  #                    sbd_prop_over_bets_pct, sbd_prop_over_money_pct,
-  #                    sbd_home_ml_bets_pct,   sbd_home_ml_money_pct
-
-Anti-ban measures (8 layers):
-  1. Daily Parquet cache   — zero re-hits after first successful fetch
-  2. CookieJar session     — persists Sucuri/Cloudflare cookies across all requests
-  3. Homepage warm-up      — seeds cookies before hitting the JSON endpoints
-  4. 8 rotating user agents
-  5. Jittered delays       — random 1.5–4.0s between requests
-  6. Exponential backoff   — 30s → 90s → 270s on 429/503
-  7. Daily fetch cap (3x)  — circuit breaker, never hammers
-  8. Graceful 403/empty    — returns empty DataFrame, no crash, no retry storm
-
-PEP 8 compliant.
-"""
-
 from __future__ import annotations
 
 import http.cookiejar
@@ -77,13 +48,13 @@ SCHEDULE_URL = f"{BASE_URL}/wp-json/adpt/v1/mlb/schedule"
 SPORT_EVENT_URL = f"{BASE_URL}/wp-json/adpt/v1/sport-event/mlb"
 PLAYER_PROPS_URL = f"{BASE_URL}/wp-json/adpt/v1/player-props/mlb"
 
-# Books to query — covers >90% of public handle
+# Books to query -- covers >90% of public handle
 BOOKS = "fanduel,draftkings,betmgm,caesars,pointsbet,betonlineag,bovada"
 
-MAX_DAILY_FETCHES = 3          # Circuit breaker — hard ceiling per day
-MIN_DELAY = 1.5                # Seconds — minimum jitter delay
-MAX_DELAY = 4.0                # Seconds — maximum jitter delay
-BACKOFF_SEQUENCE = [30, 90, 270]  # Seconds — on 429/503
+MAX_DAILY_FETCHES = 3          # Circuit breaker -- hard ceiling per day
+MIN_DELAY = 1.5                # Seconds -- minimum jitter delay
+MAX_DELAY = 4.0                # Seconds -- maximum jitter delay
+BACKOFF_SEQUENCE = [30, 90, 270]  # Seconds -- on 429/503
 
 _USER_AGENTS: list[str] = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -183,12 +154,12 @@ class _Session:
                 return json.loads(raw.decode("utf-8", errors="replace"))
             except urllib.error.HTTPError as exc:
                 if exc.code == 403:
-                    logger.warning("[SBD] HTTP 403 on %s — aborting", url)
+                    logger.warning("[SBD] HTTP 403 on %s -- aborting", url)
                     return None
                 if exc.code in (429, 503) and attempt < retries - 1:
                     wait = BACKOFF_SEQUENCE[min(attempt, len(BACKOFF_SEQUENCE) - 1)]
                     logger.warning(
-                        "[SBD] HTTP %d — backing off %ds (attempt %d/%d)",
+                        "[SBD] HTTP %d -- backing off %ds (attempt %d/%d)",
                         exc.code, wait, attempt + 1, retries,
                     )
                     time.sleep(wait)
@@ -239,7 +210,7 @@ def _fetch_game_splits(
         total_under_bets, total_under_money,
         spread_home_bets, spread_home_money,
         spread_away_bets, spread_away_money,
-    All values are floats 0–100 (percent) or None if unavailable.
+    All values are floats 0-100 (percent) or None if unavailable.
     """
     url = f"{SPORT_EVENT_URL}/{urllib.parse.quote(event_id, safe=':')}?books={BOOKS}"
     data = session.get_json(url)
@@ -397,7 +368,7 @@ class PublicTrendsScraper:
 
         # Daily fetch cap check
         if not _check_cap():
-            logger.warning("[SBD] Daily fetch cap reached — returning empty DataFrames")
+            logger.warning("[SBD] Daily fetch cap reached -- returning empty DataFrames")
             return pd.DataFrame(), pd.DataFrame()
 
         _increment_cap()
@@ -457,14 +428,14 @@ def enrich_props_with_public_trends(
     """Enrich a props DataFrame with SportsBettingDime public betting percentages.
 
     Adds columns to props:
-        sbd_game_over_bets_pct   — % tickets on game total Over
-        sbd_game_over_money_pct  — % money on game total Over
-        sbd_game_under_bets_pct  — % tickets on game total Under
-        sbd_game_under_money_pct — % money on game total Under
-        sbd_home_ml_bets_pct     — % tickets on home team moneyline
-        sbd_home_ml_money_pct    — % money on home team moneyline
-        sbd_prop_over_bets_pct   — % tickets on player's specific prop Over (when available)
-        sbd_prop_over_money_pct  — % money on player's specific prop Over (when available)
+        sbd_game_over_bets_pct   -- % tickets on game total Over
+        sbd_game_over_money_pct  -- % money on game total Over
+        sbd_game_under_bets_pct  -- % tickets on game total Under
+        sbd_game_under_money_pct -- % money on game total Under
+        sbd_home_ml_bets_pct     -- % tickets on home team moneyline
+        sbd_home_ml_money_pct    -- % money on home team moneyline
+        sbd_prop_over_bets_pct   -- % tickets on player's specific prop Over (when available)
+        sbd_prop_over_money_pct  -- % money on player's specific prop Over (when available)
 
     Args:
         props: DataFrame with at minimum 'player_name' (or 'player') and 'team' columns.
@@ -488,7 +459,7 @@ def enrich_props_with_public_trends(
     if not game_df.empty and "home_team" in game_df.columns:
         team_col = "team" if "team" in props.columns else None
 
-        # Build team → game lookup (home and away)
+        # Build team -> game lookup (home and away)
         home_lookup: dict[str, dict] = {}
         away_lookup: dict[str, dict] = {}
         for _, row in game_df.iterrows():
@@ -621,7 +592,7 @@ def get_fade_signal(
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("PropIQ — SportsBettingDime Public Trends Scraper")
+    print("PropIQ -- SportsBettingDime Public Trends Scraper")
     print("=" * 60)
 
     scraper = PublicTrendsScraper()
