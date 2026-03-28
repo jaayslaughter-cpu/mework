@@ -120,7 +120,7 @@ class UnderMachine(BaseAgent):
             a, b = under_legs[0], under_legs[1]
             # Correlation bonus: same-game unders are positively correlated
             # Adjust combined prob upward slightly
-            combined_prob = a.model_prob * b.model_prob * 1.05
+            combined_prob = min(a.model_prob * b.model_prob * 1.05, 0.99)
             combined_dec = self.parlay_odds([a, b])
             ev = self.calculate_ev(combined_prob, combined_dec)
             if ev >= self.ev_threshold:
@@ -138,7 +138,7 @@ class UnderMachine(BaseAgent):
         # 3-leg under parlay
         if len(under_legs) >= 3:
             a, b, c = under_legs[0], under_legs[1], under_legs[2]
-            combined_prob = a.model_prob * b.model_prob * c.model_prob * 1.08
+            combined_prob = min(a.model_prob * b.model_prob * c.model_prob * 1.08, 0.99)
             combined_dec = self.parlay_odds([a, b, c])
             ev = self.calculate_ev(combined_prob, combined_dec)
             if ev >= self.ev_threshold:

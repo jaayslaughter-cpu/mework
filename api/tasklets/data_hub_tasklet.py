@@ -201,8 +201,9 @@ def _fetch_player_props(_event_ids: list[str]) -> list[dict]:
 def _fetch_pitcher_stats() -> dict:
     """Returns dict of {pitcher_name: {era, whip, k_per9, ...}}"""
     try:
+        season = date.today().year
         resp = _get_with_backoff(
-            f"{SPORTSDATA_BASE}/stats/json/PitcherSummaries/2025",
+            f"{SPORTSDATA_BASE}/stats/json/PitcherSummaries/{season}",
             headers={"Ocp-Apim-Subscription-Key": SPORTSDATA_KEY}
         )
         stats = {}

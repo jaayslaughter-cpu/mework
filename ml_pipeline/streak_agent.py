@@ -6,29 +6,29 @@ PropIQ — 19th Agent: StreakAgent
 Underdog Fantasy "Streaks" format — 11 consecutive correct picks to win.
 
 Entry tiers:
-  $1  entry → $1,000  prize
-  $5  entry → $5,000  prize
-  $10 entry → $10,000 prize
+  $1  entry -> $1,000  prize
+  $5  entry -> $5,000  prize
+  $10 entry -> $10,000 prize
 
 Rules enforced:
-  • Confidence gate    : ≥ 8.0/10  (vs. 7.0 for standard parlays)
-  • Probability gate   : ≥ 0.62 implied win probability per pick
-  • EV gate            : ≥ 5.0% per pick
+  • Confidence gate    : >= 8.0/10  (vs. 7.0 for standard parlays)
+  • Probability gate   : >= 0.62 implied win probability per pick
+  • EV gate            : >= 5.0% per pick
   • Team diversity     : picks 1 & 2 must be from different teams
   • Single pick/day    : one Streaks pick per day maximum
   • Streak window      : 10 calendar days to complete 11 picks
   • In-game allowed    : yes — Underdog accepts full-game total projections
   • Rescues            : supported (player exits early — Underdog grants rescue)
   • Void rules
-      - Picks 1–2 void → full streak restart (new streak from pick 1)
-      - Picks 3–11 void → replace with next-available pick (pick # preserved)
+      - Picks 1-2 void -> full streak restart (new streak from pick 1)
+      - Picks 3-11 void -> replace with next-available pick (pick # preserved)
 
 Pick selection algorithm:
   1. Fetch live Underdog Fantasy MLB props (with team enrichment)
   2. Evaluate each prop using MLB historical base rates (same as dispatcher)
   3. Run all 18 AGENT_CONFIGS filters to count cross-agent "signals"
   4. Score each prop: streak_confidence() = prob_score + ev_bonus + signal_bonus
-  5. Filter: conf ≥ 8.0, prob ≥ 0.62, ev_pct ≥ 5.0%
+  5. Filter: conf >= 8.0, prob >= 0.62, ev_pct >= 5.0%
   6. Apply team-diversity rule for picks 1 & 2
   7. Select top-ranked prop; skip day if nothing qualifies (better than a bad pick)
 
@@ -109,13 +109,13 @@ STREAK_EV_MIN     = 5.0    # EV % floor
 STREAK_TOTAL_WINS = 11     # picks needed to win
 STREAK_WINDOW_DAYS = 10    # calendar days to complete the streak
 
-# Entry tiers: entry_key → (stake_usd, prize_usd)
+# Entry tiers: entry_key -> (stake_usd, prize_usd)
 ENTRY_TIERS: dict[int, tuple[float, float]] = {
     1:  (1.0,  1_000.0),
     5:  (5.0,  5_000.0),
     10: (10.0, 10_000.0),
 }
-DEFAULT_ENTRY = 1   # $1 entry → $1,000 prize
+DEFAULT_ENTRY = 1   # $1 entry -> $1,000 prize
 
 DISCORD_WEBHOOK = os.getenv(
     "DISCORD_WEBHOOK_URL",
@@ -153,9 +153,9 @@ class StreakCandidate:
     platform:    str          # "Underdog" or "PrizePicks"
     entry_type:  str          # "FLEX" or "STANDARD"
     position:    str          # "SP", "C", "1B", etc.
-    implied_prob: float       # 0.0–1.0 estimated win probability
+    implied_prob: float       # 0.0-1.0 estimated win probability
     ev_pct:      float        # expected value %
-    confidence:  float        # 1.0–10.0 StreakAgent score
+    confidence:  float        # 1.0-10.0 StreakAgent score
     signal_count: int         # number of AGENT_CONFIGS that approve this pick
 
 
@@ -249,17 +249,17 @@ def _is_game_prop(prop_type: str, line: float) -> bool:
 
 def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
     """
-    Single-leg Streaks confidence  (1.0 – 10.0).
+    Single-leg Streaks confidence  (1.0 - 10.0).
 
     Formula mirrors build_parlay() in live_dispatcher for consistency:
-      prob_score    = (prob – 0.50) / 0.30 × 7.0   → 0–7 over 50%–80%
-      ev_bonus      = min(ev_pct / 15.0 × 2.0, 2.0) → 0–2 for 0%–15% EV
-      signal_bonus  = min(signal_count × 0.1, 1.0)  → 0–1 for 0–10 agents
+      prob_score    = (prob - 0.50) / 0.30 * 7.0   -> 0-7 over 50%-80%
+      ev_bonus      = min(ev_pct / 15.0 * 2.0, 2.0) -> 0-2 for 0%-15% EV
+      signal_bonus  = min(signal_count * 0.1, 1.0)  -> 0-1 for 0-10 agents
 
     No legs_penalty (single-leg pick).  Gate for StreakAgent: 8.0/10.
     Gate is achievable when:
-      prob ≥ 0.76 + ev_pct ≥ 7.5%  (e.g. hits_runs_rbis Over 0.5 = 82%)
-      prob ≥ 0.80 + any ev            (dominant Over lines)
+      prob >= 0.76 + ev_pct >= 7.5%  (e.g. hits_runs_rbis Over 0.5 = 82%)
+      prob >= 0.80 + any ev            (dominant Over lines)
     """
     prob_score   = (prob - 0.50) / 0.30 * 7.0
     ev_bonus     = min(ev_pct / 15.0 * 2.0, 2.0)
@@ -297,7 +297,7 @@ def fetch_underdog_props_with_teams() -> list[dict]:
     Fetch Underdog Fantasy MLB props, including team abbreviation.
 
     Extends the base fetch_underdog_props() to also resolve team from the
-    appearance object (appearance.match_id → not available) or from a
+    appearance object (appearance.match_id -> not available) or from a
     supplemental appearances team_id lookup.
 
     Falls back to live_dispatcher.fetch_underdog_props() if team is unavailable,
@@ -313,7 +313,7 @@ def fetch_underdog_props_with_teams() -> list[dict]:
     players_map: dict[str, dict]     = {p["id"]: p for p in data.get("players", [])}
     appearances_map: dict[str, dict] = {a["id"]: a for a in data.get("appearances", [])}
 
-        # Build team_id → abbreviation from any 'teams' or 'match_teams' array
+        # Build team_id -> abbreviation from any 'teams' or 'match_teams' array
         teams_map: dict[str, str] = {}
         for t in data.get("teams", []):
             tid = t.get("id", "")
@@ -514,8 +514,8 @@ def select_streak_pick(
     Choose today's Streaks pick from qualified candidates.
 
     Rules applied:
-      1. Filter: conf ≥ STREAK_CONF_MIN, prob ≥ STREAK_PROB_MIN, ev ≥ STREAK_EV_MIN
-      2. Team diversity: if pick_number ≤ 2 and prior_pick_team is set,
+      1. Filter: conf >= STREAK_CONF_MIN, prob >= STREAK_PROB_MIN, ev >= STREAK_EV_MIN
+      2. Team diversity: if pick_number <= 2 and prior_pick_team is set,
          exclude candidates from that same team
       3. Rank: primary = confidence desc, tiebreak = signal_count desc
 
@@ -875,7 +875,7 @@ def post_pick_alert(
         "footer": {
             "text": (
                 f"PropIQ StreakAgent • {datetime.now(timezone.utc).strftime('%b %d %Y %H:%M')} UTC • "
-                f"Confidence gate ≥ {STREAK_CONF_MIN}/10 • Prob gate ≥ {int(STREAK_PROB_MIN*100)}%"
+                f"Confidence gate >= {STREAK_CONF_MIN}/10 • Prob gate >= {int(STREAK_PROB_MIN*100)}%"
             )
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -946,7 +946,7 @@ def post_settlement_alert(
             "text": (
                 f"PropIQ StreakAgent Settlement • "
                 f"{datetime.now(timezone.utc).strftime('%b %d %Y')} • "
-                f"${stake_usd:.0f} entry → ${prize_usd:,.0f} prize"
+                f"${stake_usd:.0f} entry -> ${prize_usd:,.0f} prize"
             )
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1245,7 +1245,7 @@ def run_streak_pick(
     """
     Morning run (11 AM ET alongside main dispatcher).
 
-    Fetches props → scores → selects best pick → persists → alerts Discord.
+    Fetches props -> scores -> selects best pick -> persists -> alerts Discord.
     Returns the pick dict, or None if no qualifying pick exists today.
     """
     picked_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1283,7 +1283,7 @@ def run_streak_pick(
     # Score all props
     candidates = evaluate_props_for_streaks(raw_props)
     logger.info(
-        "[Streak] Scored %d candidates (prob≥%.0f%%, ev≥%.0f%%, conf≥%.1f)",
+        "[Streak] Scored %d candidates (prob>=%.0f%%, ev>=%.0f%%, conf>=%.1f)",
         sum(1 for c in candidates
             if c.confidence >= STREAK_CONF_MIN
             and c.implied_prob >= STREAK_PROB_MIN
@@ -1298,7 +1298,7 @@ def run_streak_pick(
     pick = select_streak_pick(candidates, pick_number, prior_team)
     if not pick:
         logger.info(
-            "[Streak] No qualifying pick today (conf≥%.1f/10). Skipping — "
+            "[Streak] No qualifying pick today (conf>=%.1f/10). Skipping — "
             "better to wait than force a marginal pick.",
             STREAK_CONF_MIN,
         )

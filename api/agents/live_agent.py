@@ -90,7 +90,7 @@ class LiveAgent(BaseAgent):
 
         slips: list[BetSlip] = []
 
-        for dk, delta in sorted(movements, key=lambda x: abs(x[1]), reverse=True)[:5]:
+        for dk, _dir, delta in sorted(movements, key=lambda x: abs(x[2]), reverse=True)[:5]:
             prop_data = props_by_key.get(dk)
             if not prop_data:
                 continue

@@ -161,5 +161,5 @@ class ParlayAgent(BaseAgent):
                 ))
 
         slips.sort(key=lambda x: x.expected_value, reverse=True)
-        logger.info("[parlay] %s legs 1 %s parlay slips", len(ml_legs), len(slips))
+        logger.info("[parlay] %s legs -> %s parlay slips", len(ml_legs), len(slips))
         return slips[:8]

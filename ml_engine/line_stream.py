@@ -36,8 +36,7 @@ APIs / sources (all free, no new keys):
   - site.api.espn.com           (no key, no quota)
 """
 
-No in-game bet signals are generated. In-game phase is monitoring only.
-"""
+# No in-game bet signals are generated. In-game phase is monitoring only.
 
 from __future__ import annotations
 
