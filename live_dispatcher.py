@@ -922,25 +922,18 @@ def fetch_prizepicks_props() -> list[dict]:
     """
     global _pp_session
     try:
+        # Single attempt — Railway IP is 403-blocked; jump straight to Apify on failure
         data = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2 ** attempt)   # 2s, 4s back-off
-                _pp_session = None
-            sess = _get_pp_session()
-            resp = sess.get(
-                "https://api.prizepicks.com/projections",
-                params={"per_page": 250, "single_stat": True, "league_id": 2},
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                break
-            logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
-            if resp.status_code == 403:
-                _pp_session = None
-        if data is None:
-            logger.info("[PP] Direct API blocked — falling back to Apify actor")
+        sess = _get_pp_session()
+        resp = sess.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+        else:
+            logger.info("[PP] HTTP %d — routing to Apify (no retries)", resp.status_code)
             return _fetch_prizepicks_via_apify()
 
         # Build player id -> name map from included resources

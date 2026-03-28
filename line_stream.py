@@ -162,25 +162,99 @@ def _get_db() -> sqlite3.Connection:
 # Prop fetching
 # ---------------------------------------------------------------------------
 
+def _fetch_prizepicks_via_apify_ls() -> list[dict]:
+    """Apify fallback for PrizePicks when Railway IP is 403-blocked."""
+    import json as _json
+    api_key = os.getenv("APIFY_API_KEY", "")
+    if not api_key:
+        logger.warning("[PP/Apify] No APIFY_API_KEY set")
+        return []
+    actor_id = "4AmgQeem8dEgMEiRF"
+    run_url = f"https://api.apify.com/v2/acts/{actor_id}/runs"
+    try:
+        run_resp = requests.post(
+            run_url,
+            params={"token": api_key},
+            json={"memory": 512},
+            timeout=30,
+        )
+        if run_resp.status_code not in (200, 201):
+            logger.warning("[PP/Apify] Run start HTTP %d", run_resp.status_code)
+            return []
+        run_id = run_resp.json()["data"]["id"]
+        dataset_id = run_resp.json()["data"]["defaultDatasetId"]
+
+        # Poll for completion (max 120s)
+        for _ in range(24):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"https://api.apify.com/v2/actor-runs/{run_id}",
+                params={"token": api_key},
+                timeout=15,
+            )
+            if status_resp.json().get("data", {}).get("status") in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
+                break
+
+        items_resp = requests.get(
+            f"https://api.apify.com/v2/datasets/{dataset_id}/items",
+            params={"token": api_key, "format": "json", "limit": 500},
+            timeout=30,
+        )
+        if items_resp.status_code != 200:
+            logger.warning("[PP/Apify] Dataset HTTP %d", items_resp.status_code)
+            return []
+        items = items_resp.json() if isinstance(items_resp.json(), list) else []
+    except Exception as exc:
+        logger.warning("[PP/Apify] Error: %s", exc)
+        return []
+
+    _LS_STAT_TYPES = frozenset({
+        "hits", "home runs", "total bases", "runs", "rbi",
+        "hits+runs+rbis", "strikeouts", "earned runs",
+        "pitching outs", "walks allowed", "stolen bases",
+        "singles", "hitter strikeouts",
+    })
+    props = []
+    for item in items:
+        odds_tier = str(item.get("odds_tier", "")).lower()
+        if odds_tier != "standard":
+            continue
+        if item.get("adjusted_odds", False):
+            continue
+        stat_raw = str(item.get("stat", "") or "").lower()
+        if stat_raw not in _LS_STAT_TYPES:
+            continue
+        line_val = item.get("line") or item.get("line_score")
+        pname = item.get("player_name", "")
+        if not pname or line_val is None:
+            continue
+        props.append({
+            "player_name": pname,
+            "prop_type":   stat_raw,
+            "platform":    "prizepicks",
+            "line":        float(line_val),
+        })
+    logger.info("[PP/Apify] %d standard props fetched via Apify", len(props))
+    return props
+
+
 def _fetch_prizepicks() -> list[dict]:
     """Fetch active PrizePicks MLB props. Returns list of prop dicts."""
     try:
         data = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2 ** attempt)  # 2s, 4s back-off
-            resp = requests.get(
-                "https://api.prizepicks.com/projections",
-                params={"per_page": 250, "single_stat": True, "league_id": 2},
-                headers=_PP_HEADERS,
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                break
-            logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
+        resp = requests.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
+            headers=_PP_HEADERS,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+        else:
+            logger.info("[PP] HTTP %d — routing to Apify fallback", resp.status_code)
+            return _fetch_prizepicks_via_apify_ls()
         if data is None:
-            return []
+            return _fetch_prizepicks_via_apify_ls()
 
         player_map: dict[str, str] = {}
         for item in data.get("included", []):

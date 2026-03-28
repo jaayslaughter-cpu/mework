@@ -367,7 +367,7 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
 
 def _load_xgb_model():
     """Lazy-load trained XGBoost model from disk."""
-    path = os.getenv("XGB_MODEL_PATH", "/app/models/xgb_propiq.pkl")
+    path = os.getenv("XGB_MODEL_PATH", "/tmp/xgb_propiq.pkl")
     if os.path.exists(path):
         with open(path, "rb") as f:
             return pickle.load(f)
@@ -1541,7 +1541,7 @@ def run_xgboost_tasklet() -> None:
     preds    = model.predict(X_test)
     accuracy = accuracy_score(y_test, preds)
 
-    model_path = os.getenv("XGB_MODEL_PATH", "/app/models/xgb_propiq.pkl")
+    model_path = os.getenv("XGB_MODEL_PATH", "/tmp/xgb_propiq.pkl")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
