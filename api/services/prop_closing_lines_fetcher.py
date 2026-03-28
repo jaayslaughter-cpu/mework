@@ -288,7 +288,7 @@ class PropClosingLinesFetcher:
 
                 if resp.status_code == 200:
                     return resp.json()
-                elif resp.status_code == 429 or resp.status_code == 401:
+                elif resp.status_code in (429, 401):
                     # Quota exceeded or key invalid → try next key
                     if not self._rotate_key():
                         summary.errors.append(f"All API keys exhausted (status {resp.status_code})")
