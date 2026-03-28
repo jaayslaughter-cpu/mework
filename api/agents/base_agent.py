@@ -49,7 +49,9 @@ class BetSlip:
     confidence: float = 0.0
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     settled_at: Optional[str] = None
-    outcome: Optional[str] = None  # "win" | "loss" | "push" | "pending"
+    # FIX BUG 2: Default "pending" so WHERE outcome='pending' query works.
+    # Previously None → saved as SQL NULL → get_pending_bets() could never find bets.
+    outcome: str = "pending"  # "win" | "loss" | "push" | "pending"
     profit_units: float = 0.0
     game_date: str = field(default_factory=lambda: date.today().isoformat())
     metadata: dict = field(default_factory=dict)
@@ -186,7 +188,6 @@ class AgentDB:
         roi = (total_profit / total_wagered * 100) if total_wagered > 0 else 0.0
         win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
 
-        # Get current capital from stats table or default
         existing = conn.execute(
             "SELECT current_capital, base_capital FROM agent_stats WHERE agent_name=?",
             (agent_name,)
@@ -254,7 +255,7 @@ def get_db() -> AgentDB:
 
 class BaseAgent(abc.ABC):
     """
-    Abstract base for all 7 PropIQ agents.
+    Abstract base for all PropIQ agents.
     Each agent must implement: analyze() -> list[BetSlip]
     """
 
@@ -273,7 +274,6 @@ class BaseAgent(abc.ABC):
     def _ensure_stats_row(self):
         stats = self.db.get_agent_stats(self.name)
         if stats["last_updated"] is None:
-            # Initialize with defaults
             self.db.update_agent_stats(self.name)
 
     @abc.abstractmethod
@@ -289,7 +289,6 @@ class BaseAgent(abc.ABC):
         start = time.time()
         try:
             slips = self.analyze(hub_data)
-            # Validate constraints
             valid = []
             for slip in slips:
                 if self.min_legs <= slip.num_legs <= self.max_legs and slip.expected_value >= self.ev_threshold:

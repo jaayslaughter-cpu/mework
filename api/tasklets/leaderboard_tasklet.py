@@ -1,8 +1,14 @@
 """
-Leaderboard Tasklet — Runs every 60 seconds
+LeaderBoard Tasklet — Runs every 60 seconds
 ---------------------------------------------
 Tracks agent ROI, win rates, and auto-allocates capital.
 Top 3 agents get 2x capital. Bottom 2 get 0.5x.
+
+FIX BUG 10: Removed "arb" from AGENT_NAMES, AGENT_DISPLAY, AGENT_STRATEGIES.
+  ArbitrageAgent was removed in Phase 48. Keeping it here caused capital to
+  be allocated to a non-existent agent and corrupted the leaderboard output.
+  With 6 active agents: TOP_N_BOOST=3 and BOTTOM_N_CUT=2 means 1 agent is in
+  the neutral middle band — intentional and correct.
 """
 from __future__ import annotations
 import json
@@ -18,29 +24,28 @@ LEADERBOARD_PATH = Path(__file__).parent.parent / "data" / "leaderboard.json"
 LEADERBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 BASE_CAPITAL = 100.0
-TOP_N_BOOST = 3     # Top 3 get 2x capital
-BOTTOM_N_CUT = 2    # Bottom 2 get 0.5x capital
-BOOST_MULT = 2.0
-CUT_MULT = 0.5
+TOP_N_BOOST   = 3     # Top 3 get 2x capital
+BOTTOM_N_CUT  = 2     # Bottom 2 get 0.5x capital
+BOOST_MULT    = 2.0
+CUT_MULT      = 0.5
 
-AGENT_NAMES = ["ev_hunter", "under_machine", "three_leg", "parlay", "live", "arb", "grading"]
+# FIX BUG 10: "arb" removed — ArbitrageAgent deleted Phase 48
+AGENT_NAMES = ["ev_hunter", "under_machine", "three_leg", "parlay", "live", "grading"]
 AGENT_DISPLAY = {
-    "ev_hunter": "+EV Hunter",
+    "ev_hunter":    "+EV Hunter",
     "under_machine": "Under Machine",
-    "three_leg": "3-Leg Correlated",
-    "parlay": "Parlay",
-    "live": "Live",
-    "arb": "Arbitrage",
-    "grading": "Grading",
+    "three_leg":    "3-Leg Correlated",
+    "parlay":       "Parlay",
+    "live":         "Live",
+    "grading":      "Grading",
 }
 AGENT_STRATEGIES = {
-    "ev_hunter": "EV > 5% | 1-3 legs",
+    "ev_hunter":    "EV > 5% | 1-3 legs",
     "under_machine": "ERA < 3.50 duels | 58% WR",
-    "three_leg": "Same-game correlated | 8-12% edge",
-    "parlay": "Game outcomes | 2-3% ROI",
-    "live": ">5% line movement | 5-8% edge",
-    "arb": "Cross-book >1% guaranteed",
-    "grading": "Boxscore settlement",
+    "three_leg":    "Same-game correlated | 8-12% edge",
+    "parlay":       "Game outcomes | 2-3% ROI",
+    "live":         ">5% line movement | 5-8% edge",
+    "grading":      "Boxscore settlement",
 }
 
 
@@ -106,52 +111,56 @@ def run_leaderboard_tasklet() -> dict:
         # Rank badge
         rank_in_list = next(
             (i + 1 for i, ss in enumerate(
-                sorted([x for x in stats_list if x["agent_name"] != "grading"],
-                       key=lambda x: x.get("roi_pct", 0), reverse=True)
-            ) if ss["agent_name"] == name), None
+                sorted(
+                    [x for x in stats_list if x["agent_name"] != "grading"],
+                    key=lambda x: x.get("roi_pct", 0),
+                    reverse=True,
+                )
+            ) if ss["agent_name"] == name),
+            None,
         )
 
         leaderboard.append({
-            "agent_name": name,
-            "display_name": AGENT_DISPLAY.get(name, name),
-            "strategy": AGENT_STRATEGIES.get(name, ""),
-            "rank": rank_in_list,
-            "total_bets": total,
-            "wins": wins,
-            "losses": losses,
-            "pushes": s.get("pushes", 0),
-            "win_rate_pct": round(win_rate, 2),
-            "roi_pct": round(roi, 2),
+            "agent_name":         name,
+            "display_name":       AGENT_DISPLAY.get(name, name),
+            "strategy":           AGENT_STRATEGIES.get(name, ""),
+            "rank":               rank_in_list,
+            "total_bets":         total,
+            "wins":               wins,
+            "losses":             losses,
+            "pushes":             s.get("pushes", 0),
+            "win_rate_pct":       round(win_rate, 2),
+            "roi_pct":            round(roi, 2),
             "total_profit_units": round(profit, 2),
-            "current_capital": capital,
-            "capital_change": round(capital_change, 2),
-            "capital_mult": capital / BASE_CAPITAL,
-            "status": "🔥 2x Capital" if capital == BASE_CAPITAL * BOOST_MULT
-                      else ("⚠️ 0.5x Capital" if capital == BASE_CAPITAL * CUT_MULT
-                            else "Active"),
+            "current_capital":    capital,
+            "capital_change":     round(capital_change, 2),
+            "capital_mult":       capital / BASE_CAPITAL,
+            "status": (
+                "🔥 2x Capital" if capital == BASE_CAPITAL * BOOST_MULT
+                else ("⚠️ 0.5x Capital" if capital == BASE_CAPITAL * CUT_MULT
+                      else "Active")
+            ),
         })
 
-    leaderboard.sort(key=lambda x: (x.get("roi_pct", 0)), reverse=True)
+    leaderboard.sort(key=lambda x: x.get("roi_pct", 0), reverse=True)
 
     output = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "total_agents": len(leaderboard),
+        "timestamp":              datetime.utcnow().isoformat(),
+        "total_agents":           len(leaderboard),
         "total_capital_deployed": sum(e["current_capital"] for e in leaderboard),
-        "leaderboard": leaderboard,
+        "leaderboard":            leaderboard,
     }
 
-    # Write to file
     with open(LEADERBOARD_PATH, "w") as f:
         json.dump(output, f, indent=2)
 
     logger.info(
         "[leaderboard] Updated %d agents — Top: %s (%.1f%% ROI)",
         len(leaderboard),
-        leaderboard[0]['display_name'] if leaderboard else 'N/A',
-        leaderboard[0]['roi_pct'] if leaderboard else 0
+        leaderboard[0]["display_name"] if leaderboard else "N/A",
+        leaderboard[0]["roi_pct"] if leaderboard else 0,
     )
     return output
-
 
 
 def read_leaderboard() -> dict:
