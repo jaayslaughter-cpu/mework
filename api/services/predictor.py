@@ -7,6 +7,7 @@ from xgboost import XGBClassifier
 from services.fatigue_logic import apply_fatigue_adjustments
 from services.usage_vacuums import evaluate_player_context
 from services.defensive_contrast import evaluate_defensive_contrast
+from services.abs_challenge import apply_abs_to_probability, ABSContext
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ def calculate_implied_probability(american_odds: int) -> float:
 def _build_feature_vector(statcast_data: list) -> np.ndarray | None:
     """
     Build an 8-feature numpy array from statcast pitch records.
-    Feature order must match training: 
+    Feature order must match training:
     [release_speed, release_spin_rate, launch_speed, launch_angle,
      is_barrel, is_barrel_expanded, is_hard_hit, is_sweet_spot]
     Returns None if insufficient data.
@@ -123,13 +124,20 @@ def evaluate_edge(
     vacuum_context: dict = None,
     contrast_context: dict = None,
     prop_category: str = "",
+    abs_context: ABSContext = None,
 ) -> dict:
     """
     Core ML Evaluation Logic.
     1. De-vig to get true Vegas probability
     2. Run XGBoost model if statcast features available, else use calibrated scaffold
     3. Apply fatigue, vacuum, and defensive contrast multipliers
-    4. Calculate edge vs. market
+    4. Apply ABS (Automated Ball-Strike) challenge multiplier for K/BB props
+    5. Calculate edge vs. market
+
+    abs_context: Optional ABSContext dataclass. When provided and prop_category
+    is pitcher_strikeouts, batter_strikeouts, batter_walks, or pitcher_walks,
+    a height/challenge-rate multiplier is applied. All other prop types are
+    unaffected (multiplier = 1.0).
     """
     # 1. Vegas implied probabilities (de-vigged)
     implied_over = calculate_implied_probability(over_odds)
@@ -184,9 +192,22 @@ def evaluate_edge(
         contrast_multiplier = evaluate_defensive_contrast(prop_category, contrast_context)
         adjusted_prob = adjusted_prob * contrast_multiplier
 
+    # 6. Apply ABS (Automated Ball-Strike) Challenge Modifier
+    # Affects: pitcher_strikeouts, batter_strikeouts, batter_walks, pitcher_walks
+    # All other prop types pass through with abs_multiplier = 1.0
+    abs_multiplier = 1.0
+    abs_applied = False
+    if abs_context is not None:
+        adjusted_prob, abs_multiplier = apply_abs_to_probability(
+            base_probability=adjusted_prob,
+            prop_type=prop_category,
+            abs_context=abs_context,
+        )
+        abs_applied = abs_multiplier != 1.0
+
     model_projected_over_prob = min(adjusted_prob, 0.95)
 
-    # 6. Calculate edge
+    # 7. Calculate edge
     edge_percentage = (model_projected_over_prob - true_vegas_over) * 100
 
     return {
@@ -202,5 +223,7 @@ def evaluate_edge(
         "vacuum_multiplier": round(vacuum_multiplier, 3),
         "contrast_boost_applied": contrast_multiplier != 1.0,
         "contrast_multiplier": round(contrast_multiplier, 3),
+        "abs_applied": abs_applied,
+        "abs_multiplier": round(abs_multiplier, 5),
         "vig_removed": round(vig * 100, 2),
     }
