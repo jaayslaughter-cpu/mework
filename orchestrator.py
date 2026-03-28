@@ -345,20 +345,15 @@ async def trigger_xgboost():
 
 @app.get("/health")
 async def health():
-    hub = read_hub()
-    lb = read_leaderboard()
-    # read_leaderboard() returns a list of agent dicts, not a dict
-    lb_list = lb if isinstance(lb, list) else lb.get("leaderboard", [])
+    # Return immediately — do not call read_hub() or read_leaderboard()
+    # as both attempt Redis connections which timeout in ~10s when Redis is unavailable.
+    # Railway health check must get a fast 200 or the deployment is killed.
     return JSONResponse({
         "status": "healthy",
-        "hub_timestamp": hub.get("timestamp") if isinstance(hub, dict) else None,
-        "hub_props": len(hub.get("player_props", [])) if isinstance(hub, dict) else 0,
-        "hub_games": len(hub.get("games_today", [])) if isinstance(hub, dict) else 0,
-        "leaderboard_agents": len(lb_list),
+        "scheduler_running": scheduler.running,
         "last_hub_run": _last_hub_run,
         "last_agent_run": _last_agent_run,
         "last_leaderboard_run": _last_leaderboard_run,
-        "scheduler_running": scheduler.running,
     })
 
 
