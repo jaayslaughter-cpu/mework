@@ -787,16 +787,130 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
+def _fetch_prizepicks_via_apify() -> list[dict]:
+    """
+    Fallback: run the Apify PrizePicks MLB scraper actor when the direct
+    API call is blocked (Railway datacenter IP gets 403 from DataDome).
+
+    Actor ID : 4AmgQeem8dEgMEiRF
+    Input    : {"leagues": ["MLB"]}
+    Returns  : same format as fetch_prizepicks_props()
+    """
+    apify_key = os.environ.get("APIFY_API_KEY", "")
+    if not apify_key:
+        logger.warning("[PP-Apify] APIFY_API_KEY not set — skipping fallback")
+        return []
+
+    # ── Apify stat label → our internal stat_type ─────────────────────────
+    _APIFY_STAT_MAP: dict[str, str] = {
+        "hitter fantasy score":   "hitter fantasy score",
+        "pitcher fantasy score":  "pitcher fantasy score",
+        "hits":                   "hits",
+        "home runs":              "home runs",
+        "total bases":            "total bases",
+        "rbis":                   "rbis",
+        "rbi":                    "rbi",
+        "runs":                   "runs",
+        "stolen bases":           "stolen bases",
+        "hits+runs+rbis":         "hits+runs+rbis",
+        "hits + runs + rbis":     "hits + runs + rbis",
+        "pitcher strikeouts":     "pitcher strikeouts",
+        "strikeouts":             "strikeouts",
+        "earned runs allowed":    "earned runs allowed",
+        "earned runs":            "earned runs",
+        "hits allowed":           "hits allowed",
+        "walks allowed":          "walks allowed",
+        "pitching outs":          "pitching outs",
+        "walks":                  "walks",
+        "doubles":                "doubles",
+        "triples":                "triples",
+    }
+
+    try:
+        run_url = (
+            f"https://api.apify.com/v2/acts/4AmgQeem8dEgMEiRF/runs"
+            f"?token={apify_key}&waitForFinish=120"
+        )
+        r = requests.post(
+            run_url,
+            json={"leagues": ["MLB"]},
+            timeout=130,
+        )
+        if r.status_code not in (200, 201):
+            logger.warning("[PP-Apify] Run start HTTP %d", r.status_code)
+            return []
+
+        run_data  = r.json().get("data", {})
+        dataset_id = run_data.get("defaultDatasetId", "")
+        run_status = run_data.get("status", "")
+        run_id     = run_data.get("id", "")
+
+        # Poll until SUCCEEDED (waitForFinish handles most of this, but be safe)
+        if run_status not in ("SUCCEEDED", "READY"):
+            for _ in range(20):
+                time.sleep(6)
+                poll = requests.get(
+                    f"https://api.apify.com/v2/actor-runs/{run_id}?token={apify_key}",
+                    timeout=15,
+                )
+                run_status = poll.json().get("data", {}).get("status", "")
+                dataset_id = poll.json().get("data", {}).get("defaultDatasetId", dataset_id)
+                if run_status == "SUCCEEDED":
+                    break
+            else:
+                logger.warning("[PP-Apify] Run %s never finished (status=%s)", run_id, run_status)
+                return []
+
+        # Fetch dataset items
+        items_url = (
+            f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+            f"?token={apify_key}&limit=8000&clean=true"
+        )
+        resp = requests.get(items_url, timeout=30)
+        if resp.status_code != 200:
+            logger.warning("[PP-Apify] Dataset fetch HTTP %d", resp.status_code)
+            return []
+
+        items = resp.json()
+        props: list[dict] = []
+        for item in items:
+            stat_raw = str(item.get("stat", "") or "").strip()
+            stat_key = stat_raw.lower()
+            if stat_key not in _PP_MLB_STAT_TYPES:
+                continue
+            if "inning" in stat_key:
+                continue
+            line_val = item.get("line")
+            if line_val is None:
+                continue
+            pname = str(item.get("player_name", "") or "").strip()
+            if not pname:
+                continue
+            # Normalise stat label to match our internal naming
+            stat_out = _APIFY_STAT_MAP.get(stat_key, stat_raw)
+            props.append({
+                "source":      "prizepicks",
+                "player_name": pname,
+                "stat_type":   stat_out,
+                "line":        float(line_val),
+            })
+
+        logger.info("[PP-Apify] Fetched %d MLB props via Apify", len(props))
+        return props
+
+    except Exception as exc:
+        logger.warning("[PP-Apify] Fallback failed: %s", exc)
+        return []
+
+
 def fetch_prizepicks_props() -> list[dict]:
     """
-    Fetch PrizePicks MLB projections via session-cookie warm-up.
+    Fetch PrizePicks MLB projections.
 
-    PrizePicks is protected by Cloudflare + DataDome bot detection.
-    The fix: visit app.prizepicks.com first (mobile Safari UA) so the
-    CDN issues valid cookies, then hit the API on the same session.
-    Without the warm-up visit every direct API call returns 403.
+    Primary  : Direct API with session-cookie warm-up.
+    Fallback : Apify actor 4AmgQeem8dEgMEiRF when Railway IP is 403-blocked.
 
-    Returns raw list of dicts.
+    Returns raw list of dicts (same format either way).
     """
     global _pp_session
     try:
@@ -804,7 +918,6 @@ def fetch_prizepicks_props() -> list[dict]:
         for attempt in range(3):
             if attempt:
                 time.sleep(2 ** attempt)   # 2s, 4s back-off
-                # Force a fresh session on retry so we get new cookies
                 _pp_session = None
             sess = _get_pp_session()
             resp = sess.get(
@@ -817,9 +930,10 @@ def fetch_prizepicks_props() -> list[dict]:
                 break
             logger.warning("[PP] HTTP %d (attempt %d/3)", resp.status_code, attempt + 1)
             if resp.status_code == 403:
-                _pp_session = None   # force re-warm on next attempt
+                _pp_session = None
         if data is None:
-            return []
+            logger.info("[PP] Direct API blocked — falling back to Apify actor")
+            return _fetch_prizepicks_via_apify()
 
         # Build player id -> name map from included resources
         player_map: dict[str, str] = {}
@@ -835,11 +949,8 @@ def fetch_prizepicks_props() -> list[dict]:
             attrs    = proj.get("attributes", {})
             stat_raw = str(attrs.get("stat_type", "") or "")
 
-            # Filter to baseball stat types
             if stat_raw.lower() not in _PP_MLB_STAT_TYPES:
                 continue
-
-            # Skip innings pitched (removed in Phase 19)
             if "inning" in stat_raw.lower():
                 continue
 
@@ -865,8 +976,8 @@ def fetch_prizepicks_props() -> list[dict]:
         logger.info("[PP] Fetched %d MLB props", len(props))
         return props
     except Exception as exc:
-        logger.warning("[PP] Fetch failed: %s", exc)
-        return []
+        logger.warning("[PP] Fetch failed: %s — trying Apify fallback", exc)
+        return _fetch_prizepicks_via_apify()
 
 
 def fetch_underdog_props() -> list[dict]:
