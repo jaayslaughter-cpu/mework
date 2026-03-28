@@ -195,6 +195,37 @@ except ImportError:
     def _pp_adjustment(*_a, **_kw) -> float: return 0.0  # noqa: E704
 
     logger.warning("[PP+] predict_plus_layer not found — Layer 8b disabled.")
+# ── Phase 51: Dome Stadium Adjustment ─────────────────────────────────────
+try:
+    from dome_adjustment import apply_dome_adjustment as _apply_dome_adj
+    _DOME_AVAILABLE = True
+    logger.info("[Dome] Dome adjustment module loaded.")
+except ImportError:
+    _DOME_AVAILABLE = False
+
+    def _apply_dome_adj(prob, prop_type, venue, roof_status="closed", is_home_team=True):  # noqa: E302
+        return prob, 0.0
+
+    logger.warning("[Dome] dome_adjustment not found — dome context modifier disabled.")
+
+# ── Phase 53: Altitude park factor adjustment ─────────────────────────────────
+try:
+    from altitude_adjustment import (
+        apply_altitude_adjustments as _alt_adjust,
+        get_humidor_status as _get_humidor,
+    )
+    _ALT_AVAILABLE = True
+    logger.info("[Altitude] Altitude adjustment module loaded.")
+except ImportError:
+    _ALT_AVAILABLE = False
+
+    def _alt_adjust(base_projection, prop_type, venue, humidor_active=False):  # noqa: E704
+        return base_projection
+
+    def _get_humidor(venue):  # noqa: E704
+        return False
+
+    logger.warning("[Altitude] altitude_adjustment not found — altitude adjustments disabled.")
 
 # ── Phase 47: Live temperature calibration ───────────────────────────────────
 # Loads per-agent T scalars from DB at dispatcher startup (single bulk query).
@@ -564,7 +595,7 @@ def fetch_today_schedule(date_str: str | None = None) -> list[dict]:
     try:
         resp = requests.get(
             f"{_MLBAPI_BASE}/schedule",
-            params={"sportId": 1, "date": date, "hydrate": "team,linescore"},
+            params={"sportId": 1, "date": date, "hydrate": "team,linescore,venue"},
             headers=_HEADERS, timeout=15,
         )
         if resp.status_code != 200:
@@ -577,6 +608,7 @@ def fetch_today_schedule(date_str: str | None = None) -> list[dict]:
                     "game_id":   g.get("gamePk"),
                     "home_team": g.get("teams", {}).get("home", {}).get("team", {}).get("name"),
                     "away_team": g.get("teams", {}).get("away", {}).get("team", {}).get("name"),
+                    "venue":     (g.get("venue") or {}).get("name", ""),
                     "time_utc":  g.get("gameDate"),
                     "status":    g.get("status", {}).get("detailedState", ""),
                 })
@@ -1288,9 +1320,83 @@ def _build_mlbam_lookup() -> dict:
         return {}
 
 
+def _build_player_venue_map() -> dict:
+    """
+    Build player_name_lower -> venue_name mapping for altitude adjustments.
+
+    Uses the same MLB Stats API /sports/1/players endpoint as _build_mlbam_lookup()
+    but maps currentTeam.name -> TEAM_TO_VENUE to resolve the player's home park.
+    Falls back gracefully to an empty dict on any error.
+    """
+    try:
+        from altitude_adjustment import TEAM_TO_VENUE as _TEAM_TO_VENUE
+        import datetime as _dt
+        season = _dt.datetime.now(_dt.timezone.utc).year
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/sports/1/players",
+            params={"season": season, "gameType": "R"},
+            headers={"User-Agent": "PropIQ/1.0"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "[Altitude] Player venue map HTTP %d — altitude skipped",
+                resp.status_code,
+            )
+            return {}
+        venue_map: dict = {}
+        for person in resp.json().get("people", []):
+            full_name = person.get("fullName", "")
+            team_name = person.get("currentTeam", {}).get("name", "")
+            venue = _TEAM_TO_VENUE.get(team_name, "")
+            if full_name and venue:
+                venue_map[full_name.lower()] = venue
+        logger.info(
+            "[Altitude] Player venue map built: %d players mapped to venues",
+            len(venue_map),
+        )
+        return venue_map
+    except Exception as exc:
+        logger.warning(
+            "[Altitude] Player venue map failed: %s — altitude adjustments skipped",
+            exc,
+        )
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
+
+def _build_player_team_map() -> dict:
+    """
+    Fetch active MLB roster from Stats API.
+    Returns {player_name_lower: current_team_name} for dome venue lookup.
+    Falls back to empty dict on any error -- dome adjustment degrades gracefully.
+    """
+    try:
+        import datetime as _dt
+        season = _dt.datetime.now(_dt.timezone.utc).year
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/sports/1/players",
+            params={"season": season, "gameType": "R"},
+            headers={"User-Agent": "PropIQ/1.0"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return {}
+        mapping: dict = {}
+        for person in resp.json().get("people", []):
+            full_name = person.get("fullName", "")
+            team_name = (person.get("currentTeam") or {}).get("name", "")
+            if full_name and team_name:
+                mapping[full_name.lower()] = team_name
+        logger.info("[Dome] Player-team map built: %d players", len(mapping))
+        return mapping
+    except Exception as exc:
+        logger.warning("[Dome] Player-team map failed: %s -- dome adjustment degraded", exc)
+        return {}
+
 
 class LiveDispatcher:
     """Orchestrates daily prop fetching, analysis, and Discord dispatch."""
@@ -1337,6 +1443,27 @@ class LiveDispatcher:
             logger.warning("No MLB games found for %s — no alerts sent.", date)
             return
         logger.info("%d games scheduled", len(games))
+
+        # ── Phase 51: Build team/venue maps for dome adjustment ───────────
+        self._team_venue_map: dict = {}
+        self._home_teams: set = set()
+        for _g in games:
+            _venue = _g.get("venue", "")
+            _ht = _g.get("home_team", "")
+            _at = _g.get("away_team", "")
+            if _venue:
+                if _ht:
+                    self._team_venue_map[_ht] = _venue
+                    self._home_teams.add(_ht)
+                if _at:
+                    self._team_venue_map[_at] = _venue
+        self._player_team_map: dict = (
+            _build_player_team_map() if _DOME_AVAILABLE else {}
+        )
+        logger.info(
+            "[Dome] Venue map: %d teams | Player map: %d players",
+            len(self._team_venue_map), len(self._player_team_map),
+        )
 
         # 2. Fetch live props from both platforms
         pp_props = fetch_prizepicks_props()
@@ -1465,8 +1592,18 @@ class LiveDispatcher:
                 )
         # ── End Phase 42 prefetch ──────────────────────────────────────────────
 
+        # ── Phase 53: Build player -> venue map for altitude adjustments ─────────
+        _player_venue_map: dict = {}
+        if _ALT_AVAILABLE:
+            try:
+                _player_venue_map = _build_player_venue_map()
+            except Exception as _av_err:
+                logger.warning("[Altitude] Venue map build failed: %s", _av_err)
+
         # 3. Build evaluated leg pool (enrichment data flows through)
-        leg_pool: list[PropLeg] = self._evaluate_props(all_raw, sbd_game_df, sbd_prop_df)
+        leg_pool: list[PropLeg] = self._evaluate_props(
+            all_raw, sbd_game_df, sbd_prop_df, _player_venue_map
+        )
         logger.info("Leg pool: %d evaluated legs (min prob %.0f%%)",
                     len(leg_pool), MIN_PROB * 100)
 
@@ -1684,6 +1821,7 @@ class LiveDispatcher:
         raw_props: list[dict],
         sbd_game_df=None,
         sbd_prop_df=None,
+        player_venue_map: dict | None = None,
     ) -> list[PropLeg]:
         """
         Normalise raw props, compare platforms, apply EV gate.
@@ -2060,6 +2198,57 @@ class LiveDispatcher:
                     except Exception:
                         pass   # Predict+ is additive — never crash a leg
                 # ── End Layers 8a / 8b ───────────────────────────────────────
+
+                # ── Phase 53: Altitude park factor adjustment ──────────────────
+                # Fires last (after Form, FG, Marcel, Predict+) so the gate sees
+                # the fully calibrated probability.
+                # Chase Field: gets both dome (if roof closed) and altitude.
+                # Coors Field: altitude factor dampened ~35% by humidor.
+                if _ALT_AVAILABLE and player_venue_map:
+                    _alt_venue = player_venue_map.get(pname.lower(), "")
+                    if _alt_venue:
+                        _prob_pre_alt = prob
+                        prob = _alt_adjust(
+                            base_projection=prob,
+                            prop_type=prop_type,
+                            venue=_alt_venue,
+                            humidor_active=_get_humidor(_alt_venue),
+                        )
+                        prob = min(0.80, max(0.40, prob))
+                        if abs(prob - _prob_pre_alt) > 0.0001:
+                            logger.debug(
+                                "[Altitude] %-22s  %-16s  venue=%s  adj=%+.4f",
+                                pname, prop_type, _alt_venue, prob - _prob_pre_alt,
+                            )
+                # ── End Phase 53 ───────────────────────────────────────────────
+                # ── Phase 51: Dome Stadium Adjustment ────────────────────────────
+                # Applied after all real-time layers. Zeroes weather boosts for
+                # dome/closed-roof games; applies turf + environment modifiers.
+                if _DOME_AVAILABLE:
+                    try:
+                        _player_team = getattr(self, "_player_team_map", {}).get(
+                            pname.lower(), ""
+                        )
+                        _player_venue = getattr(self, "_team_venue_map", {}).get(
+                            _player_team, ""
+                        )
+                        if _player_venue:
+                            _is_home = _player_team in getattr(
+                                self, "_home_teams", set()
+                            )
+                            prob, _dome_nudge = _apply_dome_adj(
+                                prob, prop_type, _player_venue,
+                                roof_status="closed",
+                                is_home_team=_is_home,
+                            )
+                            if _dome_nudge != 0.0:
+                                logger.debug(
+                                    "[Dome] %-22s  %-16s  venue=%s  nudge=%+.3f  final=%.3f",
+                                    pname, prop_type, _player_venue, _dome_nudge, prob,
+                                )
+                    except Exception:
+                        pass  # dome adjustment is additive -- never crash a leg
+                # ── End Phase 51 ────────────────────────────────────────────
 
                 # Gate checks — Phase 35: log all decisions with full feature trail
                 if prob < cfg["min_prob"]:
