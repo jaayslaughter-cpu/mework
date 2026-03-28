@@ -5,13 +5,9 @@ from routers import mlb_data, predictions
 
 app = FastAPI(title="PropIQ Analytics Engine", version="1.0")
 
-# Register routers
-app.include_router(mlb_data.router)
-app.include_router(predictions.router)
-
-start_time = time.time()
-
-# Configure CORS to allow the Node Hub to communicate
+# FIX BUG 8: Middleware MUST be added before include_router() calls.
+# Previously add_middleware() was called after the routers were registered,
+# meaning CORS headers were not guaranteed to apply to already-registered routes.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3002"],
@@ -20,14 +16,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+start_time = time.time()
+
+# Register routers (after middleware)
+app.include_router(mlb_data.router)
+app.include_router(predictions.router)
+
+
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "PropIQ ML Engine"}
+
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "uptime": int(time.time() - start_time),
-        "timestamp": int(time.time() * 1000)
+        "timestamp": int(time.time() * 1000),
     }

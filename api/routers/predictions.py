@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from services.predictor import evaluate_edge
 from services.statcast import get_recent_statcast_data
+# FIX BUG 3: Import ABSContext so it can be accepted in PropRequest
+from services.abs_challenge import ABSContext
 
 router = APIRouter(prefix="/api/predict", tags=["Predictions"])
 
@@ -33,11 +35,32 @@ class ContrastContext(BaseModel):
     park_hr_factor: int = 100
 
 
+# FIX BUG 3: Pydantic model wrapping ABSContext dataclass fields
+class ABSContextRequest(BaseModel):
+    batter_height_in: float = Field(
+        72.0,
+        description="Batter height in inches. Default 72 (6'0\" league avg).",
+    )
+    is_2026_season: bool = Field(
+        True,
+        description="Set False to disable ABS modelling for pre-2026 props.",
+    )
+
+    def to_abs_context(self) -> ABSContext:
+        return ABSContext(
+            batter_height_in=self.batter_height_in,
+            is_2026_season=self.is_2026_season,
+        )
+
+
 class PropRequest(BaseModel):
     player_id: int
     prop_category: str = Field(
         ...,
-        description="pitcher_strikeouts | batter_total_bases | batter_home_runs | batter_hits_runs_rbis"
+        description=(
+            "pitcher_strikeouts | batter_total_bases | "
+            "batter_home_runs | batter_hits_runs_rbis"
+        ),
     )
     line: float
     over_odds: int
@@ -46,6 +69,8 @@ class PropRequest(BaseModel):
     fatigue_context: Optional[FatigueContext] = None
     vacuum_context: Optional[VacuumContext] = None
     contrast_context: Optional[ContrastContext] = None
+    # FIX BUG 3: ABS context now accepted and forwarded to evaluate_edge
+    abs_context: Optional[ABSContextRequest] = None
     # Optional: include recent statcast data window for live inference
     statcast_start_date: Optional[str] = None
     statcast_end_date: Optional[str] = None
@@ -65,6 +90,9 @@ async def calculate_market_edge(request: PropRequest):
                 request.statcast_start_date, request.statcast_end_date
             )
 
+        # FIX BUG 3: Convert Pydantic model → ABSContext dataclass
+        abs_ctx = request.abs_context.to_abs_context() if request.abs_context else None
+
         result = evaluate_edge(
             sportsbook_line=request.line,
             over_odds=request.over_odds,
@@ -74,6 +102,7 @@ async def calculate_market_edge(request: PropRequest):
             vacuum_context=request.vacuum_context.model_dump() if request.vacuum_context else None,
             contrast_context=request.contrast_context.model_dump() if request.contrast_context else None,
             prop_category=request.prop_category,
+            abs_context=abs_ctx,
         )
         return {"player_id": request.player_id, **result}
     except Exception as e:
@@ -95,6 +124,9 @@ async def calculate_batch_edge(request: BatchPropRequest):
                 statcast_data = get_recent_statcast_data(
                     prop.statcast_start_date, prop.statcast_end_date
                 )
+            # FIX BUG 3: Forward abs_context in batch path too
+            abs_ctx = prop.abs_context.to_abs_context() if prop.abs_context else None
+
             result = evaluate_edge(
                 sportsbook_line=prop.line,
                 over_odds=prop.over_odds,
@@ -104,6 +136,7 @@ async def calculate_batch_edge(request: BatchPropRequest):
                 vacuum_context=prop.vacuum_context.model_dump() if prop.vacuum_context else None,
                 contrast_context=prop.contrast_context.model_dump() if prop.contrast_context else None,
                 prop_category=prop.prop_category,
+                abs_context=abs_ctx,
             )
             results.append({"player_id": prop.player_id, **result})
         except Exception as e:

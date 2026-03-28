@@ -5,11 +5,14 @@ Bridges the multi-provider OddsFetcher output into the PropIQ agent pipeline.
 
 Uses fetch_aggregated_odds() to get three pre-segmented opportunity buckets:
     top_clv       → EVHunter, LineValueAgent
-    arbitrage     → ArbitrageAgent
-    dislocations  → EVHunter (CLV enrichment), SteamAgent
+    dislocations  → EVHunter (CLV enrichment)
 
 Detects Pinnacle/Circa/CRIS vs. soft-book price dislocations and scores each
 PropEdge with a dislocation_score for downstream agent weighting.
+
+FIX BUG 6: Changed `from api.services.odds_fetcher import ...` to
+  `from services.odds_fetcher import ...` — when running under uvicorn with
+  api/ as the working root the `api.` prefix causes ModuleNotFoundError.
 
 PEP 8 compliant.
 """
@@ -20,7 +23,8 @@ import logging
 import time
 from typing import Any
 
-from api.services.odds_fetcher import MergedOdds, OddsFetcher, _american_to_implied
+# FIX BUG 6: Correct import path — no `api.` prefix when running from api/
+from services.odds_fetcher import MergedOdds, OddsFetcher, _american_to_implied
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +57,11 @@ def _merged_to_prop_edge(
     Args:
         m:                  Source MergedOdds object.
         model_prob:         Optional ML-calibrated probability (overrides consensus).
-        source_override:    Force ``source`` field (e.g. ``"arbitrage"``).
+        source_override:    Force ``source`` field (e.g. ``"dislocation"``).
         dislocation_score:  Pinnacle/soft-book probability gap (0.0–1.0).
 
     Returns:
-        PropEdge dict consumed by the 15-agent execution squad.
+        PropEdge dict consumed by the 17-agent execution squad.
     """
     return {
         # Core prop fields
@@ -113,7 +117,6 @@ def _compute_dislocation_score(m: MergedOdds) -> float:
     if not sharp_lines or not soft_lines:
         return 0.0
 
-    # Use the function directly instead of _strip_vig to keep it simple
     def _nv(ov: int, un: int) -> float:
         p_o = _american_to_implied(ov)
         p_u = _american_to_implied(un)
@@ -134,16 +137,14 @@ class MarketFusionEngine:
     Pulls multi-provider odds via fetch_aggregated_odds(), applies quality
     gates, and emits PropEdge dicts for each agent segment.
 
-    Three output channels:
+    Two output channels:
         run()              → CLV PropEdges for EVHunter / LineValueAgent
-        arbitrage_scan()   → ArbitrageAgent PropEdges (total implied < 1.0)
         dislocation_scan() → Sharp/soft gap PropEdges for EVHunter enrichment
 
     Usage::
 
         engine = MarketFusionEngine()
         clv_edges = engine.run()                    # EVHunter feed
-        arb_edges = engine.arbitrage_scan()         # ArbitrageAgent feed
         dis_edges = engine.dislocation_scan()       # CLV enrichment
     """
 
@@ -169,7 +170,7 @@ class MarketFusionEngine:
         now = time.time()
         if self._cache and (now - self._cache_ts) < self._cache_ttl:
             return self._cache
-        self._cache    = self._fetcher.fetch_aggregated_odds(
+        self._cache = self._fetcher.fetch_aggregated_odds(
             n=n,
             min_clv_pct=self._clv_gate,
             min_dislocation_pct=self._dislocation_gate,
@@ -220,40 +221,6 @@ class MarketFusionEngine:
             prop_edges.append(_merged_to_prop_edge(m, dislocation_score=dis_score))
 
         return prop_edges
-
-    # ------------------------------------------------------------------
-    # arbitrage_scan() — ArbitrageAgent feed
-    # ------------------------------------------------------------------
-    def arbitrage_scan(self) -> list[dict[str, Any]]:
-        """
-        Surface true arbitrage opportunities (total implied < 1.0).
-
-        Over on provider A + Under on provider B both priced in the backer's
-        favour.  Returns PropEdges with ``source="arbitrage"`` and an
-        ``arb_margin`` field showing the guaranteed profit percentage.
-
-        Returns:
-            List of arbitrage PropEdge dicts sorted by arb_margin descending.
-        """
-        agg      = self._get_aggregated()
-        arb_list = agg.get("arbitrage", [])
-
-        arb_edges: list[dict[str, Any]] = []
-        for m in arb_list:
-            over_impl  = _american_to_implied(m.best_odds_over)
-            under_impl = _american_to_implied(m.best_odds_under)
-            arb_margin = round(1.0 - (over_impl + under_impl), 4)
-            pe = _merged_to_prop_edge(
-                m,
-                source_override="arbitrage",
-                dislocation_score=_compute_dislocation_score(m),
-            )
-            pe["arb_margin"] = arb_margin
-            arb_edges.append(pe)
-
-        arb_edges.sort(key=lambda x: x["arb_margin"], reverse=True)
-        logger.info("[MarketFusion] %d arbitrage opportunities found", len(arb_edges))
-        return arb_edges
 
     # ------------------------------------------------------------------
     # dislocation_scan() — Pinnacle/soft-book gap edges

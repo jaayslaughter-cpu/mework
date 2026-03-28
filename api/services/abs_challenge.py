@@ -1,306 +1,223 @@
 """
-abs_challenge.py
-----------------
-Automated Ball-Strike (ABS) challenge system modifier for PropIQ.
+api/services/abs_challenge.py
+==============================
+2026 MLB Automated Ball-Strike (ABS) Challenge System.
 
-Models the 2026 MLB rule change where batters and pitchers/catchers can
-challenge ball/strike calls, with the ABS camera adjudicating challenges.
+Models the impact of the ABS challenge rule on K/BB props.
 
-Six core facts modeled:
-  1. Strike zone = 27% to 53.5% of batter height (vertical)
-  2. Zone judged at the CENTER of home plate (front edge)
-  3. Grazing the edge = called strike (no benefit-of-the-doubt to batter)
-  4. Pitcher/Catcher teams initiate 53% of challenges; succeed 60% of the time
-  5. Hitters initiate 47% of challenges; succeed only 46% of the time
-  6. Judge's zone is ~20% larger (by area) than Altuve's
+Key facts modelled:
+  1. Strike zone = 27%–53.5% of batter height
+  2. Judged at horizontal centre of home plate
+  3. Grazing edge counts as a strike
+  4. Battery (pitcher+catcher): 53% of challenges, 60% success rate
+  5. Hitters: 47% of challenges, 46% success rate
+  6. Tall batters (Judge ~6'7") have ~20% larger zones than short batters (Altuve ~5'6")
 
-Prop multipliers returned for:
-  - pitcher_strikeouts
-  - batter_strikeouts
-  - batter_walks
+FIX BUG 4: apply_abs_to_probability() now clamps the MULTIPLIER to [0.88, 1.12]
+  — not the final probability to [0.40, 0.80].
+  The old 0.40 floor could artificially inflate props already below 0.40 (fabricating
+  edge that doesn't exist). The 0.80 ceiling conflicted with predictor's own 0.95 cap.
+  The multiplier cap is the correct guardrail: ±12% max ABS influence per prop.
 
-All other prop types return 1.0 (no ABS effect).
+FIX BUG C: This file belongs in api/services/ so predictor.py can import it as
+  `from services.abs_challenge import ...` when running from within api/.
+  The root-level abs_challenge.py (used by live_dispatcher.py) is a separate copy
+  for the dispatcher pipeline.
+
+PEP 8 compliant.
 """
 
+from __future__ import annotations
+
 import logging
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# ── Challenge statistics from 2026 ABS pilot data ──────────────────────────
-PITCHER_CATCHER_CHALLENGE_SHARE = 0.53   # 53% of challenges initiated by battery
-PITCHER_CATCHER_SUCCESS_RATE    = 0.60   # 60% of those succeed (call overturned to strike)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-HITTER_CHALLENGE_SHARE          = 0.47   # 47% of challenges initiated by hitter
-HITTER_SUCCESS_RATE             = 0.46   # 46% of those succeed (call overturned to ball)
+# Zone height as fraction of batter height
+_ZONE_BOTTOM_FRAC = 0.27
+_ZONE_TOP_FRAC    = 0.535
 
-# Challenges per game (estimated from early 2026 data)
-CHALLENGES_PER_GAME_BATTERY     = 1.8    # Battery uses ~1.8 challenges/game
-CHALLENGES_PER_GAME_HITTER      = 1.6    # Hitters use ~1.6 challenges/game
+# Reference heights (inches)
+_ALTUVE_HEIGHT_IN = 66.0   # 5'6"  — smallest zone
+_JUDGE_HEIGHT_IN  = 79.0   # 6'7"  — largest zone (~20% bigger)
+_LEAGUE_AVG_IN    = 72.0   # 6'0"  — baseline
 
-# ── Zone height anchors ─────────────────────────────────────────────────────
-ZONE_BOTTOM_PCT = 0.270   # 27.0% of height
-ZONE_TOP_PCT    = 0.535   # 53.5% of height
+# Challenge rates and success rates
+_BATTERY_CHALLENGE_RATE   = 0.53   # Battery initiates 53% of challenges
+_BATTERY_SUCCESS_RATE     = 0.60   # Battery wins 60% of challenges
+_HITTER_CHALLENGE_RATE    = 0.47   # Hitters initiate 47% of challenges
+_HITTER_SUCCESS_RATE      = 0.46   # Hitters win 46% of challenges
 
-# Reference player heights (inches)
-# Aaron Judge: 6'7" = 79 inches
-# Jose Altuve: 5'6" = 66 inches
-HEIGHT_JUDGE_IN  = 79.0
-HEIGHT_ALTUVE_IN = 66.0
-
-# K-zone area scales with height squared (both vertical and marginal horizontal)
-# Judge zone area / Altuve zone area = (79/66)^2 ≈ 1.43 → ~20% larger by side length
-# Using the vertical dimension only: 79/66 = 1.197 ≈ 20% taller
-ZONE_SIZE_RATIO_JUDGE_VS_ALTUVE = (HEIGHT_JUDGE_IN / HEIGHT_ALTUVE_IN)  # 1.197
-
-
-# ── Prop categories this module affects ─────────────────────────────────────
-ABS_AFFECTED_PROPS = frozenset({
+# Prop categories affected by ABS
+_ABS_AFFECTED_PROPS = frozenset({
     "pitcher_strikeouts",
     "batter_strikeouts",
     "batter_walks",
     "pitcher_walks",
 })
 
+# FIX BUG 4: Clamp MULTIPLIER, not probability
+_MULTIPLIER_MIN = 0.88
+_MULTIPLIER_MAX = 1.12
+
+
+# ---------------------------------------------------------------------------
+# ABSContext dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ABSContext:
     """
-    Context object carrying batter/pitcher ABS-relevant attributes.
+    Context for ABS challenge modelling.
 
-    Attributes
-    ----------
-    batter_height_in : float
-        Batter's height in inches. Drives zone sizing. Default 72.0 (6'0").
-    pitcher_k_rate : float
-        Pitcher's season K% (0.0-1.0). High K pitchers rely more on borderline
-        calls, so ABS slightly penalises them. Default 0.22 (league avg).
-    batter_k_rate : float
-        Batter's season K% (0.0-1.0). High-K batters face more ABS exposure.
-        Default 0.23 (league avg).
-    batter_bb_rate : float
-        Batter's season BB% (0.0-1.0). Short batters earn more walks via
-        successful challenges. Default 0.085 (league avg).
-    is_high_k_pitcher : bool
-        Convenience flag. Set True if pitcher K% > 0.28 (top-tier strikeout arm).
-    prop_type : str
-        The prop category being evaluated. Used for targeted modifier selection.
+    Attributes:
+        batter_height_in:  Batter height in inches. Defaults to league average (72").
+        is_2026_season:    True when the 2026 ABS rule is active. When False the
+                           multiplier is always 1.0 (no-op).
     """
-    batter_height_in: float = 72.0        # 6'0" league average
-    pitcher_k_rate: float   = 0.22        # League-average K%
-    batter_k_rate: float    = 0.23        # League-average K%
-    batter_bb_rate: float   = 0.085       # League-average BB%
-    is_high_k_pitcher: bool = False       # True if pitcher K% > 28%
-    prop_type: str          = ""
+    batter_height_in: float = _LEAGUE_AVG_IN
+    is_2026_season: bool = True
 
 
-def calculate_zone_height(batter_height_in: float) -> dict:
+# ---------------------------------------------------------------------------
+# Zone helpers
+# ---------------------------------------------------------------------------
+
+def _zone_height_inches(height_in: float) -> float:
+    """Return the height of the ABS strike zone in inches for a given batter."""
+    return ((_ZONE_TOP_FRAC - _ZONE_BOTTOM_FRAC) * height_in)
+
+
+def _zone_size_ratio(height_in: float) -> float:
     """
-    Calculate the ABS strike zone vertical boundaries for a given batter height.
-
-    Zone = 27% to 53.5% of height (measured from ground).
-    Grazing the edge = strike (no benefit-of-the-doubt to batter).
-
-    Returns
-    -------
-    dict with keys: bottom_in, top_in, height_in, size_vs_league_avg
+    Return this batter's zone size relative to league average (1.0 = average).
+    Values > 1.0 → larger zone → more likely strikes → more Ks, fewer BBs.
     """
-    bottom = batter_height_in * ZONE_BOTTOM_PCT
-    top    = batter_height_in * ZONE_TOP_PCT
-    zone_height = top - bottom
-
-    # Compare to league-average zone (72-inch batter)
-    league_avg_zone = 72.0 * (ZONE_TOP_PCT - ZONE_BOTTOM_PCT)
-    size_ratio = zone_height / league_avg_zone
-
-    return {
-        "bottom_in":         round(bottom, 2),
-        "top_in":            round(top, 2),
-        "height_in":         round(zone_height, 2),
-        "size_vs_league_avg": round(size_ratio, 4),
-    }
+    zone = _zone_height_inches(height_in)
+    avg_zone = _zone_height_inches(_LEAGUE_AVG_IN)
+    return zone / avg_zone if avg_zone > 0 else 1.0
 
 
-def _expected_overturned_to_strikes_per_pa(challenges_per_game: float = CHALLENGES_PER_GAME_BATTERY) -> float:
+# ---------------------------------------------------------------------------
+# Core multiplier
+# ---------------------------------------------------------------------------
+
+def _compute_abs_multiplier(
+    prop_type: str,
+    batter_height_in: float,
+) -> float:
     """
-    Expected calls overturned TO STRIKES per plate appearance via battery challenges.
-    Assumes roughly 4 PAs per game per batter.
+    Compute the ABS challenge multiplier for a single prop.
+
+    Logic:
+      - Zone size ratio drives the direction of adjustment.
+        * Taller batter → bigger zone → more K friendly, fewer BB.
+        * Shorter batter → smaller zone → fewer Ks, more BB.
+      - The challenge system correction partially offsets zone bias
+        because hitters can challenge balls that clip a very large zone.
+      - Net effect is dampened by the challenge success/failure rates.
+
+    Returns a multiplier in the uncapped range; caller must clamp to
+    [_MULTIPLIER_MIN, _MULTIPLIER_MAX].
     """
-    overturned_per_game = challenges_per_game * PITCHER_CATCHER_SUCCESS_RATE
-    return overturned_per_game / 4.0  # per PA
-
-
-def _expected_overturned_to_balls_per_pa(challenges_per_game: float = CHALLENGES_PER_GAME_HITTER) -> float:
-    """
-    Expected calls overturned TO BALLS per plate appearance via hitter challenges.
-    """
-    overturned_per_game = challenges_per_game * HITTER_SUCCESS_RATE
-    return overturned_per_game / 4.0  # per PA
-
-
-def _zone_size_modifier(batter_height_in: float) -> float:
-    """
-    Returns a multiplier (>1.0 means bigger zone, <1.0 means smaller zone)
-    relative to the 72-inch league-average batter.
-
-    Taller batters: bigger zone = more K risk, fewer BB
-    Shorter batters: smaller zone = less K risk, more BB
-    """
-    league_avg_height = 72.0
-    return batter_height_in / league_avg_height
-
-
-def get_abs_multiplier(prop_type: str, abs_context: "ABSContext") -> float:
-    """
-    Return the ABS probability multiplier for a given prop type and batter context.
-
-    Multiplier semantics: multiply the base prop probability by this value.
-    1.0 = no change | >1.0 = prop more likely | <1.0 = prop less likely
-
-    Affected props:
-      - pitcher_strikeouts
-      - batter_strikeouts
-      - batter_walks / pitcher_walks
-
-    All others return exactly 1.0.
-
-    Parameters
-    ----------
-    prop_type : str
-        Prop category string (e.g., "pitcher_strikeouts").
-    abs_context : ABSContext
-        Batter/pitcher attributes for this matchup.
-
-    Returns
-    -------
-    float multiplier clamped to [0.88, 1.12]
-    """
-    pt = prop_type.lower().strip()
-
-    if pt not in ABS_AFFECTED_PROPS:
+    prop_lower = prop_type.lower()
+    if prop_lower not in _ABS_AFFECTED_PROPS:
         return 1.0
 
-    height = abs_context.batter_height_in
-    zone   = calculate_zone_height(height)
-    zone_ratio = zone["size_vs_league_avg"]  # e.g., 1.097 for Judge, 0.917 for Altuve
+    zone_ratio = _zone_size_ratio(batter_height_in)
+    zone_delta = zone_ratio - 1.0   # positive = larger than avg, negative = smaller
 
-    # Extra strikes added per PA from successful battery challenges
-    extra_strikes_pa = _expected_overturned_to_strikes_per_pa()
-    # Extra balls added per PA from successful hitter challenges
-    extra_balls_pa = _expected_overturned_to_balls_per_pa()
+    # Battery net benefit: larger zone → battery challenges more borderline calls
+    battery_net = (
+        _BATTERY_CHALLENGE_RATE
+        * _BATTERY_SUCCESS_RATE
+        * zone_delta
+    )
 
-    # ── PITCHER STRIKEOUTS ─────────────────────────────────────────────────
-    if pt == "pitcher_strikeouts":
-        # Bigger zone (taller batter) → more K opportunities for pitcher
-        zone_k_boost = (zone_ratio - 1.0) * 0.30  # 30% sensitivity
+    # Hitter net benefit: larger zone → hitter challenges called strikes more often
+    # This REDUCES the zone advantage for the battery
+    hitter_correction = (
+        _HITTER_CHALLENGE_RATE
+        * _HITTER_SUCCESS_RATE
+        * zone_delta
+    )
 
-        # Battery challenges recover borderline strikes → small K boost
-        challenge_k_boost = extra_strikes_pa * 0.40
+    # Net zone influence (battery advantage minus hitter correction)
+    net_zone_effect = battery_net - hitter_correction
 
-        # High-K pitchers depend more on borderline calls (which ABS now
-        # adjudicates more strictly) → slight penalty for elite K arms
-        elite_k_penalty = -0.015 if abs_context.is_high_k_pitcher else 0.0
-
-        multiplier = 1.0 + zone_k_boost + challenge_k_boost + elite_k_penalty
-
-        logger.debug(
-            "[ABS] pitcher_strikeouts | height=%.1f zone_ratio=%.4f "
-            "zone_k_boost=%.4f challenge_k_boost=%.4f elite_penalty=%.4f "
-            "=> multiplier=%.4f",
-            height, zone_ratio, zone_k_boost, challenge_k_boost, elite_k_penalty, multiplier,
-        )
-
-    # ── BATTER STRIKEOUTS ──────────────────────────────────────────────────
-    elif pt == "batter_strikeouts":
-        # Bigger zone = batter faces more strike surface = more K risk
-        zone_k_boost = (zone_ratio - 1.0) * 0.35
-
-        # Battery challenges add borderline strikes → slightly more K risk for batter
-        challenge_k_exposure = extra_strikes_pa * 0.30
-
-        # Hitter challenges recover some bad calls → slight K reduction
-        hitter_challenge_save = -extra_balls_pa * 0.25
-
-        # High personal K rate amplifies zone-size sensitivity
-        k_rate_amplifier = (abs_context.batter_k_rate - 0.23) * 0.10
-
-        multiplier = 1.0 + zone_k_boost + challenge_k_exposure + hitter_challenge_save + k_rate_amplifier
-
-        logger.debug(
-            "[ABS] batter_strikeouts | height=%.1f zone_ratio=%.4f "
-            "zone_k_boost=%.4f challenge_exposure=%.4f hitter_save=%.4f k_rate_amp=%.4f "
-            "=> multiplier=%.4f",
-            height, zone_ratio, zone_k_boost, challenge_k_exposure,
-            hitter_challenge_save, k_rate_amplifier, multiplier,
-        )
-
-    # ── BATTER / PITCHER WALKS ─────────────────────────────────────────────
-    elif pt in ("batter_walks", "pitcher_walks"):
-        # Smaller zone (shorter batter) = fewer strike calls = more walk opportunities
-        zone_bb_boost = (1.0 - zone_ratio) * 0.35  # inverted: short = positive
-
-        # Hitter challenges that overturn strikes to balls → walk boost
-        hitter_challenge_bb_boost = extra_balls_pa * 0.50
-
-        # Battery challenges that recover pitches as strikes → walk reduction
-        battery_bb_penalty = -extra_strikes_pa * 0.20
-
-        # Personal BB rate sensitivity
-        bb_rate_amplifier = (abs_context.batter_bb_rate - 0.085) * 0.15
-
-        multiplier = 1.0 + zone_bb_boost + hitter_challenge_bb_boost + battery_bb_penalty + bb_rate_amplifier
-
-        logger.debug(
-            "[ABS] %s | height=%.1f zone_ratio=%.4f "
-            "zone_bb_boost=%.4f hitter_bb_boost=%.4f battery_penalty=%.4f bb_rate_amp=%.4f "
-            "=> multiplier=%.4f",
-            pt, height, zone_ratio, zone_bb_boost, hitter_challenge_bb_boost,
-            battery_bb_penalty, bb_rate_amplifier, multiplier,
-        )
-
+    # Map to prop-type direction
+    if prop_lower in ("pitcher_strikeouts", "batter_strikeouts"):
+        # Larger zone → more Ks for pitcher, more Ks for batter (from their POV)
+        raw_multiplier = 1.0 + net_zone_effect
     else:
-        return 1.0
+        # "batter_walks", "pitcher_walks"
+        # Larger zone → fewer walks (zone is harder to avoid)
+        raw_multiplier = 1.0 - net_zone_effect
 
-    # Clamp: ABS effect is real but bounded; don't let it override the model
-    return round(max(0.88, min(1.12, multiplier)), 5)
+    # FIX BUG 4: Clamp the MULTIPLIER to [0.88, 1.12]
+    # Do NOT clamp the final probability here — predictor.py applies its own cap.
+    clamped = max(_MULTIPLIER_MIN, min(_MULTIPLIER_MAX, raw_multiplier))
 
+    logger.debug(
+        "[ABS] prop=%s height=%.1fin zone_ratio=%.3f net_effect=%.4f "
+        "raw_mult=%.4f clamped_mult=%.4f",
+        prop_lower, batter_height_in, zone_ratio, net_zone_effect,
+        raw_multiplier, clamped,
+    )
+    return clamped
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def apply_abs_to_probability(
     base_probability: float,
     prop_type: str,
-    abs_context: Optional["ABSContext"] = None,
+    abs_context: ABSContext,
 ) -> tuple[float, float]:
     """
-    Apply ABS multiplier to a base probability and return (adjusted_prob, multiplier).
+    Apply the ABS challenge multiplier to a base probability.
 
-    Parameters
-    ----------
-    base_probability : float
-        The probability coming out of the ML pipeline (0.0-1.0).
-    prop_type : str
-        Prop category string.
-    abs_context : ABSContext or None
-        If None, returns base_probability unchanged with multiplier 1.0.
+    Args:
+        base_probability:  Probability before ABS adjustment (0–1).
+        prop_type:         Prop category string.
+        abs_context:       ABSContext with batter height and season flag.
 
-    Returns
-    -------
-    (adjusted_probability: float, multiplier_used: float)
+    Returns:
+        Tuple of (adjusted_probability, multiplier_used).
+        If prop is not ABS-affected or is_2026_season is False,
+        returns (base_probability, 1.0) — a clean no-op.
     """
-    if abs_context is None:
+    if not abs_context.is_2026_season:
         return base_probability, 1.0
 
-    multiplier = get_abs_multiplier(prop_type, abs_context)
-
+    multiplier = _compute_abs_multiplier(prop_type, abs_context.batter_height_in)
     if multiplier == 1.0:
         return base_probability, 1.0
 
+    # Apply multiplier to probability — predictor.py will apply its own 0.95 ceiling
     adjusted = base_probability * multiplier
-    # Keep probability in sensible bounds
-    adjusted = max(0.40, min(0.80, adjusted))
+    return adjusted, multiplier
 
-    logger.info(
-        "[ABS] %s | base_prob=%.4f multiplier=%.5f adjusted_prob=%.4f",
-        prop_type, base_probability, multiplier, adjusted,
-    )
-    return round(adjusted, 5), multiplier
+
+def judge_vs_altuve_zone_check() -> dict:
+    """
+    Validation helper — confirms ~20% zone difference between Judge and Altuve.
+    Used in tests and startup health checks.
+    """
+    judge_zone  = _zone_height_inches(_JUDGE_HEIGHT_IN)
+    altuve_zone = _zone_height_inches(_ALTUVE_HEIGHT_IN)
+    diff_pct    = (judge_zone - altuve_zone) / altuve_zone * 100
+    return {
+        "judge_zone_in":   round(judge_zone,  2),
+        "altuve_zone_in":  round(altuve_zone, 2),
+        "difference_pct":  round(diff_pct,    2),
+        "expected_pct":    20.0,
+        "pass":            abs(diff_pct - 20.0) < 5.0,
+    }
