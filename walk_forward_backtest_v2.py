@@ -588,7 +588,7 @@ def print_summary(fold_results: List[dict]) -> None:
 
 
 def save_results(fold_results: List[dict]) -> None:
-    path = "/agent/home/backtest_v2_results.json"
+    path = os.getenv("BACKTEST_RESULTS_PATH", "/tmp/backtest_v2_results.json")
     with open(path, "w") as f:
         json.dump({
             "run_timestamp": datetime.utcnow().isoformat() + "Z",

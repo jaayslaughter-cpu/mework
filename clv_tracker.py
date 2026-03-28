@@ -27,7 +27,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # line_stream.py writes to this path on the agent filesystem
-_DB_PATH = Path("/agent/home/line_stream.db")
+import os as _os
+_DB_PATH = Path(_os.getenv("CLV_DB_PATH", "/tmp/line_stream.db"))
 
 _EMPTY_SUMMARY: dict = {
     "available":   False,

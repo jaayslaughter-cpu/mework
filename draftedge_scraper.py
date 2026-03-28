@@ -38,7 +38,8 @@ import pandas as pd
 # Configuration
 # ---------------------------------------------------------------------------
 
-CACHE_DIR = Path("/agent/home/cache/draftedge")
+import os as _os
+CACHE_DIR = Path(_os.getenv("DRAFTEDGE_CACHE_DIR", "/tmp/cache/draftedge"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 BATTER_ENDPOINT = "https://draftedge.com/draftedge-data/mlb_proj_dk.json"
