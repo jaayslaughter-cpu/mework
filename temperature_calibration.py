@@ -74,7 +74,7 @@ except ImportError:
 MIN_SAMPLES: int = 30          # minimum graded picks before fitting T
 T_FLOOR: float = 0.5           # never compress below this
 T_CEILING: float = 4.0         # never expand above this (safety cap)
-T_DEFAULT: float = 1.5         # conservative prior for new agents (slightly compressed)
+T_DEFAULT: float = 1.0         # no scaling until 30+ graded picks exist for calibration
 VAL_FRACTION: float = 0.30     # hold-out fraction for validation when splitting
 
 

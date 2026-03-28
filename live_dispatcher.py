@@ -222,9 +222,9 @@ try:
     logger.info("[Phase47] Temperature calibration module loaded.")
 except ImportError:
     _TEMP_CAL_AVAILABLE = False
-    def _load_all_temperatures(names): return {n: 1.5 for n in names}  # noqa: E302
+    def _load_all_temperatures(names): return {n: 1.0 for n in names}  # noqa: E302
     def _apply_temperature(p, T): return p                              # noqa: E302
-    _T_DEFAULT = 1.5
+    _T_DEFAULT = 1.0
     logger.warning("[Phase47] temperature_calibration not found -- using T=%.1f default.", _T_DEFAULT)
 
 
@@ -1044,7 +1044,7 @@ def build_parlay(
     legs: list[PropLeg],
     agent: dict,
     excluded_keys: set[tuple] | None = None,
-    agent_T: float = 1.5,
+    agent_T: float = 1.0,
 ) -> dict | None:
     """
     From a list of candidate legs, apply agent filter and build a parlay dict
@@ -1153,7 +1153,7 @@ def build_parlay(
 def build_omega_parlay(
     legs: list[PropLeg],
     excluded_keys: set[tuple] | None = None,
-    agent_T: float = 1.5,
+    agent_T: float = 1.0,
 ) -> dict | None:
     """
     OmegaStack -- 18th agent: true ensemble meta-model.
@@ -1651,9 +1651,9 @@ class LiveDispatcher:
             if ev < MIN_EV_PCT:
                 logger.info("[%s] EV %.1f%% below gate -- skipped.", agent["name"], ev)
                 continue
-            if conf < 7.0:
+            if conf < 5.5:
                 logger.info(
-                    "[%s] Confidence %.1f/10 below 7.0 gate -- skipped.",
+                    "[%s] Confidence %.1f/10 below 5.5 gate -- skipped.",
                     agent["name"], conf,
                 )
                 continue
@@ -1666,12 +1666,12 @@ class LiveDispatcher:
         if omega:
             ev_o   = omega.get("ev_pct", 0)
             conf_o = omega.get("confidence", 0)
-            if ev_o >= MIN_EV_PCT and conf_o >= 7.0:
+            if ev_o >= MIN_EV_PCT and conf_o >= 5.5:
                 omega["_agent_meta"] = None
                 candidate_parlays.append(omega)
             else:
                 logger.info(
-                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 -- below gate, skipped.",
+                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 -- below 5.5 gate, skipped.",
                     ev_o, conf_o,
                 )
         else:
