@@ -367,8 +367,9 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     so we never go dark just because one key hits its daily limit.
     """
     keys = [
-        os.getenv("ODDS_API_KEY",        "e4e30098807a9eece674d85e30471f03"),
-        os.getenv("ODDS_API_KEY_BACKUP",  "673bf195062e60e666399be40f763545"),
+        os.getenv("ODDS_API_KEY",          "14d35c33111760aca07e9547fff1561a"),
+        os.getenv("ODDS_API_KEY_BACKUP1",  "e4e30098807a9eece674d85e30471f03"),
+        os.getenv("ODDS_API_KEY_BACKUP2",  "673bf195062e60e666399be40f763545"),
     ]
     last_err: Exception | None = None
     for key in keys:

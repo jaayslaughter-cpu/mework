@@ -89,7 +89,7 @@ propiq:
       key: ${SPORTSDATA_API_KEY:c2abf26f55714d228c7c311290f956d7}
       base-url: https://api.sportsdata.io/v3/mlb
     theodds:
-      key: ${THEODDS_API_KEY:e4e30098807a9eece674d85e30471f03}
+      key: ${THEODDS_API_KEY:14d35c33111760aca07e9547fff1561a}
       base-url: https://api.the-odds-api.com/v4
     tank01:
       key: ${TANK01_API_KEY:58a304828bmshcbb94dbde04853fp12d39cjsn002951acdfed}
@@ -182,8 +182,8 @@ propiq:
       key: ${SPORTSDATA_API_KEY}
       base-url: https://api.sportsdata.io/v3/mlb
     theodds:
-      key-primary: ${THEODDS_API_KEY_PRIMARY}
-      key-backup: ${THEODDS_API_KEY_BACKUP}
+      key-primary: ${THEODDS_API_KEY_PRIMARY:14d35c33111760aca07e9547fff1561a}
+      key-backup: ${THEODDS_API_KEY_BACKUP:673bf195062e60e666399be40f763545}
       base-url: https://api.the-odds-api.com/v4
       # QUOTA PROTECTION: 5-10 minute polling enforced in DataHubTasklet
       min-poll-interval-minutes: 7

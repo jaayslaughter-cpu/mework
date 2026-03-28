@@ -221,18 +221,30 @@ def _sportsdata_get(path: str) -> Any:
 
 def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     """Call The Odds API for MLB lines."""
-    key = os.getenv("ODDS_API_KEY", "e4e30098807a9eece674d85e30471f03")
-    try:
-        resp = requests.get(
-            f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
-            params={"apiKey": key, "regions": "us", "markets": "h2h,totals,spreads"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.warning("Odds API error: %s", e)
-        return []
+    keys = [
+        os.getenv("ODDS_API_KEY",          "14d35c33111760aca07e9547fff1561a"),
+        os.getenv("ODDS_API_KEY_BACKUP1",  "e4e30098807a9eece674d85e30471f03"),
+        os.getenv("ODDS_API_KEY_BACKUP2",  "673bf195062e60e666399be40f763545"),
+    ]
+    last_err = None
+    for key in keys:
+        try:
+            resp = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
+                params={"apiKey": key, "regions": "us", "markets": "h2h,totals,spreads"},
+                timeout=30,
+            )
+            if resp.status_code == 429:
+                logger.warning("Odds API quota hit on key ...%s — rotating", key[-6:])
+                last_err = Exception(f"HTTP 429 on key ...{key[-6:]}")
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            continue
+    logger.warning("Odds API: all keys exhausted — %s", last_err)
+    return []
 
 
 def _load_xgb_model():

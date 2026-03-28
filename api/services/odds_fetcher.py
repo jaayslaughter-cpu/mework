@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-ODDS_API_KEY_PRIMARY  = os.getenv("ODDS_API_KEY",        "e4e30098807a9eece674d85e30471f03")
-ODDS_API_KEY_BACKUP   = os.getenv("ODDS_API_KEY_BACKUP", "673bf195062e60e666399be40f763545")
+ODDS_API_KEY_PRIMARY  = os.getenv("ODDS_API_KEY",          "14d35c33111760aca07e9547fff1561a")
+ODDS_API_KEY_FALLBACK1 = os.getenv("ODDS_API_KEY_BACKUP1",  "e4e30098807a9eece674d85e30471f03")
+ODDS_API_KEY_FALLBACK2 = os.getenv("ODDS_API_KEY_BACKUP2",  "673bf195062e60e666399be40f763545")
 ODDS_API_BASE         = "https://api.the-odds-api.com/v4"
 
 SBR_API_BASE          = os.getenv("SBR_API_BASE", "https://www.sportsbookreview.com/api")
@@ -208,7 +209,7 @@ class OddsApiOddsFetcher(BaseOddsFetcher):
     """
 
     def __init__(self) -> None:
-        self._keys = [ODDS_API_KEY_PRIMARY, ODDS_API_KEY_BACKUP]
+        self._keys = [ODDS_API_KEY_PRIMARY, ODDS_API_KEY_FALLBACK1, ODDS_API_KEY_FALLBACK2]
         self._key_idx = 0
 
     def provider_name(self) -> str:
