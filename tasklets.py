@@ -351,7 +351,7 @@ def _fetch_espn_games() -> dict:
 
 def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     """Call The Odds API for MLB lines."""
-    key = os.getenv("ODDS_API_KEY", "14d35c33111760aca07e9547fff1561a")
+    key = os.getenv("ODDS_API_KEY", "673bf195062e60e666399be40f763545")
     try:
         resp = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
