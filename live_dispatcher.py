@@ -1628,9 +1628,11 @@ class LiveDispatcher:
         # 2. Fetch live props from both platforms
         pp_props = fetch_prizepicks_props()
         ud_props = fetch_underdog_props()
-        # Underdog props are StreakAgent territory only — main agents use
-        # PrizePicks exclusively so parlays never mix platforms.
-        all_raw  = pp_props  # ud_props handled by StreakAgent only
+        # Both platforms feed the main pool — but agents only pick all-PP
+        # or all-UD parlays (never mixed). FLEX lines stripped here.
+        ud_std   = [p for p in ud_props
+                    if p.get("entry_type", "FLEX") == "STANDARD"]
+        all_raw  = pp_props + ud_std
 
         if not all_raw:
             logger.warning("No props fetched from either platform -- aborting.")
@@ -1801,6 +1803,12 @@ class LiveDispatcher:
             logger.warning("Layer 9 CV skipped (fallback): %s", _cv_err)
         # ── End Layer 9 ───────────────────────────────────────────────────────
 
+        # Split leg pool by platform — agents pick best of PP vs UD
+        pp_leg_pool = [l for l in leg_pool if l.platform == "PrizePicks"]
+        ud_leg_pool = [l for l in leg_pool if l.platform == "Underdog"]
+        logger.info("[Pool] PrizePicks legs=%d  Underdog legs=%d",
+                    len(pp_leg_pool), len(ud_leg_pool))
+
         if not leg_pool:
             logger.warning("No legs passed EV/prob gates -- no alerts today.")
             return
@@ -1824,7 +1832,16 @@ class LiveDispatcher:
                 logger.info("[RISK] %s -- skipped (disabled or in cool-down)", agent["name"])
                 continue
             _agent_T = self._agent_temperatures.get(agent["name"], _T_DEFAULT)
-            parlay = build_parlay(leg_pool, agent, agent_T=_agent_T)
+            # Best-of-two: run agent against PP pool and UD pool separately,
+            # pick whichever scores higher. PrizePicks wins on tie.
+            _pp_play = build_parlay(pp_leg_pool, agent, agent_T=_agent_T)
+            _ud_play = build_parlay(ud_leg_pool, agent, agent_T=_agent_T)
+            if _pp_play and _ud_play:
+                parlay = (_ud_play
+                          if _ud_play["confidence"] > _pp_play["confidence"]
+                          else _pp_play)  # PP wins tie
+            else:
+                parlay = _pp_play or _ud_play
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
                 continue
