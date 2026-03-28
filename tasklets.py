@@ -23,6 +23,32 @@ Railway deployment notes
 
 from __future__ import annotations
 
+# WagerBrain-enhanced odds math (bookmaker_margin, kelly_criterion, true_odds_ev)
+try:
+    from odds_math import (
+        bookmaker_margin   as _bookmaker_margin,
+        kelly_criterion    as _kelly_criterion_wb,
+        true_odds_ev       as _true_odds_ev,
+        prop_ev_dollar     as _prop_ev_dollar,
+        is_acceptable_vig  as _is_acceptable_vig,
+        elo_win_prob       as _elo_win_prob,
+        MAX_VIG            as _MAX_VIG,
+    )
+    _ODDS_MATH_AVAILABLE = True
+except ImportError:
+    _ODDS_MATH_AVAILABLE = False
+    def _bookmaker_margin(o, u): return 0.0          # noqa: E704
+    def _kelly_criterion_wb(p, o, kf=0.25, mc=0.05): # noqa: E704
+        b = (o / 100.0) if o > 0 else (100.0 / abs(o))
+        q = 1 - p
+        raw = (b * p - q) / b
+        return min(kf * raw, mc) if raw > 0 else 0.0
+    def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
+    def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
+    def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
+    def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
+    _MAX_VIG = 0.08
+
 import datetime
 import json
 import logging
@@ -253,12 +279,23 @@ def _no_vig(over_american: int, under_american: int) -> tuple[float, float]:
 
 
 def _kelly_units(edge: float, odds_american: int) -> float:
-    """Quarter-Kelly bet sizing, capped at MAX_UNIT_CAP."""
+    """Quarter-Kelly bet sizing, capped at MAX_UNIT_CAP.
+    Uses WagerBrain kelly_criterion() when available (more accurate decimal
+    odds conversion). Falls back to inline calculation if not available.
+    """
+    if _ODDS_MATH_AVAILABLE:
+        return _kelly_criterion_wb(
+            prob=float(edge),
+            odds_american=int(odds_american),
+            kelly_fraction=KELLY_FRACTION,
+            max_cap=MAX_UNIT_CAP,
+        )
+    # Inline fallback
     if odds_american > 0:
         b = odds_american / 100.0
     else:
         b = 100.0 / abs(odds_american)
-    p = edge
+    p = float(edge)
     q = 1 - p
     kelly = (b * p - q) / b
     return min(KELLY_FRACTION * kelly, MAX_UNIT_CAP)
@@ -532,11 +569,13 @@ def _fetch_prizepicks_direct() -> list[dict]:
 
 def _fetch_underdog_props_direct() -> list[dict]:
     """Fetch Underdog Fantasy MLB over/under lines (free, no key required)."""
+    # Headers confirmed working by aidanhall21/underdog-fantasy-pickem-scraper
+    # No API key needed — standard browser UA with Google Referer is sufficient
     _UD_HEADERS = {
-        "User-Agent": "Underdog Fantasy/3.0 (iPhone; iOS 17.0) CFNetwork/1474 Darwin/23.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
-        "x-api-key": "KeepItSecret",
+        "Referer": "https://www.google.com/",
     }
     try:
         resp = requests.get(
@@ -668,15 +707,14 @@ def run_data_hub_tasklet() -> None:
     physics_key = "hub:physics"
     if not _hub_exists(r, physics_key):
         logger.info("[DataHub] Scraping physics / arsenal data…")
-        # Game-level predictions: home win prob, over/under prob, SP matchup
         game_predictions = _fetch_game_predictions() if _GAME_PRED_AVAILABLE else []
         physics = {
-            "pitch_arsenal":    [],           # Statcast — no source yet
-            "advanced_stats":   [],           # FanGraphs — optional layer
-            "bvp":              [],           # BvP splits — no source yet
-            "batted_ball":      [],           # Statcast — optional layer
-            "second_half":      [],           # splits — no source yet
-            "game_predictions": game_predictions,  # NEW — per-game ML signals
+            "pitch_arsenal":    [],
+            "advanced_stats":   [],
+            "bvp":              [],
+            "batted_ball":      [],
+            "second_half":      [],
+            "game_predictions": game_predictions,
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
         if game_predictions:
@@ -773,20 +811,12 @@ class _BaseAgent:
     # shared helpers
     def _model_prob(self, player: str, prop_type: str,
                     team: str = "", side: str = "OVER") -> float:
-        """
-        Return probability estimate for a prop.
-        Layers:
-          1. XGBoost model (if loaded)
-          2. Game-level prediction context (home win, over/under lean)
-          3. League-average fallback (50.0)
-        """
+        """Return probability estimate for a prop (XGB + game context)."""
         base_prob = 50.0
-
-        # Layer 1: XGBoost model
         if self.model:
             try:
-                import xgboost as xgb    # noqa: PLC0415
-                import numpy as np       # noqa: PLC0415
+                import xgboost as xgb  # noqa: PLC0415
+                import numpy as np     # noqa: PLC0415
                 feats = np.array([[0.0] * 20], dtype=np.float32)
                 if isinstance(self.model, xgb.Booster):
                     dmat = xgb.DMatrix(feats)
@@ -798,14 +828,11 @@ class _BaseAgent:
                     base_prob = float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-
-        # Layer 2: Game-level context adjustment
-        if team:
+        if team and _GAME_PRED_AVAILABLE:
             ctx = _get_game_context(self.hub, team)
             if ctx:
                 prop_lower = prop_type.lower()
                 adj = 0.0
-
                 if side == "OVER":
                     over_prob = ctx.get("over_prob", 0.50)
                     if over_prob >= 0.58:
@@ -818,7 +845,6 @@ class _BaseAgent:
                         adj += (under_prob - 0.50) * 20
                     elif under_prob <= 0.42:
                         adj -= (0.50 - under_prob) * 20
-
                 if any(x in prop_lower for x in ("strikeout", "k", "pitcher")):
                     sp_side = "home" if "home" in team.lower() else "away"
                     sp_era = ctx.get("features", {}).get(f"{sp_side}_sp_era", 4.20)
@@ -826,16 +852,13 @@ class _BaseAgent:
                         adj += 3.0
                     elif sp_era >= 5.00:
                         adj -= 2.0
-
                 if any(x in prop_lower for x in ("hit", "total base", "home run", "rbi", "run")):
                     home_win = ctx.get("home_win_prob", 0.50)
                     if home_win >= 0.60:
                         adj += 1.5
                     elif home_win <= 0.40:
                         adj -= 1.5
-
                 base_prob = max(30.0, min(80.0, base_prob + adj))
-
         return base_prob
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
@@ -899,10 +922,27 @@ class _EVHunter(_BaseAgent):
     def evaluate(self, prop: dict) -> dict | None:
         over_odds  = prop.get("over_american",  -110)
         under_odds = prop.get("under_american", -110)
+
+        # WagerBrain: skip props with excessive juice (>8% margin)
+        if _ODDS_MATH_AVAILABLE and not _is_acceptable_vig(over_odds, under_odds, _MAX_VIG):
+            return None
+
         fair_over, _ = _no_vig(over_odds, under_odds)
-        model_prob   = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
-        implied      = _american_to_implied(over_odds) / 100
-        ev_pct       = (model_prob / 100 - implied) / implied
+        model_prob = self._model_prob(
+            prop.get("player", ""), prop.get("prop_type", ""),
+            team=prop.get("team", ""), side="OVER",
+        )
+        implied = _american_to_implied(over_odds) / 100
+
+        # WagerBrain: use true_odds_ev for more accurate EV calculation
+        if _ODDS_MATH_AVAILABLE:
+            from odds_math import american_to_decimal as _a2d  # noqa: PLC0415
+            profit  = _a2d(over_odds) - 1.0
+            ev_dollar = _true_odds_ev(stake=1.0, profit=profit, prob=model_prob / 100)
+            ev_pct = ev_dollar  # dollar EV per unit = EV% when stake=1
+        else:
+            ev_pct = (model_prob / 100 - implied) / implied
+
         if ev_pct >= MIN_EV_THRESH:
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
@@ -913,10 +953,26 @@ class _UnderMachine(_BaseAgent):
     name = "UnderMachine"
 
     def evaluate(self, prop: dict) -> dict | None:
+        over_odds  = prop.get("over_american",  -110)
         under_odds = prop.get("under_american", -110)
-        model_prob    = 100 - self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
-        implied       = _american_to_implied(under_odds) / 100
-        ev_pct        = (model_prob / 100 - implied) / implied
+
+        # WagerBrain: skip excessive vig
+        if _ODDS_MATH_AVAILABLE and not _is_acceptable_vig(over_odds, under_odds, _MAX_VIG):
+            return None
+
+        model_prob = 100 - self._model_prob(
+            prop.get("player", ""), prop.get("prop_type", ""),
+            team=prop.get("team", ""), side="UNDER",
+        )
+        implied = _american_to_implied(under_odds) / 100
+
+        if _ODDS_MATH_AVAILABLE:
+            from odds_math import american_to_decimal as _a2d  # noqa: PLC0415
+            profit = _a2d(under_odds) - 1.0
+            ev_pct = _true_odds_ev(stake=1.0, profit=profit, prob=model_prob / 100)
+        else:
+            ev_pct = (model_prob / 100 - implied) / implied
+
         if ev_pct >= MIN_EV_THRESH:
             return self._build_bet(prop, "UNDER", model_prob,
                                    implied * 100, ev_pct * 100)
@@ -1199,32 +1255,25 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
     return (sum(probs) / len(probs)) if probs else None
 
 
-
-
 def _get_game_context(hub: dict, team_name: str) -> dict:
-    """
-    Look up game-level prediction context for a player's team.
-    Returns prediction dict or empty dict if not found.
-    """
+    """Look up game-level prediction context for a player's team."""
     predictions = hub.get("physics", {}).get("game_predictions", [])
     if not predictions or not team_name:
         return {}
-
     team_lower = team_name.lower()
     for pred in predictions:
         if (team_lower in pred.get("home_team", "").lower() or
                 team_lower in pred.get("away_team", "").lower()):
             return pred
-
-    # Try partial match on common abbreviations / city names
     team_words = set(team_lower.split())
     for pred in predictions:
         home_words = set(pred.get("home_team", "").lower().split())
         away_words = set(pred.get("away_team", "").lower().split())
         if team_words & home_words or team_words & away_words:
             return pred
-
     return {}
+
+
 def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
     """
     Edge = sharp consensus implied prob % − Underdog implied prob %.
@@ -1416,6 +1465,19 @@ def run_agent_tasklet() -> None:
                 if not bet:
                     continue
 
+                # WagerBrain: skip props with excessive vig before EV math
+                if _ODDS_MATH_AVAILABLE:
+                    _over_o  = prop.get("over_american",  -115)
+                    _under_o = prop.get("under_american", -115)
+                    if not _is_acceptable_vig(_over_o, _under_o, _MAX_VIG):
+                        logger.debug(
+                            "[AgentTasklet] Skipping %s %s — vig %.1f%% > max %.1f%%",
+                            player, prop_type,
+                            _bookmaker_margin(_over_o, _under_o) * 100,
+                            _MAX_VIG * 100,
+                        )
+                        continue
+
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is not None:
                     side    = bet["side"]
@@ -1425,6 +1487,15 @@ def run_agent_tasklet() -> None:
                     edge = _underdog_edge(ud_odds, sharp_prob)
                     if edge < MIN_EV_THRESH * 100:
                         continue
+
+                    # WagerBrain: also compute dollar EV for logging
+                    if _ODDS_MATH_AVAILABLE:
+                        dollar_ev = _prop_ev_dollar(
+                            model_prob=sharp_prob / 100,
+                            odds_american=ud_odds,
+                        )
+                        bet["dollar_ev"] = round(dollar_ev, 4)
+
                     bet["ev_pct"]          = round(edge, 2)
                     bet["model_prob"]      = round(sharp_prob, 1)
                     bet["sharp_consensus"] = True

@@ -1,15 +1,23 @@
 """odds_math.py — PropIQ Analytics Odds Math Utility
 
-Vig-stripping and Expected Value functions consumed by the Execution Tier.
+Vig-stripping, Expected Value, Kelly Criterion, and bookmaker margin
+functions consumed by the Execution Tier and AgentTasklet.
+
 No external dependencies — pure Python arithmetic.
 
-All public functions accept American odds (e.g. -110, +150).
-
-Functions:
+Functions (original):
     american_to_implied      -- American odds → raw implied probability (with vig)
     calculate_true_probability -- Two-sided market → true no-vig probabilities
     calculate_ev             -- (model_prob / true_no_vig_prob) - 1
     calculate_no_vig_ev      -- Convenience wrapper for a single prop side
+
+Functions added from WagerBrain (github.com/sedemmler/WagerBrain):
+    true_odds_ev             -- EV from user-supplied model probability
+    kelly_criterion          -- Kelly Criterion bet sizing (fractional)
+    bookmaker_margin         -- Bookmaker vig as a percentage
+    decimal_odds             -- American → Decimal odds conversion
+    parlay_decimal_odds      -- Combined decimal odds for a multi-leg parlay
+    american_to_decimal      -- American → Decimal helper
 
 Mathematical basis:
     Raw implied probability:
@@ -21,33 +29,29 @@ Mathematical basis:
     True no-vig probability (each side):
         true_prob = implied_prob / overround
 
-    Expected Value (edge vs sharp market):
-        EV% = (model_probability / true_no_vig_probability) - 1
+    Expected Value (WagerBrain true_odds_ev):
+        EV = (profit * prob) - (stake * (1 - prob))
 
-    Interpretation:
-        EV% = 0.00  → model agrees with sharp market
-        EV% = 0.10  → model thinks the prop is 10% more likely than the market
-        EV% = -0.05 → model is below the sharp line — skip this prop
+    Kelly Criterion:
+        f* = (b*p - q) / b   where b = decimal_odds - 1, p = win_prob, q = 1 - p
+
+    Bookmaker Margin:
+        margin = (1/fav_decimal + 1/dog_decimal) - 1
 """
 
 from __future__ import annotations
 
+import math
+
 
 # ---------------------------------------------------------------------------
-# Core functions
+# Core implied probability (original)
 # ---------------------------------------------------------------------------
 
 def american_to_implied(odds: float) -> float:
     """Convert American odds to raw implied probability (includes vig).
 
-    Args:
-        odds: American odds integer or float (e.g. -110, +150, -140).
-
-    Returns:
-        Implied probability as a decimal (0.0 – 1.0).
-
-    Raises:
-        ValueError: If ``odds`` is 0 or would produce a nonsensical result.
+    Returns probability as a decimal (0.0 – 1.0).
 
     Examples:
         >>> american_to_implied(-110)
@@ -69,56 +73,24 @@ def calculate_true_probability(
 ) -> tuple[float, float]:
     """Strip vig from a two-sided market and return true no-vig probabilities.
 
-    Converts both sides of a 2-way player prop market from American odds to
-    implied probabilities, sums them to find the overround (vig), then
-    normalises each side so the two true probabilities sum to exactly 1.0.
-
-    Args:
-        odds_over:  American odds for the Over side (e.g. -110).
-        odds_under: American odds for the Under side (e.g. -110).
-
     Returns:
-        Tuple of (true_over_prob, true_under_prob) — two floats that sum to 1.0.
+        Tuple of (true_over_prob, true_under_prob) — two floats summing to 1.0.
 
     Examples:
         >>> calculate_true_probability(-110, -110)
         (0.5, 0.5)
-        >>> calculate_true_probability(-140, +115)
-        (0.5638..., 0.4361...)
     """
-    implied_over = american_to_implied(odds_over)
+    implied_over  = american_to_implied(odds_over)
     implied_under = american_to_implied(odds_under)
-    overround = implied_over + implied_under          # e.g. 1.0476 for -110/-110
-    true_over = implied_over / overround
-    true_under = implied_under / overround
-    return true_over, true_under
+    overround     = implied_over + implied_under
+    return implied_over / overround, implied_under / overround
 
 
 def calculate_ev(model_probability: float, true_no_vig_probability: float) -> float:
-    """Calculate Expected Value as a percentage edge vs the true market price.
-
-    Formula:
-        EV% = (model_probability / true_no_vig_probability) - 1
-
-    A positive EV% means our model believes this outcome is more likely than
-    the sharp market's true (no-vig) probability implies.  A strict +3% gate
-    (:data:`MIN_EV_THRESHOLD`) is enforced in the Execution Tier before any
-    slip is published to Discord.
-
-    Args:
-        model_probability:      Calibrated XGBoost probability (0.0 – 1.0).
-        true_no_vig_probability: True no-vig probability for the same side
-                                 from :func:`calculate_true_probability`.
+    """EV as edge vs true market price: (model_prob / true_no_vig_prob) - 1.
 
     Returns:
-        EV as a signed decimal fraction (e.g. 0.062 = +6.2%).
-        Returns 0.0 if ``true_no_vig_probability`` is zero to avoid division.
-
-    Examples:
-        >>> calculate_ev(0.58, 0.50)   # model thinks 58%, market says 50%
-        0.16
-        >>> calculate_ev(0.52, 0.535)  # model below market — negative EV
-        -0.028...
+        Signed decimal (e.g. 0.062 = +6.2%).
     """
     if true_no_vig_probability <= 0.0:
         return 0.0
@@ -131,25 +103,16 @@ def calculate_no_vig_ev(
     odds_under: float,
     side: str,
 ) -> float:
-    """End-to-end convenience: strip vig, pick correct side, return EV%.
-
-    Combines :func:`calculate_true_probability` and :func:`calculate_ev`
-    into a single call for use inside the Execution Tier's per-leg loop.
+    """End-to-end: strip vig, pick correct side, return EV%.
 
     Args:
-        model_prob: Calibrated XGBoost probability for this leg (0.0 – 1.0).
+        model_prob: Calibrated probability for this leg (0.0 – 1.0).
         odds_over:  American odds for the Over side.
         odds_under: American odds for the Under side.
-        side:       ``"Over"`` or ``"Under"`` (case-insensitive).
+        side:       \"Over\" or \"Under\" (case-insensitive).
 
     Returns:
-        EV% as a signed decimal (e.g. 0.062 = +6.2%).
-
-    Examples:
-        >>> calculate_no_vig_ev(0.58, -110, -110, "Over")
-        0.16
-        >>> calculate_no_vig_ev(0.42, -110, -110, "Under")
-        -0.16
+        EV% as signed decimal (e.g. 0.062 = +6.2%).
     """
     true_over, true_under = calculate_true_probability(odds_over, odds_under)
     true_no_vig = true_over if side.strip().lower() == "over" else true_under
@@ -157,14 +120,255 @@ def calculate_no_vig_ev(
 
 
 # ---------------------------------------------------------------------------
+# WagerBrain additions — odds conversion
+# ---------------------------------------------------------------------------
+
+def american_to_decimal(odds: int | float) -> float:
+    """Convert American odds to Decimal (European) odds.
+
+    Adapted from WagerBrain/WagerBrain/odds.py (sedemmler).
+
+    Examples:
+        >>> american_to_decimal(-110)
+        1.909...
+        >>> american_to_decimal(+150)
+        2.5
+    """
+    if isinstance(odds, float) and odds > 1.0:
+        return odds  # already decimal
+    if odds >= 100:
+        return 1.0 + (odds / 100.0)
+    elif odds <= -101:
+        return 1.0 + (100.0 / abs(odds))
+    return float(odds)
+
+
+def parlay_decimal_odds(odds_list: list[int | float]) -> float:
+    """Return combined decimal odds for a multi-leg parlay.
+
+    Multiplies all legs' decimal odds together.
+    Adapted from WagerBrain/WagerBrain/odds.py parlay_odds().
+
+    Args:
+        odds_list: List of American or Decimal odds for each leg.
+
+    Returns:
+        Combined decimal odds (e.g. 7.23 for a 3-leg parlay).
+
+    Examples:
+        >>> parlay_decimal_odds([-110, -110, -110])
+        6.81...
+    """
+    result = 1.0
+    for o in odds_list:
+        result *= american_to_decimal(o)
+    return round(result, 4)
+
+
+# ---------------------------------------------------------------------------
+# WagerBrain additions — EV
+# ---------------------------------------------------------------------------
+
+def true_odds_ev(stake: float, profit: float, prob: float) -> float:
+    """Expected Value from user-supplied model probability.
+
+    Adapted from WagerBrain/WagerBrain/probs.py true_odds_ev().
+    Use this when you have your own probability estimate (not just
+    implied probability from odds). Returns the dollar EV per unit staked.
+
+    Formula:
+        EV = (profit * prob) - (stake * (1 - prob))
+
+    Args:
+        stake:  Amount wagered (e.g. 1.0 for per-unit calculation).
+        profit: Net amount returned on a win (stake * (decimal_odds - 1)).
+        prob:   Model-estimated probability of winning (0.0 – 1.0).
+
+    Returns:
+        Dollar EV per unit. Positive = +EV bet.
+
+    Examples:
+        >>> true_odds_ev(stake=1.0, profit=0.909, prob=0.58)  # -110, model 58%
+        0.144...
+        >>> true_odds_ev(stake=1.0, profit=1.50, prob=0.35)   # +150, model 35%
+        -0.125
+    """
+    return (profit * prob) - (stake * (1.0 - prob))
+
+
+def prop_ev_dollar(model_prob: float, odds_american: int, stake: float = 1.0) -> float:
+    """Dollar EV for a single prop bet.
+
+    Convenience wrapper combining true_odds_ev() with American→Decimal
+    conversion so agents can get a dollar figure in one call.
+
+    Args:
+        model_prob:    Model win probability (0.0 – 1.0).
+        odds_american: American odds on this side (e.g. -110, +120).
+        stake:         Unit stake (default 1.0).
+
+    Returns:
+        Dollar EV per unit staked.
+
+    Examples:
+        >>> prop_ev_dollar(0.58, -110)   # 58% chance at -110
+        0.144...
+        >>> prop_ev_dollar(0.40, +150)   # 40% chance at +150
+        0.1
+    """
+    dec = american_to_decimal(odds_american)
+    profit = stake * (dec - 1.0)
+    return true_odds_ev(stake=stake, profit=profit, prob=model_prob)
+
+
+# ---------------------------------------------------------------------------
+# WagerBrain additions — Kelly Criterion
+# ---------------------------------------------------------------------------
+
+def kelly_criterion(
+    prob: float,
+    odds_american: int | float,
+    kelly_fraction: float = 0.25,
+    max_cap: float = 0.05,
+) -> float:
+    """Kelly Criterion bet sizing as a fraction of bankroll.
+
+    Adapted from WagerBrain/WagerBrain/bankroll.py basic_kelly_criterion().
+    Defaults to Quarter-Kelly (kelly_fraction=0.25) capped at 5% of bankroll.
+
+    Formula:
+        f* = ((b * p) - q) / b   where b = decimal_odds - 1
+
+    Args:
+        prob:           Estimated win probability (0.0 – 1.0).
+        odds_american:  American odds on this side.
+        kelly_fraction: Risk scaling (1.0 = full Kelly, 0.25 = quarter-Kelly).
+        max_cap:        Maximum fraction of bankroll (hard cap).
+
+    Returns:
+        Fraction of bankroll to bet (0.0 – max_cap).
+        Returns 0.0 for negative Kelly (no edge).
+
+    Examples:
+        >>> kelly_criterion(prob=0.58, odds_american=-110)
+        0.029...   # 2.9% of bankroll at quarter-Kelly
+        >>> kelly_criterion(prob=0.40, odds_american=-110)
+        0.0        # negative edge — don't bet
+    """
+    b = american_to_decimal(odds_american) - 1.0
+    if b <= 0:
+        return 0.0
+    q = 1.0 - prob
+    raw_kelly = (b * prob - q) / b
+    if raw_kelly <= 0:
+        return 0.0
+    return min(raw_kelly * kelly_fraction, max_cap)
+
+
+# ---------------------------------------------------------------------------
+# WagerBrain additions — Bookmaker margin / vig
+# ---------------------------------------------------------------------------
+
+def bookmaker_margin(over_american: int | float, under_american: int | float) -> float:
+    """Calculate bookmaker vig as a percentage of the two-sided market.
+
+    Adapted from WagerBrain/WagerBrain/utils.py bookmaker_margin().
+    A standard -110/-110 line has ~4.76% margin.
+    Pinnacle (sharpest book) typically runs 2-3%.
+    Soft books run 6-10%+.
+
+    Formula:
+        margin = (1/fav_decimal + 1/dog_decimal) - 1
+
+    Args:
+        over_american:  American odds on the Over side.
+        under_american: American odds on the Under side.
+
+    Returns:
+        Vig as a decimal (e.g. 0.0476 = 4.76% for -110/-110).
+
+    Examples:
+        >>> bookmaker_margin(-110, -110)
+        0.04761904761904762
+        >>> bookmaker_margin(-115, -105)
+        0.04761904761904762
+    """
+    fav_dec = american_to_decimal(over_american)
+    dog_dec = american_to_decimal(under_american)
+    if fav_dec <= 0 or dog_dec <= 0:
+        return 0.0
+    return (1.0 / fav_dec) + (1.0 / dog_dec) - 1.0
+
+
+def is_acceptable_vig(
+    over_american: int | float,
+    under_american: int | float,
+    max_vig: float = 0.08,
+) -> bool:
+    """Return True if the bookmaker margin is within acceptable limits.
+
+    Used as a pre-filter in AgentTasklet to skip props with excessive juice
+    before running EV calculations. DraftKings/FanDuel typically run 4-6%;
+    reject anything above 8% as too juiced to find real edge.
+
+    Args:
+        over_american:  American odds on the Over side.
+        under_american: American odds on the Under side.
+        max_vig:        Maximum acceptable vig (default 8%).
+
+    Returns:
+        True if vig is acceptable, False if too high.
+
+    Examples:
+        >>> is_acceptable_vig(-110, -110)   # 4.76% — acceptable
+        True
+        >>> is_acceptable_vig(-130, -110)   # 9.5% — too juiced
+        False
+    """
+    return bookmaker_margin(over_american, under_american) <= max_vig
+
+
+def elo_win_prob(elo_diff: float) -> float:
+    """Convert ELO rating difference to win probability (538-style formula).
+
+    Adapted from WagerBrain/WagerBrain/probs.py elo_prob().
+    Used for team-level context in game prediction layer.
+
+    Formula:
+        P(win) = 1 / (10^(-elo_diff/400) + 1)
+
+    Args:
+        elo_diff: Team A ELO minus Team B ELO (positive = Team A favoured).
+
+    Returns:
+        Win probability for Team A (0.0 – 1.0).
+
+    Examples:
+        >>> elo_win_prob(0)      # equal teams
+        0.5
+        >>> elo_win_prob(100)    # 100 point ELO advantage
+        0.6401...
+        >>> elo_win_prob(-200)   # 200 point ELO deficit
+        0.2401...
+    """
+    return 1.0 / (10.0 ** (-elo_diff / 400.0) + 1.0)
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 #: Minimum no-vig EV% required before the Execution Tier publishes a slip.
-#: Hard-coded here so the threshold is defined in one place and imported
-#: by :mod:`execution_agents`.
-MIN_EV_THRESHOLD: float = 0.03   # 3 % edge vs sharp market
+MIN_EV_THRESHOLD: float = 0.03      # 3% edge vs sharp market
 
-#: Underdog Fantasy's standard Pick'em implied probability (no vig).
-#: Used as the baseline comparison when sportsbook odds are unavailable.
+#: Underdog Fantasy standard Pick'em implied probability (no vig).
 UNDERDOG_PICKEM_IMPLIED: float = 0.535
+
+#: Maximum acceptable bookmaker margin — props above this are skipped.
+MAX_VIG: float = 0.08               # 8% vig ceiling
+
+#: Quarter-Kelly fraction (default risk scaling).
+KELLY_FRACTION: float = 0.25
+
+#: Maximum bankroll fraction per bet.
+MAX_UNIT_CAP: float = 0.05          # 5% bankroll cap

@@ -918,11 +918,13 @@ def fetch_underdog_props() -> list[dict]:
     Returns raw list of dicts.
     """
     try:
+        # Headers confirmed by aidanhall21/underdog-fantasy-pickem-scraper
+        # Google Referer + Chrome UA works without any API key
         _ud_headers = {
-            "User-Agent": "Underdog Fantasy/3.0 (iPhone; iOS 17.0) CFNetwork/1474 Darwin/23.0.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
-            "x-api-key": "KeepItSecret",
+            "Referer": "https://www.google.com/",
         }
         resp = requests.get(
             "https://api.underdogfantasy.com/beta/v5/over_under_lines",
