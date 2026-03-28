@@ -33,7 +33,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -1853,7 +1853,7 @@ class ExecutionSquad:
             if self._should_flush():
                 self._flush_to_agents()
             ch.basic_ack(delivery_tag=method.delivery_tag)
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             logger.error("ExecutionSquad: message parse error: %s", exc)
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 

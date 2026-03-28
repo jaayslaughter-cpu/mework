@@ -113,7 +113,6 @@ def _compute_dislocation_score(m: MergedOdds) -> float:
     if not sharp_lines or not soft_lines:
         return 0.0
 
-    sharp_p_over, _ = _american_to_implied(sharp_lines[0].odds_over), None
     # Use the function directly instead of _strip_vig to keep it simple
     def _nv(ov: int, un: int) -> float:
         p_o = _american_to_implied(ov)

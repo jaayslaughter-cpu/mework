@@ -134,7 +134,8 @@ class BaseOddsFetcher(ABC):
         ...
 
     @abstractmethod
-    def parse_response(self, response: str) -> list[dict]:
+    @staticmethod
+    def parse_response(response: str) -> list[dict]:
         """
         Parse a raw HTTP response body into a list of raw event dicts.
 
@@ -170,7 +171,6 @@ class BaseOddsFetcher(ABC):
     @abstractmethod
     def provider_name(self) -> str:
         ...
-
 
 # ---------------------------------------------------------------------------
 # Provider 1 — The Odds API
@@ -497,7 +497,8 @@ class OddsFetcher:
                              provider.provider_name(), e)
         return all_lines
 
-    def merge_odds(self, lines: list[OddsLine]) -> list[MergedOdds]:
+    @staticmethod
+    def merge_odds(lines: list[OddsLine]) -> list[MergedOdds]:
         """
         Group lines by (player_name, prop_type, line), compute consensus
         no-vig probabilities, find best odds, and estimate CLV.
@@ -509,7 +510,7 @@ class OddsFetcher:
             groups.setdefault(key, []).append(ol)
 
         merged: list[MergedOdds] = []
-        for (player, prop_type, line), group in groups.items():
+        for (_, prop_type, line), group in groups.items():
             # Consensus: average no-vig probs across all providers
             probs_over  = []
             probs_under = []

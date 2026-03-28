@@ -18,7 +18,7 @@ import io
 import logging
 import os
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -231,8 +231,9 @@ class StatcastDataHub:
 
         return None
 
+    @staticmethod
     def _parse_arsenal_row(
-        self, row: dict, pitcher_id: str, season: int
+        row: dict, pitcher_id: str, season: int
     ) -> PitcherArsenal:
         def _f(key: str, default: float = 0.0) -> float:
             try:
@@ -294,8 +295,9 @@ class StatcastDataHub:
                 return self._parse_discipline_row(row, batter_id, season)
         return None
 
+    @staticmethod
     def _parse_discipline_row(
-        self, row: dict, batter_id: str, season: int
+        row: dict, batter_id: str, season: int
     ) -> BatterPlateDiscipline:
         def _f(key: str, default: float = 0.0) -> float:
             try:
