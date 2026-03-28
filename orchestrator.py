@@ -166,7 +166,8 @@ async def _startup_dispatch_if_ready() -> None:
     await asyncio.sleep(30)  # give DataHub one full cycle to populate
     for attempt in range(1, 7):
         hub = read_hub()
-        if hub.get("dfs", {}).get("prizepicks"):
+        # Check context (ESPN games) — reliably populated; prizepicks may be [] on first cycle
+        if hub.get("context") or hub.get("dfs", {}).get("prizepicks"):
             logger.info("[orchestrator] DataHub ready — firing startup dispatch (attempt %d)", attempt)
             await job_dispatch()
             return

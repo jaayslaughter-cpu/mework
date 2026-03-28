@@ -43,6 +43,7 @@ import logging
 import sqlite3
 import time
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -66,7 +67,7 @@ DISCORD_WEBHOOK = (
     "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
 )
 
-_DB_PATH = Path("/agent/home/line_stream.db")
+_DB_PATH = Path(os.getenv("LINE_STREAM_DB_PATH", "/tmp/line_stream.db"))
 _STEAM_THRESHOLD = 0.5   # minimum line movement (units) to fire a steam alert
 _REQUEST_SLEEP = 1.2     # seconds between ESPN requests
 
