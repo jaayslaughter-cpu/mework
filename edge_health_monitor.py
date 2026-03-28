@@ -233,39 +233,77 @@ def store_edge_metrics(metrics: dict[str, dict], clv: dict[str, float], config_v
                     roi_30d FLOAT,
                     clv_30d FLOAT,
                     z_score FLOAT,
+                    wins INT DEFAULT 0,
+                    losses INT DEFAULT 0,
+                    UNIQUE (agent_name, metric_date, window_days)
+                )
+            """)
+            # Insert / upsert per-agent metrics
+            for agent_name, m in metrics.items():
+                cur.execute(
+                    """
+                    INSERT INTO agent_metrics
+                        (agent_name, window_days, config_version, brier_score, ece,
+                         actual_win_rate, n_bets, n_legs, roi_30d, clv_30d, z_score,
+                         wins, losses)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (agent_name, metric_date, window_days) DO UPDATE SET
+                        roi_30d = EXCLUDED.roi_30d,
+                        clv_30d = EXCLUDED.clv_30d,
+                        z_score = EXCLUDED.z_score,
+                        wins    = EXCLUDED.wins,
+                        losses  = EXCLUDED.losses
+                    """,
+                    (
+                        agent_name, days, config_version,
+                        m.get("brier_score"), m.get("ece"),
+                        m.get("actual_win_rate"), m.get("n_bets"),
+                        m.get("n_legs"), m.get("roi_30d"),
+                        clv.get(agent_name, 0.0), m.get("z_score"),
+                        m.get("wins", 0), m.get("losses", 0),
+                    ),
+                )
+            conn.commit()
+            logger.info("Stored edge metrics for %d agents", len(metrics))
+    except Exception as exc:
+        logger.error("Failed to store edge metrics: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Discord report
 # ---------------------------------------------------------------------------
-lines = [
-    f"{'Agent':<18} {'CLV':>7} {'ROI':>8} {'W-L':>8} {'Z-Score':>9} {'Status':>7}",
-    "-" * 64,
-]
-flagged = []
-combined: dict[str, dict] = {}
-for agent, m in sorted(metrics.items(), key=lambda x: x[1]["z_score"]):
-    agent_clv = clv.get(agent, 0.0)
-    z = m["z_score"]
-    if z <= Z_ALERT_THRESHOLD:
-        status = "🚨 ALERT"
-        flagged.append((agent, m, agent_clv))
-    elif z <= Z_CONCERN_THRESHOLD:
-        status = "⚠️  WARN"
-    elif z >= 1.5:
-        status = "🔥 HOT "
-    else:
-        status = "✅ OK  "
-    wl = f"{m['wins']}-{m['losses']}"
-    lines.append(
-        f"{agent:<18} {agent_clv:>+7.3f} {m['roi_30d']:>+7.1%} {wl:>8} {z:>+9.2f} {status}"
-    )
-    combined[agent] = {**m, "clv_30d": agent_clv}
-
-lines.append("""
-
-# ---------------------------------------------------------------------------
-# Main
-""")
-# ---------------------------------------------------------------------------
+def _post_edge_report(metrics: dict, clv: dict, days: int) -> dict[str, dict]:
+    """Format and post the edge health report to Discord."""
+    Z_ALERT_THRESHOLD = -1.5
+    Z_CONCERN_THRESHOLD = -0.5
+    lines_out = [
+        f"Edge Health Monitor — {days}-Day Window",
+        f"{'Agent':<18} {'CLV':>7} {'ROI':>8} {'W-L':>8} {'Z-Score':>9} {'Status':>8}",
+        "-" * 64,
+    ]
+    flagged = []
+    combined: dict[str, dict] = {}
+    for agent, m in sorted(metrics.items(), key=lambda x: x[1].get("z_score", 0)):
+        agent_clv = clv.get(agent, 0.0)
+        z = m.get("z_score", 0.0)
+        if z <= Z_ALERT_THRESHOLD:
+            status = "🚨 ALERT"
+            flagged.append((agent, m, agent_clv))
+        elif z <= Z_CONCERN_THRESHOLD:
+            status = "⚠️  WARN"
+        elif z >= 1.5:
+            status = "🔥 HOT "
+        else:
+            status = "✅ OK  "
+        wl = f"{m.get('wins', 0)}-{m.get('losses', 0)}"
+        roi = m.get("roi_30d", 0.0)
+        lines_out.append(
+            f"{agent:<18} {agent_clv:>+7.3f} {roi:>+7.1%} {wl:>8} {z:>+9.2f} {status}"
+        )
+        combined[agent] = {**m, "clv_30d": agent_clv}
+    report = "\n".join(lines_out)
+    _post_discord(report)
+    return combined
 def run(days: int = 30, quiet: bool = False) -> dict[str, dict]:
     cfg = _load_config()
     config_version = cfg.get("version", "unknown")

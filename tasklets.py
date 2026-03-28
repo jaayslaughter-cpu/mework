@@ -528,7 +528,6 @@ class _BaseAgent:
             "bullpen_ok":  True,
         }
 
-    def _confidence(self, ev_pct: float) -> int:
     @staticmethod
     def _confidence(ev_pct: float) -> int:
         if ev_pct >= 10: return 9
@@ -1594,7 +1593,6 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
         for game in odds_list:
             if not isinstance(game, dict):
                 continue
-            for market_key, outcomes in game.get("bookmakers", [{}])[0].get("markets", [{}]):
             for _ in game.get("bookmakers", [{}])[0].get("markets", [{}]):
                 pass
     except Exception:

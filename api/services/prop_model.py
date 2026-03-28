@@ -353,7 +353,6 @@ class PropModelWithCalibration:
       - ErrorStore for mistake logging + self-correction
       - Live sportsbook line integration
       - DFS outcome tracking
-    """
     Flexible ensemble that combines XGBStrikeoutModel + RandomForestPropModel
     predictions using one of three combination modes.
 
@@ -375,7 +374,6 @@ class PropModelWithCalibration:
         probs = ensemble.predict(X_test)          # shape (n,)
     """
 
-    def __init__(
     def _load_model(self):
         """Load XGBoost model if available."""
         try:
@@ -418,7 +416,7 @@ class PropModelWithCalibration:
             logger.error("XGBoost predict error: %s", e)
             return 0.50
 
-    def predict(
+    def __init__(
         self,
         models:     Optional[list[Any]] = None,
         mode:       EnsembleMode = "average",
