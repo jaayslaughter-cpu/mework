@@ -40,6 +40,20 @@ try:
 except ImportError:
     redis_lib = None  # type: ignore[assignment]
 
+
+try:
+    from game_prediction_layer import (
+        fetch_game_predictions_today as _fetch_game_predictions,
+        get_game_prediction as _get_game_pred,
+    )
+    _GAME_PRED_AVAILABLE = True
+    logger.info("[GamePred] Game prediction layer loaded.")
+except ImportError:
+    _GAME_PRED_AVAILABLE = False
+    def _fetch_game_predictions() -> list: return []          # noqa: E704
+    def _get_game_pred(*a, **kw) -> dict | None: return None  # noqa: E704
+    logger.warning("[GamePred] game_prediction_layer not found — game signals disabled.")
+
 from DiscordAlertService import discord_alert
 from public_trends_scraper import PublicTrendsScraper, get_fade_signal
 
@@ -654,14 +668,23 @@ def run_data_hub_tasklet() -> None:
     physics_key = "hub:physics"
     if not _hub_exists(r, physics_key):
         logger.info("[DataHub] Scraping physics / arsenal data…")
+        # Game-level predictions: home win prob, over/under prob, SP matchup
+        game_predictions = _fetch_game_predictions() if _GAME_PRED_AVAILABLE else []
         physics = {
-            "pitch_arsenal":  [],  # no Statcast actor yet
-            "advanced_stats": [],  # no actor yet
-            "bvp":            [],  # no actor yet
-            "batted_ball":    [],  # no actor yet
-            "second_half":    [],  # no actor yet
+            "pitch_arsenal":    [],           # Statcast — no source yet
+            "advanced_stats":   [],           # FanGraphs — optional layer
+            "bvp":              [],           # BvP splits — no source yet
+            "batted_ball":      [],           # Statcast — optional layer
+            "second_half":      [],           # splits — no source yet
+            "game_predictions": game_predictions,  # NEW — per-game ML signals
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
+        if game_predictions:
+            logger.info(
+                "[DataHub] Game predictions: %d games, %d HIGH confidence",
+                len(game_predictions),
+                sum(1 for g in game_predictions if g.get("confidence") == "HIGH"),
+            )
 
     # ── Group 2: Context / Environment (TTL 10 min) ───────────────────────
     context_key = "hub:context"
@@ -748,24 +771,72 @@ class _BaseAgent:
         raise NotImplementedError
 
     # shared helpers
-    def _model_prob(self, player: str, prop_type: str) -> float:
+    def _model_prob(self, player: str, prop_type: str,
+                    team: str = "", side: str = "OVER") -> float:
+        """
+        Return probability estimate for a prop.
+        Layers:
+          1. XGBoost model (if loaded)
+          2. Game-level prediction context (home win, over/under lean)
+          3. League-average fallback (50.0)
+        """
+        base_prob = 50.0
+
+        # Layer 1: XGBoost model
         if self.model:
             try:
-                import xgboost as xgb  # noqa: PLC0415
-                import numpy as np     # noqa: PLC0415
+                import xgboost as xgb    # noqa: PLC0415
+                import numpy as np       # noqa: PLC0415
                 feats = np.array([[0.0] * 20], dtype=np.float32)
                 if isinstance(self.model, xgb.Booster):
                     dmat = xgb.DMatrix(feats)
                     prob = float(self.model.predict(dmat)[0])
-                    # If output > 1 it's raw score, sigmoid it
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
-                    return prob * 100
+                    base_prob = prob * 100
                 else:
-                    return float(self.model.predict_proba(feats)[0][1]) * 100
+                    base_prob = float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-        return 50.0
+
+        # Layer 2: Game-level context adjustment
+        if team:
+            ctx = _get_game_context(self.hub, team)
+            if ctx:
+                prop_lower = prop_type.lower()
+                adj = 0.0
+
+                if side == "OVER":
+                    over_prob = ctx.get("over_prob", 0.50)
+                    if over_prob >= 0.58:
+                        adj += (over_prob - 0.50) * 20
+                    elif over_prob <= 0.42:
+                        adj -= (0.50 - over_prob) * 20
+                elif side == "UNDER":
+                    under_prob = ctx.get("under_prob", 0.50)
+                    if under_prob >= 0.58:
+                        adj += (under_prob - 0.50) * 20
+                    elif under_prob <= 0.42:
+                        adj -= (0.50 - under_prob) * 20
+
+                if any(x in prop_lower for x in ("strikeout", "k", "pitcher")):
+                    sp_side = "home" if "home" in team.lower() else "away"
+                    sp_era = ctx.get("features", {}).get(f"{sp_side}_sp_era", 4.20)
+                    if sp_era <= 3.00:
+                        adj += 3.0
+                    elif sp_era >= 5.00:
+                        adj -= 2.0
+
+                if any(x in prop_lower for x in ("hit", "total base", "home run", "rbi", "run")):
+                    home_win = ctx.get("home_win_prob", 0.50)
+                    if home_win >= 0.60:
+                        adj += 1.5
+                    elif home_win <= 0.40:
+                        adj -= 1.5
+
+                base_prob = max(30.0, min(80.0, base_prob + adj))
+
+        return base_prob
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
@@ -1128,6 +1199,32 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
     return (sum(probs) / len(probs)) if probs else None
 
 
+
+
+def _get_game_context(hub: dict, team_name: str) -> dict:
+    """
+    Look up game-level prediction context for a player's team.
+    Returns prediction dict or empty dict if not found.
+    """
+    predictions = hub.get("physics", {}).get("game_predictions", [])
+    if not predictions or not team_name:
+        return {}
+
+    team_lower = team_name.lower()
+    for pred in predictions:
+        if (team_lower in pred.get("home_team", "").lower() or
+                team_lower in pred.get("away_team", "").lower()):
+            return pred
+
+    # Try partial match on common abbreviations / city names
+    team_words = set(team_lower.split())
+    for pred in predictions:
+        home_words = set(pred.get("home_team", "").lower().split())
+        away_words = set(pred.get("away_team", "").lower().split())
+        if team_words & home_words or team_words & away_words:
+            return pred
+
+    return {}
 def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
     """
     Edge = sharp consensus implied prob % − Underdog implied prob %.
