@@ -42,8 +42,7 @@ import math
 import random
 import statistics
 import time
-from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import urllib.request
 

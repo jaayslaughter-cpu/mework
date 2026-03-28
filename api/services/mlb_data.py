@@ -5,7 +5,7 @@ Advanced feature engineering for MLB player props.
 Integrates:
   - PlateDisciplineStats: O-Swing%, Z-Swing%, SwStr%, Contact%, Zone%
   - PitcherClusterEngine: K-means arsenal clustering (4 clusters)
-  - MatchupEncoder: batter handedness splits → weighted K% advantage
+  - MatchupEncoder: batter handedness splits 1261275 weighted K% advantage
   - AdvancedFeatureBuilder: assembles full advanced feature matrix
   - MLBDataValidator: bounds-checking + required-field validation
 
@@ -15,7 +15,7 @@ PEP 8 compliant. No hallucinated APIs.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -28,7 +28,7 @@ try:
     _SKL_AVAILABLE = True
 except ImportError:
     _SKL_AVAILABLE = False
-    logger.warning("[MLBData] scikit-learn not installed — rule-based cluster fallback active")
+    logger.warning("[MLBData] scikit-learn not installed 126154 rule-based cluster fallback active")
 
 
 # ---------------------------------------------------------------------------

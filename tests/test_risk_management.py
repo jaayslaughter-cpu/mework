@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import unittest
 from api.services.risk_management import (
     KellyCriterion, PortfolioOptimizer,
-    HARD_CAP_PCT, MIN_BET_PCT, MAX_PORTFOLIO_PCT,
+    HARD_CAP_PCT, MAX_PORTFOLIO_PCT,
 )
 
 

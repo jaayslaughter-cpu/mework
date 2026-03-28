@@ -4,21 +4,21 @@ PropIQ Agent Army — tasklets.py
 Flat module exporting all 6 tasklet run-functions + 2 state readers
 consumed by the root orchestrator.py.
 
-  run_data_hub_tasklet()     → scrape Apify / APIs → Redis mlb_hub
-  read_hub()                 → read mlb_hub from Redis
-  run_agent_tasklet()        → 10 agents → EV → Kafka / Redis bet_queue
-  get_agents()               → agent leaderboard dict
-  run_leaderboard_tasklet()  → 14-day ROI → capital multipliers
-  read_leaderboard()         → read leaderboard from Redis
-  run_backtest_tasklet()     → nightly out-of-sample XGBoost audit
-  run_grading_tasklet()      → boxscore settlement + CLV calc
-  run_xgboost_tasklet()      → weekly model retrain on ledger
+  run_data_hub_tasklet()     1scrape Apify / APIs 1 Redis mlb_hub
+  read_hub()                 1read mlb_hub from Redis
+  run_agent_tasklet()        110 agents 1 EV 1 Kafka / Redis bet_queue
+  get_agents()               1agent leaderboard dict
+  run_leaderboard_tasklet()  114-day ROI 1 capital multipliers
+  read_leaderboard()         1read leaderboard from Redis
+  run_backtest_tasklet()     1nightly out-of-sample XGBoost audit
+  run_grading_tasklet()      1boxscore settlement + CLV calc
+  run_xgboost_tasklet()      1weekly model retrain on ledger
 
 Railway deployment notes
 ------------------------
   All service addresses come from environment variables with safe defaults.
   Every external call is wrapped in try/except so a downed dependency
-  degrades gracefully instead of crashing the whole process.
+degrades gracefully instead of crashing the whole process.
 """
 
 from __future__ import annotations
@@ -26,17 +26,15 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import math
 import os
 import pickle
-import time
 from typing import Any
 
 import requests
 import redis as redis_lib
 from DiscordAlertService import discord_alert
 
-# ── Null-object fallback for when Redis is unreachable ────────────────────────
+# 1Null-object fallback for when Redis is unreachable ────────────────────────────────
 
 class _NullRedis:
     """
@@ -53,7 +51,6 @@ class _NullRedis:
     def lrange(self, *a, **kw):  return []
     def delete(self, *a, **kw):  return None
     def ping(self, *a, **kw):    return False
-
 
 logger = logging.getLogger("propiq.tasklets")
 

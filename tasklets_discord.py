@@ -26,10 +26,8 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import math
 import os
 import pickle
-import time
 from typing import Any
 
 import requests
@@ -53,7 +51,6 @@ class _NullRedis:
     def lrange(self, *a, **kw):  return []
     def delete(self, *a, **kw):  return None
     def ping(self, *a, **kw):    return False
-
 
 logger = logging.getLogger("propiq.tasklets")
 

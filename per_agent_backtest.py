@@ -37,10 +37,7 @@ SIMULATION-LIMITED agents get a theoretical assessment instead of real fold numb
 import urllib.request
 import json
 import statistics
-import math
 import random
-import sys
-from datetime import date, timedelta
 from collections import defaultdict
 
 # ─── Config ───────────────────────────────────────────────────────────────────

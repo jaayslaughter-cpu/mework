@@ -30,7 +30,6 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 import psycopg2
-import requests
 import yaml
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [EDGE-HEALTH] %(message)s")

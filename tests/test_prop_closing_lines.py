@@ -71,13 +71,10 @@ Test plan (28 tests)
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from datetime import date
 from typing import Dict, List, Optional
-from unittest.mock import MagicMock, patch, call
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 # ── Inlined module so tests run without installing the package ─────────────────
 # We import directly from the source path.
@@ -89,8 +86,6 @@ from prop_closing_lines_fetcher import (
     PropClosingLinesFetcher,
     PropLine,
     FetchSummary,
-    PITCHER_MARKETS,
-    BATTER_MARKETS,
     ALL_MARKETS,
 )
 

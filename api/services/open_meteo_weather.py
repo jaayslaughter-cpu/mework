@@ -9,35 +9,11 @@ Weather data service using Open-Meteo (https://open-meteo.com).
 ✅ Returns temperature, wind speed/direction, precipitation probability,
    humidity — all fields needed for PropIQ's WeatherAgent
 
-Replaces Dark Sky (permanently shutdown March 31 2023) and
-eliminates the need for a Visual Crossing API key.
-
-Park coordinates are embedded for all 30 MLB stadiums.
-Weather features are aligned with the WeatherAgent's prop adjustments:
-  - wind_speed_mph  → home run, total bases boost
-  - wind_direction  → blowing out (H to P) vs in (P to H)
-  - temp_f          → cold suppresses offense
-  - precip_pct      → rain delay risk
-  - humidity_pct    → ball-flight impact at altitude
-
-Usage::
-
-    svc = OpenMeteoWeatherService()
-
-    # Game-day forecast
-    wx = svc.get_game_weather("Wrigley Field", "2026-04-05", hour=13)
-
-    # Historical weather (for backtesting)
-    hist = svc.get_historical_weather("Yankee Stadium", "2025-09-01", hour=13)
-"""
-
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 import requests

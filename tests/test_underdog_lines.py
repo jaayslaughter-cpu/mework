@@ -8,7 +8,6 @@ Run with: pytest tests/test_underdog_lines.py -v
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,9 +15,7 @@ import pytest
 from api.services.underdog_lines_fetcher import (
     STAT_MAP,
     UnderdogLinesFetcher,
-    UnderdogMLBLine,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixture helpers — minimal Underdog API payload

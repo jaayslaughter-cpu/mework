@@ -50,12 +50,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
-import time
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import requests

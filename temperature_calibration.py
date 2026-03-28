@@ -37,8 +37,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
-import sys
 from typing import Any
 
 logger = logging.getLogger("propiq.temperature_calibration")

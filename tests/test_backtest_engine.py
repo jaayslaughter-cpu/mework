@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from datetime import date
 from api.tasklets.backtest_tasklet import (
-    BetRecord, BacktestMetrics, PropSimulator,
+    BetRecord, PropSimulator,
     BacktestReport, BacktestDataset, BacktestRunner,
     _american_to_implied, _strip_vig, _simulate_line, _model_prob, _kelly,
 )

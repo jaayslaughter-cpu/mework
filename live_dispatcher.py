@@ -15,35 +15,14 @@ Flow
   3. Merge and deduplicate player lines across both platforms
   4. Fetch baseline stat projections from MLB Stats API (season averages)
   5. Run platform_selector for each prop → pick PrizePicks or Underdog
-  6. Calculate fantasy-points expected value (hitter + pitcher scoring)
-  7. Apply 15 agent filters to build per-agent parlays
-  8. Validate EV gate (≥3%) and Kelly cap (≤10%)
-  9. Fire Discord alerts via DiscordAlertService
-
-Supported prop types (innings_pitched REMOVED per Phase 19):
-  Hitter:  hits, home_runs, rbis, runs, total_bases, stolen_bases,
-           hits_runs_rbis, fantasy_hitter
-  Pitcher: strikeouts (labelled "Pitcher Ks"), earned_runs, fantasy_pitcher
-
-Platform rules:
-  - Compare PP vs Underdog line per prop
-  - Pick platform with higher implied win probability for that specific leg
-  - $20 hard-cap stake per parlay
-  - If fantasy points leg has EV edge ≥ 3% over the offered line → include
-
-Run standalone:
-  python live_dispatcher.py [--date 2026-03-22] [--dry-run]
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 

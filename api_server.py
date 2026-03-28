@@ -2,6 +2,10 @@
 
 Exposes the FastAPI endpoints consumed by the Spring Boot XGBoostModelService.
 All prediction routes delegate to a singleton :class:`MLPipeline` instance
+"""api_server.py — PropIQ Python ML microservice HTTP layer.
+
+Exposes the FastAPI endpoints consumed by the Spring Boot XGBoostModelService.
+All prediction routes delegate to a singleton :class:`MLPipeline` instance
 that is trained/loaded at startup.  The backtest audit route runs a SHAP
 feature-importance analysis on historical settled-bet data.
 
@@ -27,7 +31,6 @@ Usage
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import subprocess
