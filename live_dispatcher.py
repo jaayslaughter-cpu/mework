@@ -1628,6 +1628,10 @@ class LiveDispatcher:
         # 2. Fetch live props from both platforms
         pp_props = fetch_prizepicks_props()
         ud_props = fetch_underdog_props()
+        # Strip Underdog FLEX lines from main pool — only STANDARD Underdog
+        # lines reach agents. FLEX/alt are StreakAgent territory only.
+        ud_props = [p for p in ud_props
+                    if p.get("entry_type", "FLEX") == "STANDARD"]
         all_raw  = pp_props + ud_props
 
         if not all_raw:
