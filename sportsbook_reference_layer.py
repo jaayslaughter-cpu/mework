@@ -42,7 +42,15 @@ logger = logging.getLogger("propiq.sb_ref")
 # Configuration
 # ---------------------------------------------------------------------------
 
-ODDS_API_KEY  = os.getenv("ODDS_API_KEY", "673bf195062e60e666399be40f763545")
+# 3-key fallback chain: primary (14d35c33) -> backup1 (673bf195) -> backup2 (e4e30098)
+ODDS_API_KEY = (
+    os.getenv("ODDS_API_KEY")
+    or os.getenv("ODDS_API_KEY_PRIMARY", "14d35c33111760aca07e9547fff1561a")
+)
+_ODDS_KEY_FALLBACKS = [
+    os.getenv("ODDS_API_KEY_BACKUP1", "673bf195062e60e666399be40f763545"),
+    os.getenv("ODDS_API_KEY_BACKUP2", "e4e30098807a9eece674d85e30471f03"),
+]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT         = "baseball_mlb"
 
@@ -170,6 +178,17 @@ def _fetch_events(date: str) -> list[dict]:
             timeout=15,
         )
         _log_quota(resp)
+        # Fallback key rotation on auth failure
+        if resp.status_code in (401, 403):
+            for fallback_key in _ODDS_KEY_FALLBACKS:
+                resp = requests.get(
+                    f"{ODDS_API_BASE}/sports/{SPORT}/events",
+                    params={"apiKey": fallback_key, "dateFormat": "iso"},
+                    headers=_REQUEST_HEADERS,
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    break
         if resp.status_code != 200:
             logger.warning(
                 "[SB_REF] Events fetch HTTP %d: %s",
