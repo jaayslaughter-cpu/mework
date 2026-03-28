@@ -880,6 +880,13 @@ def _fetch_prizepicks_via_apify() -> list[dict]:
                 continue
             if "inning" in stat_key:
                 continue
+            # Skip alt lines and promo (goblin / demon) lines — main board only
+            board = str(item.get("board_type", "") or "").lower().strip()
+            if board and board != "standard":
+                continue
+            if item.get("is_promo", False):
+                continue
+
             line_val = item.get("line")
             if line_val is None:
                 continue
@@ -952,6 +959,12 @@ def fetch_prizepicks_props() -> list[dict]:
             if stat_raw.lower() not in _PP_MLB_STAT_TYPES:
                 continue
             if "inning" in stat_raw.lower():
+                continue
+            # Skip alt lines and promo (goblin / demon) lines — main board only
+            board = str(attrs.get("board_type", "") or "").lower().strip()
+            if board and board != "standard":
+                continue
+            if attrs.get("is_promo", False):
                 continue
 
             line_val = attrs.get("line_score")
