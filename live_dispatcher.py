@@ -1844,35 +1844,31 @@ class LiveDispatcher:
         else:
             logger.info("[OmegaStack] No triple-confirmation legs today.")
 
-        # ── Exclusive pick claiming pass ───────────────────────────────────
-        # Sort highest confidence first -- that agent wins any contested pick.
-        # Each (player_name, prop_type, side) may appear in exactly ONE parlay.
-        # Parlays that lose too many legs to fall below MIN_LEGS are dropped.
+        # ── Dedup pass: drop 100% identical parlays only ─────────────────
+        # Agents are independent bets — they MAY share individual legs.
+        # Only suppress a parlay if its full leg fingerprint is an exact
+        # duplicate of one already queued (same player+prop+side set).
         candidate_parlays.sort(key=lambda p: -p.get("confidence", 0))
-        claimed_keys: set[tuple[str, str, str]] = set()
+        seen_fingerprints: set[frozenset] = set()
         final_parlays: list[dict] = []
 
         for parlay in candidate_parlays:
-            original_legs = parlay["legs"]
-            available = [
-                leg for leg in original_legs
-                if (leg["player_name"].lower(), leg["prop_type"], leg["side"])
-                not in claimed_keys
-            ]
-            if len(available) < MIN_LEGS:
+            fp = frozenset(
+                (leg["player_name"].lower(), leg["prop_type"], leg["side"])
+                for leg in parlay["legs"]
+            )
+            if fp in seen_fingerprints:
                 logger.info(
-                    "[%s] Dropped after pick exclusion -- %d/%d legs unclaimed (need >= %d)",
-                    parlay["agent_name"], len(available), len(original_legs), MIN_LEGS,
+                    "[%s] Dropped — exact duplicate of a higher-confidence parlay.",
+                    parlay["agent_name"],
                 )
                 continue
-            for leg in available:
-                claimed_keys.add((leg["player_name"].lower(), leg["prop_type"], leg["side"]))
-            parlay["legs"] = available
+            seen_fingerprints.add(fp)
             final_parlays.append(parlay)
 
         logger.info(
-            "Claim pass: %d/%d parlays survived | %d unique picks claimed",
-            len(final_parlays), len(candidate_parlays), len(claimed_keys),
+            "Dedup pass: %d/%d parlays queued to send",
+            len(final_parlays), len(candidate_parlays),
         )
 
         # ── Send all surviving parlays ─────────────────────────────────────
