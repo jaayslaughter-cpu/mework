@@ -129,3 +129,82 @@ if __name__ == "__main__":
     parser.add_argument("--history", default=BET_HISTORY_PATH, help="Path to bet_history.csv")
     args = parser.parse_args()
     generate_calibration_map(args.history)
+
+
+# ── DB-backed calibration: reads from bet_ledger instead of CSV ───────────────
+
+def generate_calibration_map_from_db() -> None:
+    """Read settled bets from bet_ledger Postgres table and rebuild calibration_map.json.
+
+    This is the live-loop version of generate_calibration_map().
+    Called automatically by run_xgboost_tasklet() after every weekly retrain so
+    the calibration map always reflects the most recent settled bet outcomes.
+
+    Requires DATABASE_URL environment variable (Railway Postgres).
+    Falls back gracefully if DB unavailable.
+    """
+    import os
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.warning("[CalibDB] No DATABASE_URL — skipping DB-backed calibration")
+        return
+
+    try:
+        import pandas as pd
+        import psycopg2
+    except ImportError as exc:
+        logger.warning("[CalibDB] Missing dependency (%s) — skipping", exc)
+        return
+
+    try:
+        conn = psycopg2.connect(db_url)
+        df = pd.read_sql(
+            """
+            SELECT model_prob, actual_outcome AS outcome
+            FROM bet_ledger
+            WHERE actual_outcome IS NOT NULL
+              AND model_prob    IS NOT NULL
+              AND graded_at     IS NOT NULL
+            ORDER BY graded_at DESC
+            LIMIT 10000
+            """,
+            conn,
+        )
+        conn.close()
+    except Exception as exc:
+        logger.warning("[CalibDB] Postgres read failed: %s", exc)
+        return
+
+    if df.empty:
+        logger.info("[CalibDB] No settled bets found — skipping calibration")
+        return
+
+    # Normalise model_prob to 0-1 range (stored as percentage in bet_ledger)
+    df["model_prob"] = df["model_prob"].astype(float)
+    if df["model_prob"].max() > 1.5:          # stored as 0-100
+        df["model_prob"] = df["model_prob"] / 100.0
+
+    df["outcome"] = df["outcome"].astype(int)
+    df = df.dropna(subset=["model_prob", "outcome"])
+
+    if len(df) < MIN_SAMPLE:
+        logger.info("[CalibDB] Only %d settled bets (need %d) — writing identity map",
+                    len(df), MIN_SAMPLE)
+        _write_identity_map()
+        return
+
+    # Write temp CSV so existing generate_calibration_map() can process it
+    import tempfile
+    import os as _os
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
+        df.to_csv(tmp, index=False)
+        tmp_path = tmp.name
+
+    try:
+        generate_calibration_map(tmp_path)
+        logger.info("[CalibDB] Calibration map rebuilt from %d settled bets", len(df))
+    finally:
+        try:
+            _os.unlink(tmp_path)
+        except Exception:
+            pass

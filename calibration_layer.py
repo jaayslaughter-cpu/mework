@@ -604,3 +604,133 @@ def apply_isotonic_calibration(raw_prob: float, path: str = "calibration_map.jso
 
     closest_key = min(_CAL_MAP.keys(), key=lambda k: abs(float(k) - raw_prob))
     return _CAL_MAP[closest_key]
+
+
+# ── Uncertainty Penalty ───────────────────────────────────────────────────────
+
+def apply_uncertainty_penalty(prob: float, prop: dict) -> float:
+    """Pull probability toward 0.5 based on player variance and sample reliability.
+
+    Three independent penalty axes (all multiplicative):
+      1. Sample size  — fewer games => less trustworthy signal
+      2. Performance variance — high CV score => volatile output
+      3. Role stability — unstable role => unpredictable minutes/PA
+
+    Returns the penalized probability (0.01-0.99).
+    The penalty never inverts the edge — it only compresses toward 0.50.
+    """
+    games = int(prop.get("games_played", prop.get("sample_size", 50)))
+    if games < 10:
+        sample_mult = 0.82
+    elif games < 20:
+        sample_mult = 0.91
+    elif games < 40:
+        sample_mult = 0.96
+    else:
+        sample_mult = 1.00
+
+    cv = float(prop.get("cv_score", prop.get("performance_variance", 0.30)))
+    if cv > 0.80:
+        var_mult = 0.86
+    elif cv > 0.50:
+        var_mult = 0.93
+    elif cv > 0.30:
+        var_mult = 0.97
+    else:
+        var_mult = 1.00
+
+    role = float(prop.get("role_stability", prop.get("minutes_stability", 1.0)))
+    role_mult = max(0.85, min(1.0, 0.85 + 0.15 * role))
+
+    combined = max(0.72, min(1.0, sample_mult * var_mult * role_mult))
+    penalized = 0.5 + (prob - 0.5) * combined
+    return round(max(0.01, min(0.99, penalized)), 4)
+
+
+# ── Confidence Label ──────────────────────────────────────────────────────────
+
+def _prob_to_confidence_label(prob: float) -> str:
+    """Map a calibrated probability to HIGH / MEDIUM / LOW.
+
+    Based purely on edge over market (|prob - 0.50|), not ev_pct integers.
+        HIGH   >= 13 pp edge  (>=63% or <=37%)
+        MEDIUM >=  6 pp edge  (>=56% or <=44%)
+        LOW    <   6 pp edge
+    """
+    edge = abs(float(prob) - 0.5)
+    if edge >= 0.13:
+        return "HIGH"
+    if edge >= 0.06:
+        return "MEDIUM"
+    return "LOW"
+
+
+# ── Unified Probability Pipeline ──────────────────────────────────────────────
+
+def compute_unified_probability(
+    raw_model_prob: float,
+    market_implied: float,
+    prop: dict,
+    context_metrics: dict | None = None,
+    brier_score: float | None = None,
+) -> dict:
+    """Single calibrated probability pipeline. Replaces all additive score systems.
+
+    5-stage pipeline:
+      1. Isotonic calibration  -- map XGBoost output to true observed hit rate
+      2. Trust gate            -- hard override to market on bad data quality
+      3. Dynamic shrinkage     -- pull model toward market (alpha 0.40-0.60)
+      4. Uncertainty penalty   -- compress toward 0.5 for high-variance players
+      5. Brier governor        -- final safety gate when model is drifting
+
+    Returns dict with final_prob, edge, confidence_label, shrink_factor,
+    and all intermediate values for logging and features_json.
+    """
+    ctx = context_metrics or {}
+
+    calibrated = apply_isotonic_calibration(float(raw_model_prob))
+
+    override, gate_status = apply_trust_gate(calibrated, market_implied, ctx)
+    if override is not None:
+        return {
+            "final_prob":       round(override, 4),
+            "edge":             round(override - market_implied, 4),
+            "confidence_label": _prob_to_confidence_label(override),
+            "shrink_factor":    1.0,
+            "gate_status":      gate_status,
+            "raw_model_prob":   round(raw_model_prob, 4),
+            "calibrated_model": round(calibrated, 4),
+            "market_implied":   round(market_implied, 4),
+            "pre_shrink_prob":  round(calibrated, 4),
+            "pre_penalty_prob": round(override, 4),
+            "brier_used":       0.0,
+        }
+
+    reliability = float(ctx.get("reliability_score", 0.5))
+    raw_alpha = calculate_dynamic_shrink(reliability, calibrated, market_implied)
+    alpha = max(0.40, min(0.60, raw_alpha))
+    shrunk = market_implied + alpha * (calibrated - market_implied)
+
+    post_penalty = apply_uncertainty_penalty(shrunk, prop)
+
+    if brier_score is None:
+        try:
+            brier_score = get_current_brier()
+        except Exception:
+            pass
+    _brier = float(brier_score) if brier_score is not None else 0.20
+    final = apply_calibration_governor(post_penalty, _brier)
+
+    return {
+        "final_prob":       round(final, 4),
+        "edge":             round(final - market_implied, 4),
+        "confidence_label": _prob_to_confidence_label(final),
+        "shrink_factor":    round(alpha, 3),
+        "gate_status":      gate_status,
+        "raw_model_prob":   round(raw_model_prob, 4),
+        "calibrated_model": round(calibrated, 4),
+        "market_implied":   round(market_implied, 4),
+        "pre_shrink_prob":  round(calibrated, 4),
+        "pre_penalty_prob": round(shrunk, 4),
+        "brier_used":       round(_brier, 4),
+    }

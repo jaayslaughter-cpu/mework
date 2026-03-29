@@ -58,6 +58,8 @@ try:
         sniper_decision_gate, should_cash_out, apply_thermal_correction,
         ABS_FRAMING_WEIGHT, SteamMonitor, get_reliability_score,
         apply_isotonic_calibration,
+        compute_unified_probability,
+        _prob_to_confidence_label,
         apply_shadow_whiff_boost,
         apply_zone_integrity_multiplier,
         adaptive_velocity_check,
@@ -1231,9 +1233,13 @@ class _BaseAgent:
                     prob = float(self.model.predict(dmat)[0])
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
+                    # Apply isotonic calibration: XGBoost raw → true observed hit rate
+                    prob = apply_isotonic_calibration(prob)
                     return prob * 100
                 else:
-                    return float(self.model.predict_proba(feats)[0][1]) * 100
+                    raw_p = float(self.model.predict_proba(feats)[0][1])
+                    raw_p = apply_isotonic_calibration(raw_p)
+                    return raw_p * 100
             except Exception:
                 pass
         # Apply Brier-score calibration governor (shrinks toward market if model is drifting)
@@ -1366,7 +1372,23 @@ class _BaseAgent:
             "confidence":  self._confidence(ev_pct),
             "spring_training": _is_spring_training(),
         })
-        kelly = _kelly_units(model_prob / 100, side_odds)
+        # ── Unified probability pipeline (Phase 83)
+        # All pre-signals (shadow whiff, zone integrity, lineup chase) have
+        # already been applied above. Now run the single unified calibration.
+        _unified = compute_unified_probability(
+            raw_model_prob=model_prob / 100.0,
+            market_implied=implied_prob / 100.0,
+            prop=prop,
+        )
+        final_prob_pct = round(_unified["final_prob"] * 100.0, 2)
+        confidence_lbl = _unified["confidence_label"]
+        edge_pct       = round(_unified["edge"] * 100.0, 2)
+
+        # Recompute Kelly and EV on the final calibrated probability
+        kelly   = _kelly_units(final_prob_pct / 100.0, side_odds)
+        _impl   = max(implied_prob / 100.0, 0.01)
+        ev_final = round((final_prob_pct / 100.0 - _impl) / _impl * 100.0, 2)
+
         platforms = self._dfs_platforms(prop, side)
         return {
             "agent":              self.name,
@@ -1376,13 +1398,15 @@ class _BaseAgent:
             "line":               prop.get("line", 0),
             "side":               side,
             "odds_american":      prop.get("odds_american", -110),
-            "model_prob":         round(model_prob, 1),
+            "model_prob":         final_prob_pct,        # calibrated, shrunk, penalised
             "implied_prob":       round(implied_prob, 1),
-            "ev_pct":             round(ev_pct, 1),
+            "ev_pct":             ev_final,
+            "edge":               edge_pct,              # new field: model edge over market
             "kelly_units":        round(kelly, 3),
+            "shrink_factor":      _unified["shrink_factor"],
             "recommended_platform": platforms[0] if platforms else "PrizePicks",
             "checklist":          self._checklist(prop),
-            "confidence":         self._confidence(ev_pct),
+            "confidence":         confidence_lbl,         # "HIGH"/"MEDIUM"/"LOW"
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.utcnow().isoformat(),
             "_features_json":     json.dumps(_feat_vec),
@@ -1413,14 +1437,13 @@ class _BaseAgent:
         }
 
     @staticmethod
-    def _confidence(ev_pct: float) -> int:
-        # ev_pct is stored as percentage (3–20 range) in _build_bet
-        if ev_pct >= 15: return 9
-        if ev_pct >= 10: return 8
-        if ev_pct >= 7:  return 7
-        if ev_pct >= 5:  return 6
-        if ev_pct >= 3:  return 5
-        return 4
+    @staticmethod
+    def _confidence(ev_pct: float) -> str:
+        """Deprecated shim — derive label from ev_pct as probability proxy.
+        Live code paths use confidence_label from compute_unified_probability().
+        """
+        prob_proxy = 0.5 + max(-0.15, min(0.15, float(ev_pct) / 100.0))
+        return _prob_to_confidence_label(prob_proxy)
 
 
 class _EVHunter(_BaseAgent):
@@ -2714,3 +2737,16 @@ def run_xgboost_tasklet() -> None:
     else:
         logger.warning("[XGBoostTasklet] ⚠️ Below minimum threshold (%.1f%% < 77.7%%).",
                        accuracy * 100)
+
+    # ── Rebuild calibration map from live bet_ledger outcomes ────────────────
+    # Backtest → live feedback loop: settled bets → isotonic calibration →
+    # _model_prob() applies map before returning → all predictions self-correct.
+    try:
+        from calibrate_model import generate_calibration_map_from_db as _gen_calib  # noqa: PLC0415
+        _gen_calib()
+        # Force singleton reload: next _model_prob() call picks up new map
+        import calibration_layer as _cal_mod
+        _cal_mod._CAL_MAP = None
+        logger.info("[XGBoostTasklet] ✅ Calibration map rebuilt from bet_ledger.")
+    except Exception as _calib_err:
+        logger.warning("[XGBoostTasklet] Calibration map rebuild failed: %s", _calib_err)
