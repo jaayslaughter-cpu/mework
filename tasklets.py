@@ -2165,6 +2165,21 @@ def run_agent_tasklet() -> None:
 
                 bet["underdog_line"] = prop.get("underdog_line",
                                                 prop.get("over_american", -120))
+
+                # ── Sniper Decision Gate ─────────────────────────────────────
+                # Raises minimum threshold on deeper parlay rungs (rung 5+: +2pp/leg)
+                # Uses final_prob from compute_unified_probability (stored on bet)
+                _sniper_prob = float(bet.get("model_prob", 50.0)) / 100.0
+                _sniper_pass, _sniper_reason = sniper_decision_gate(
+                    _sniper_prob, len(agent_hits)
+                )
+                if not _sniper_pass:
+                    logger.debug(
+                        "[AgentTasklet] %s rung=%d sniper REJECT: %s",
+                        bet.get("player", "?"), len(agent_hits), _sniper_reason
+                    )
+                    continue
+
                 agent_hits.append(bet)
 
             except Exception as e:
