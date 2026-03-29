@@ -94,6 +94,11 @@ except ImportError:
     _NSFI_AVAILABLE = False
 
 from lineup_chase_layer import get_lineup_chase_score
+
+# ── Logger bootstrap (must precede any logger.* call below) ──────────────────
+import logging as _logging_bootstrap
+logger = _logging_bootstrap.getLogger("propiq.tasklets")
+
 try:
     from prop_enrichment_layer import enrich_props as _enrich_props
     _ENRICHMENT_AVAILABLE = True
@@ -111,17 +116,22 @@ try:
     _GAME_PRED_AVAILABLE = True
 except ImportError:
     _GAME_PRED_AVAILABLE = False
-    def _bookmaker_margin(o, u): return 0.0          # noqa: E704
-    def _kelly_criterion_wb(p, o, kf=0.25, mc=0.05): # noqa: E704
-        b = (o / 100.0) if o > 0 else (100.0 / abs(o))
-        q = 1 - p
-        raw = (b * p - q) / b
-        return min(kf * raw, mc) if raw > 0 else 0.0
-    def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
-    def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
-    def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
-    def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
-    _MAX_VIG = 0.08
+    # Only define game-prediction stubs here — odds_math functions already defined above
+    def get_game_predictions(): return []           # noqa: E704
+    def get_single_game_prediction(*a, **kw): return None  # noqa: E704
+    # Fallback odds helpers only if odds_math didn't load
+    if not _ODDS_MATH_AVAILABLE:
+        def _bookmaker_margin(o, u): return 0.0     # noqa: E704
+        def _kelly_criterion_wb(prob, odds_american, kelly_fraction=0.25, max_cap=0.05):  # noqa: E704
+            b = (odds_american / 100.0) if odds_american > 0 else (100.0 / abs(odds_american))
+            q = 1 - prob
+            raw = (b * prob - q) / b
+            return min(kelly_fraction * raw, max_cap) if raw > 0 else 0.0
+        def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
+        def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
+        def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
+        def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
+        _MAX_VIG = 0.08
 
 import datetime
 import json
@@ -169,8 +179,6 @@ class _NullRedis:
     def delete(*a, **kw):  return None
     @staticmethod
     def ping(*a, **kw):    return False
-
-logger = logging.getLogger("propiq.tasklets")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1882,7 +1890,9 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
     combined_ev = round(
         (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
     ) if legs else 0.0
-    avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
+    _conf_to_num = {"elite": 9, "high": 7, "medium": 5, "low": 3}
+    avg_conf = round(sum(_conf_to_num.get(str(lg.get("confidence", "medium")).lower(), 5)
+                         for lg in legs) / max(len(legs), 1), 1)
     platform = legs[0].get("recommended_platform", "PrizePicks").lower() if legs else "prizepicks"
     return {
         "agent":           agent_name,
@@ -2110,8 +2120,20 @@ def _get_props(hub: dict) -> list[dict]:
                 logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
         return props
 
-    # No real props available — skip cycle entirely (no synthetic)
-    return []
+    # 3. Hub empty (Redis down) — fall back to direct API fetches
+    logger.warning("[AgentTasklet] Hub empty — falling back to direct Underdog/PrizePicks fetch.")
+    direct_ud = _fetch_underdog_props_direct()
+    direct_pp = _fetch_prizepicks_direct()
+    combined: list[dict] = []
+    seen_keys: set = set()
+    for p in direct_ud + direct_pp:
+        k = (p.get("player", "").lower(), p.get("prop_type", ""))
+        if k not in seen_keys:
+            seen_keys.add(k)
+            combined.append(p)
+    if combined:
+        logger.info("[AgentTasklet] Direct fetch fallback: %d props", len(combined))
+    return combined
 
 
 def run_agent_tasklet() -> None:
