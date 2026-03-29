@@ -1350,9 +1350,9 @@ class _BaseAgent:
     # ─────────────────────────────────────────────────────────────────────
     @staticmethod
     def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
-        """Return a 20-element float list usable by XGBoost.
+        """Return a 27-element float list usable by XGBoost.
         All values normalised to [0, 1] or small bounded floats.
-        Schema is FIXED — any future changes must keep len == 20.
+        Schema is FIXED — any future changes must keep len == 27.
         """
         import math
 
@@ -1439,6 +1439,20 @@ class _BaseAgent:
         _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
         conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
 
+        # ── Enrichment signal slots (Phase 97) ───────────────────────────────
+        # These 7 signals were computed by prop_enrichment_layer and attached to
+        # every prop but never fed to XGBoost — now they are.  Normalised [0,1].
+        form_adj      = _clamp((float(prop.get("_form_adj",            0.0) or 0.0) + 0.20) / 0.40)  # hot/cold streak
+        cv_nudge      = _clamp((float(prop.get("_cv_nudge",            0.0) or 0.0) + 0.15) / 0.30)  # CV consistency
+        bayesian_nudge= _clamp((float(prop.get("_bayesian_nudge",      0.0) or 0.0) + 0.15) / 0.30)  # Bayesian update
+        marcel_adj    = _clamp((float(prop.get("_marcel_adj",          0.0) or 0.0) + 0.02) / 0.04)  # Marcel ±1.8pp
+        predict_plus  = _clamp((float(prop.get("_predict_plus_adj",    0.0) or 0.0) + 0.08) / 0.16)  # Predict+ arsenal
+        ps_prob       = _clamp(float(prop.get("_player_specific_prob", 0.0) or 0.0))                  # Poisson/binomial rate
+        has_enrich    = float(any([
+            prop.get("_form_adj"), prop.get("_cv_nudge"), prop.get("_bayesian_nudge"),
+            prop.get("_marcel_adj"), prop.get("_predict_plus_adj"), prop.get("_player_specific_prob"),
+        ]))  # 1.0 = enrichment ran; 0.0 = cold start / enrichment unavailable
+
         vec = [
             k_rate, bb_rate, era, whip,           # 0-3  pitcher/batter stats
             shadow_whiff, zone_mult,               # 4-5  statcast contact quality
@@ -1449,8 +1463,15 @@ class _BaseAgent:
             line_val, impl_prob,                   # 14-15 market (sb_implied when avail)
             pt_enc, side_enc,                      # 16-17 prop meta
             brier, sb_line_gap,                    # 18-19 calibration + sharp line gap
+            form_adj,                              # 20   hot/cold form streak
+            cv_nudge,                              # 21   CV consistency nudge
+            bayesian_nudge,                        # 22   Bayesian update nudge
+            marcel_adj,                            # 23   Marcel projection adjustment
+            predict_plus,                          # 24   Predict+ arsenal adjustment
+            ps_prob,                               # 25   player-specific Poisson/binomial prob
+            has_enrich,                            # 26   enrichment completeness flag
         ]
-        assert len(vec) == 20, f"Feature vector length {len(vec)} != 20"
+        assert len(vec) == 27, f"Feature vector length {len(vec)} != 27"
         return [round(v, 6) for v in vec]
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
@@ -2782,7 +2803,15 @@ def run_backtest_tasklet() -> None:
         logger.info("[BacktestTasklet] Insufficient data (%d rows) — skipping.", len(rows))
         return
 
-    X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
+    # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
+    _TARGET_FEATS = 27
+    _raw_feats = [json.loads(r[0]) for r in rows]
+    _padded    = [
+        f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
+        else f[:_TARGET_FEATS]
+        for f in _raw_feats
+    ]
+    X = np.array(_padded, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     split      = int(len(X) * 0.8)
@@ -3330,7 +3359,15 @@ def run_xgboost_tasklet() -> None:
         logger.info("[XGBoostTasklet] Insufficient training data (%d rows) — skipping.", len(rows))
         return
 
-    X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
+    # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
+    _TARGET_FEATS = 27
+    _raw_feats = [json.loads(r[0]) for r in rows]
+    _padded    = [
+        f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
+        else f[:_TARGET_FEATS]
+        for f in _raw_feats
+    ]
+    X = np.array(_padded, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
