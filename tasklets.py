@@ -35,6 +35,22 @@ except ImportError:
     def _variance_penalty(result): return 1.0              # noqa: E704
     def _inject_team_total(prop, hub): pass                # noqa: E704
 
+# ── CLV Feedback Engine (Step 2 upgrade: per-edge-tag adaptive thresholds) ────
+try:
+    from clv_feedback_engine import (
+        get_threshold       as _get_ev_threshold,
+        rebuild_thresholds  as _rebuild_ev_thresholds,
+        load_thresholds     as _load_ev_thresholds,
+        build_discord_summary as _clv_discord_summary,
+    )
+    _CLV_ENGINE_AVAILABLE = True
+except ImportError:
+    _CLV_ENGINE_AVAILABLE = False
+    def _get_ev_threshold(edge_reasons=None): return MIN_EV_THRESH   # noqa: E704
+    def _rebuild_ev_thresholds(): return {}                          # noqa: E704
+    def _load_ev_thresholds(): return {}                             # noqa: E704
+    def _clv_discord_summary(): return ""                            # noqa: E704
+
 # WagerBrain-enhanced odds math (bookmaker_margin, kelly_criterion, true_odds_ev)
 try:
     from odds_math import (
@@ -1613,7 +1629,7 @@ class _UnderMachine(_BaseAgent):
         else:
             ev_pct = (model_prob / 100 - implied) / implied
 
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1672,7 +1688,7 @@ class _UmpireAgent(_BaseAgent):
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1709,7 +1725,7 @@ class _F5Agent(_BaseAgent):
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1752,7 +1768,7 @@ class _FadeAgent(_BaseAgent):
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (fade_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", fade_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1799,7 +1815,7 @@ class _LineValueAgent(_BaseAgent):
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1845,7 +1861,7 @@ class _BullpenAgent(_BaseAgent):
         over_odds = prop.get("over_american", -110)
         implied   = _american_to_implied(over_odds) / 100
         ev_pct    = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1899,7 +1915,7 @@ class _WeatherAgent(_BaseAgent):
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
             ev_pct     = (model_prob / 100 - implied) / implied
-            if ev_pct >= MIN_EV_THRESH:
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "OVER", model_prob,
                                        implied * 100, ev_pct * 100)
 
@@ -1911,7 +1927,7 @@ class _WeatherAgent(_BaseAgent):
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
             ev_pct     = (model_prob / 100 - implied) / implied
-            if ev_pct >= MIN_EV_THRESH:
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "OVER", model_prob,
                                        implied * 100, ev_pct * 100)
 
@@ -1971,7 +1987,7 @@ class _SteamAgent(_BaseAgent):
             model_prob = 100 - model_prob  # flip for Under
 
         ev_pct = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, fade_side, model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1997,7 +2013,7 @@ class _MLEdgeAgent(_BaseAgent):
         odds   = over_odds if side == "OVER" else prop.get("under_american", -110)
         imp    = _american_to_implied(odds)
         ev_pct = (model_prob / 100 - imp) / imp
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, side, model_prob, imp * 100, ev_pct * 100)
         return None
 
@@ -2189,7 +2205,7 @@ class _CorrelatedParlayAgent(_BaseAgent):
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds) * 100
         ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -2217,7 +2233,7 @@ class _StackSmithAgent(_BaseAgent):
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds) * 100
         ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -2241,7 +2257,7 @@ class _ChalkBusterAgent(_BaseAgent):
             implied    = _american_to_implied(under_odds) * 100
             under_prob = 100.0 - model_prob
             ev_pct     = (under_prob / 100 - _american_to_implied(under_odds)) / _american_to_implied(under_odds) * 100
-            if ev_pct >= MIN_EV_THRESH:
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "UNDER", model_prob, implied, ev_pct)
         return None
 
@@ -2275,7 +2291,7 @@ class _SharpFadeAgent(_BaseAgent):
             implied    = _american_to_implied(odds) * 100
             prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
             ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
-            if ev_pct >= MIN_EV_THRESH:
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
         return None
 
@@ -2302,7 +2318,7 @@ class _TimeValueAgent(_BaseAgent):
         over_odds   = prop.get("over_american", -115)
         implied     = _american_to_implied(over_odds) * 100
         ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -2329,7 +2345,7 @@ class _LineupChaseAgent(_BaseAgent):
         over_odds   = prop.get("over_american", -115)
         implied     = _american_to_implied(over_odds) * 100
         ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -2360,7 +2376,7 @@ class _PropCycleAgent(_BaseAgent):
         implied     = _american_to_implied(odds) * 100
         prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct      = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, side, model_prob, implied, ev_pct)
         return None
 
@@ -2393,7 +2409,7 @@ class _UnderDogAgent(_BaseAgent):
         implied    = _american_to_implied(odds) * 100
         prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, side, model_prob, implied, ev_pct)
         return None
 
@@ -2717,10 +2733,10 @@ def run_agent_tasklet() -> None:
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
-                             units_wagered)
+                             units_wagered, sim_edge_reasons)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s))
+                                ABS(%s), %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -2737,6 +2753,7 @@ def run_agent_tasklet() -> None:
                             (_leg.get("recommended_platform") or "prizepicks").lower(),
                             _leg.get("_features_json"),
                             _leg.get("kelly_units") or 0.02,
+                            __import__("json").dumps(_leg.get("sim_edge_reasons") or []),
                         ),
                     )
         _conn.commit()
@@ -3012,6 +3029,20 @@ def run_backtest_tasklet() -> None:
     else:
         logger.warning("[BacktestTasklet] ⚠️ Model below threshold (%.3f < %.3f). "
                        "Retraining queued.", accuracy, ACCURACY_THRESHOLD)
+
+    # ── Step 2: Rebuild edge thresholds from settled bet history ──────────────
+    # After every weekly retrain, update per-tag EV thresholds so edge types
+    # with proven win-rates lower their bar and noisy edge types raise theirs.
+    try:
+        new_thresholds = _rebuild_ev_thresholds()
+        if new_thresholds:
+            logger.info("[BacktestTasklet] 🎯 Rebuilt %d edge thresholds: %s",
+                        len(new_thresholds), new_thresholds)
+        else:
+            logger.info("[BacktestTasklet] No edge threshold overrides generated "
+                        "(insufficient settled history).")
+    except Exception as _thr_exc:
+        logger.warning("[BacktestTasklet] Edge threshold rebuild failed: %s", _thr_exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
