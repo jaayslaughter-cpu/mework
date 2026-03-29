@@ -2448,41 +2448,47 @@ def run_agent_tasklet() -> None:
     r_dedup    = _redis()
     _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
 
-    fresh_parlays = []
+    # ── One play per agent per day — hard gate ───────────────────────────────────────
+    # Claim the slot IMMEDIATELY when iterating so that multiple parlays from
+    # the same agent in a single 30-second cycle cannot all slip through before
+    # any lock is written.  Only the highest-EV parlay per agent advances.
+    best_per_agent: dict = {}   # agent_name -> (ev, parlay, r_daily_key)
     for parlay in all_parlays:
         agent_name = parlay.get("agent", "unknown")
 
-        # ── In-memory check (primary — always works) ──
+        # In-memory gate (primary — works without Redis)
         if _AGENT_SENT_TODAY.get(agent_name) == today_str:
             logger.debug("[AgentTasklet] %s already sent today — skipping.", agent_name)
             continue
 
-        # ── Redis check (secondary — cross-process guard) ──
+        # Redis gate (secondary — cross-process guard)
         r_daily_key = f"agent_sent:{agent_name}:{today_str}"
         try:
             if r_dedup.exists(r_daily_key):
-                # Sync in-memory so subsequent cycles skip without Redis round-trip
-                _AGENT_SENT_TODAY[agent_name] = today_str
+                _AGENT_SENT_TODAY[agent_name] = today_str   # sync in-memory
                 logger.debug("[AgentTasklet] %s already sent today (Redis) — skipping.", agent_name)
                 continue
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
 
-        fresh_parlays.append((parlay, agent_name, r_daily_key))
+        # Keep only the single highest-EV parlay per agent this cycle
+        ev = parlay.get("combined_ev_pct", 0)
+        if agent_name not in best_per_agent or ev > best_per_agent[agent_name][0]:
+            best_per_agent[agent_name] = (ev, parlay, r_daily_key)
 
-    skipped = len(all_parlays) - len(fresh_parlays)
+    skipped = len(all_parlays) - len(best_per_agent)
     if skipped:
-        logger.info("[AgentTasklet] Skipped %d parlay(s) — agents already sent today.", skipped)
+        logger.info("[AgentTasklet] Skipped %d parlay(s) — agents already sent today or lower-EV duplicate.", skipped)
 
-    for parlay, agent_name, r_daily_key in fresh_parlays:
+    for agent_name, (_ev, parlay, r_daily_key) in best_per_agent.items():
+        # Claim BEFORE sending — prevents double-send if Discord call is slow
+        _AGENT_SENT_TODAY[agent_name] = today_str
+        try:
+            r_dedup.setex(r_daily_key, _DAY_TTL, "1")
+        except Exception:
+            pass
         try:
             discord_alert.send_parlay_alert(parlay)
-            # Mark sent in both in-memory dict and Redis
-            _AGENT_SENT_TODAY[agent_name] = today_str
-            try:
-                r_dedup.setex(r_daily_key, _DAY_TTL, "1")
-            except Exception:
-                pass
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
