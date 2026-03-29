@@ -35,6 +35,22 @@ except ImportError:
     def _variance_penalty(result): return 1.0              # noqa: E704
     def _inject_team_total(prop, hub): pass                # noqa: E704
 
+# ── Lock-Time Gate (Step 3 upgrade: prevent lookahead bias) ───────────────────
+try:
+    from lock_time_gate import (
+        should_skip_prop      as _should_skip_prop,
+        stamp_prop            as _stamp_prop,
+        fetch_game_times_today as _fetch_game_times_today,
+        data_is_contaminated  as _data_is_contaminated,
+    )
+    _LOCK_GATE_AVAILABLE = True
+except ImportError:
+    _LOCK_GATE_AVAILABLE = False
+    def _should_skip_prop(prop, game_times): return (False, "gate_unavailable")   # noqa: E704
+    def _stamp_prop(prop, game_times): return prop                                 # noqa: E704
+    def _fetch_game_times_today(): return {}                                       # noqa: E704
+    def _data_is_contaminated(prop, ts, game_times): return False                 # noqa: E704
+
 # ── CLV Feedback Engine (Step 2 upgrade: per-edge-tag adaptive thresholds) ────
 try:
     from clv_feedback_engine import (
@@ -1105,7 +1121,10 @@ def _ensure_bet_ledger() -> None:
                     graded_at       TIMESTAMP,
                     features_json   TEXT,
                     actual_outcome  INTEGER,
-                    created_at      TIMESTAMP    DEFAULT NOW()
+                    created_at      TIMESTAMP    DEFAULT NOW(),
+                    lookahead_safe  BOOLEAN      DEFAULT TRUE,
+                    game_time_utc   VARCHAR(30),
+                    game_state      VARCHAR(20)
                 )
             """)
         conn.commit()
@@ -1178,6 +1197,7 @@ def run_data_hub_tasklet() -> None:
             "lineups":            _fetch_mlb_lineups_today(),
             "projected_starters": _fetch_mlb_probable_starters(),
             "standings":          _fetch_mlb_standings(),
+            "game_times":         _fetch_game_times_today(),  # Step 3: first-pitch UTC + status
         }
         _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
 
@@ -2601,6 +2621,21 @@ def run_agent_tasklet() -> None:
     # This populates the fields _build_feature_vector() reads (k_rate, shadow_whiff, etc.)
     import datetime as _dt
     props = _enrich_props(props, hub, season=_dt.date.today().year)
+
+    # ── Step 3: Stamp game_time_utc / game_state / lookahead_safe on each prop ──
+    game_times = (hub.get("context") or {}).get("game_times", {})
+    if _LOCK_GATE_AVAILABLE and game_times:
+        for _p in props:
+            _stamp_prop(_p, game_times)
+        props_before = len(props)
+        props = [
+            p for p in props
+            if not _should_skip_prop(p, game_times)[0]
+        ]
+        dropped = props_before - len(props)
+        if dropped:
+            logger.info("[LockGate] Dropped %d props (game Live/Final).", dropped)
+
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
 
     all_parlays: list[dict] = []
@@ -2733,10 +2768,11 @@ def run_agent_tasklet() -> None:
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
-                             units_wagered, sim_edge_reasons)
+                             units_wagered, sim_edge_reasons,
+                             lookahead_safe, game_time_utc, game_state)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s), %s)
+                                ABS(%s), %s, %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -2754,6 +2790,9 @@ def run_agent_tasklet() -> None:
                             _leg.get("_features_json"),
                             _leg.get("kelly_units") or 0.02,
                             __import__("json").dumps(_leg.get("sim_edge_reasons") or []),
+                            _leg.get("lookahead_safe", True),
+                            _leg.get("game_time_utc", ""),
+                            _leg.get("game_state", "unknown"),
                         ),
                     )
         _conn.commit()
@@ -3489,6 +3528,7 @@ def run_xgboost_tasklet() -> None:
                 WHERE graded_at IS NOT NULL
                   AND features_json IS NOT NULL
                   AND actual_outcome IS NOT NULL
+                  AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                 ORDER BY graded_at DESC
                 LIMIT 20000
                 """
