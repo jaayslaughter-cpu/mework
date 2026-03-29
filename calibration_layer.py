@@ -70,6 +70,23 @@ _STAT_MAP: Dict[str, str] = {
     "ha":                  "hits_allowed",
     "walks_allowed":       "walks_allowed",
     "batter_strikeouts":   "strikeouts",  # Underdog variation
+    # Platform-specific prop names (PrizePicks + Underdog)
+    "outs_recorded":           "outs_recorded",
+    "outs recorded":           "outs_recorded",
+    "fantasy_score":           "fantasy_score",
+    "fantasy score":           "fantasy_score",
+    "pitcher fantasy score":   "fantasy_score",
+    "hitter fantasy score":    "fantasy_score",
+    "pitcher_fantasy_score":   "fantasy_score",
+    "hitter_fantasy_score":    "fantasy_score",
+    "fantasy pts":             "fantasy_score",
+    "fantasy_pts":             "fantasy_score",
+    "hits + runs + rbis":      "hits_runs_rbis",
+    "hits + runs + rbi":       "hits_runs_rbis",
+    "hits+runs+rbis":          "hits_runs_rbis",
+    "h+r+rbi+":                "hits_runs_rbis",
+    "earned_runs_allowed":     "earned_runs",
+    "earned runs allowed":     "earned_runs",
 }
 
 

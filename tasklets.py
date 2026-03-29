@@ -66,7 +66,13 @@ except ImportError:
         if not s: return ""
         m = {"hr":"home_runs","h":"hits","k":"strikeouts","ks":"strikeouts",
              "tb":"total_bases","sb":"stolen_bases","rbi":"rbis","bb":"walks",
-             "er":"earned_runs","p_outs":"pitching_outs","h+r+rbi":"hits_runs_rbis"}
+             "er":"earned_runs","p_outs":"pitching_outs","h+r+rbi":"hits_runs_rbis",
+             "outs_recorded":"outs_recorded","outs recorded":"outs_recorded",
+             "fantasy_score":"fantasy_score","fantasy score":"fantasy_score",
+             "pitcher fantasy score":"fantasy_score","hitter fantasy score":"fantasy_score",
+             "fantasy pts":"fantasy_score","fantasy_pts":"fantasy_score",
+             "hits + runs + rbis":"hits_runs_rbis","hits+runs+rbis":"hits_runs_rbis",
+             "hits + runs + rbi":"hits_runs_rbis","h+r+rbi+":"hits_runs_rbis"}
         s2 = str(s).lower().replace(" ","_").replace("-","_").strip()
         return m.get(s2, s2)
     ABS_FRAMING_WEIGHT = 0.20
@@ -582,6 +588,14 @@ def _fetch_prizepicks_direct() -> list[dict]:
             line_val = attrs.get("line_score")
             if line_val is None:
                 continue
+            # STANDARD filter: skip alt/goblin/demon/flex board types
+            board_type  = str(attrs.get("board_type", "standard") or "standard").lower()
+            odds_tier   = str(attrs.get("odds_type",  "standard") or "standard").lower()
+            adjusted    = attrs.get("adjusted_odds", False)
+            if board_type not in ("standard", "") or odds_tier not in ("standard", ""):
+                continue
+            if adjusted:
+                continue
             pid = (
                 proj.get("relationships", {})
                     .get("new_player", {})
@@ -591,10 +605,16 @@ def _fetch_prizepicks_direct() -> list[dict]:
             pname = player_map.get(pid, "")
             if not pname:
                 continue
+            stat_norm = _norm_stat(stat_raw)
             props.append({
-                "player_name": pname,
-                "stat":        stat_raw,
-                "line":        float(line_val),
+                "player":        pname,
+                "player_name":   pname,
+                "stat":          stat_norm,
+                "prop_type":     stat_norm,
+                "line":          float(line_val),
+                "over_american":  int(attrs.get("over_odds", -110) or -110),
+                "under_american": int(attrs.get("under_odds", -110) or -110),
+                "platform":      "PrizePicks",
             })
         logger.info("[DataHub] PrizePicks direct: %d props", len(props))
         return props
@@ -630,6 +650,15 @@ def _fetch_underdog_props_direct() -> list[dict]:
         for line in data.get("over_under_lines", []):
             if line.get("status") != "active":
                 continue
+            # Enforce STANDARD only — skip FLEX / alt / goblin / demon lines
+            ou_check = line.get("over_under") or {}
+            entry_type = (
+                line.get("entry_type")
+                or ou_check.get("entry_type")
+                or line.get("payout_multiplier_type", "")
+            )
+            if entry_type and str(entry_type).upper() not in ("STANDARD", ""):
+                continue
             stable_id = line.get("stable_id", line.get("id", ""))
             if stable_id in seen:
                 continue
@@ -647,11 +676,14 @@ def _fetch_underdog_props_direct() -> list[dict]:
             if not name:
                 continue
             props.append({
-                "player":        name,
-                "stat_type":     stat_ud,
-                "line":          float(line.get("stat_value") or ou.get("stat_value") or 1.5),
-                "over_american": int(line.get("over_american", -115) or -115),
-                "under_american":int(line.get("under_american", -115) or -115),
+                "player":         name,
+                "player_name":    name,
+                "stat_type":      stat_ud,
+                "prop_type":      stat_ud,
+                "line":           float(line.get("stat_value") or ou.get("stat_value") or 1.5),
+                "over_american":  int(line.get("over_american", -115) or -115),
+                "under_american": int(line.get("under_american", -115) or -115),
+                "platform":       "Underdog",
             })
         logger.info("[DataHub] Underdog direct: %d props", len(props))
         return props
@@ -1287,6 +1319,7 @@ class _UmpireAgent(_BaseAgent):
     name = "UmpireAgent"
     # Canonical pitcher stat set — populated via _norm_stat() at ingestion
     _PITCHER_STATS = {"strikeouts", "earned_runs", "pitching_outs", "innings_pitched",
+                        "outs_recorded", "fantasy_score", "hits_allowed", "walks_allowed",
                       "pitching_wins", "hits_allowed", "walks_allowed"}
     # ABS 2026: catcher framing weight reduced 80 % per ABS Challenge System
     _FRAMING_WEIGHT = ABS_FRAMING_WEIGHT  # 0.20
@@ -1296,7 +1329,7 @@ class _UmpireAgent(_BaseAgent):
         if not umpires:
             return None
         prop_type = prop.get("prop_type", "")
-        if "K" not in prop_type and "strikeout" not in prop_type.lower():
+        if _norm_stat(prop_type) not in self._PITCHER_STATS:
             return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type)
         model_prob = min(model_prob + 5.0, 95.0)
@@ -1394,7 +1427,7 @@ class _BullpenAgent(_BaseAgent):
     name = "BullpenAgent"
     # Canonical hitter stat set — populated via _norm_stat() at ingestion
     _HITTER_STATS = {"home_runs", "rbis", "hits", "total_bases", "hits_runs_rbis",
-                     "stolen_bases", "singles", "walks", "runs"}
+                     "stolen_bases", "singles", "walks", "runs", "fantasy_score"}
 
     def evaluate(self, prop: dict) -> dict | None:
         """Targets high-leverage relief situations (fatigue 0-4 scale)."""
@@ -1404,7 +1437,7 @@ class _BullpenAgent(_BaseAgent):
         fatigue   = fatigue_map.get(team, 2)
 
         prop_type = prop.get("prop_type", "")
-        if "HR" not in prop_type and "RBI" not in prop_type and "H" not in prop_type:
+        if _norm_stat(prop_type) not in self._HITTER_STATS:
             return None
 
         model_prob = self._model_prob(player, prop_type)
@@ -1440,7 +1473,7 @@ class _WeatherAgent(_BaseAgent):
 
         prop_type = prop.get("prop_type", "")
         if wind_mph >= 10 and "out" in wind_dir.lower() and (
-                "HR" in prop_type or "TB" in prop_type):
+                _norm_stat(prop_type) in {"home_runs", "total_bases", "hits_runs_rbis", "fantasy_score"}):
             model_prob = self._model_prob(player, prop_type)
             model_prob = min(model_prob + 8.0, 95.0)
             over_odds  = prop.get("over_american", -110)
@@ -2226,6 +2259,9 @@ def _get_stat(stats: dict, prop_type: str) -> float | None:
         "hits_allowed":  "HitsAllowed",
         "walks_allowed": "WalksAllowed",
         "pitching_outs": "InningsPitched",
+        "outs_recorded": "__outs_recorded__",  # computed below
+        "hits_runs_rbis": "__composite__",      # computed below
+        "fantasy_score":  "__fantasy_score__",  # computed below
         # Legacy uppercase abbreviations (fallback)
         "h":  "Hits",    "hr": "HomeRuns",  "r":  "Runs",
         "sb": "StolenBases", "tb": "TotalBases",
@@ -2238,6 +2274,39 @@ def _get_stat(stats: dict, prop_type: str) -> float | None:
             prop_key = prop_key[len(prefix):]
 
     field = mapping.get(prop_key)
+    if field == "__outs_recorded__":
+        # IP stored as e.g. 6.2 = 6 innings 2 outs (NOT 6.67)
+        ip = stats.get("InningsPitched")
+        if ip is not None:
+            ip = float(ip)
+            full = int(ip)
+            partial = round((ip % 1) * 10)  # 6.2 → partial=2
+            return float(full * 3 + partial)
+        return None
+    if field == "__composite__":
+        # H + R + RBI composite
+        h   = stats.get("Hits",          stats.get("H", 0)) or 0
+        r   = stats.get("Runs",          stats.get("R", 0)) or 0
+        rbi = stats.get("RunsBattedIn",  stats.get("RBI", 0)) or 0
+        return float(h) + float(r) + float(rbi)
+    if field == "__fantasy_score__":
+        # PrizePicks hitter FS: 1×H, 2×2B, 3×3B, 4×HR, 1×R, 1×RBI, 2×SB
+        # Pitcher FS: 3×K, 1×IP, -2×ER (PP convention)
+        # If we don't have enough data, return None so settlement marks pending
+        k   = stats.get("Strikeouts")
+        ip  = stats.get("InningsPitched")
+        er  = stats.get("EarnedRuns")
+        if k is not None and ip is not None and er is not None:
+            # Pitcher fantasy score
+            return round(float(k) * 3 + float(ip) - float(er) * 2, 2)
+        h   = stats.get("Hits");   rn = stats.get("Runs")
+        rbi = stats.get("RunsBattedIn"); hr = stats.get("HomeRuns")
+        sb  = stats.get("StolenBases")
+        if h is not None and rn is not None and rbi is not None:
+            fs = (float(h or 0) + float(rn or 0) + float(rbi or 0) +
+                  float(hr or 0) * 3 + float(sb or 0) * 2)
+            return round(fs, 2)
+        return None
     if field:
         val = stats.get(field)
         return float(val) if val is not None else None
