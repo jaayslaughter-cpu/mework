@@ -3128,7 +3128,7 @@ def run_xgboost_tasklet() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT features_json, actual_outcome
+                SELECT features_json, actual_outcome, graded_at
                 FROM bet_ledger
                 WHERE graded_at IS NOT NULL
                   AND features_json IS NOT NULL
@@ -3149,8 +3149,20 @@ def run_xgboost_tasklet() -> None:
     X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+    # ── Recency decay: recent bets matter more than old ones ──────────────
+    # weight = e^(-0.01 × days_ago)
+    # Last week ≈ 0.93 | 30 days ≈ 0.74 | 90 days ≈ 0.41 | Opening Day ≈ 0.16
+    now_utc = datetime.datetime.utcnow()
+    sample_weights = np.array([
+        np.exp(-0.01 * max((now_utc - (
+            r[2] if isinstance(r[2], datetime.datetime)
+            else datetime.datetime.fromisoformat(str(r[2]))
+        ).replace(tzinfo=None)).days, 0))
+        for r in rows
+    ], dtype=np.float32)
+
+    X_train, X_test, y_train, y_test, w_train, _ = train_test_split(
+        X, y, sample_weights, test_size=0.2, random_state=42, stratify=y
     )
 
     model = xgb.XGBClassifier(
@@ -3162,6 +3174,7 @@ def run_xgboost_tasklet() -> None:
     )
     model.fit(
         X_train, y_train,
+        sample_weight=w_train,
         eval_set=[(X_test, y_test)],
         verbose=False,
     )
