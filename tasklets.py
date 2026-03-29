@@ -189,6 +189,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
+MIN_CONFIDENCE    = 7          # plays below 7/10 are never sent to Discord
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -2470,6 +2471,12 @@ def run_agent_tasklet() -> None:
                 continue
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
+
+        # Confidence gate — 7/10 minimum, nothing lower reaches Discord
+        play_conf = parlay.get("confidence", 0)
+        if play_conf < MIN_CONFIDENCE:
+            logger.debug("[AgentTasklet] %s confidence %.1f < 7 — skipping.", agent_name, play_conf)
+            continue
 
         # Keep only the single highest-EV parlay per agent this cycle
         ev = parlay.get("combined_ev_pct", 0)
