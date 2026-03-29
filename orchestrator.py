@@ -194,17 +194,13 @@ async def _startup_dispatch_if_ready() -> None:
     for attempt in range(1, 7):
         # Read hub directly from in-memory fallback (_mem_get) — avoids
         # Redis dependency that caused "waiting" loops in prior deployments
-        try:
-            from tasklets import _mem_get  # noqa: PLC0415
-            hub = _mem_get("mlb_hub") or {}
-        except Exception:
-            hub = read_hub()
+        hub = read_hub()
 
         # DataHub is ready when game_states is populated (ESPN always works)
         game_states = hub.get("game_states", {})
         has_context = bool(hub.get("context"))
-        has_games = bool(game_states)
-        has_props = bool(hub.get("dfs", {}).get("prizepicks"))
+        has_games = bool(hub.get("context", {}).get("projected_starters"))
+        has_props = bool(hub.get("dfs", {}).get("underdog"))
 
         if has_games or has_context or has_props:
             logger.info(
@@ -370,14 +366,9 @@ async def get_insights():
     lb = read_leaderboard()
     hub = read_hub()
     agents = get_agents()
-    agent_status = {}
-    for name, agent in agents.items():
-        stats = agent.stats
-        pending = len(agent.db.get_pending_bets(name))
-        agent_status[name] = {**stats, "pending_bets": pending}
     return JSONResponse({
-        "leaderboard": lb.get("leaderboard", []),
-        "agent_status": agent_status,
+        "leaderboard": lb,
+        "agents": agents,
         "games_today": len(hub.get("games_today", [])),
         "timestamp": lb.get("timestamp"),
     })
@@ -390,7 +381,8 @@ async def get_leaderboard():
 
 @app.get("/leaderboard/live")
 async def get_leaderboard_live():
-    return JSONResponse(run_leaderboard_tasklet())
+    run_leaderboard_tasklet()
+    return JSONResponse({"leaderboard": read_leaderboard()})
 
 
 @app.get("/backtest/latest")
@@ -407,14 +399,15 @@ async def get_backtest():
 
 @app.post("/backtest/run")
 async def trigger_backtest(start_date: str = None, end_date: str = None):
-    asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet, start_date, end_date))
+    asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet))
     return JSONResponse({"status": "started", "message": "Backtest running in background"})
 
 
 @app.post("/grade")
 async def trigger_grading_endpoint(game_date: str = None):
-    result = await run_grading_tasklet(game_date=game_date)
-    return JSONResponse(result)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_grading_tasklet)
+    return JSONResponse({"status": "ok", "message": "Grading complete — check Discord for recap"})
 
 
 @app.post("/xgboost/retrain")

@@ -22,6 +22,8 @@ Railway deployment notes
 """
 
 from __future__ import annotations
+import logging as _early_logging
+logger = _early_logging.getLogger("propiq.tasklets")
 
 # WagerBrain-enhanced odds math (bookmaker_margin, kelly_criterion, true_odds_ev)
 try:
@@ -58,8 +60,6 @@ try:
         sniper_decision_gate, should_cash_out, apply_thermal_correction,
         ABS_FRAMING_WEIGHT, SteamMonitor, get_reliability_score,
         apply_isotonic_calibration,
-        compute_unified_probability,
-        _prob_to_confidence_label,
         apply_shadow_whiff_boost,
         apply_zone_integrity_multiplier,
         adaptive_velocity_check,
@@ -89,49 +89,40 @@ try:
 except ImportError:
     _DRIFT_MONITOR_AVAILABLE = False
     def get_current_brier(): return 0.18
-    _NSFI_AVAILABLE = True
-except ImportError:
-    _NSFI_AVAILABLE = False
 
 from lineup_chase_layer import get_lineup_chase_score
-
-# ── Logger bootstrap (must precede any logger.* call below) ──────────────────
-import logging as _logging_bootstrap
-logger = _logging_bootstrap.getLogger("propiq.tasklets")
-
+try:
+    from base_rate_model import get_model_prob as _base_rate_prob
+    _BASE_RATE_AVAILABLE = True
+except ImportError:
+    _BASE_RATE_AVAILABLE = False
+    def _base_rate_prob(prop, side="OVER"): return 50.0  # noqa: E704
 try:
     from prop_enrichment_layer import enrich_props as _enrich_props
     _ENRICHMENT_AVAILABLE = True
-    logger.info("[Enrichment] prop_enrichment_layer loaded.")
 except ImportError:
     _ENRICHMENT_AVAILABLE = False
-    def _enrich_props(props, hub, season=None): return props
-    logger.warning("[Enrichment] prop_enrichment_layer not found — props run unenriched.")
+    def _enrich_props(props, hub, season=None): return props  # noqa: E704
 
 try:
     from game_prediction_layer import (
         fetch_game_predictions_today as get_game_predictions,
-        get_single_game_prediction,
+        get_game_prediction as get_single_game_prediction,
     )
     _GAME_PRED_AVAILABLE = True
 except ImportError:
     _GAME_PRED_AVAILABLE = False
-    # Only define game-prediction stubs here — odds_math functions already defined above
-    def get_game_predictions(): return []           # noqa: E704
-    def get_single_game_prediction(*a, **kw): return None  # noqa: E704
-    # Fallback odds helpers only if odds_math didn't load
-    if not _ODDS_MATH_AVAILABLE:
-        def _bookmaker_margin(o, u): return 0.0     # noqa: E704
-        def _kelly_criterion_wb(prob, odds_american, kelly_fraction=0.25, max_cap=0.05):  # noqa: E704
-            b = (odds_american / 100.0) if odds_american > 0 else (100.0 / abs(odds_american))
-            q = 1 - prob
-            raw = (b * prob - q) / b
-            return min(kelly_fraction * raw, max_cap) if raw > 0 else 0.0
-        def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
-        def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
-        def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
-        def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
-        _MAX_VIG = 0.08
+    def _bookmaker_margin(o, u): return 0.0          # noqa: E704
+    def _kelly_criterion_wb(p, o, kf=0.25, mc=0.05): # noqa: E704
+        b = (o / 100.0) if o > 0 else (100.0 / abs(o))
+        q = 1 - p
+        raw = (b * p - q) / b
+        return min(kf * raw, mc) if raw > 0 else 0.0
+    def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
+    def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
+    def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
+    def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
+    _MAX_VIG = 0.08
 
 import datetime
 import json
@@ -179,6 +170,8 @@ class _NullRedis:
     def delete(*a, **kw):  return None
     @staticmethod
     def ping(*a, **kw):    return False
+
+# logger defined at top of file
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1252,58 +1245,39 @@ class _BaseAgent:
                     prob = float(self.model.predict(dmat)[0])
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
-                    # Apply isotonic calibration: XGBoost raw → true observed hit rate
-                    prob = apply_isotonic_calibration(prob)
                     return prob * 100
                 else:
-                    raw_p = float(self.model.predict_proba(feats)[0][1])
-                    raw_p = apply_isotonic_calibration(raw_p)
-                    return raw_p * 100
+                    return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-        # ── BASE_RATES fallback: use historical hit rates instead of flat 50% ──
-        # Imported from live_dispatcher (single source of truth for all stat types)
-        try:
-            from live_dispatcher import _BASE_RATES as _BR
-            _stat_norm = _norm_stat(prop_type) if prop_type else ""
-            _line_val  = float(prop.get("line", 1.5) if prop else 1.5)
-            _side      = str(prop.get("side", "over") if prop else "over").lower()
-            _rates     = _BR.get(_stat_norm, [])
-            if _rates:
-                # Interpolate: find the two nearest line brackets
-                _sorted = sorted(_rates, key=lambda x: x[0])
-                _base   = _sorted[0][1]  # default = lowest line rate
-                for _l, _p in _sorted:
-                    if _line_val >= _l:
-                        _base = _p
-                    else:
-                        break
-                # Under probability = 1 - over probability
-                if _side == "under":
-                    _base = 1.0 - _base
-                raw_p = round(_base * 100.0, 2)
-            else:
-                raw_p = 50.0
-        except Exception:
-            raw_p = 50.0
+        # No XGBoost model — use calibrated base rate model instead of flat 50%
+        # base_rate_model uses historical MLB base rates + FanGraphs + context signals
+        if _BASE_RATE_AVAILABLE and prop:
+            # Determine side from prop context (bet dict may not be available here)
+            _side = "OVER"   # default; agents override via their own EV checks
+            raw_p = _base_rate_prob(prop, _side)
+            # Apply Brier calibration governor on top of base rate
+            if _DRIFT_MONITOR_AVAILABLE:
+                try:
+                    brier = get_current_brier()
+                    raw_p = apply_calibration_governor(raw_p / 100.0, brier) * 100.0
+                except Exception:
+                    pass
+            return round(max(5.0, min(95.0, raw_p)), 2)
 
-        # Apply Brier-score calibration governor (shrinks toward market if model is drifting)
+        # Absolute fallback — no base rate model AND no prop context
+        raw_p = 50.0
         if _DRIFT_MONITOR_AVAILABLE:
             try:
                 brier = get_current_brier()
-                calibrated = apply_calibration_governor(raw_p / 100.0, brier)
-                raw_p = round(calibrated * 100.0, 2)
+                raw_p = apply_calibration_governor(raw_p / 100.0, brier) * 100.0
             except Exception:
                 pass
-
-        # Apply enrichment nudges stored on prop (from prop_enrichment_layer)
         if prop:
             raw_p += float(prop.get("_bayesian_nudge", 0.0)) * 100.0
             raw_p += float(prop.get("_cv_nudge",       0.0)) * 100.0
             raw_p += float(prop.get("_form_adj",       0.0)) * 100.0
-            raw_p = max(30.0, min(80.0, raw_p))   # hard bounds
-
-        return round(raw_p, 2)
+        return round(max(5.0, min(95.0, raw_p)), 2)
 
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1401,20 +1375,9 @@ class _BaseAgent:
         )
         # Zone integrity: FRAUD/ELITE_SHADOW multiplier from heart vs shadow whiff
         pitcher_id = prop.get("mlbam_id") or prop.get("player_id")
-        _mp_pre_zi = model_prob
         model_prob = apply_zone_integrity_multiplier(
             model_prob, prop.get("prop_type", ""), pitcher_id
         )
-        # Write multiplier back so feature vector captures it (was always 1.0 before)
-        prop["_zone_integrity_mult"] = round(model_prob / _mp_pre_zi, 4) if _mp_pre_zi else 1.0
-        # Velocity drop check for K-props: pitch vel decline signals K regression
-        _lv = prop.get("_live_velocity", 0.0) or 0.0
-        _sv = prop.get("_season_velocity", 0.0) or 0.0
-        if _lv and _sv and prop.get("prop_type", "").lower() in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
-            _vel_mult = adaptive_velocity_check(_lv, _sv)
-            model_prob = round(model_prob * _vel_mult, 4)
-            logger.debug("[VelCheck] %s live=%.1f season=%.1f mult=%.3f new_prob=%.2f",
-                         prop.get("player", ""), _lv, _sv, _vel_mult, model_prob)
         # Lineup chase difficulty adjustment for pitcher K-props
         _k_prop_types = {"strikeouts", "pitcher_strikeouts", "k", "ks"}
         if prop.get("prop_type", "").lower() in _k_prop_types:
@@ -1440,23 +1403,7 @@ class _BaseAgent:
             "confidence":  self._confidence(ev_pct),
             "spring_training": _is_spring_training(),
         })
-        # ── Unified probability pipeline (Phase 83)
-        # All pre-signals (shadow whiff, zone integrity, lineup chase) have
-        # already been applied above. Now run the single unified calibration.
-        _unified = compute_unified_probability(
-            raw_model_prob=model_prob / 100.0,
-            market_implied=implied_prob / 100.0,
-            prop=prop,
-        )
-        final_prob_pct = round(_unified["final_prob"] * 100.0, 2)
-        confidence_lbl = _unified["confidence_label"]
-        edge_pct       = round(_unified["edge"] * 100.0, 2)
-
-        # Recompute Kelly and EV on the final calibrated probability
-        kelly   = _kelly_units(final_prob_pct / 100.0, side_odds)
-        _impl   = max(implied_prob / 100.0, 0.01)
-        ev_final = round((final_prob_pct / 100.0 - _impl) / _impl * 100.0, 2)
-
+        kelly = _kelly_units(model_prob / 100, side_odds)
         platforms = self._dfs_platforms(prop, side)
         return {
             "agent":              self.name,
@@ -1466,15 +1413,13 @@ class _BaseAgent:
             "line":               prop.get("line", 0),
             "side":               side,
             "odds_american":      prop.get("odds_american", -110),
-            "model_prob":         final_prob_pct,        # calibrated, shrunk, penalised
+            "model_prob":         round(model_prob, 1),
             "implied_prob":       round(implied_prob, 1),
-            "ev_pct":             ev_final,
-            "edge":               edge_pct,              # new field: model edge over market
+            "ev_pct":             round(ev_pct, 1),
             "kelly_units":        round(kelly, 3),
-            "shrink_factor":      _unified["shrink_factor"],
             "recommended_platform": platforms[0] if platforms else "PrizePicks",
             "checklist":          self._checklist(prop),
-            "confidence":         confidence_lbl,         # "HIGH"/"MEDIUM"/"LOW"
+            "confidence":         self._confidence(ev_pct),
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.utcnow().isoformat(),
             "_features_json":     json.dumps(_feat_vec),
@@ -1505,45 +1450,59 @@ class _BaseAgent:
         }
 
     @staticmethod
-    @staticmethod
-    def _confidence(ev_pct: float) -> str:
-        """Deprecated shim — derive label from ev_pct as probability proxy.
-        Live code paths use confidence_label from compute_unified_probability().
-        """
-        prob_proxy = 0.5 + max(-0.15, min(0.15, float(ev_pct) / 100.0))
-        return _prob_to_confidence_label(prob_proxy)
+    def _confidence(ev_pct: float) -> int:
+        # ev_pct is stored as percentage (3–20 range) in _build_bet
+        if ev_pct >= 15: return 9
+        if ev_pct >= 10: return 8
+        if ev_pct >= 7:  return 7
+        if ev_pct >= 5:  return 6
+        if ev_pct >= 3:  return 5
+        return 4
 
 
 class _EVHunter(_BaseAgent):
     name = "EVHunter"
 
     def evaluate(self, prop: dict) -> dict | None:
-        over_odds  = prop.get("over_american",  -110)
-        under_odds = prop.get("under_american", -110)
+        """Best-EV generalist — checks both sides, bets whichever has higher EV."""
+        over_odds  = prop.get("over_american",  -115)
+        under_odds = prop.get("under_american", -115)
 
         # WagerBrain: skip props with excessive juice (>8% margin)
         if _ODDS_MATH_AVAILABLE and not _is_acceptable_vig(over_odds, under_odds, _MAX_VIG):
             return None
 
-        fair_over, _ = _no_vig(over_odds, under_odds)
-        model_prob = self._model_prob(
-            prop.get("player", ""), prop.get("prop_type", ""),
-            team=prop.get("team", ""), side="OVER", prop=prop,
-        )
-        implied = _american_to_implied(over_odds) / 100
+        best_bet = None
+        best_ev  = MIN_EV_THRESH  # only fire if clearly positive
 
-        # WagerBrain: use true_odds_ev for more accurate EV calculation
-        if _ODDS_MATH_AVAILABLE:
-            from odds_math import american_to_decimal as _a2d  # noqa: PLC0415
-            profit  = _a2d(over_odds) - 1.0
-            ev_dollar = _true_odds_ev(stake=1.0, profit=profit, prob=model_prob / 100)
-            ev_pct = ev_dollar  # dollar EV per unit = EV% when stake=1
-        else:
-            ev_pct = (model_prob / 100 - implied) / implied
+        for side, odds in (("OVER", over_odds), ("UNDER", under_odds)):
+            # Get calibrated probability for this side
+            if _BASE_RATE_AVAILABLE:
+                model_p = _base_rate_prob(prop, side)
+            else:
+                model_p = self._model_prob(
+                    prop.get("player", ""), prop.get("prop_type", ""),
+                    prop=prop,
+                )
+                if side == "UNDER":
+                    model_p = 100.0 - model_p
 
-        if ev_pct >= MIN_EV_THRESH:
-            return self._build_bet(prop, "OVER", model_prob,
-                                   implied * 100, ev_pct * 100)
+            implied = _american_to_implied(odds) / 100
+
+            if _ODDS_MATH_AVAILABLE:
+                from odds_math import american_to_decimal as _a2d  # noqa: PLC0415
+                profit    = _a2d(odds) - 1.0
+                ev_pct    = _true_odds_ev(stake=1.0, profit=profit, prob=model_p / 100)
+            else:
+                ev_pct = (model_p / 100 - implied) / implied
+
+            if ev_pct > best_ev:
+                best_ev  = ev_pct
+                best_bet = (side, model_p, implied * 100, ev_pct * 100)
+
+        if best_bet:
+            side, model_p, implied_p, ev_p = best_bet
+            return self._build_bet(prop, side, model_p, implied_p, ev_p)
         return None
 
 
@@ -1551,17 +1510,23 @@ class _UnderMachine(_BaseAgent):
     name = "UnderMachine"
 
     def evaluate(self, prop: dict) -> dict | None:
-        over_odds  = prop.get("over_american",  -110)
-        under_odds = prop.get("under_american", -110)
+        """Strict UNDER specialist — targets high-probability Under lines."""
+        over_odds  = prop.get("over_american",  -115)
+        under_odds = prop.get("under_american", -115)
 
         # WagerBrain: skip excessive vig
         if _ODDS_MATH_AVAILABLE and not _is_acceptable_vig(over_odds, under_odds, _MAX_VIG):
             return None
 
-        model_prob = 100 - self._model_prob(
-            prop.get("player", ""), prop.get("prop_type", ""),
-            team=prop.get("team", ""), side="UNDER", prop=prop,
-        )
+        # Use base_rate_model for Under probability directly
+        if _BASE_RATE_AVAILABLE:
+            model_prob = _base_rate_prob(prop, "UNDER")
+        else:
+            model_prob = 100.0 - self._model_prob(
+                prop.get("player", ""), prop.get("prop_type", ""),
+                prop=prop,
+            )
+
         implied = _american_to_implied(under_odds) / 100
 
         if _ODDS_MATH_AVAILABLE:
@@ -1587,14 +1552,46 @@ class _UmpireAgent(_BaseAgent):
     _FRAMING_WEIGHT = ABS_FRAMING_WEIGHT  # 0.20
 
     def evaluate(self, prop: dict) -> dict | None:
+        # Try hub umpires, then fetch live from MLB Stats API (free)
         umpires = self.hub.get("context", {}).get("umpires", [])
         if not umpires:
-            return None
+            try:
+                import datetime as _dt, requests as _req
+                _d = _dt.date.today().strftime("%Y-%m-%d")
+                _sched = _req.get(
+                    "https://statsapi.mlb.com/api/v1/schedule",
+                    params={"sportId":1,"date":_d,"hydrate":"officials","gameType":"R"},
+                    timeout=8,
+                ).json()
+                for _db in _sched.get("dates", []):
+                    for _g in _db.get("games", []):
+                        for _off in _g.get("officials", []):
+                            if _off.get("officialType") == "Home Plate":
+                                umpires.append({
+                                    "name":      _off.get("official", {}).get("fullName", ""),
+                                    "home_team": _g["teams"]["home"]["team"].get("name",""),
+                                    "away_team": _g["teams"]["away"]["team"].get("name",""),
+                                    "k_rate": 8.8, "run_env": 1.0,
+                                })
+            except Exception:
+                pass
+
         prop_type = prop.get("prop_type", "")
         if _norm_stat(prop_type) not in self._PITCHER_STATS:
             return None
+
+        # UmpireAgent only needs K props — umpires just confirm game is happening
+        # If we got umpires from MLB API we know games are scheduled
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
-        model_prob = min(model_prob + 5.0, 95.0)
+
+        # Apply umpire K-rate modifier if we have umpire data
+        if umpires:
+            k_mod = float(umpires[0].get("k_rate", 8.8)) / 8.8  # vs league avg
+            model_prob = min(model_prob * k_mod, 95.0)
+        else:
+            # No umpire data — still evaluate but without umpire boost
+            model_prob = min(model_prob + 3.0, 95.0)
+
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
@@ -1608,10 +1605,30 @@ class _F5Agent(_BaseAgent):
     name = "F5Agent"
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Targets first-5-innings run props."""
-        if "f5" not in prop.get("prop_type", "").lower():
+        """Pitcher performance props (K, outs, earned runs, hits allowed).
+        Renamed from F5Agent — Underdog/PrizePicks don't offer F5 markets.
+        Uses SP matchup quality, lineup chase score, and FanGraphs pitcher stats.
+        """
+        prop_type = _norm_stat(prop.get("prop_type", ""))
+        _PITCHER_TARGETS = {"strikeouts", "pitching_outs", "earned_runs",
+                            "hits_allowed", "walks_allowed", "fantasy_pitcher"}
+        if prop_type not in _PITCHER_TARGETS:
             return None
-        model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""), prop=prop)
+
+        model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+
+        # Boost for high-K pitcher props based on chase score from enrichment
+        if prop_type == "strikeouts":
+            chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
+            model_prob = min(model_prob + chase_adj * 100, 95.0)
+
+        # CSW% boost: elite contact/swing-strike means K-over more likely
+        csw = float(prop.get("csw_pct", prop.get("swstr_pct", 0.0)))
+        if csw > 0.30:
+            model_prob = min(model_prob + 3.0, 95.0)
+        elif csw < 0.23:
+            model_prob = max(model_prob - 2.0, 30.0)
+
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
@@ -1636,11 +1653,14 @@ class _FadeAgent(_BaseAgent):
         team     = prop.get("team", "")
         prop_type = prop.get("prop_type", "")
 
-        import pandas as pd
-        game_records = pub_data.get("game_df", []) if isinstance(pub_data, dict) else []
-        prop_records = pub_data.get("prop_df", []) if isinstance(pub_data, dict) else []
-        game_df = pd.DataFrame(game_records) if game_records else pd.DataFrame()
-        prop_df = pd.DataFrame(prop_records) if prop_records else pd.DataFrame()
+        try:
+            import pandas as pd
+            game_records = pub_data.get("game_df", []) if isinstance(pub_data, dict) else []
+            prop_records = pub_data.get("prop_df", []) if isinstance(pub_data, dict) else []
+            game_df = pd.DataFrame(game_records) if game_records else pd.DataFrame()
+            prop_df = pd.DataFrame(prop_records) if prop_records else pd.DataFrame()
+        except ImportError:
+            return None  # pandas not available
 
         pub_pct, signal_src = get_fade_signal(
             player, team, prop_type, game_df, prop_df, threshold=SBD_THRESHOLD
@@ -1665,17 +1685,40 @@ class _LineValueAgent(_BaseAgent):
     name = "LineValueAgent"
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Hunts opening line steam moves."""
+        """Hunts steam moves (sharp money signals).
+        Primary: sharp_report from Action Network (if available).
+        Fallback: SBD public_betting — >70% public tickets = steam signal.
+        """
+        player    = prop.get("player", "")
+        prop_type = prop.get("prop_type", "")
+        steam     = False
+
+        # Primary: Action Network sharp_report
         sharp = self.hub.get("market", {}).get("sharp_report", [])
-        player = prop.get("player", "")
-        steam  = False
         for rec in sharp:
             if isinstance(rec, dict) and player.lower() in str(rec).lower():
                 steam = bool(rec.get("steam_move", False) or rec.get("reverse_line_move", False))
-                break
+                if steam:
+                    break
+
+        # Fallback: SBD public betting — extreme ticket% = steam proxy
+        if not steam:
+            pub = self.hub.get("market", {}).get("public_betting", {})
+            for rec in (pub.get("prop_df", []) if isinstance(pub, dict) else []):
+                if not isinstance(rec, dict):
+                    continue
+                if player.lower() not in str(rec.get("player", "")).lower():
+                    continue
+                over_pct  = float(rec.get("over_pct",  rec.get("ticket_pct", 0)) or 0)
+                under_pct = float(rec.get("under_pct", 0) or 0)
+                if over_pct >= 70 or under_pct >= 70:
+                    steam = True
+                    break
+
         if not steam:
             return None
-        model_prob = self._model_prob(player, prop.get("prop_type", ""), prop=prop)
+
+        model_prob = self._model_prob(player, prop_type, prop=prop)
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
@@ -1692,19 +1735,36 @@ class _BullpenAgent(_BaseAgent):
                      "stolen_bases", "singles", "walks", "runs", "fantasy_score"}
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Targets high-leverage relief situations (fatigue 0-4 scale)."""
+        """Targets hitter props when opposing bullpen is fatigued (0-4 scale).
+        Fatigue from context_modifiers.BullpenFatigueScorer when available,
+        otherwise defaults to neutral (2).
+        """
+        # Try hub bullpen_fatigue, then context_modifiers live calculation
         fatigue_map: dict = self.hub.get("bullpen_fatigue", {})
         player    = prop.get("player", "")
         team      = prop.get("team", "")
-        fatigue   = fatigue_map.get(team, 2)
-
         prop_type = prop.get("prop_type", "")
+
         if _norm_stat(prop_type) not in self._HITTER_STATS:
             return None
 
+        # Get fatigue for opposing team (batter faces opponent's bullpen)
+        opp_team = prop.get("opposing_team", "")
+        fatigue  = fatigue_map.get(opp_team, fatigue_map.get(team, -1))
+
+        # If not in hub, fall back to neutral (BullpenFatigueScorer needs full
+        # pitching_logs DataFrame + target_date which aren't available here)
+        if fatigue < 0:
+            fatigue = 2  # neutral — no fatigue data available this cycle
+
         model_prob = self._model_prob(player, prop_type, prop=prop)
+
+        # Fatigue boost: tired bullpen = more runs for batters
         if fatigue >= 3:
             model_prob = min(model_prob + 6.0, 95.0)
+        elif fatigue >= 2:
+            model_prob = min(model_prob + 2.0, 95.0)
+
         over_odds = prop.get("over_american", -110)
         implied   = _american_to_implied(over_odds) / 100
         ev_pct    = (model_prob / 100 - implied) / implied
@@ -1720,33 +1780,64 @@ class _WeatherAgent(_BaseAgent):
     # Temp data arrives via hub["context"]["weather"] → WeatherAgent enriches game totals.
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Wind/park/pull-hitter combos."""
-        weather_list = self.hub.get("context", {}).get("weather", [])
-        player       = prop.get("player", "")
-        venue        = prop.get("venue", "")
-        wind_mph     = 0
-        wind_dir     = ""
-        for w in weather_list:
-            if isinstance(w, dict) and (venue.lower() in str(w).lower() or
-                                        player.lower() in str(w).lower()):
-                wind_mph = float(w.get("wind_speed", 0) or 0)
-                wind_dir = str(w.get("wind_direction", "") or "")
-                break
+        """Wind/park/temperature combos for power hitter props.
+        Wind data from prop dict (set by prop_enrichment_layer) — no hub lookup needed.
+        Dome games are skipped (no wind effect indoors).
+        """
+        # Skip dome games — prop_enrichment_layer sets is_dome
+        if prop.get("is_dome"):
+            return None
 
+        player    = prop.get("player", "")
         prop_type = prop.get("prop_type", "")
-        if wind_mph >= 10 and "out" in wind_dir.lower() and (
-                _norm_stat(prop_type) in {"home_runs", "total_bases", "hits_runs_rbis", "fantasy_score"}):
+        venue     = prop.get("venue", "")
+
+        # Get wind from enriched prop dict first (fastest), then hub weather list
+        wind_mph = float(prop.get("_wind_speed", 0) or 0)
+        wind_dir = str(prop.get("_wind_direction", "") or "")
+
+        # Fallback: scan hub weather list
+        if wind_mph == 0:
+            for w in self.hub.get("context", {}).get("weather", []):
+                if not isinstance(w, dict):
+                    continue
+                team = prop.get("team", "")
+                if (venue and venue.lower() in str(w).lower()) or                    (team and team.lower() in str(w.get("team","")).lower()):
+                    wind_mph = float(w.get("wind_speed_mph", w.get("wind_speed", 0)) or 0)
+                    wind_dir = str(w.get("wind_direction", "") or "")
+                    break
+
+        _POWER_PROPS  = {"home_runs", "total_bases", "hits_runs_rbis",
+                         "fantasy_hitter", "fantasy_pitcher"}
+        _CONTACT_PROPS = {"hits", "rbis", "runs"}
+
+        pt_norm = _norm_stat(prop_type)
+
+        # Wind blowing out ≥10mph → boost power props
+        if wind_mph >= 10 and "out" in wind_dir.lower() and pt_norm in _POWER_PROPS:
             model_prob = self._model_prob(player, prop_type, prop=prop)
-            # Thermal correction: HR/TB props gain/lose ~10% per 10°F from 70°F baseline
-            if _norm_stat(prop_type) in {"home_runs", "total_bases", "hits_runs_rbis"}:
-                model_prob = min(apply_thermal_correction(model_prob, prop.get("_temp_f", 72.0)), 95.0)
-            model_prob = min(model_prob + 8.0, 95.0)
+            # Scale boost: 10mph=+4pp, 15mph=+6pp, 20mph+=+8pp
+            boost = min(8.0, (wind_mph - 10) * 0.4 + 4.0)
+            model_prob = min(model_prob + boost, 95.0)
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
             ev_pct     = (model_prob / 100 - implied) / implied
             if ev_pct >= MIN_EV_THRESH:
                 return self._build_bet(prop, "OVER", model_prob,
                                        implied * 100, ev_pct * 100)
+
+        # Hot temperature (>85°F) → boost all hitter props
+        temp_f = float(prop.get("_temp_f", 72) or 72)
+        if temp_f >= 85 and pt_norm in (_POWER_PROPS | _CONTACT_PROPS):
+            model_prob = self._model_prob(player, prop_type, prop=prop)
+            model_prob = min(model_prob + 3.0, 95.0)
+            over_odds  = prop.get("over_american", -110)
+            implied    = _american_to_implied(over_odds) / 100
+            ev_pct     = (model_prob / 100 - implied) / implied
+            if ev_pct >= MIN_EV_THRESH:
+                return self._build_bet(prop, "OVER", model_prob,
+                                       implied * 100, ev_pct * 100)
+
         return None
 
 
@@ -1754,23 +1845,57 @@ class _SteamAgent(_BaseAgent):
     name = "SteamAgent"
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Follows sharp money (reverse line movement)."""
-        sharp  = self.hub.get("market", {}).get("sharp_report", [])
-        player = prop.get("player", "")
-        rlm    = False
+        """Follows sharp money (reverse line movement).
+        Primary: sharp_report RLM flag.
+        Fallback: SBD money% vs ticket% divergence ≥15pp = RLM proxy.
+        """
+        player    = prop.get("player", "")
+        prop_type = prop.get("prop_type", "")
+        rlm       = False
+        fade_side = "OVER"  # default: sharp money on Over
+
+        # Primary: Action Network RLM flag
+        sharp = self.hub.get("market", {}).get("sharp_report", [])
         for rec in sharp:
             if isinstance(rec, dict) and player.lower() in str(rec).lower():
                 rlm = bool(rec.get("reverse_line_move", False))
-                break
+                if rlm:
+                    break
+
+        # Fallback: SBD money% vs ticket% divergence
+        if not rlm:
+            pub = self.hub.get("market", {}).get("public_betting", {})
+            for rec in (pub.get("prop_df", []) if isinstance(pub, dict) else []):
+                if not isinstance(rec, dict):
+                    continue
+                if player.lower() not in str(rec.get("player", "")).lower():
+                    continue
+                ticket = float(rec.get("ticket_pct", rec.get("over_pct", 50)) or 50)
+                money  = float(rec.get("money_pct", 50) or 50)
+                div    = abs(money - ticket)
+                if div >= 15:  # sharp money diverging from public = RLM
+                    rlm = True
+                    # If money% > ticket%, sharp betting Over despite public Under
+                    fade_side = "OVER" if money > ticket else "UNDER"
+                    break
+
         if not rlm:
             return None
-        model_prob = self._model_prob(player, prop.get("prop_type", ""), prop=prop)
+
+        model_prob = self._model_prob(player, prop_type, prop=prop)
         model_prob = min(model_prob + 4.0, 95.0)
-        over_odds  = prop.get("over_american", -110)
-        implied    = _american_to_implied(over_odds) / 100
-        ev_pct     = (model_prob / 100 - implied) / implied
+
+        if fade_side == "OVER":
+            odds    = prop.get("over_american", -110)
+            implied = _american_to_implied(odds) / 100
+        else:
+            odds    = prop.get("under_american", -110)
+            implied = _american_to_implied(odds) / 100
+            model_prob = 100 - model_prob  # flip for Under
+
+        ev_pct = (model_prob / 100 - implied) / implied
         if ev_pct >= MIN_EV_THRESH:
-            return self._build_bet(prop, "OVER", model_prob,
+            return self._build_bet(prop, fade_side, model_prob,
                                    implied * 100, ev_pct * 100)
         return None
 
@@ -1779,16 +1904,21 @@ class _MLEdgeAgent(_BaseAgent):
     name = "MLEdgeAgent"
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Pure XGBoost model edge — only fires when model prob diverges ≥8 pp."""
-        model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""), prop=prop)
+        """Pure XGBoost model edge — fires when model diverges ≥8pp from implied.
+        Passes full prop dict to _model_prob so enriched features are used.
+        """
+        model_prob = self._model_prob(
+            prop.get("player", ""), prop.get("prop_type", ""), prop=prop
+        )
         over_odds  = prop.get("over_american", -110)
-        implied    = _american_to_implied(over_odds) / 100 * 100
+        # _american_to_implied returns 0-1; multiply by 100 for percentage
+        implied    = _american_to_implied(over_odds) * 100
         divergence = abs(model_prob - implied)
         if divergence < 8.0:
             return None
         side   = "OVER" if model_prob > implied else "UNDER"
         odds   = over_odds if side == "OVER" else prop.get("under_american", -110)
-        imp    = _american_to_implied(odds) / 100
+        imp    = _american_to_implied(odds)
         ev_pct = (model_prob / 100 - imp) / imp
         if ev_pct >= MIN_EV_THRESH:
             return self._build_bet(prop, side, model_prob, imp * 100, ev_pct * 100)
@@ -1880,9 +2010,13 @@ def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _are_legs_correlated(legs: list[dict]) -> bool:
-    """Return True if any two legs share the same player."""
+    """Return True if any two legs share the same player or same player+prop_type."""
     players = [lg.get("player", "") for lg in legs]
-    return len(set(players)) < len(players)
+    if len(set(players)) < len(players):
+        return True  # same player in two legs
+    # Also block same player+prop combo (e.g. Aaron Judge hits Over AND Under)
+    combos = [(lg.get("player", ""), lg.get("prop_type", "")) for lg in legs]
+    return len(set(combos)) < len(combos)
 
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
@@ -1890,9 +2024,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
     combined_ev = round(
         (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
     ) if legs else 0.0
-    _conf_to_num = {"elite": 9, "high": 7, "medium": 5, "low": 3}
-    avg_conf = round(sum(_conf_to_num.get(str(lg.get("confidence", "medium")).lower(), 5)
-                         for lg in legs) / max(len(legs), 1), 1)
+    avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
     platform = legs[0].get("recommended_platform", "PrizePicks").lower() if legs else "prizepicks"
     return {
         "agent":           agent_name,
@@ -1938,30 +2070,22 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
                 for k in range(j + 1, len(top)):
                     three = two + [top[k]]
                     if not _are_legs_correlated(three):
-                        key = "|".join(sorted(lg["player"] for lg in three))
+                        key = "|".join(sorted(
+                            f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
+                            for lg in three
+                        ))
                         if key not in seen:
                             seen.add(key)
-                            _p3 = _make_parlay(three, agent_name)
-                            # is_ev_positive: Underdog 3-pick parlay EV gate (2026 multipliers)
-                            _avg3 = sum(lg.get("model_prob", 55.0) for lg in three) / 300.0
-                            _ok3, _ev3 = is_ev_positive(_avg3, n_legs=3)
-                            if _ok3:
-                                parlays.append(_p3)
-                            else:
-                                logger.debug("[EVGate] 3-leg parlay rejected ev=%.3f", _ev3)
+                            parlays.append(_make_parlay(three, agent_name))
                         break
 
-            key2 = "|".join(sorted(lg["player"] for lg in two))
+            key2 = "|".join(sorted(
+                f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
+                for lg in two
+            ))
             if key2 not in seen:
                 seen.add(key2)
-                _p2 = _make_parlay(two, agent_name)
-                # is_ev_positive: Underdog 2-pick parlay EV gate (2026 multipliers)
-                _avg2 = sum(lg.get("model_prob", 55.0) for lg in two) / 200.0
-                _ok2, _ev2 = is_ev_positive(_avg2, n_legs=2)
-                if _ok2:
-                    parlays.append(_p2)
-                else:
-                    logger.debug("[EVGate] 2-leg parlay rejected ev=%.3f", _ev2)
+                parlays.append(_make_parlay(two, agent_name))
 
     return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
 
@@ -2120,20 +2244,8 @@ def _get_props(hub: dict) -> list[dict]:
                 logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
         return props
 
-    # 3. Hub empty (Redis down) — fall back to direct API fetches
-    logger.warning("[AgentTasklet] Hub empty — falling back to direct Underdog/PrizePicks fetch.")
-    direct_ud = _fetch_underdog_props_direct()
-    direct_pp = _fetch_prizepicks_direct()
-    combined: list[dict] = []
-    seen_keys: set = set()
-    for p in direct_ud + direct_pp:
-        k = (p.get("player", "").lower(), p.get("prop_type", ""))
-        if k not in seen_keys:
-            seen_keys.add(k)
-            combined.append(p)
-    if combined:
-        logger.info("[AgentTasklet] Direct fetch fallback: %d props", len(combined))
-    return combined
+    # No real props available — skip cycle entirely (no synthetic)
+    return []
 
 
 def run_agent_tasklet() -> None:
@@ -2159,6 +2271,7 @@ def run_agent_tasklet() -> None:
         return
 
     # Enrich all props with FanGraphs, weather, Bayesian, CV, form, park context
+    # This populates the fields _build_feature_vector() reads (k_rate, shadow_whiff, etc.)
     import datetime as _dt
     props = _enrich_props(props, hub, season=_dt.date.today().year)
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
@@ -2215,21 +2328,6 @@ def run_agent_tasklet() -> None:
 
                 bet["underdog_line"] = prop.get("underdog_line",
                                                 prop.get("over_american", -120))
-
-                # ── Sniper Decision Gate ─────────────────────────────────────
-                # Raises minimum threshold on deeper parlay rungs (rung 5+: +2pp/leg)
-                # Uses final_prob from compute_unified_probability (stored on bet)
-                _sniper_prob = float(bet.get("model_prob", 50.0)) / 100.0
-                _sniper_pass, _sniper_reason = sniper_decision_gate(
-                    _sniper_prob, len(agent_hits)
-                )
-                if not _sniper_pass:
-                    logger.debug(
-                        "[AgentTasklet] %s rung=%d sniper REJECT: %s",
-                        bet.get("player", "?"), len(agent_hits), _sniper_reason
-                    )
-                    continue
-
                 agent_hits.append(bet)
 
             except Exception as e:
@@ -2249,6 +2347,32 @@ def run_agent_tasklet() -> None:
 
     if not all_parlays:
         logger.info("[AgentTasklet] No qualifying slips this cycle.")
+        return
+
+    # ── Cross-agent dedup — remove identical leg sets regardless of which agent built them
+    # Fingerprint = frozenset of (player, prop_type, side) tuples across all legs
+    def _parlay_fingerprint(p: dict) -> frozenset:
+        return frozenset(
+            (lg.get("player", lg.get("player_name", "")),
+             lg.get("prop_type", ""),
+             lg.get("side", ""))
+            for lg in p.get("legs", [])
+        )
+
+    seen_fps: set = set()
+    unique_parlays: list[dict] = []
+    for parlay in sorted(all_parlays, key=lambda p: p.get("combined_ev_pct", 0), reverse=True):
+        fp = _parlay_fingerprint(parlay)
+        if fp and fp not in seen_fps:
+            seen_fps.add(fp)
+            unique_parlays.append(parlay)
+    dupes = len(all_parlays) - len(unique_parlays)
+    if dupes:
+        logger.info("[AgentTasklet] Removed %d duplicate parlay(s) across agents.", dupes)
+    all_parlays = unique_parlays
+
+    if not all_parlays:
+        logger.info("[AgentTasklet] All parlays were duplicates — skipping.")
         return
 
     producer = _kafka_producer()
@@ -2281,9 +2405,11 @@ def run_agent_tasklet() -> None:
                         INSERT INTO bet_ledger
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
-                             status, bet_date, platform, features_json)
+                             status, bet_date, platform, features_json,
+                             units_wagered)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                'OPEN', %s, %s, %s)
+                                'OPEN', %s, %s, %s,
+                                ABS(%s))
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -2299,6 +2425,7 @@ def run_agent_tasklet() -> None:
                             _today,
                             (_leg.get("recommended_platform") or "prizepicks").lower(),
                             _leg.get("_features_json"),
+                            _leg.get("kelly_units") or 0.02,
                         ),
                     )
         _conn.commit()
@@ -2308,9 +2435,34 @@ def run_agent_tasklet() -> None:
     except Exception as _dbe:
         logger.warning("[AgentTasklet] bet_ledger INSERT failed: %s", _dbe)
 
+    # ── Cross-cycle dedup — skip parlays already sent in the last 6 hours
+    r_dedup = _redis()
+    _SENT_TTL = 6 * 3600  # 6 hours — covers one full game day
+    fresh_parlays = []
     for parlay in all_parlays:
+        fp   = _parlay_fingerprint(parlay)
+        rkey = "sent_parlay:" + ":".join(sorted(str(x) for x in fp))
+        try:
+            already = r_dedup.exists(rkey)
+        except Exception:
+            already = False
+        if already:
+            logger.debug("[AgentTasklet] Skipping already-sent parlay: %s", rkey[:80])
+        else:
+            fresh_parlays.append((parlay, rkey))
+
+    skipped = len(all_parlays) - len(fresh_parlays)
+    if skipped:
+        logger.info("[AgentTasklet] Skipped %d already-sent parlay(s) from prior cycles.", skipped)
+
+    for parlay, rkey in fresh_parlays:
         try:
             discord_alert.send_parlay_alert(parlay)
+            # Mark as sent in Redis — expires after 6 hours so new-day props get through
+            try:
+                r_dedup.setex(rkey, _SENT_TTL, "1")
+            except Exception:
+                pass
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
@@ -2351,7 +2503,9 @@ def run_leaderboard_tasklet() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT agent_name, profit_loss, units_wagered
+                SELECT agent_name,
+                       COALESCE(profit_loss, 0.0)                         AS profit_loss,
+                       COALESCE(units_wagered, ABS(kelly_units), 1.0)     AS units_wagered
                 FROM bet_ledger
                 WHERE graded_at >= %s AND status IN ('WIN', 'LOSS', 'PUSH')
                 """,
@@ -2626,14 +2780,17 @@ def run_grading_tasklet() -> None:
                 closing_odds = _fetch_closing_odds(player, ptype, side) or odds
                 clv = float(model_prob or 50) - _american_to_implied(int(closing_odds or -110))
 
+                # actual_outcome: 1=WIN, 0=LOSS (used by XGBoost retraining)
+                actual_outcome = 1 if status == "WIN" else 0 if status == "LOSS" else None
                 cur.execute(
                     """
                     UPDATE bet_ledger
                     SET status = %s, profit_loss = %s, actual_result = %s,
-                        clv = %s, graded_at = NOW()
+                        clv = %s, graded_at = NOW(), actual_outcome = %s
                     WHERE id = %s
                     """,
-                    (status, round(pl, 4), actual, round(clv, 2), bid),
+                    (status, round(pl, 4), actual, round(clv, 2),
+                     actual_outcome, bid),
                 )
 
                 results.append({
@@ -2661,10 +2818,89 @@ def run_grading_tasklet() -> None:
     logger.info("[GradingTasklet] Graded %d bets — W:%d L:%d P:%d  Profit: %+.2fu",
                 len(results), wins, losses, pushes, total_profit)
 
+    # Sync results into propiq_season_record so /propiq/record endpoint has data
+    try:
+        conn2 = _pg_conn()
+        with conn2.cursor() as cur2:
+            # Upsert a daily summary row per agent
+            from collections import defaultdict
+            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0})
+            for r in results:
+                _ag = r.get("agent", "Unknown")
+                if r["status"] == "WIN":
+                    _agent_results[_ag]["wins"]   += 1
+                    _agent_results[_ag]["profit"] += float(r.get("profit_loss", 0))
+                elif r["status"] == "LOSS":
+                    _agent_results[_ag]["losses"] += 1
+                    _agent_results[_ag]["profit"] += float(r.get("profit_loss", 0))
+                else:
+                    _agent_results[_ag]["pushes"] += 1
+            for _ag, _stats in _agent_results.items():
+                _status = "WIN" if _stats["wins"] > _stats["losses"] else (
+                          "LOSS" if _stats["losses"] > _stats["wins"] else "PUSH")
+                cur2.execute("""
+                    INSERT INTO propiq_season_record
+                        (date, agent_name, parlay_legs, platform, stake, payout,
+                         confidence, status, legs_json, created_at)
+                    VALUES (%s, %s, %s, 'mixed', 5.00, %s, 0.0, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    today, _ag,
+                    _stats["wins"] + _stats["losses"] + _stats["pushes"],
+                    round(5.0 + _stats["profit"], 2),
+                    _status,
+                    json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
+                                "pushes": _stats["pushes"]}),
+                    datetime.datetime.utcnow().isoformat(),
+                ))
+        conn2.commit()
+        conn2.close()
+        logger.info("[GradingTasklet] Synced %d agents to propiq_season_record", len(_agent_results))
+    except Exception as _sync_err:
+        logger.debug("[GradingTasklet] Season record sync failed: %s", _sync_err)
+
     try:
         discord_alert.send_daily_recap(results, total_profit, today)
     except Exception as _disc_err:
         logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
+
+    # Update drift monitor with today's Brier score
+    if results:
+        try:
+            from drift_monitor import record_brier  # noqa: PLC0415
+            # Brier score: mean((model_prob/100 - outcome)^2) across graded bets
+            # Fetch actual model_prob from bet_ledger for accurate Brier score
+            _brier_probs = {}
+            try:
+                _bc = _pg_conn()
+                with _bc.cursor() as _bcur:
+                    _ids = [r["id"] for r in results if r.get("id")]
+                    if _ids:
+                        _bcur.execute(
+                            "SELECT id, model_prob FROM bet_ledger WHERE id = ANY(%s)",
+                            (_ids,)
+                        )
+                        _brier_probs = {row[0]: float(row[1] or 52) / 100
+                                        for row in _bcur.fetchall()}
+                _bc.close()
+            except Exception:
+                pass
+
+            brier_inputs = []
+            for r in results:
+                if r["status"] == "PUSH":
+                    continue   # PUSH is not a WIN/LOSS — exclude from Brier
+                outcome = 1 if r["status"] == "WIN" else 0
+                prob    = _brier_probs.get(r.get("id"), 0.52)
+                brier_inputs.append({"prob": prob, "outcome": outcome})
+            if brier_inputs:
+                from calibration_layer import calculate_brier_score  # noqa: PLC0415
+                brier = calculate_brier_score(brier_inputs)
+                if brier is not None:
+                    record_brier(brier)
+                    logger.info("[GradingTasklet] Brier score recorded: %.4f", brier)
+        except Exception as _brier_err:
+            logger.debug("[GradingTasklet] Brier record failed: %s", _brier_err)
 
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
@@ -2767,19 +3003,36 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
 
 def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
-    """Best-effort closing line fetch from Redis market cache."""
+    """
+    Best-effort closing line from Redis market cache (hub:market odds list).
+    Scans sharp book markets for player name match. Returns American odds int or None.
+    """
     try:
         r   = _redis()
         raw = r.get("hub:market")
         if not raw:
             return None
-        market = json.loads(raw)
+        market    = json.loads(raw)
         odds_list = market.get("odds", [])
+        player_lc = player.lower()
+
         for game in odds_list:
             if not isinstance(game, dict):
                 continue
-            for _ in game.get("bookmakers", [{}])[0].get("markets", [{}]):
-                pass
+            for bookmaker in game.get("bookmakers", []):
+                bkey = bookmaker.get("key", "").lower()
+                if bkey not in {"draftkings", "fanduel", "pinnacle", "betmgm"}:
+                    continue
+                for mkt in bookmaker.get("markets", []):
+                    for outcome in mkt.get("outcomes", []):
+                        desc = str(outcome.get("description", "")).lower()
+                        name = str(outcome.get("name", "")).lower()
+                        out_side = str(outcome.get("name", "")).upper()
+                        if player_lc in desc or player_lc in name:
+                            if side.upper() in out_side or out_side in side.upper():
+                                price = outcome.get("price")
+                                if price is not None:
+                                    return int(price)
     except Exception:
         pass
     return None
@@ -2857,8 +3110,16 @@ def run_xgboost_tasklet() -> None:
 
     model_path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    with open(model_path, "wb") as f:
-        pickle.dump(model, f)
+    # Save as XGBoost native JSON (matches _load_xgb_model() which uses xgb.Booster().load_model())
+    # pickle.dump would save as sklearn wrapper — incompatible with xgb.Booster.load_model()
+    try:
+        model.get_booster().save_model(model_path)
+        logger.info("[XGBoostTasklet] Saved model as XGBoost JSON to %s", model_path)
+    except Exception:
+        # Fallback to pickle for sklearn wrapper models
+        with open(model_path.replace(".json", ".pkl"), "wb") as f:
+            pickle.dump(model, f)
+        logger.info("[XGBoostTasklet] Saved model as pickle (JSON save failed)")
 
     r = _redis()
     r.setex("xgb_meta", 604800, json.dumps({
@@ -2890,16 +3151,3 @@ def run_xgboost_tasklet() -> None:
     else:
         logger.warning("[XGBoostTasklet] ⚠️ Below minimum threshold (%.1f%% < 77.7%%).",
                        accuracy * 100)
-
-    # ── Rebuild calibration map from live bet_ledger outcomes ────────────────
-    # Backtest → live feedback loop: settled bets → isotonic calibration →
-    # _model_prob() applies map before returning → all predictions self-correct.
-    try:
-        from calibrate_model import generate_calibration_map_from_db as _gen_calib  # noqa: PLC0415
-        _gen_calib()
-        # Force singleton reload: next _model_prob() call picks up new map
-        import calibration_layer as _cal_mod
-        _cal_mod._CAL_MAP = None
-        logger.info("[XGBoostTasklet] ✅ Calibration map rebuilt from bet_ledger.")
-    except Exception as _calib_err:
-        logger.warning("[XGBoostTasklet] Calibration map rebuild failed: %s", _calib_err)
