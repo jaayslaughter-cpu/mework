@@ -1,0 +1,108 @@
+{
+  "system_metadata": {
+    "last_updated": "2026-03-29",
+    "version": "1.0.0",
+    "note": "Updated weekly by CLVFeedbackLoop in clv_feedback.py",
+    "global_shrink_bounds": [0.2, 0.8]
+  },
+  "tiers": {
+    "ace": {
+      "strikeouts": {
+        "reliability_score": 0.72,
+        "clv_weight": 0.35,
+        "streak_sensitivity": 0.15
+      },
+      "pitching_outs": {
+        "reliability_score": 0.68,
+        "clv_weight": 0.30,
+        "streak_sensitivity": 0.10
+      },
+      "hits_allowed": {
+        "reliability_score": 0.62,
+        "clv_weight": 0.30,
+        "streak_sensitivity": 0.12
+      },
+      "earned_runs": {
+        "reliability_score": 0.60,
+        "clv_weight": 0.28,
+        "streak_sensitivity": 0.14
+      }
+    },
+    "mid_rotation": {
+      "strikeouts": {
+        "reliability_score": 0.55,
+        "clv_weight": 0.25,
+        "streak_sensitivity": 0.25
+      },
+      "pitching_outs": {
+        "reliability_score": 0.52,
+        "clv_weight": 0.22,
+        "streak_sensitivity": 0.22
+      },
+      "hits_allowed": {
+        "reliability_score": 0.50,
+        "clv_weight": 0.20,
+        "streak_sensitivity": 0.20
+      },
+      "earned_runs": {
+        "reliability_score": 0.48,
+        "clv_weight": 0.20,
+        "streak_sensitivity": 0.22
+      }
+    },
+    "bullpen_spot": {
+      "strikeouts": {
+        "reliability_score": 0.42,
+        "clv_weight": 0.40,
+        "streak_sensitivity": 0.45
+      },
+      "pitching_outs": {
+        "reliability_score": 0.40,
+        "clv_weight": 0.38,
+        "streak_sensitivity": 0.42
+      },
+      "earned_runs": {
+        "reliability_score": 0.38,
+        "clv_weight": 0.35,
+        "streak_sensitivity": 0.40
+      }
+    },
+    "hitter": {
+      "hits": {
+        "reliability_score": 0.56,
+        "clv_weight": 0.25,
+        "streak_sensitivity": 0.20
+      },
+      "home_runs": {
+        "reliability_score": 0.52,
+        "clv_weight": 0.28,
+        "streak_sensitivity": 0.30
+      },
+      "total_bases": {
+        "reliability_score": 0.55,
+        "clv_weight": 0.26,
+        "streak_sensitivity": 0.22
+      },
+      "rbis": {
+        "reliability_score": 0.50,
+        "clv_weight": 0.22,
+        "streak_sensitivity": 0.28
+      },
+      "hits_runs_rbis": {
+        "reliability_score": 0.53,
+        "clv_weight": 0.24,
+        "streak_sensitivity": 0.24
+      },
+      "stolen_bases": {
+        "reliability_score": 0.58,
+        "clv_weight": 0.30,
+        "streak_sensitivity": 0.18
+      }
+    }
+  },
+  "streak_logic_constants": {
+    "heat_threshold": 0.75,
+    "inflation_penalty_max": 0.15,
+    "mean_reversion_factor": 0.08
+  }
+}

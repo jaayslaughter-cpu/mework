@@ -49,6 +49,38 @@ try:
     _NSFI_AVAILABLE = True
 except ImportError:
     _NSFI_AVAILABLE = False
+    def _fetch_nsfi(): return []
+
+try:
+    from calibration_layer import (
+        _norm_stat, apply_trust_gate, calculate_streak_penalty,
+        apply_calibration_governor, is_ev_positive, check_streaks_gate,
+        sniper_decision_gate, should_cash_out, apply_thermal_correction,
+        ABS_FRAMING_WEIGHT, SteamMonitor, get_reliability_score,
+        apply_isotonic_calibration,
+    )
+    _CAL_LAYER_AVAILABLE = True
+except ImportError:
+    _CAL_LAYER_AVAILABLE = False
+    def _norm_stat(s):
+        if not s: return ""
+        m = {"hr":"home_runs","h":"hits","k":"strikeouts","ks":"strikeouts",
+             "tb":"total_bases","sb":"stolen_bases","rbi":"rbis","bb":"walks",
+             "er":"earned_runs","p_outs":"pitching_outs","h+r+rbi":"hits_runs_rbis"}
+        s2 = str(s).lower().replace(" ","_").replace("-","_").strip()
+        return m.get(s2, s2)
+    ABS_FRAMING_WEIGHT = 0.20
+    class SteamMonitor:
+        def detect_steam(self, *a, **kw): return False, 0.0
+try:
+    from drift_monitor import get_current_brier
+    _DRIFT_MONITOR_AVAILABLE = True
+except ImportError:
+    _DRIFT_MONITOR_AVAILABLE = False
+    def get_current_brier(): return 0.18
+    _NSFI_AVAILABLE = True
+except ImportError:
+    _NSFI_AVAILABLE = False
 
 try:
     from game_prediction_layer import get_game_predictions
@@ -604,7 +636,7 @@ def _fetch_underdog_props_direct() -> list[dict]:
             seen.add(stable_id)
             ou = line.get("over_under") or {}
             app_stat = ou.get("appearance_stat") or {}
-            stat_ud = app_stat.get("stat", "")
+            stat_ud = _norm_stat(app_stat.get("stat", ""))
             app_id = app_stat.get("appearance_id", "")
             appearance = appearances_map.get(app_id, {})
             player_id = appearance.get("player_id", "")
@@ -1114,7 +1146,16 @@ class _BaseAgent:
                     return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-        return 50.0
+        # Apply Brier-score calibration governor (shrinks toward market if model is drifting)
+        raw_p = 50.0
+        if _DRIFT_MONITOR_AVAILABLE:
+            try:
+                brier = get_current_brier()
+                calibrated = apply_calibration_governor(raw_p / 100.0, brier)
+                return round(calibrated * 100.0, 2)
+            except Exception:
+                pass
+        return raw_p
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
@@ -1244,6 +1285,11 @@ class _UnderMachine(_BaseAgent):
 
 class _UmpireAgent(_BaseAgent):
     name = "UmpireAgent"
+    # Canonical pitcher stat set — populated via _norm_stat() at ingestion
+    _PITCHER_STATS = {"strikeouts", "earned_runs", "pitching_outs", "innings_pitched",
+                      "pitching_wins", "hits_allowed", "walks_allowed"}
+    # ABS 2026: catcher framing weight reduced 80 % per ABS Challenge System
+    _FRAMING_WEIGHT = ABS_FRAMING_WEIGHT  # 0.20
 
     def evaluate(self, prop: dict) -> dict | None:
         umpires = self.hub.get("context", {}).get("umpires", [])
@@ -1346,6 +1392,9 @@ class _LineValueAgent(_BaseAgent):
 
 class _BullpenAgent(_BaseAgent):
     name = "BullpenAgent"
+    # Canonical hitter stat set — populated via _norm_stat() at ingestion
+    _HITTER_STATS = {"home_runs", "rbis", "hits", "total_bases", "hits_runs_rbis",
+                     "stolen_bases", "singles", "walks", "runs"}
 
     def evaluate(self, prop: dict) -> dict | None:
         """Targets high-leverage relief situations (fatigue 0-4 scale)."""
@@ -1372,6 +1421,8 @@ class _BullpenAgent(_BaseAgent):
 
 class _WeatherAgent(_BaseAgent):
     name = "WeatherAgent"
+    # Note: apply_thermal_correction() from calibration_layer used for HR/total props.
+    # Temp data arrives via hub["context"]["weather"] → WeatherAgent enriches game totals.
 
     def evaluate(self, prop: dict) -> dict | None:
         """Wind/park/pull-hitter combos."""
@@ -1468,7 +1519,7 @@ def _extract_underdog_props(hub: dict) -> list[dict]:
             pick.get("under_american", pick.get("under_odds", -115)) or -115
         )
         player = pick.get("player", pick.get("name", "Unknown"))
-        prop_type = pick.get("stat_type", pick.get("prop_type", pick.get("prop", "H")))
+        prop_type = _norm_stat(pick.get("stat_type", pick.get("prop_type", pick.get("prop", "H"))))
         line = float(pick.get("line", pick.get("value", 1.5)) or 1.5)
         if not player or player == "Unknown":
             continue
@@ -1601,6 +1652,9 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
     return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
 
 
+# Module-level SteamMonitor instance — tracks line movement across DataHub refreshes
+_STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
+
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _SteamAgent, _MLEdgeAgent,
@@ -1620,7 +1674,7 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
                 continue
             props.append({
                 "player":          pick.get("player", pick.get("name", "Unknown")),
-                "prop_type":       pick.get("stat_type", pick.get("prop", "H")),
+                "prop_type":       _norm_stat(pick.get("stat_type", pick.get("prop", "H"))),
                 "line":            float(pick.get("line", pick.get("value", 1.5)) or 1.5),
                 "over_american":   int(pick.get("over_odds", -115) or -115),
                 "under_american":  int(pick.get("under_odds", -115) or -115),
@@ -1656,7 +1710,7 @@ def _get_props(hub: dict) -> list[dict]:
             if not isinstance(pick, dict):
                 continue
             player = pick.get("player_name", pick.get("player", pick.get("name", "")))
-            prop_type = pick.get("stat", pick.get("stat_type", pick.get("prop_type", "H")))
+            prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", "H"))))
             line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue

@@ -1,0 +1,75 @@
+{
+  "version": "2026.1.0",
+  "metadata": {
+    "last_refactor": "2026-03-29",
+    "sport": "MLB",
+    "engine": "PropIQ-CalibrationLayer",
+    "note": "xStats anchor: 90% weight on expected metrics, only 10% on raw outcomes"
+  },
+  "hitter_projections": {
+    "feature_weights": {
+      "xwOBA": 0.45,
+      "xBA": 0.25,
+      "xSLG": 0.20,
+      "actual_wOBA_lag": 0.10
+    },
+    "opportunity_constants": {
+      "base_pa_by_slot": {
+        "1": 4.65,
+        "2": 4.55,
+        "3": 4.43,
+        "4": 4.33,
+        "5": 4.20,
+        "6": 4.05,
+        "7": 3.95,
+        "8": 3.85,
+        "9": 3.75
+      },
+      "environmental_multipliers": {
+        "coors_field": 1.12,
+        "high_total_game": 1.05,
+        "low_total_game": 0.96,
+        "bottom_9_home_favorite": 0.92,
+        "extra_innings_likely": 1.04
+      }
+    },
+    "luck_deviation": {
+      "hot_threshold": 0.050,
+      "cold_threshold": -0.050,
+      "description": "actual_wOBA - xwOBA. +0.05 = running hot (regression candidate). -0.05 = unlucky (breakout candidate)"
+    }
+  },
+  "pitcher_interaction": {
+    "xERA_weight": 0.50,
+    "whiff_rate_floor": 0.22,
+    "handedness_penalty": 0.08,
+    "fatigue_decay_start": 85,
+    "abs_framing_weight": 0.20,
+    "note": "abs_framing_weight reduced 80% per 2026 MLB ABS Challenge System"
+  },
+  "pitcher_tiers": {
+    "ace": {
+      "era_ceiling": 3.20,
+      "k9_floor": 9.0,
+      "description": "Elite starters: model dominates (reliability 0.72)"
+    },
+    "mid_rotation": {
+      "era_ceiling": 4.50,
+      "k9_floor": 7.0,
+      "description": "Average SP: balanced model/market weighting (reliability 0.55)"
+    },
+    "bullpen_spot": {
+      "era_ceiling": 99.0,
+      "k9_floor": 0.0,
+      "description": "Relievers/openers: market dominates (reliability 0.42)"
+    }
+  },
+  "calibration": {
+    "luck_deviation_threshold": 0.050,
+    "max_streak_adjustment": 0.15,
+    "default_mlb_shrink_factor": 0.65,
+    "fractional_kelly": 0.25,
+    "min_ev_gate": 0.02,
+    "brier_governor_threshold": 0.22
+  }
+}
