@@ -355,6 +355,138 @@ def elo_win_prob(elo_diff: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# WagerBrain additions — Stated odds EV (two-sided case)
+# ---------------------------------------------------------------------------
+
+def stated_odds_ev(prob: float, odds_american: int | float) -> float:
+    """EV for a stated bet using American odds and model probability.
+
+    Handles the asymmetric stake/profit structure for favorites vs underdogs:
+      - Favorite (negative): risk |odds| to win 100
+      - Underdog (positive): risk 100 to win odds
+
+    Adapted from WagerBrain/WagerBrain/probs.py stated_odds_ev().
+
+    Args:
+        prob:           Model-estimated win probability (0.0 – 1.0).
+        odds_american:  American odds on this side (e.g. -110, +150).
+
+    Returns:
+        Dollar EV per standardised stake. Positive = +EV bet.
+
+    Examples:
+        >>> stated_odds_ev(0.58, -110)   # fav side, 58% model prob
+        0.053...
+        >>> stated_odds_ev(0.35, +150)   # dog side, 35% model prob
+        -0.025...
+    """
+    if odds_american < 0:
+        stake = abs(odds_american)
+        profit = 100.0
+    else:
+        stake = 100.0
+        profit = float(odds_american)
+    return true_odds_ev(stake=stake, profit=profit, prob=prob)
+
+
+# ---------------------------------------------------------------------------
+# WagerBrain additions — Fibonacci progressive staking
+# ---------------------------------------------------------------------------
+
+def fibonacci_bankroll(
+    sequence_length: int,
+    base_unit: float = 1.0,
+) -> list[float]:
+    """Generate a Fibonacci staking sequence for progressive bankroll management.
+
+    Each bet in a losing streak is sized by the next number in the Fibonacci
+    sequence multiplied by base_unit. Resets to base_unit on a win.
+
+    Adapted from WagerBrain/WagerBrain/bankroll.py fibonacci_bankroll().
+
+    Args:
+        sequence_length: Number of bets to pre-calculate.
+        base_unit:       Minimum stake unit (default 1.0).
+
+    Returns:
+        List of stake amounts in Fibonacci progression.
+
+    Examples:
+        >>> fibonacci_bankroll(6)
+        [1.0, 1.0, 2.0, 3.0, 5.0, 8.0]
+        >>> fibonacci_bankroll(5, base_unit=5.0)
+        [5.0, 5.0, 10.0, 15.0, 25.0]
+    """
+    if sequence_length <= 0:
+        return []
+    fib: list[float] = []
+    a, b = 1, 1
+    for i in range(sequence_length):
+        fib.append(a * base_unit)
+        a, b = b, a + b
+    return fib
+
+
+# ---------------------------------------------------------------------------
+# WagerBrain additions — Arbitrage detection (sharp-book consensus)
+# ---------------------------------------------------------------------------
+
+def basic_arbitrage(
+    odds_book_a: int | float,
+    odds_book_b: int | float,
+) -> dict:
+    """Detect arbitrage between two books offering opposite sides.
+
+    Calculates whether betting the favourite on Book A and underdog on Book B
+    (or vice versa) guarantees a profit regardless of outcome.
+
+    Adapted from WagerBrain/WagerBrain/strats/arb.py basic_arbitrage().
+    Primary use in PropIQ: verify sharp-book consensus by checking if
+    implied probs sum < 1.0 (market is offering true edge).
+
+    Args:
+        odds_book_a: American odds on Side A from Book A (e.g. -108).
+        odds_book_b: American odds on Side B from Book B (e.g. +115).
+
+    Returns:
+        dict with keys:
+            is_arb (bool):        True if a risk-free profit exists.
+            overround (float):    Sum of implied probs (< 1.0 = arb exists).
+            margin_pct (float):   Guaranteed profit % of total stake (0 if no arb).
+            stake_a (float):      Optimal stake on Side A per 100 total risked.
+            stake_b (float):      Optimal stake on Side B per 100 total risked.
+
+    Examples:
+        >>> basic_arbitrage(-108, +115)
+        {'is_arb': True, 'overround': 0.985..., 'margin_pct': 1.4..., ...}
+        >>> basic_arbitrage(-110, -110)
+        {'is_arb': False, 'overround': 1.047..., 'margin_pct': 0.0, ...}
+    """
+    imp_a = american_to_implied(odds_book_a)
+    imp_b = american_to_implied(odds_book_b)
+    overround = imp_a + imp_b
+    is_arb = overround < 1.0
+
+    if is_arb:
+        # Optimal stakes: proportional to implied probability
+        stake_a = (imp_a / overround) * 100.0
+        stake_b = (imp_b / overround) * 100.0
+        margin_pct = (1.0 / overround - 1.0) * 100.0
+    else:
+        stake_a = 50.0
+        stake_b = 50.0
+        margin_pct = 0.0
+
+    return {
+        "is_arb":      is_arb,
+        "overround":   round(overround, 6),
+        "margin_pct":  round(margin_pct, 4),
+        "stake_a":     round(stake_a, 2),
+        "stake_b":     round(stake_b, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
