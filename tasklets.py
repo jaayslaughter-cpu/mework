@@ -89,6 +89,12 @@ except ImportError:
     _SHRINKAGE_AVAILABLE = False
 
 try:
+    from market_validator import stamp_market_validation as _stamp_market_validation
+    _MARKET_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _MARKET_VALIDATOR_AVAILABLE = False
+
+try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
     _NSFI_AVAILABLE = True
 except ImportError:
@@ -1573,6 +1579,44 @@ class _BaseAgent:
                              prop["_shrinkage_delta"])
             except Exception as _se:
                 logger.debug("[ThinData] Shrinkage error: %s", _se)
+
+        # ── Phase 91 Step 6: Market line validation ───────────────────────────
+        # After shrinkage, check how far model_prob departs from the sportsbook's
+        # implied probability.  Divergence >20pp → soft-cap (likely data error).
+        # Divergence 12-20pp → WIDE flag (monitor).  Logs + stamps prop for audit.
+        if _MARKET_VALIDATOR_AVAILABLE:
+            try:
+                _market_implied_pct = implied_prob * 100.0
+                model_prob, _mv_valid = _stamp_market_validation(
+                    prop,
+                    model_prob_pct=model_prob,
+                    market_implied_pct=_market_implied_pct,
+                )
+                if not _mv_valid:
+                    logger.error(
+                        "[MarketValidator] INVALID prob after validation %s %s prob=%.1f",
+                        prop.get("player", ""), _prop_type, model_prob,
+                    )
+            except Exception as _mve:
+                logger.debug("[MarketValidator] Error: %s", _mve)
+
+        # ── Recalculate ev_pct from final model_prob (shrinkage + cap may have changed it) ──
+        # ev_pct was computed from raw model_p before _build_bet(); recalculate
+        # so Kelly / confidence downstream reflect the actual adjusted probability.
+        try:
+            _side_american = (
+                prop.get("over_american",  prop.get("odds_american", -115))
+                if side == "OVER"
+                else prop.get("under_american", prop.get("odds_american", -115))
+            )
+            _decimal = (
+                (100 / abs(_side_american) + 1) if _side_american < 0
+                else (_side_american / 100 + 1)
+            )
+            _profit  = _decimal - 1
+            ev_pct   = round((_profit * (model_prob / 100) - (1 - model_prob / 100)) * 100, 3)
+        except Exception:
+            pass   # keep original ev_pct on error
 
         side_odds = (
             prop.get("over_american",  prop.get("odds_american", -115))
