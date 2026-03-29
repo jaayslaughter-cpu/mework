@@ -1196,26 +1196,39 @@ def read_hub() -> dict:
 
 class _BaseAgent:
     name: str = "BaseAgent"
+    _shared_model = None   # hot-reloaded by XGBoostTasklet without restart
 
     def __init__(self, hub: dict, model):
         self.hub   = hub
-        self.model = model
+        self.model = model or _BaseAgent._shared_model
 
     def evaluate(self, prop: dict) -> dict | None:
         """Return a bet dict if edge found, else None."""
         raise NotImplementedError
 
     # shared helpers
-    def _model_prob(self, player: str, prop_type: str, **_ignored) -> float:
+    def _model_prob(self, player: str, prop_type: str, prop: dict | None = None, **_ignored) -> float:
         if self.model:
             try:
                 import xgboost as xgb  # noqa: PLC0415
                 import numpy as np     # noqa: PLC0415
-                feats = np.array([[0.0] * 20], dtype=np.float32)
+                # Build live feature vector from the actual prop (not zeros)
+                _live_prop = prop or {"prop_type": prop_type}
+                feats_list = self._build_feature_vector(_live_prop)
+                # Apply dropped_features mask from last backtest
+                try:
+                    _bt_raw = _redis().get("backtest_result")
+                    if _bt_raw:
+                        _bt = json.loads(_bt_raw)
+                        for _idx in (_bt.get("dropped_features") or []):
+                            if 0 <= _idx < len(feats_list):
+                                feats_list[_idx] = 0.0
+                except Exception:
+                    pass
+                feats = np.array([feats_list], dtype=np.float32)
                 if isinstance(self.model, xgb.Booster):
                     dmat = xgb.DMatrix(feats)
                     prob = float(self.model.predict(dmat)[0])
-                    # If output > 1 it's raw score, sigmoid it
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
                     return prob * 100
@@ -1233,6 +1246,89 @@ class _BaseAgent:
             except Exception:
                 pass
         return raw_p
+
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Feature vector (20 signals) — identical schema at INSERT and predict
+    # ─────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
+        """Return a 20-element float list usable by XGBoost.
+        All values normalised to [0, 1] or small bounded floats.
+        Schema is FIXED — any future changes must keep len == 20.
+        """
+        import math
+
+        def _clamp(v, lo=0.0, hi=1.0):
+            try:
+                return max(lo, min(hi, float(v)))
+            except Exception:
+                return 0.0
+
+        # ── Pitcher stats (from FanGraphs cache on prop) ──────────────
+        k_rate      = _clamp(prop.get("k_rate",    prop.get("k_pct",    0.22)))
+        bb_rate     = _clamp(prop.get("bb_rate",   prop.get("bb_pct",   0.08)))
+        era         = _clamp((prop.get("era", 4.0)) / 9.0)          # 0 ERA→0, 9 ERA→1
+        whip        = _clamp((prop.get("whip", 1.3)) / 3.0)
+
+        # ── Statcast / zone signals ───────────────────────────────────
+        shadow_whiff = _clamp(prop.get("shadow_whiff_rate", 0.25))
+        zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
+
+        # ── Lineup context ────────────────────────────────────────────
+        chase_adj   = _clamp((prop.get("_lineup_chase_adj", 0.0) + 0.10) / 0.20)  # -0.10→0, +0.10→1
+        o_swing     = _clamp(prop.get("_opp_o_swing_avg", 0.28))
+
+        # ── Weather ───────────────────────────────────────────────────
+        wind_speed  = _clamp(prop.get("_wind_speed",  8.0) / 30.0)
+        temp        = _clamp((prop.get("_temp_f",    72.0) - 32) / 80.0)
+
+        # ── Game context ──────────────────────────────────────────────
+        is_spring   = float(bool(prop.get("spring_training") or (bet or {}).get("spring_training")))
+
+        # ── Bet signals (from bet dict if available, else from prop) ──
+        b           = bet or {}
+        model_prob  = _clamp((b.get("model_prob")  or prop.get("model_prob",  50.0)) / 100.0)
+        ev_pct      = _clamp((b.get("ev_pct")      or prop.get("ev_pct",       3.0) + 20) / 40.0)
+        kelly       = _clamp((b.get("kelly_units")  or prop.get("kelly_units",  0.5)) / 3.0)
+        line_val    = _clamp((b.get("line")         or prop.get("line",         1.5)) / 10.0)
+        impl_prob   = _clamp((b.get("implied_prob") or prop.get("implied_prob", 52.4)) / 100.0)
+
+        # ── Prop type encoding ────────────────────────────────────────
+        _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0,
+                   "home_runs": 1, "hr": 1,
+                   "hits": 2, "hits_allowed": 2,
+                   "rbis": 3, "rbi": 3,
+                   "fantasy_score": 4}
+        pt_enc = _pt_map.get(str(b.get("prop_type") or prop.get("prop_type", "")).lower(), 5) / 5.0
+
+        side_enc    = 0.0 if str(b.get("side") or prop.get("side", "OVER")).upper() == "OVER" else 1.0
+
+        # ── Calibration quality ───────────────────────────────────────
+        brier = 0.25  # neutral default
+        try:
+            from calibration_layer import get_current_brier
+            brier = _clamp(get_current_brier())
+        except Exception:
+            pass
+
+        # ── Confidence encoding ───────────────────────────────────────
+        _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
+        conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
+
+        vec = [
+            k_rate, bb_rate, era, whip,          # 0-3  pitcher
+            shadow_whiff, zone_mult,              # 4-5  statcast
+            chase_adj, o_swing,                   # 6-7  lineup
+            wind_speed, temp,                     # 8-9  weather
+            is_spring,                            # 10   context
+            model_prob, ev_pct, kelly,            # 11-13 bet quality
+            line_val, impl_prob,                  # 14-15 market
+            pt_enc, side_enc,                     # 16-17 prop meta
+            brier, conf_enc,                      # 18-19 calibration
+        ]
+        assert len(vec) == 20, f"Feature vector length {len(vec)} != 20"
+        return [round(v, 6) for v in vec]
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
@@ -1258,6 +1354,18 @@ class _BaseAgent:
             if side == "OVER"
             else prop.get("under_american", prop.get("odds_american", -115))
         )
+        # Build feature vector now (all signals computed above are on prop)
+        _feat_vec = self._build_feature_vector(prop, {
+            "model_prob":  model_prob,
+            "ev_pct":      ev_pct,
+            "kelly_units": round(_kelly_units(model_prob / 100, side_odds), 3),
+            "line":        prop.get("line", 0),
+            "implied_prob": implied_prob,
+            "side":        side,
+            "prop_type":   prop.get("prop_type", ""),
+            "confidence":  self._confidence(ev_pct),
+            "spring_training": _is_spring_training(),
+        })
         kelly = _kelly_units(model_prob / 100, side_odds)
         platforms = self._dfs_platforms(prop, side)
         return {
@@ -1277,6 +1385,7 @@ class _BaseAgent:
             "confidence":         self._confidence(ev_pct),
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.utcnow().isoformat(),
+            "_features_json":     json.dumps(_feat_vec),
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
@@ -1449,7 +1558,7 @@ class _FadeAgent(_BaseAgent):
         if pub_pct < SBD_THRESHOLD:
             return None
 
-        model_prob = self._model_prob(player, prop_type)
+        model_prob = self._model_prob(player, prop_type, prop=prop)
         fade_boost = 6.0 if signal_src == "player_prop" else 5.0
         fade_prob  = 100 - model_prob + fade_boost
         under_odds = prop.get("under_american", -110)
@@ -1502,7 +1611,7 @@ class _BullpenAgent(_BaseAgent):
         if _norm_stat(prop_type) not in self._HITTER_STATS:
             return None
 
-        model_prob = self._model_prob(player, prop_type)
+        model_prob = self._model_prob(player, prop_type, prop=prop)
         if fatigue >= 3:
             model_prob = min(model_prob + 6.0, 95.0)
         over_odds = prop.get("over_american", -110)
@@ -1536,7 +1645,7 @@ class _WeatherAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         if wind_mph >= 10 and "out" in wind_dir.lower() and (
                 _norm_stat(prop_type) in {"home_runs", "total_bases", "hits_runs_rbis", "fantasy_score"}):
-            model_prob = self._model_prob(player, prop_type)
+            model_prob = self._model_prob(player, prop_type, prop=prop)
             model_prob = min(model_prob + 8.0, 95.0)
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
@@ -1833,6 +1942,12 @@ def _get_props(hub: dict) -> list[dict]:
                 continue
             _pp_enrich = _build_pitcher_enrich_map(hub)
             _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
+            _fg_pitcher = {}
+            try:
+                from fangraphs_layer import get_pitcher as _fg_get_pitcher
+                _fg_pitcher = _fg_get_pitcher(player) or {}
+            except Exception:
+                pass
             props.append({
                 "player":           player,
                 "prop_type":        str(prop_type).lower(),
@@ -1846,6 +1961,10 @@ def _get_props(hub: dict) -> list[dict]:
                 "player_id":        _pp_pitcher.get("mlbam_id"),
                 "opposing_team":    _pp_pitcher.get("opposing_team", ""),
                 "_context_lineups": hub.get("context", {}).get("lineups", []),
+                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.22)),
+                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.08)),
+                "era":              _fg_pitcher.get("era",    4.0),
+                "whip":             _fg_pitcher.get("whip",   1.3),
             })
         if props:
             logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
@@ -1986,9 +2105,9 @@ def run_agent_tasklet() -> None:
                         INSERT INTO bet_ledger
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
-                             status, bet_date, platform)
+                             status, bet_date, platform, features_json)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                'OPEN', %s, %s)
+                                'OPEN', %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -2003,6 +2122,7 @@ def run_agent_tasklet() -> None:
                             _parlay.get("agent") or _parlay.get("agent_name"),
                             _today,
                             (_leg.get("recommended_platform") or "prizepicks").lower(),
+                            _leg.get("_features_json"),
                         ),
                     )
         _conn.commit()
@@ -2577,6 +2697,15 @@ def run_xgboost_tasklet() -> None:
 
     logger.info("[XGBoostTasklet] Retrain complete. Accuracy=%.3f | Train=%d Test=%d | Saved→%s",
                 accuracy, len(X_train), len(X_test), model_path)
+
+    # ── Hot-reload: update the global model so live agents use it immediately ──
+    try:
+        new_booster = xgb.Booster()
+        new_booster.load_model(model_path)
+        _BaseAgent._shared_model = new_booster
+        logger.info("[XGBoostTasklet] ✅ Hot-reloaded model into all agents.")
+    except Exception as _hrl_err:
+        logger.warning("[XGBoostTasklet] Hot-reload failed (%s) — agents pick up on next restart.", _hrl_err)
 
     if accuracy >= 0.842:
         logger.info("[XGBoostTasklet] 🎯 Target accuracy %.1f%% reached!", accuracy * 100)
