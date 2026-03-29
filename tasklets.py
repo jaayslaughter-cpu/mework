@@ -1245,6 +1245,12 @@ class _BaseAgent:
                                 feats_list[_idx] = 0.0
                 except Exception:
                     pass
+                # Pad / trim to FEATURE_DIM so old 20-feat models don't crash
+                _dim = _BaseAgent.FEATURE_DIM
+                if len(feats_list) < _dim:
+                    feats_list = feats_list + [0.0] * (_dim - len(feats_list))
+                elif len(feats_list) > _dim:
+                    feats_list = feats_list[:_dim]
                 feats = np.array([feats_list], dtype=np.float32)
                 if isinstance(self.model, xgb.Booster):
                     dmat = xgb.DMatrix(feats)
@@ -1287,13 +1293,15 @@ class _BaseAgent:
 
 
     # ─────────────────────────────────────────────────────────────────────
-    # Feature vector (20 signals) — identical schema at INSERT and predict
+    # Feature vector (23 signals) — identical schema at INSERT and predict
     # ─────────────────────────────────────────────────────────────────────
+    FEATURE_DIM = 23  # bump when adding columns; old models padded automatically
+
     @staticmethod
     def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
-        """Return a 20-element float list usable by XGBoost.
+        """Return a 23-element float list usable by XGBoost.
         All values normalised to [0, 1] or small bounded floats.
-        Schema is FIXED — any future changes must keep len == 20.
+        Schema is FIXED — any future changes must keep len == FEATURE_DIM.
         """
         import math
 
@@ -1359,6 +1367,20 @@ class _BaseAgent:
         _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
         conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
 
+        # ── Pitch type whiff vs batter hand (slot 20) ─────────────────
+        # _pitch_whiff_vs_hand written by prop_enrichment_layer
+        pitch_whiff_vs_hand = _clamp(prop.get("_pitch_whiff_vs_hand", 0.25))
+
+        # ── Bullpen ERA normalized (slot 21) ──────────────────────────
+        # _bullpen_era written by prop_enrichment_layer; 4.5 ERA = 0.5
+        raw_bp_era = float(prop.get("_bullpen_era", 4.50) or 4.50)
+        bullpen_era_norm = _clamp(raw_bp_era / 9.0)
+
+        # ── Batting order slot normalized (slot 22) ───────────────────
+        # _batting_order_slot: 1=leadoff (0.0), 9=last (1.0); 0=unknown→0.44 (mid)
+        raw_slot = int(prop.get("_batting_order_slot", 0) or 0)
+        batting_order_norm = _clamp((raw_slot - 1) / 8.0) if raw_slot > 0 else 0.44
+
         vec = [
             k_rate, bb_rate, era, whip,          # 0-3  pitcher
             shadow_whiff, zone_mult,              # 4-5  statcast
@@ -1369,8 +1391,11 @@ class _BaseAgent:
             line_val, impl_prob,                  # 14-15 market
             pt_enc, side_enc,                     # 16-17 prop meta
             brier, conf_enc,                      # 18-19 calibration
+            pitch_whiff_vs_hand,                  # 20   pitch type matchup
+            bullpen_era_norm,                     # 21   bullpen strength
+            batting_order_norm,                   # 22   lineup slot
         ]
-        assert len(vec) == 20, f"Feature vector length {len(vec)} != 20"
+        assert len(vec) == 23, f"Feature vector length {len(vec)} != 23"
         return [round(v, 6) for v in vec]
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
@@ -2096,12 +2121,246 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
     return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
 
 
+class _CorrelatedParlayAgent(_BaseAgent):
+    """Finds props within the same game that are positively correlated
+    (e.g. pitcher facing a high-K lineup → striker Ks UP + opposing batters hits DOWN).
+    Targets the cross-side EV boost when both legs reinforce the same game narrative.
+    """
+    name = "CorrelatedParlayAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        team      = prop.get("team", "")
+        opp_team  = prop.get("opposing_team", "")
+        if not (team and opp_team):
+            return None
+        # Pitcher strikeout correlation: high K-lineup + chase-heavy opponent
+        if prop_type in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
+            chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
+            if chase_adj < 0.03:  # opponent isn't a high-chase lineup
+                return None
+        model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        over_odds  = prop.get("over_american", -115)
+        implied    = _american_to_implied(over_odds) * 100
+        ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= MIN_EV_THRESH:
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _StackSmithAgent(_BaseAgent):
+    """Builds same-game team stacks.
+    Targets multiple batters from the same lineup against a fatigued bullpen
+    or a pitcher with poor zone metrics.  Fires on batter props only.
+    """
+    name = "StackSmithAgent"
+
+    _BATTER_TYPES = {"hits", "total_bases", "home_runs", "rbis", "runs_scored", "singles"}
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        if prop_type not in self._BATTER_TYPES:
+            return None
+        # Stack signal: opposing pitcher has high ERA or low K rate
+        era   = float(prop.get("era", 4.20) or 4.20)
+        k_rate = float(prop.get("k_rate", 0.22) or 0.22)
+        # Only stack against pitchers with ERA > 4.5 or K-rate < 0.20
+        if era <= 4.50 and k_rate >= 0.20:
+            return None
+        model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        over_odds  = prop.get("over_american", -115)
+        implied    = _american_to_implied(over_odds) * 100
+        ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= MIN_EV_THRESH:
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _ChalkBusterAgent(_BaseAgent):
+    """Fades heavy public chalk — seeks value on under-served unders and contrarian overs
+    when public betting percentage diverges sharply from model probability.
+    """
+    name = "ChalkBusterAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        market     = self.hub.get("market", {})
+        pub        = market.get("public_betting", {})
+        player     = prop.get("player", "")
+        prop_type  = prop.get("prop_type", "").lower()
+        pub_over   = float(pub.get(player, {}).get("over_pct", 50) if isinstance(pub.get(player), dict) else 50)
+        # Fade if public is piling on overs (>68%) — contrarian under edge
+        if pub_over > 68:
+            model_prob = self._model_prob(player, prop_type, prop=prop)
+            under_odds = prop.get("under_american", -115)
+            implied    = _american_to_implied(under_odds) * 100
+            under_prob = 100.0 - model_prob
+            ev_pct     = (under_prob / 100 - _american_to_implied(under_odds)) / _american_to_implied(under_odds) * 100
+            if ev_pct >= MIN_EV_THRESH:
+                return self._build_bet(prop, "UNDER", model_prob, implied, ev_pct)
+        return None
+
+
+class _SharpFadeAgent(_BaseAgent):
+    """Follows reverse line movement — fires when public money is on one side
+    but the line moves the other way (sharp money signal).
+    Uses ticket%/money% divergence from SBD/The Odds API.
+    """
+    name = "SharpFadeAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        market    = self.hub.get("market", {})
+        sbd       = market.get("sharp_report", [])
+        player    = prop.get("player", "")
+        prop_type = prop.get("prop_type", "").lower()
+        for entry in sbd:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("player", "").lower() != player.lower():
+                continue
+            ticket_pct = float(entry.get("ticket_pct", 50) or 50)
+            money_pct  = float(entry.get("money_pct",  50) or 50)
+            # Sharp signal: ≥15pp divergence (money% < ticket% = sharp on UNDER)
+            divergence = ticket_pct - money_pct
+            if abs(divergence) < 15:
+                continue
+            sharp_side = "UNDER" if divergence > 0 else "OVER"
+            model_prob = self._model_prob(player, prop_type, prop=prop)
+            odds       = prop.get("under_american", -115) if sharp_side == "UNDER" else prop.get("over_american", -115)
+            implied    = _american_to_implied(odds) * 100
+            prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
+            ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+            if ev_pct >= MIN_EV_THRESH:
+                return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+        return None
+
+
+class _TimeValueAgent(_BaseAgent):
+    """Time-based edge agent.
+    Targets props where line value has drifted since open — captures overnight
+    steam and early-sharp movement by comparing current implied vs model.
+    Also applies a dome/afternoon multiplier (dome + day game = higher scoring pace).
+    """
+    name = "TimeValueAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        is_dome   = bool(prop.get("_is_dome", False))
+        temp_f    = float(prop.get("_temp_f", 72.0) or 72.0)
+        # Dome boost for batter props — controlled environment inflates totals
+        batter_types = {"hits", "total_bases", "home_runs", "rbis", "runs_scored"}
+        dome_boost = 2.5 if (is_dome and prop_type in batter_types) else 0.0
+        # Hot weather boost for batter power props
+        temp_boost = 1.5 if (temp_f >= 85 and prop_type in {"home_runs", "total_bases"}) else 0.0
+        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        model_prob  = min(95.0, model_prob + dome_boost + temp_boost)
+        over_odds   = prop.get("over_american", -115)
+        implied     = _american_to_implied(over_odds) * 100
+        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= MIN_EV_THRESH:
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _LineupChaseAgent(_BaseAgent):
+    """Lineup confirmation specialist.
+    Only fires once confirmed lineups are in DataHub.  Applies max lineup-chase
+    difficulty boost for pitcher K-props against strikeout-prone lineups.
+    """
+    name = "LineupChaseAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        lineups = self.hub.get("context", {}).get("lineups", [])
+        if not lineups:
+            return None  # wait for confirmed lineups
+        prop_type = prop.get("prop_type", "").lower()
+        if prop_type not in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
+            return None
+        chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
+        if chase_adj < 0.04:  # only high-chase lineups
+            return None
+        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        model_prob  = min(95.0, model_prob + chase_adj * 120)
+        over_odds   = prop.get("over_american", -115)
+        implied     = _american_to_implied(over_odds) * 100
+        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= MIN_EV_THRESH:
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _PropCycleAgent(_BaseAgent):
+    """Prop cycle tracker.
+    Detects when a prop line has been consistently above (or below) a player's
+    recent rolling average — captures mean-reversion value on over/under.
+    Uses _form_adj and _cv_nudge enrichment signals already on the prop.
+    """
+    name = "PropCycleAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        form_adj  = float(prop.get("_form_adj", 0.0))
+        cv_nudge  = float(prop.get("_cv_nudge", 0.0))
+        # Needs meaningful form signal to fire
+        if abs(form_adj) < 0.02 and abs(cv_nudge) < 0.02:
+            return None
+        # Positive form + positive CV = OVER cycle; negative = UNDER cycle
+        cycle_score = form_adj + cv_nudge
+        side        = "OVER" if cycle_score > 0 else "UNDER"
+        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        # Boost model in direction of cycle
+        boost       = abs(cycle_score) * 100 * 0.5  # max ~5pp at 0.10 score
+        model_prob  = min(95.0, model_prob + (boost if side == "OVER" else -boost))
+        odds        = prop.get("over_american", -115) if side == "OVER" else prop.get("under_american", -115)
+        implied     = _american_to_implied(odds) * 100
+        prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
+        ev_pct      = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        if ev_pct >= MIN_EV_THRESH:
+            return self._build_bet(prop, side, model_prob, implied, ev_pct)
+        return None
+
+
+class _UnderDogAgent(_BaseAgent):
+    """Underdog Fantasy specialist.
+    Only evaluates props sourced directly from Underdog Fantasy.
+    Targets lines where Underdog has moved away from the sharp-book consensus
+    (Underdog line < consensus implied = over value; > consensus = under value).
+    """
+    name = "UnderDogAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        if prop.get("platform", "").lower() != "underdog":
+            return None
+        player    = prop.get("player", "")
+        prop_type = prop.get("prop_type", "").lower()
+        # Get sharp consensus from hub market data
+        sharp_prob = _get_sharp_consensus(self.hub, player, prop_type)
+        if sharp_prob is None:
+            return None
+        ud_over_odds = prop.get("over_american", -115)
+        ud_implied   = _american_to_implied(ud_over_odds) * 100
+        divergence   = sharp_prob - ud_implied
+        if abs(divergence) < 5.0:  # need at least 5pp gap vs sharp books
+            return None
+        side       = "OVER" if divergence > 0 else "UNDER"
+        model_prob = self._model_prob(player, prop_type, prop=prop)
+        odds       = ud_over_odds if side == "OVER" else prop.get("under_american", -115)
+        implied    = _american_to_implied(odds) * 100
+        prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
+        ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        if ev_pct >= MIN_EV_THRESH:
+            return self._build_bet(prop, side, model_prob, implied, ev_pct)
+        return None
+
+
 # Module-level SteamMonitor instance — tracks line movement across DataHub refreshes
 _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _SteamAgent, _MLEdgeAgent,
+    # Phase 90 — 8 new agents complete the roster to 18
+    _CorrelatedParlayAgent, _StackSmithAgent, _ChalkBusterAgent, _SharpFadeAgent,
+    _TimeValueAgent, _LineupChaseAgent, _PropCycleAgent, _UnderDogAgent,
 ]
 
 
@@ -2652,7 +2911,14 @@ def run_backtest_tasklet() -> None:
         logger.info("[BacktestTasklet] Insufficient data (%d rows) — skipping.", len(rows))
         return
 
-    X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
+    # Normalize all feature vectors to FEATURE_DIM (handles mixed 20/23 rows)
+    _bt_fdim = _BaseAgent.FEATURE_DIM
+    _bt_raw = [json.loads(r[0]) for r in rows]
+    _bt_raw = [
+        v + [0.0] * (_bt_fdim - len(v)) if len(v) < _bt_fdim else v[:_bt_fdim]
+        for v in _bt_raw
+    ]
+    X = np.array(_bt_raw, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     split      = int(len(X) * 0.8)
@@ -3159,7 +3425,14 @@ def run_xgboost_tasklet() -> None:
         logger.info("[XGBoostTasklet] Insufficient training data (%d rows) — skipping.", len(rows))
         return
 
-    X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
+    # Normalize all feature vectors to FEATURE_DIM (handles mixed 20/23 rows)
+    FEATURE_DIM = _BaseAgent.FEATURE_DIM
+    X_raw = [json.loads(r[0]) for r in rows]
+    X_raw = [
+        v + [0.0] * (FEATURE_DIM - len(v)) if len(v) < FEATURE_DIM else v[:FEATURE_DIM]
+        for v in X_raw
+    ]
+    X = np.array(X_raw, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
