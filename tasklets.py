@@ -2216,7 +2216,7 @@ _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
-    _LineValueAgent, _BullpenAgent, _WeatherAgent, _SteamAgent, _MLEdgeAgent,
+    _LineValueAgent, _BullpenAgent, _WeatherAgent, _MLEdgeAgent,  # SteamAgent: internal-only, not in Discord picks
 ]
 
 
@@ -2592,6 +2592,24 @@ def run_agent_tasklet() -> None:
     # cross-process backup (e.g. multiple Railway replicas).
     today_str  = datetime.date.today().isoformat()   # "2026-03-29"
     r_dedup    = _redis()
+
+    # ── DB-backed dedup preload — survives crash + Redis cold restart ──────────
+    # On cycle start, restore _AGENT_SENT_TODAY from bet_ledger for today so
+    # a fresh restart never re-sends picks that were already Discord-sent today.
+    try:
+        _pg = _get_pg()
+        if _pg:
+            with _pg.cursor() as _c:
+                _c.execute(
+                    "SELECT DISTINCT agent_name FROM bet_ledger "
+                    "WHERE bet_date = %s AND discord_sent = TRUE",
+                    (today_str,)
+                )
+                for (_ag,) in _c.fetchall():
+                    _AGENT_SENT_TODAY.setdefault(_ag, today_str)
+            _pg.commit()
+    except Exception as _dbe:
+        logger.debug("[AgentTasklet] dedup preload skipped: %s", _dbe)
     _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
 
     # ── One play per agent per day — hard gate ───────────────────────────────────────
@@ -2641,6 +2659,19 @@ def run_agent_tasklet() -> None:
             pass
         try:
             discord_alert.send_parlay_alert(parlay)
+            # Mark as sent in DB — crash-safe dedup
+            try:
+                _pg2 = _get_pg()
+                if _pg2:
+                    with _pg2.cursor() as _c2:
+                        _c2.execute(
+                            "UPDATE bet_ledger SET discord_sent = TRUE "
+                            "WHERE agent_name = %s AND bet_date = %s",
+                            (agent_name, today_str)
+                        )
+                    _pg2.commit()
+            except Exception as _dbe2:
+                logger.debug("[AgentTasklet] discord_sent update skipped: %s", _dbe2)
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
