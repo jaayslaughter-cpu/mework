@@ -94,9 +94,20 @@ except ImportError:
     _NSFI_AVAILABLE = False
 
 from lineup_chase_layer import get_lineup_chase_score
+try:
+    from prop_enrichment_layer import enrich_props as _enrich_props
+    _ENRICHMENT_AVAILABLE = True
+    logger.info("[Enrichment] prop_enrichment_layer loaded.")
+except ImportError:
+    _ENRICHMENT_AVAILABLE = False
+    def _enrich_props(props, hub, season=None): return props
+    logger.warning("[Enrichment] prop_enrichment_layer not found — props run unenriched.")
 
 try:
-    from game_prediction_layer import get_game_predictions
+    from game_prediction_layer import (
+        fetch_game_predictions_today as get_game_predictions,
+        get_single_game_prediction,
+    )
     _GAME_PRED_AVAILABLE = True
 except ImportError:
     _GAME_PRED_AVAILABLE = False
@@ -1242,16 +1253,49 @@ class _BaseAgent:
                     return raw_p * 100
             except Exception:
                 pass
+        # ── BASE_RATES fallback: use historical hit rates instead of flat 50% ──
+        # Imported from live_dispatcher (single source of truth for all stat types)
+        try:
+            from live_dispatcher import _BASE_RATES as _BR
+            _stat_norm = _norm_stat(prop_type) if prop_type else ""
+            _line_val  = float(prop.get("line", 1.5) if prop else 1.5)
+            _side      = str(prop.get("side", "over") if prop else "over").lower()
+            _rates     = _BR.get(_stat_norm, [])
+            if _rates:
+                # Interpolate: find the two nearest line brackets
+                _sorted = sorted(_rates, key=lambda x: x[0])
+                _base   = _sorted[0][1]  # default = lowest line rate
+                for _l, _p in _sorted:
+                    if _line_val >= _l:
+                        _base = _p
+                    else:
+                        break
+                # Under probability = 1 - over probability
+                if _side == "under":
+                    _base = 1.0 - _base
+                raw_p = round(_base * 100.0, 2)
+            else:
+                raw_p = 50.0
+        except Exception:
+            raw_p = 50.0
+
         # Apply Brier-score calibration governor (shrinks toward market if model is drifting)
-        raw_p = 50.0
         if _DRIFT_MONITOR_AVAILABLE:
             try:
                 brier = get_current_brier()
                 calibrated = apply_calibration_governor(raw_p / 100.0, brier)
-                return round(calibrated * 100.0, 2)
+                raw_p = round(calibrated * 100.0, 2)
             except Exception:
                 pass
-        return raw_p
+
+        # Apply enrichment nudges stored on prop (from prop_enrichment_layer)
+        if prop:
+            raw_p += float(prop.get("_bayesian_nudge", 0.0)) * 100.0
+            raw_p += float(prop.get("_cv_nudge",       0.0)) * 100.0
+            raw_p += float(prop.get("_form_adj",       0.0)) * 100.0
+            raw_p = max(30.0, min(80.0, raw_p))   # hard bounds
+
+        return round(raw_p, 2)
 
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1278,7 +1322,12 @@ class _BaseAgent:
         whip        = _clamp((prop.get("whip", 1.3)) / 3.0)
 
         # ── Statcast / zone signals ───────────────────────────────────
-        shadow_whiff = _clamp(prop.get("shadow_whiff_rate", 0.25))
+        # FanGraphs csw_pct / swstr_pct used as shadow_whiff proxy when Statcast unavailable
+        shadow_whiff = _clamp(
+            prop.get("shadow_whiff_rate",
+            prop.get("csw_pct",
+            prop.get("swstr_pct", 0.25)))
+        )
         zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
 
         # ── Lineup context ────────────────────────────────────────────
@@ -1993,14 +2042,48 @@ def _get_props(hub: dict) -> list[dict]:
             logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
             return props
 
-    # 2. Try Underdog from hub
+    # 2. Underdog from hub — combined with PrizePicks if both available
     ud_props = _extract_underdog_props(hub)
     if ud_props:
-        return ud_props
+        props = []
+        props.extend(ud_props)
+        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
 
-    # 3. Last resort — synthetic (logs warning so we notice)
-    logger.warning("[AgentTasklet] No real props in hub — using synthetic fallback")
-    return _build_synthetic_props(hub)
+        # Add PrizePicks on top (deduped)
+        pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+        if pp_picks and isinstance(pp_picks, list):
+            seen = {(p["player"].lower(), p["prop_type"]) for p in props}
+            pp_added = 0
+            for pick in pp_picks:
+                if not isinstance(pick, dict):
+                    continue
+                player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
+                prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", ""))))
+                line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
+                if not player or not prop_type:
+                    continue
+                key = (player.lower(), prop_type)
+                if key in seen:
+                    continue
+                seen.add(key)
+                props.append({
+                    "player":         player,
+                    "player_name":    player,
+                    "prop_type":      prop_type,
+                    "line":           float(line or 1.5),
+                    "over_american":  -115,
+                    "under_american": -115,
+                    "team":           pick.get("player_team", pick.get("team", "")),
+                    "venue":          "",
+                    "platform":       "prizepicks",
+                })
+                pp_added += 1
+            if pp_added:
+                logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
+        return props
+
+    # No real props available — skip cycle entirely (no synthetic)
+    return []
 
 
 def run_agent_tasklet() -> None:
@@ -2022,8 +2105,13 @@ def run_agent_tasklet() -> None:
 
     props = _get_props(hub)
     if not props:
-        logger.info("[AgentTasklet] No Underdog props available — skipping cycle.")
+        logger.info("[AgentTasklet] No live UD/PP props this cycle — skipping.")
         return
+
+    # Enrich all props with FanGraphs, weather, Bayesian, CV, form, park context
+    import datetime as _dt
+    props = _enrich_props(props, hub, season=_dt.date.today().year)
+    logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
 
     all_parlays: list[dict] = []
 

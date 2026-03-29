@@ -458,7 +458,7 @@ def fetch_shadow_zone_whiff(pitcher_mlbam_id: int, season: int | None = None) ->
 # CHASE  : |plate_x| < 1.5,  0.8 < plate_z < 4.2   (just outside)
 # WASTE  : everything else
 
-_ZONE_CACHE_DIR = pathlib.Path("/tmp/zone_integrity_cache")
+_ZONE_CACHE_DIR = Path("/tmp/zone_integrity_cache")
 
 
 def _classify_zone(plate_x: float, plate_z: float) -> str:
