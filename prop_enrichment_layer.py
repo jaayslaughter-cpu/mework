@@ -342,6 +342,214 @@ def _get_game_context(team: str, hub: dict) -> dict:
 # Main public function — call this once per cycle before agents
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Step 8 — Statcast features (xwOBA, barrel%, whiff%, hard-hit%)
+# ---------------------------------------------------------------------------
+_STATCAST_LAYER: object = None   # module-level singleton to avoid re-init
+
+def _get_statcast(props: list[dict]) -> list[dict]:
+    """Enrich props with Baseball Savant Statcast features.
+    Requires mlbam_id on each prop. Falls back silently.
+    Adds: sc_xwoba, sc_xba, sc_xslg, sc_barrel_rate, sc_hard_hit_rate (batters)
+          sc_whiff_rate, sc_shadow_whiff_rate (pitchers)
+    """
+    global _STATCAST_LAYER
+    try:
+        from statcast_feature_layer import (  # noqa: PLC0415
+            StatcastFeatureLayer,
+            enrich_props_with_statcast as _sc_enrich,
+        )
+        if _STATCAST_LAYER is None:
+            _STATCAST_LAYER = StatcastFeatureLayer()
+        _PITCHER_PT = {"strikeouts", "pitching_outs", "earned_runs",
+                       "hits_allowed", "walks_allowed", "fantasy_pitcher"}
+        pitchers = [p for p in props if p.get("prop_type", "") in _PITCHER_PT]
+        batters  = [p for p in props if p.get("prop_type", "") not in _PITCHER_PT]
+        if pitchers:
+            pitchers = _sc_enrich(pitchers, "pitcher", layer=_STATCAST_LAYER)
+        if batters:
+            batters  = _sc_enrich(batters,  "batter",  layer=_STATCAST_LAYER)
+        return pitchers + batters
+    except Exception as exc:
+        logger.debug("[Enrichment] Statcast skipped: %s", exc)
+        return props
+
+
+# ---------------------------------------------------------------------------
+# Step 9 — Marcel projections (3-year weighted prior + current season blend)
+# ---------------------------------------------------------------------------
+_MARCEL_LAYER: object = None
+
+def _get_marcel_adj(player: str, prop_type: str, is_pitcher: bool) -> float:
+    """Return Marcel probability adjustment (max ±0.018).
+    Blends 3 years of FanGraphs data weighted by PA — stabilises early season.
+    """
+    global _MARCEL_LAYER
+    try:
+        from marcel_layer import MarcelLayer, marcel_adjustment  # noqa: PLC0415
+        if _MARCEL_LAYER is None:
+            _MARCEL_LAYER = MarcelLayer()
+        side = "Over"   # Marcel adjustment is symmetric; caller applies sign
+        player_type = "pitcher" if is_pitcher else "batter"
+        data = (_MARCEL_LAYER.get_pitcher(player)
+                if is_pitcher else _MARCEL_LAYER.get_batter(player))
+        return float(marcel_adjustment(prop_type, side, player_type, data) or 0.0)
+    except Exception:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Step 10 — Predict+ score (pitcher K-prop unpredictability)
+# ---------------------------------------------------------------------------
+_PP_LAYER: object = None
+
+def _get_predict_plus_adj(player: str, prop_type: str,
+                          side: str, mlbam_id: int | None) -> float:
+    """Return Predict+ probability adjustment for K props only (max ±0.020)."""
+    if not mlbam_id or prop_type != "strikeouts":
+        return 0.0
+    global _PP_LAYER
+    try:
+        from predict_plus_layer import (  # noqa: PLC0415
+            PredictPlusLayer, predict_plus_adjustment,
+        )
+        if _PP_LAYER is None:
+            _PP_LAYER = PredictPlusLayer()
+        score = float(_PP_LAYER.get_score(int(mlbam_id), player) or 0.0)
+        if score <= 0:
+            return 0.0
+        return float(predict_plus_adjustment(prop_type, side, score) or 0.0)
+    except Exception:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Step 11 — Sportsbook reference (sharp book vig-stripped implied probability)
+# ---------------------------------------------------------------------------
+_SB_CACHE: list | None = None    # enriched once per DataHub cycle
+
+def _get_sportsbook_ref(props: list[dict]) -> list[dict]:
+    """Enrich props with sharp-book vig-stripped implied probability.
+    Adds: sb_implied_prob, sb_implied_prob_over, sb_implied_prob_under,
+          sb_line, sb_line_gap
+    These replace Underdog's flat -115 as the market_implied in generate_pick.
+    """
+    try:
+        from sportsbook_reference_layer import (  # noqa: PLC0415
+            enrich_props_with_sportsbook,
+        )
+        import datetime as _dt
+        date_str = _dt.date.today().isoformat()
+        return enrich_props_with_sportsbook(props, date=date_str)
+    except Exception as exc:
+        logger.debug("[Enrichment] Sportsbook reference skipped: %s", exc)
+        return props
+
+
+# ---------------------------------------------------------------------------
+# Step 12 — Player-specific base rate override
+# ---------------------------------------------------------------------------
+# Replaces population base rates for K and HR props when we have
+# enough player-specific signal (FanGraphs + Statcast).
+# This is what fixes "Cole K Over 7.5 = 22%" — for elite pitchers
+# the real rate is 40-55%.
+
+def _player_specific_rate(prop: dict, side: str) -> float | None:
+    """
+    Return player-specific win probability overriding population base rate.
+    Returns None if insufficient data to override (caller uses base rate).
+
+    For K Over: use pitcher k_rate (FG) + csw_pct + sc_whiff_rate
+    For K Under: mirror of Over
+    For HR Over: use batter hr_fb_pct + sc_barrel_rate + iso
+    For TB Over: use batter wRC+ + sc_xslg + sc_xwoba
+    """
+    prop_type = prop.get("prop_type", "")
+    line      = float(prop.get("line", 1.5) or 1.5)
+    is_over   = side.upper() == "OVER"
+
+    # ── Pitcher K props ────────────────────────────────────────────────────
+    if prop_type == "strikeouts":
+        k_rate   = float(prop.get("k_rate",   prop.get("k_pct",   0.0)) or 0.0)
+        csw_pct  = float(prop.get("csw_pct",  0.0) or 0.0)
+        whiff    = float(prop.get("sc_whiff_rate", prop.get("swstr_pct", 0.0)) or 0.0)
+        # Need at least one strong signal
+        if k_rate < 0.01 and csw_pct < 0.01:
+            return None
+        # Estimate K/9 and convert to K-count probability
+        # k_rate = K per plate appearance → K per 9 innings ≈ k_rate * 27
+        # For 6 IP (18 outs ≈ 18 PA), expected Ks = k_rate * 18
+        expected_k = k_rate * 18.0   # expected Ks over typical start
+        # CSW boost: elite CSW (>32%) means more Ks per PA
+        if csw_pct > 0.30:
+            expected_k *= (1.0 + (csw_pct - 0.28) * 2.0)
+        if whiff > 0.12:
+            expected_k *= (1.0 + (whiff - 0.11) * 1.5)
+        # Poisson approximation: P(K >= line) = 1 - CDF(line-1, lambda=expected_k)
+        import math
+        lam = max(0.01, expected_k)
+        # P(K < line) = sum_{k=0}^{line-1} e^{-lam} * lam^k / k!
+        p_under = sum(
+            math.exp(-lam) * (lam ** k) / math.factorial(int(k))
+            for k in range(int(line))
+        )
+        p_over = 1.0 - min(0.99, p_under)
+        p = p_over if is_over else (1.0 - p_over)
+        # Only override if it differs meaningfully from population avg
+        # (prevents overriding when we have bad/default data)
+        if k_rate > 0.20 or csw_pct > 0.27:   # real signal, not defaults
+            return round(p, 4)
+        return None
+
+    # ── Batter HR Over ─────────────────────────────────────────────────────
+    if prop_type == "home_runs" and line <= 0.5:
+        hr_fb   = float(prop.get("hr_fb_pct", 0.0) or 0.0)
+        barrel  = float(prop.get("sc_barrel_rate", 0.0) or 0.0)
+        iso     = float(prop.get("iso", 0.0) or 0.0)
+        if hr_fb < 0.01 and barrel < 0.01:
+            return None
+        # HR rate per PA: elite hr_fb (~18%) with 30% FB rate = ~5.4% HR/PA
+        # Avg hr_fb (~10.5%) with 35% FB = ~3.7% HR/PA
+        # League avg HR/game ≈ 9% (0.09)
+        hr_per_pa = (hr_fb if hr_fb > 0.01 else 0.105) * 0.33   # ~33% fly ball rate
+        if barrel > 0.10:
+            hr_per_pa *= (1.0 + (barrel - 0.08) * 2.0)
+        # Typical 4 PA per game
+        p_no_hr = (1.0 - hr_per_pa) ** 4
+        p_over  = 1.0 - p_no_hr
+        p = p_over if is_over else p_no_hr
+        if hr_fb > 0.01 or barrel > 0.01:
+            return round(p, 4)
+        return None
+
+    # ── Batter Total Bases ─────────────────────────────────────────────────
+    if prop_type == "total_bases" and line <= 1.5:
+        wrc     = float(prop.get("wrc_plus", 0.0) or 0.0)
+        xslg    = float(prop.get("sc_xslg",  0.0) or 0.0)
+        xwoba   = float(prop.get("sc_xwoba", 0.0) or 0.0)
+        if wrc < 1.0 and xslg < 0.01:
+            return None
+        # wRC+ 140 → ~40% above avg in TB production
+        # League avg TB Over 1.5 ≈ 55%
+        base = 0.55
+        if wrc > 80:
+            wrc_adj = (wrc - 100.0) / 100.0 * 0.10   # ±10pp for ±100 wRC+
+            base += wrc_adj
+        if xslg > 0.01:
+            xslg_adj = (xslg - 0.420) / 0.100 * 0.05  # ±5pp per .100 xSLG
+            base += xslg_adj
+        if xwoba > 0.01:
+            xwoba_adj = (xwoba - 0.310) / 0.060 * 0.04
+            base += xwoba_adj
+        base = max(0.35, min(0.80, base))
+        p = base if is_over else (1.0 - base)
+        if wrc > 80 or xslg > 0.01:
+            return round(p, 4)
+        return None
+
+    return None
+
 def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> list[dict]:
     """
     Enrich a list of raw Underdog/PrizePicks prop dicts with all analytics
@@ -365,6 +573,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
 
     if not props:
         return props
+
+    # ── Batch enrichment (whole prop list, single API call each) ─────────────
+    # Run sportsbook reference first — provides sharp-book market_implied
+    # which replaces Underdog's flat -115 and fixes OVER-bet bias
+    props = _get_sportsbook_ref(props)
+
+    # Run Statcast enrichment — provides player-specific barrel/whiff/xwOBA
+    # Requires mlbam_id which gets attached per-prop in the loop below
+    # so we defer to after the lookup maps are built.
 
     # ── Build lookup maps once for all props ──────────────────────────────────
     p2team, p2opp, p2mlbam = _build_lookup_maps(hub)
@@ -395,6 +612,14 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         if not prop.get("player_id") and pn in p2mlbam:
             prop["player_id"] = p2mlbam[pn]
             prop["mlbam_id"]  = p2mlbam[pn]
+
+        # ── Player-specific base rate override ────────────────────────────────
+        # Override population base rate for K/HR/TB when we have real signal
+        # Set on prop so generate_pick and _model_prob can use it
+        _side_hint = prop.get("side", "OVER")
+        _ps_rate = _player_specific_rate(prop, _side_hint)
+        if _ps_rate is not None:
+            prop["_player_specific_prob"] = _ps_rate
 
         team     = prop.get("team", "")
         opp_team = prop.get("opposing_team", "")
@@ -479,16 +704,34 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # ── MLB form adjustment ───────────────────────────────────────────────
         prop["_form_adj"] = _get_form_adj(player, prop_type, hub)
 
+        # ── Marcel projection adjustment (weighted 3-year prior) ────────────
+        _is_pitcher_prop = prop_type in _PITCHER_PROP_TYPES
+        _side_for_adj = prop.get("side", "OVER")
+        _marcel_adj = _get_marcel_adj(player, prop_type, _is_pitcher_prop)
+        prop["_marcel_adj"] = _marcel_adj
+
+        # ── Predict+ score (pitcher K unpredictability, K props only) ─────────
+        _pp_adj = _get_predict_plus_adj(
+            player, prop_type, _side_for_adj,
+            prop.get("mlbam_id") or prop.get("player_id"),
+        )
+        prop["_predict_plus_adj"] = _pp_adj
+
         # ── Bayesian nudge (uses implied_prob if set, else 52.4% default) ────
         base_prob = float(prop.get("implied_prob", 52.4))
         prop["_bayesian_nudge"] = _get_bayesian_nudge(prop, base_prob)
 
         enriched_count += 1
 
+    # ── Statcast batch enrichment (needs mlbam_ids attached above) ─────────────
+    props = _get_statcast(props)
+    sc_hits = sum(1 for p in props if p.get("sc_xwoba") or p.get("sc_whiff_rate"))
+
     logger.info(
-        "[Enrichment] %d props enriched | FanGraphs hits: %d/%d | "
-        "chase scores: %d teams | weather: %d stadiums",
-        enriched_count, fg_hits, len(props),
+        "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | "
+        "Marcel/PP wired | SB reference wired | "
+        "chase: %d teams | weather: %d stadiums",
+        enriched_count, fg_hits, sc_hits,
         len(_chase_cache), len(_weather_cache),
     )
     return props
