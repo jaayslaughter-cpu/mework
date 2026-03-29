@@ -410,6 +410,22 @@ def _kelly_units(edge: float, odds_american: int) -> float:
     return min(KELLY_FRACTION * kelly, MAX_UNIT_CAP)
 
 
+def _get_sample_count(prop_type: str) -> int:
+    """Return the number of settled ledger rows for this prop-type.
+    Used by thin-data shrinkage in _build_bet().
+    Populated by run_xgboost_tasklet() under key 'xgb_sample_counts'.
+    Returns 0 on any Redis miss/error (triggers max shrinkage for unknown types).
+    """
+    try:
+        raw = _redis().get("xgb_sample_counts")
+        if raw:
+            counts: dict = json.loads(raw)
+            return int(counts.get(str(prop_type).lower(), 0))
+    except Exception:
+        pass
+    return 0
+
+
 def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
     """Run an Apify actor and return dataset items."""
     api_key = os.getenv("APIFY_API_KEY", "")
@@ -1533,6 +1549,31 @@ class _BaseAgent:
                 # Fallback: apply adjustments naively (safe degradation)
                 for _, delta in _post_adjs:
                     model_prob = round(max(3.0, min(97.0, model_prob + delta)), 4)
+
+        # ── Phase 91 Step 5: Thin-data shrinkage ─────────────────────────────
+        # If this prop-type has few settled training rows, shrink model_prob
+        # toward the market implied probability. Proven prop-types pass through
+        # at full strength; cold-start prop-types are heavily dampened.
+        if _SHRINKAGE_AVAILABLE:
+            try:
+                from confidence_shrinkage import shrink_toward_market as _shrink_toward_market  # noqa: PLC0415
+                _n_samples = _get_sample_count(_prop_type)
+                _shrunk, _conf = _shrink_toward_market(
+                    model_prob_pct=model_prob,
+                    market_implied_pct=implied_prob * 100.0,
+                    n_samples=_n_samples,
+                )
+                prop["_shrinkage_n"]     = _n_samples
+                prop["_shrinkage_conf"]  = _conf
+                prop["_shrinkage_delta"] = round(_shrunk - model_prob, 3)
+                model_prob = _shrunk
+                logger.debug("[ThinData] %s %s n=%d conf=%.2f delta=%.2fpp",
+                             prop.get("player", ""), _prop_type,
+                             _n_samples, _conf,
+                             prop["_shrinkage_delta"])
+            except Exception as _se:
+                logger.debug("[ThinData] Shrinkage error: %s", _se)
+
         side_odds = (
             prop.get("over_american",  prop.get("odds_american", -115))
             if side == "OVER"
@@ -3649,6 +3690,29 @@ def run_xgboost_tasklet() -> None:
         "target_accuracy": 0.842,
         "passed":        accuracy >= 0.777,
     }))
+
+    # ── Phase 91 Step 5: Cache per-prop-type sample counts for thin-data shrinkage ──
+    # Agents read this at bet-evaluation time to know how much to trust the model
+    # for prop types with few settled training rows.
+    try:
+        _sc_conn = _pg_conn()
+        with _sc_conn.cursor() as _sc_cur:
+            _sc_cur.execute(
+                """
+                SELECT prop_type, COUNT(*) AS n
+                FROM bet_ledger
+                WHERE actual_outcome IS NOT NULL
+                  AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
+                GROUP BY prop_type
+                """
+            )
+            _counts = {row[0]: int(row[1]) for row in _sc_cur.fetchall() if row[0]}
+        _sc_conn.close()
+        r.setex("xgb_sample_counts", 604800, json.dumps(_counts))
+        logger.info("[XGBoostTasklet] Cached sample counts for %d prop types: %s",
+                    len(_counts), _counts)
+    except Exception as _sce:
+        logger.warning("[XGBoostTasklet] Could not cache sample counts: %s", _sce)
 
     logger.info("[XGBoostTasklet] Retrain complete. Accuracy=%.3f | Train=%d Test=%d | Saved→%s",
                 accuracy, len(X_train), len(X_test), model_path)
