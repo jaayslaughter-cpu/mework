@@ -7,8 +7,6 @@ Runs at midnight ET every night.
 2. Settles all PENDING parlays from that date (WIN / LOSS / PUSH)
 3. Posts a summary recap embed to Discord
 4. Updates the propiq_season_record table with final results
-5. Phase 43: Updates per-agent unit tier (Tier 1–5, $5–$20) based on
-   consecutive W/L streaks, and posts tier promotions/demotions to Discord.
 
 Run directly: python3 nightly_recap.py [YYYY-MM-DD]
 If no date given, defaults to yesterday (UTC-7).
@@ -33,28 +31,14 @@ from season_record import (
 )
 from clv_tracker import get_daily_clv_summary
 
-# Phase 43: per-agent unit tier management
+# Phase 94: CLV feedback engine — adaptive thresholds + bet_ledger population
 try:
-    from agent_unit_sizing import record_result as _unit_record_result
-    _UNIT_SIZING_AVAILABLE = True
+    from clv_feedback_engine import rebuild_thresholds as _rebuild_thresholds, build_discord_summary as _build_edge_summary
+    _CLV_FEEDBACK_AVAILABLE = True
 except ImportError:
-    _UNIT_SIZING_AVAILABLE = False
-    def _unit_record_result(*a, **kw):  # noqa: E302
-        return {"tier_change": None}
-
-# Phase 47: per-agent temperature calibration
-try:
-    from temperature_calibration import (
-        run as _run_temperature_calibration,
-        write_leg_outcomes as _write_leg_outcomes,
-        _ensure_schema as _temp_cal_ensure_schema,
-    )
-    _TEMP_CAL_AVAILABLE = True
-    _temp_cal_ensure_schema()
-except ImportError:
-    _TEMP_CAL_AVAILABLE = False
-    def _run_temperature_calibration(*a, **kw): return {}  # noqa: E302
-    def _write_leg_outcomes(*a, **kw): return 0             # noqa: E302
+    _CLV_FEEDBACK_AVAILABLE = False
+    def _rebuild_thresholds(): return {}
+    def _build_edge_summary(): return ""
 
 # ---------------------------------------------------------------------------
 # Config
@@ -81,19 +65,18 @@ _AGENT_EMOJI: dict[str, str] = {
     "LineValueAgent": "📊",
     "BullpenAgent":  "🔥",
     "WeatherAgent":  "🌬️",
+    "SteamAgent":    "♨️",
     "ArsenalAgent":  "⚔️",
     "PlatoonAgent":  "🤝",
     "CatcherAgent":  "🧤",
     "LineupAgent":   "📋",
     "GetawayAgent":  "✈️",
+    "ArbitrageAgent": "💰",
     "VultureStack":  "🦅",
     "OmegaStack":    "🔱",
 }
 
 _OUTCOME_EMOJI = {"WIN": "✅", "LOSS": "❌", "PUSH": "⏩"}
-
-# Phase 43: tier display
-_TIER_EMOJI = {1: "🌱", 2: "🌿", 3: "⭐", 4: "🔥", 5: "👑"}
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +108,6 @@ def _build_recap_embed(
     results: list[dict],
     season_stats: dict,
     clv_summary: dict | None = None,
-    tier_change_msgs: list[str] | None = None,
 ) -> dict:
     """Build the nightly recap Discord embed."""
     wins   = sum(1 for r in results if r["outcome"] == "WIN")
@@ -155,11 +137,7 @@ def _build_recap_embed(
         profit = r["units_profit"]
         profit_str = f"{'+' if profit >= 0 else ''}{profit:.1f}u"
 
-        # Phase 43: show unit size per agent result
-        unit_size = r.get("unit_dollars", 5.0)
-        unit_str = f" · ${unit_size:.0f}/unit"
-
-        # Leg summary (max 4 lines)
+        # Leg summary (max 3 lines)
         leg_lines = []
         for leg in r.get("legs", [])[:4]:
             act = leg.get("actual", -1)
@@ -169,7 +147,7 @@ def _build_recap_embed(
             )
 
         fields.append({
-            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} — {profit_str}{unit_str}",
+            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} — {profit_str}",
             "value":  "\n".join(leg_lines) or "No leg details available",
             "inline": False,
         })
@@ -189,13 +167,15 @@ def _build_recap_embed(
             "inline": False,
         })
 
-    # Phase 43: tier change notifications
-    if tier_change_msgs:
-        fields.append({
-            "name": "📊 Agent Tier Updates",
-            "value": "\n".join(tier_change_msgs),
-            "inline": False,
-        })
+    # Phase 94: Edge threshold health from clv_feedback_engine
+    if _CLV_FEEDBACK_AVAILABLE:
+        edge_summary = _build_edge_summary()
+        if edge_summary and edge_summary != "No edge threshold data yet.":
+            fields.append({
+                "name": "🎯 Edge Threshold Health",
+                "value": edge_summary[:1024],  # Discord field limit
+                "inline": False,
+            })
 
     # Season stats footer
     season_record = season_stats.get("record", "0W-0L-0P")
@@ -263,10 +243,6 @@ def run(settle_date: Optional[str] = None) -> None:
 
     # 3. Settle each parlay
     settled_results = []
-    # Phase 43: collect tier promotion/demotion messages to display in Discord
-    tier_change_msgs: list[str] = []
-    _outcome_to_result = {"WIN": "W", "LOSS": "L", "PUSH": "P"}
-
     for parlay_row in pending:
         parlay_id  = parlay_row["id"]
         agent_name = parlay_row["agent_name"]
@@ -276,7 +252,7 @@ def run(settle_date: Optional[str] = None) -> None:
         result = settle_parlay(
             parlay_id=parlay_id,
             agent_name=agent_name,
-            settle_date=settle_date,
+            date=settle_date,
             stake=stake,
             legs_data=legs,
             player_stats=player_stats,
@@ -288,40 +264,6 @@ def run(settle_date: Optional[str] = None) -> None:
             status=result.outcome,
             units_profit=result.units_profit,
         )
-
-        # ── Phase 43: Update per-agent unit tier ─────────────────────────
-        # Consecutive wins climb the ladder ($5→$8→$12→$16→$20).
-        # Consecutive losses descend back down (floor: $5).
-        # 3 in a row either direction triggers a tier move.
-        try:
-            wl = _outcome_to_result.get(result.outcome, "P")
-            tier_update = _unit_record_result(agent_name, wl)
-            if tier_update.get("tier_change"):
-                tier_change_msgs.append(tier_update["tier_change"])
-                logger.info("[Phase43] %s", tier_update["tier_change"])
-        except Exception as _unit_err:
-            logger.warning("[Phase43] Unit tier update error for %s: %s", agent_name, _unit_err)
-        # ── End Phase 43 ─────────────────────────────────────────────────
-
-        # Phase 47: Write per-leg calibration data
-        if _TEMP_CAL_AVAILABLE and result.outcome in ("WIN", "LOSS"):
-            try:
-                _cal_legs = [
-                    {"prop_type": lr.prop_type,
-                     "raw_prob": getattr(lr, "implied_prob", 0.55),
-                     "outcome": result.outcome}
-                    for lr in result.legs
-                ]
-                _written = _write_leg_outcomes(
-                    agent_name=agent_name,
-                    parlay_id=str(parlay_id),
-                    date=settle_date,
-                    legs=_cal_legs,
-                )
-                logger.debug("[Phase47] %d cal rows written for %s", _written, agent_name)
-            except Exception as _p47e:
-                logger.warning("[Phase47] Cal write error: %s", _p47e)
-        # End Phase 47 cal write
 
         logger.info(
             "[%s] %s → %s (%+.1fu)",
@@ -340,12 +282,46 @@ def run(settle_date: Optional[str] = None) -> None:
             for lr in result.legs
         ]
 
+        # Phase 94: Populate bet_ledger for each settled leg
+        if _CLV_FEEDBACK_AVAILABLE:
+            try:
+                import os, psycopg2
+                _db_url = os.environ.get("DATABASE_URL", "")
+                if _db_url:
+                    _conn = psycopg2.connect(_db_url, sslmode="require")
+                    _cur  = _conn.cursor()
+                    for _lr in result.legs:
+                        _actual_outcome = 1 if _lr.outcome == "WIN" else (0 if _lr.outcome == "LOSS" else None)
+                        _cur.execute(
+                            """
+                            INSERT INTO bet_ledger
+                                (date, agent, player_name, prop_type, direction, line,
+                                 actual_outcome, profit_loss, status, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (
+                                settle_date,
+                                agent_name,
+                                _lr.player_name,
+                                _lr.prop_type,
+                                _lr.side,
+                                _lr.line,
+                                _actual_outcome,
+                                result.units_profit / max(len(result.legs), 1),
+                                _lr.outcome,
+                            ),
+                        )
+                    _conn.commit()
+                    _conn.close()
+            except Exception as _ledger_err:
+                logger.warning("[Phase94] bet_ledger insert error: %s", _ledger_err)
+
         settled_results.append({
             "parlay_id":    parlay_id,
             "agent_name":   agent_name,
             "outcome":      result.outcome,
             "units_profit": result.units_profit,
-            "unit_dollars": stake,     # Phase 43: pass through for embed display
             "legs":         leg_summaries,
         })
 
@@ -354,14 +330,20 @@ def run(settle_date: Optional[str] = None) -> None:
     # 4. Fetch updated season stats
     season_stats = get_overall_season_stats()
 
+    # Phase 94: Rebuild adaptive edge thresholds from tonight's settled legs
+    if _CLV_FEEDBACK_AVAILABLE:
+        try:
+            logger.info("[Phase94] Rebuilding edge thresholds from bet_ledger...")
+            updated = _rebuild_thresholds()
+            logger.info("[Phase94] Rebuilt %d edge threshold overrides.", len(updated))
+        except Exception as _thresh_err:
+            logger.warning("[Phase94] rebuild_thresholds error: %s", _thresh_err)
+
     # 5. Fetch CLV summary (available if line_stream ran today)
     clv_summary = get_daily_clv_summary(settle_date)
 
-    # 6. Post Discord recap (Phase 43: includes tier change messages)
-    embed = _build_recap_embed(
-        settle_date, settled_results, season_stats, clv_summary,
-        tier_change_msgs=tier_change_msgs if tier_change_msgs else None,
-    )
+    # 6. Post Discord recap
+    embed = _build_recap_embed(settle_date, settled_results, season_stats, clv_summary)
     ok = _send_discord_embed(embed)
     if ok:
         logger.info("Recap sent to Discord for %s", settle_date)
@@ -374,26 +356,13 @@ def run(settle_date: Optional[str] = None) -> None:
     pushes = sum(1 for r in settled_results if r["outcome"] == "PUSH")
     units  = sum(r["units_profit"] for r in settled_results)
     logger.info(
-        "=== Settlement complete: %dW-%dL-%dP  %+.1fu | %d tier changes ===",
-        wins, losses, pushes, units, len(tier_change_msgs),
+        "=== Settlement complete: %dW-%dL-%dP  %+.1fu ===",
+        wins, losses, pushes, units,
     )
 
-    # Phase 47: Live Temperature Calibration
-    if _TEMP_CAL_AVAILABLE:
-        try:
-            logger.info("[Phase47] Running temperature calibration...")
-            _temp_updates = _run_temperature_calibration(quiet=False)
-            _nd = {a: t for a, t in _temp_updates.items() if abs(t - 1.5) > 0.05}
-            if _nd:
-                _t5 = sorted(_nd.items(), key=lambda x: abs(x[1]-1.0), reverse=True)[:5]
-                logger.info("[Phase47] T updates: %s", ", ".join(f"{a}->{t:.2f}" for a, t in _t5))
-            else:
-                logger.info("[Phase47] All agents at default T=1.5 (accumulating data).")
-        except Exception as _tc_err:
-            logger.warning("[Phase47] Temperature calibration failed: %s", _tc_err)
-    # End Phase 47
-
     # ── StreakAgent settlement (19th agent) ────────────────────────────────
+    # Grade today's Streaks pick via ESPN box scores, update streak state,
+    # and post a settlement embed to Discord.
     try:
         from streak_agent import settle_streak_picks
         logger.info("[StreakAgent] Running streak settlement for %s", settle_date)
@@ -404,10 +373,12 @@ def run(settle_date: Optional[str] = None) -> None:
         logger.warning("[StreakAgent] Settlement error: %s", _streak_settle_err)
 
     # ── Phase 35: Calibration + Edge Health (post-settlement) ────────────────
+    # Run after every settlement to check if our probabilities are well-calibrated
+    # and flag agents that are statistically underperforming their backtest baseline.
     try:
         from calibration_monitor import run as run_calibration
         logger.info("[Phase35] Running calibration monitor (30-day window)...")
-        run_calibration(days=30, quiet=False)
+        run_calibration(days=30, quiet=False)  # posts to Discord if degraded
     except ImportError:
         logger.debug("[Phase35] calibration_monitor.py not found — skipping.")
     except Exception as _cal_err:
@@ -417,7 +388,8 @@ def run(settle_date: Optional[str] = None) -> None:
         from edge_health_monitor import run as run_edge_health
         from risk_manager import RiskManager
         logger.info("[Phase35] Running edge health monitor...")
-        edge_metrics = run_edge_health(days=30, quiet=False)
+        edge_metrics = run_edge_health(days=30, quiet=False)  # posts Discord report
+        # Apply cool-downs to any agents that breached ROI/CLV/Brier thresholds
         if edge_metrics:
             rm = RiskManager()
             rm.check_and_apply_cool_downs(edge_metrics)
