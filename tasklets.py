@@ -25,6 +25,16 @@ from __future__ import annotations
 import logging as _early_logging
 logger = _early_logging.getLogger("propiq.tasklets")
 
+# ── Simulation engine (Step 1 upgrade: distribution-based probabilities) ──────
+try:
+    from simulation_engine import simulate_prop as _simulate_prop, variance_penalty as _variance_penalty, inject_team_total as _inject_team_total
+    _SIM_ENGINE_AVAILABLE = True
+except ImportError:
+    _SIM_ENGINE_AVAILABLE = False
+    def _simulate_prop(prop, n_sims=10_000): return None   # noqa: E704
+    def _variance_penalty(result): return 1.0              # noqa: E704
+    def _inject_team_total(prop, hub): pass                # noqa: E704
+
 # WagerBrain-enhanced odds math (bookmaker_margin, kelly_criterion, true_odds_ev)
 try:
     from odds_math import (
@@ -1228,6 +1238,32 @@ class _BaseAgent:
 
     # shared helpers
     def _model_prob(self, player: str, prop_type: str, prop: dict | None = None, **_ignored) -> float:
+        # ── Step 1: Try distribution-based simulation engine first ────────────
+        # The simulation engine returns a proper outcome distribution and
+        # derives P(over) from it.  This replaces the single-scalar approach.
+        # Falls back to XGBoost / base_rate if sim engine unavailable.
+        if _SIM_ENGINE_AVAILABLE and prop:
+            try:
+                _inject_team_total(prop, self.hub)
+                sim = _simulate_prop(prop, n_sims=8_000)
+                if sim and sim.prob_over > 0.0:
+                    raw = sim.prob_over * 100.0
+                    # Apply variance penalty: wide distribution → reduce confidence
+                    pen = _variance_penalty(sim)
+                    # Shift probability toward 50% by penalty factor
+                    raw = 50.0 + (raw - 50.0) * pen
+                    # Store distribution on prop for downstream bet sizing / logging
+                    prop["_sim_prob_over"]    = round(sim.prob_over, 4)
+                    prop["_sim_mean"]         = sim.mean
+                    prop["_sim_std"]          = sim.std
+                    prop["_sim_dist"]         = sim.dist
+                    prop["_sim_edge_reasons"] = sim.edge_reasons
+                    prop["_sim_starter_prob"] = sim.starter_prob
+                    prop["_sim_bullpen_prob"]  = sim.bullpen_prob
+                    return round(max(5.0, min(95.0, raw)), 2)
+            except Exception as _sim_err:
+                logger.debug("[BaseAgent._model_prob] SimEngine error: %s", _sim_err)
+        # ── Fallback: XGBoost model ───────────────────────────────────────────
         if self.model:
             try:
                 import xgboost as xgb  # noqa: PLC0415
@@ -1295,7 +1331,7 @@ class _BaseAgent:
     # ─────────────────────────────────────────────────────────────────────
     # Feature vector (23 signals) — identical schema at INSERT and predict
     # ─────────────────────────────────────────────────────────────────────
-    FEATURE_DIM = 23  # bump when adding columns; old models padded automatically
+    FEATURE_DIM = 24  # bump when adding columns; old models padded automatically
 
     @staticmethod
     def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
@@ -1394,8 +1430,11 @@ class _BaseAgent:
             pitch_whiff_vs_hand,                  # 20   pitch type matchup
             bullpen_era_norm,                     # 21   bullpen strength
             batting_order_norm,                   # 22   lineup slot
+            # Slot 23: simulation outcome variance — wide dist → model less confident
+            # Prevents stacked boosts from inflating confidence on high-variance props
+            _clamp(float(prop.get("_sim_std") or 0.0) / 3.0),  # 23  sim std (norm)
         ]
-        assert len(vec) == 23, f"Feature vector length {len(vec)} != 23"
+        assert len(vec) == 24, f"Feature vector length {len(vec)} != 24"
         return [round(v, 6) for v in vec]
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
@@ -1454,6 +1493,13 @@ class _BaseAgent:
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.utcnow().isoformat(),
             "_features_json":     json.dumps(_feat_vec),
+            # Simulation engine outputs (present only when sim ran successfully)
+            "sim_mean":           prop.get("_sim_mean"),
+            "sim_std":            prop.get("_sim_std"),
+            "sim_dist":           prop.get("_sim_dist"),
+            "sim_edge_reasons":   prop.get("_sim_edge_reasons", []),
+            "sim_starter_prob":   prop.get("_sim_starter_prob"),
+            "sim_bullpen_prob":   prop.get("_sim_bullpen_prob"),
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
