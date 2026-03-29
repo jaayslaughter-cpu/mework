@@ -1140,6 +1140,17 @@ def run_data_hub_tasklet() -> None:
         state = game_states.get(game_id, "Scheduled")
         return state not in ("InProgress", "Live", "Final", "F/OT", "Completed")
 
+    # ── Pre-warm FanGraphs cache before agents run ───────────────────────────
+    # FG data is lazy-loaded on first get_pitcher/get_batter call.
+    # Pre-warming here (once per DataHub cycle) avoids cold-start delay in agents.
+    try:
+        from fangraphs_layer import _load as _fg_load, _loaded as _fg_loaded  # noqa: PLC0415
+        if not _fg_loaded:
+            _fg_load()
+            logger.info("[DataHub] FanGraphs cache pre-warmed.")
+    except Exception as _fg_err:
+        logger.debug("[DataHub] FanGraphs pre-warm skipped: %s", _fg_err)
+
     # ── Group 1: Physics / Arsenal (TTL 15 min) ────────────────────────────
     physics_key = "hub:physics"
     if not _hub_exists(r, physics_key):
@@ -2793,8 +2804,10 @@ def run_grading_tasklet() -> None:
     calculate CLV, then send daily recap to Discord.
     SportsData.io replaced — was returning 403 on all calls.
     """
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    espn_date = today.replace("-", "")
+    # GradingTasklet runs at 1:05 AM — must grade YESTERDAY's bets (not today's)
+    _yesterday = (datetime.date.today() - datetime.timedelta(days=1))
+    today      = _yesterday.strftime("%Y-%m-%d")   # used as grade_date throughout
+    espn_date  = _yesterday.strftime("%Y%m%d")     # ESPN format
 
     # Use ESPN box score scraper (same source as nightly_recap.py)
     try:
