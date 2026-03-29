@@ -39,6 +39,18 @@ except ImportError:
     _ODDS_MATH_AVAILABLE = False
 
 try:
+    from confidence_shrinkage import shrink_and_size as _shrink_and_size
+    _SHRINKAGE_AVAILABLE = True
+except ImportError:
+    _SHRINKAGE_AVAILABLE = False
+
+try:
+    from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
+    _NSFI_AVAILABLE = True
+except ImportError:
+    _NSFI_AVAILABLE = False
+
+try:
     from game_prediction_layer import get_game_predictions
     _GAME_PRED_AVAILABLE = True
 except ImportError:
@@ -809,6 +821,143 @@ _capital_multipliers: dict[str, float] = {name: 1.0 for name in AGENT_NAMES}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+# MLB stadium coordinates for Open-Meteo weather fetch
+_STADIUM_COORDS: dict[str, tuple[float, float]] = {
+    "Angels Stadium":           (33.8003, -117.8827),
+    "Chase Field":              (33.4455, -112.0667),
+    "Camden Yards":             (39.2839, -76.6218),
+    "Fenway Park":              (42.3467, -71.0972),
+    "Wrigley Field":            (41.9484, -87.6553),
+    "Guaranteed Rate Field":    (41.8299, -87.6338),
+    "Great American Ball Park": (39.0979, -84.5082),
+    "Progressive Field":        (41.4962, -81.6853),
+    "Coors Field":              (39.7559, -104.9942),
+    "Comerica Park":            (42.3390, -83.0485),
+    "Minute Maid Park":         (29.7573, -95.3555),
+    "Kauffman Stadium":         (39.0517, -94.4803),
+    "Dodger Stadium":           (34.0739, -118.2400),
+    "LoanDepot Park":           (25.7781, -80.2198),
+    "American Family Field":    (43.0280, -87.9712),
+    "Target Field":             (44.9817, -93.2781),
+    "Citi Field":               (40.7571, -73.8458),
+    "Yankee Stadium":           (40.8296, -73.9262),
+    "Oakland Coliseum":         (37.7516, -122.2005),
+    "Citizens Bank Park":       (39.9056, -75.1665),
+    "PNC Park":                 (40.4469, -80.0057),
+    "Petco Park":               (32.7073, -117.1566),
+    "Oracle Park":              (37.7786, -122.3893),
+    "T-Mobile Park":            (47.5914, -122.3325),
+    "Busch Stadium":            (38.6226, -90.1928),
+    "Tropicana Field":          (27.7683, -82.6534),
+    "Globe Life Field":         (32.7473, -97.0822),
+    "Rogers Centre":            (43.6414, -79.3894),
+    "Nationals Park":           (38.8730, -77.0074),
+    "Truist Park":              (33.8907, -84.4677),
+}
+
+_TEAM_TO_STADIUM: dict[str, str] = {
+    "Los Angeles Angels":    "Angels Stadium",
+    "Arizona Diamondbacks":  "Chase Field",
+    "Baltimore Orioles":     "Camden Yards",
+    "Boston Red Sox":        "Fenway Park",
+    "Chicago Cubs":          "Wrigley Field",
+    "Chicago White Sox":     "Guaranteed Rate Field",
+    "Cincinnati Reds":       "Great American Ball Park",
+    "Cleveland Guardians":   "Progressive Field",
+    "Colorado Rockies":      "Coors Field",
+    "Detroit Tigers":        "Comerica Park",
+    "Houston Astros":        "Minute Maid Park",
+    "Kansas City Royals":    "Kauffman Stadium",
+    "Los Angeles Dodgers":   "Dodger Stadium",
+    "Miami Marlins":         "LoanDepot Park",
+    "Milwaukee Brewers":     "American Family Field",
+    "Minnesota Twins":       "Target Field",
+    "New York Mets":         "Citi Field",
+    "New York Yankees":      "Yankee Stadium",
+    "Oakland Athletics":     "Oakland Coliseum",
+    "Sacramento Athletics":  "Oakland Coliseum",
+    "Philadelphia Phillies": "Citizens Bank Park",
+    "Pittsburgh Pirates":    "PNC Park",
+    "San Diego Padres":      "Petco Park",
+    "San Francisco Giants":  "Oracle Park",
+    "Seattle Mariners":      "T-Mobile Park",
+    "St. Louis Cardinals":   "Busch Stadium",
+    "Tampa Bay Rays":        "Tropicana Field",
+    "Texas Rangers":         "Globe Life Field",
+    "Toronto Blue Jays":     "Rogers Centre",
+    "Washington Nationals":  "Nationals Park",
+    "Atlanta Braves":        "Truist Park",
+}
+
+
+def _fetch_weather_today() -> list[dict]:
+    """
+    Fetch wind speed, direction, and temperature for today's games
+    using the Open-Meteo API (free, no key required).
+    """
+    import datetime as _dt
+
+    games = _fetch_espn_games()
+    if not games:
+        return []
+
+    home_teams = set()
+    for g in games.values():
+        ht = g.get("HomeTeam", "")
+        if ht:
+            home_teams.add(ht)
+
+    results = []
+    for team in home_teams:
+        stadium = _TEAM_TO_STADIUM.get(team, "")
+        if not stadium:
+            continue
+        coords = _STADIUM_COORDS.get(stadium)
+        if not coords:
+            continue
+        lat, lon = coords
+        try:
+            resp = requests.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude":        lat,
+                    "longitude":       lon,
+                    "hourly":          "wind_speed_10m,wind_direction_10m,temperature_2m",
+                    "wind_speed_unit": "mph",
+                    "temperature_unit":"fahrenheit",
+                    "forecast_days":   1,
+                    "timezone":        "auto",
+                },
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            hourly = data.get("hourly", {})
+            idx = 18  # 6pm local — game time default
+            wind_mph = float((hourly.get("wind_speed_10m")    or [0])[idx] or 0)
+            wind_dir = float((hourly.get("wind_direction_10m") or [0])[idx] or 0)
+            temp_f   = float((hourly.get("temperature_2m")    or [70])[idx] or 70)
+            dirs     = ["N","NE","E","SE","S","SW","W","NW"]
+            cardinal = dirs[int((wind_dir + 22.5) / 45) % 8]
+            results.append({
+                "stadium":        stadium,
+                "team":           team,
+                "lat":            lat,
+                "lon":            lon,
+                "wind_speed_mph": round(wind_mph, 1),
+                "wind_direction": cardinal,
+                "wind_deg":       wind_dir,
+                "temp_f":         round(temp_f, 1),
+                "weather_source": "open-meteo",
+            })
+        except Exception as exc:
+            logger.debug("[Weather] Open-Meteo failed for %s: %s", stadium, exc)
+
+    logger.info("[DataHub] Weather fetched for %d stadiums", len(results))
+    return results
+
 # 1. DataHubTasklet
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -840,12 +989,26 @@ def run_data_hub_tasklet() -> None:
     physics_key = "hub:physics"
     if not _hub_exists(r, physics_key):
         logger.info("[DataHub] Scraping physics / arsenal data…")
+        # Compute game predictions for DataHub physics group
+        _gp_list = []
+        if _GAME_PRED_AVAILABLE:
+            try:
+                _gp_raw = get_game_predictions()
+                _gp_list = _gp_raw if isinstance(_gp_raw, list) else []
+                _high = [g for g in _gp_list if g.get("confidence", "") == "HIGH"]
+                logger.info("[DataHub] Game predictions: %d games, %d HIGH confidence",
+                            len(_gp_list), len(_high))
+            except Exception as _gpe:
+                logger.warning("[DataHub] game_prediction_layer failed: %s", _gpe)
+
         physics = {
             "pitch_arsenal":  [],  # no Statcast actor yet
             "advanced_stats": [],  # no actor yet
             "bvp":            [],  # no actor yet
             "batted_ball":    [],  # no actor yet
             "second_half":    [],  # no actor yet
+            "game_predictions": _gp_list,
+            "nsfi":             _fetch_nsfi() if _NSFI_AVAILABLE else [],
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
 
@@ -854,7 +1017,7 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, context_key):
         logger.info("[DataHub] Scraping context / environment data…")
         context = {
-            "weather":            [],  # Open-Meteo called per-game in dispatcher
+            "weather":            _fetch_weather_today(),    # Open-Meteo free
             "umpires":            [],  # no source yet
             "injuries":           [],  # no source yet
             "lineups":            _fetch_mlb_lineups_today(),
@@ -955,11 +1118,17 @@ class _BaseAgent:
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
-        kelly = _kelly_units(model_prob / 100, prop.get("odds_american", -110))
+        side_odds = (
+            prop.get("over_american",  prop.get("odds_american", -115))
+            if side == "OVER"
+            else prop.get("under_american", prop.get("odds_american", -115))
+        )
+        kelly = _kelly_units(model_prob / 100, side_odds)
         platforms = self._dfs_platforms(prop, side)
         return {
             "agent":              self.name,
             "player":             prop.get("player", "Unknown"),
+            "player_name":        prop.get("player", "Unknown"),  # Discord field
             "prop_type":          prop.get("prop_type", ""),
             "line":               prop.get("line", 0),
             "side":               side,
@@ -1001,11 +1170,13 @@ class _BaseAgent:
 
     @staticmethod
     def _confidence(ev_pct: float) -> int:
-        if ev_pct >= 10: return 9
-        if ev_pct >= 7:  return 8
-        if ev_pct >= 5:  return 7
+        # ev_pct is stored as percentage (3–20 range) in _build_bet
+        if ev_pct >= 15: return 9
+        if ev_pct >= 10: return 8
+        if ev_pct >= 7:  return 7
+        if ev_pct >= 5:  return 6
         if ev_pct >= 3:  return 5
-        return 3
+        return 4
 
 
 class _EVHunter(_BaseAgent):
@@ -1366,11 +1537,23 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
 
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
+    # Multiplicative EV: (1+e1) * (1+e2) * ... - 1
+    combined_ev = round(
+        (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
+    ) if legs else 0.0
+    avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
+    platform = legs[0].get("recommended_platform", "PrizePicks").lower() if legs else "prizepicks"
     return {
         "agent":           agent_name,
+        "agent_name":      agent_name,      # Discord field
         "legs":            legs,
         "leg_count":       len(legs),
-        "combined_ev_pct": round(sum(lg["ev_pct"] for lg in legs), 2),
+        "combined_ev_pct": combined_ev,
+        "ev_pct":          combined_ev,     # Discord field
+        "stake":           10.0,            # Discord field (default $10)
+        "confidence":      avg_conf,        # Discord field
+        "platform":        platform,        # Discord field
+        "season_stats":    {},              # filled by dispatcher if available
         "ts":              datetime.datetime.utcnow().isoformat(),
     }
 
@@ -1975,22 +2158,32 @@ def run_grading_tasklet() -> None:
 def _get_stat(stats: dict, prop_type: str) -> float | None:
     """Map prop_type string to SportsData.io stat field."""
     mapping = {
-        "H": "Hits", "HR": "HomeRuns", "RBI": "RunsBattedIn",
-        "R": "Runs", "SB": "StolenBases", "TB": "TotalBases",
-        "BB": "Walks", "K": "Strikeouts",
+        # Normalised lowercase keys (current pipeline)
+        "hits":          "Hits",
+        "home_runs":     "HomeRuns",
+        "rbis":          "RunsBattedIn",
+        "rbi":           "RunsBattedIn",
+        "runs":          "Runs",
+        "stolen_bases":  "StolenBases",
+        "total_bases":   "TotalBases",
+        "walks":         "Walks",
+        "strikeouts":    "Strikeouts",
+        "earned_runs":   "EarnedRuns",
+        "hits_allowed":  "HitsAllowed",
+        "walks_allowed": "WalksAllowed",
+        "pitching_outs": "InningsPitched",
+        # Legacy uppercase abbreviations (fallback)
+        "h":  "Hits",    "hr": "HomeRuns",  "r":  "Runs",
+        "sb": "StolenBases", "tb": "TotalBases",
+        "bb": "Walks",   "k":  "Strikeouts",
     }
-    prop_upper = prop_type.upper()
-    for prefix in ("O", "U", "OVER_", "UNDER_"):
-        if prop_upper.startswith(prefix):
-            prop_upper = prop_upper[len(prefix):]
+    prop_key = prop_type.lower().strip()
+    # Strip common prefixes
+    for prefix in ("over_", "under_", "o_", "u_"):
+        if prop_key.startswith(prefix):
+            prop_key = prop_key[len(prefix):]
 
-    for tok in prop_upper.split():
-        field = mapping.get(tok)
-        if field:
-            val = stats.get(field)
-            return float(val) if val is not None else None
-
-    field = mapping.get(prop_upper)
+    field = mapping.get(prop_key)
     if field:
         val = stats.get(field)
         return float(val) if val is not None else None

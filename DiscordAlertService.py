@@ -96,7 +96,7 @@ class DiscordAlertService:
                 "title": "✅ PropIQ Engine Online: Webhook Connected!",
                 "description": (
                     "All tasklets are scheduled and running.\n"
-                    "17-Agent Army armed and ready for 11 AM dispatch."
+                    "10-Agent Army armed | Underdog + PrizePicks | Every 30s."
                 ),
                 "color": _COLOUR_GREEN,
                 "footer": {"text": "PropIQ Analytics Engine"},
