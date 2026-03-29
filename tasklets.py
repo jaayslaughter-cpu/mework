@@ -508,8 +508,15 @@ def _fetch_mlb_standings() -> list[dict]:
 
 def _fetch_prizepicks_direct() -> list[dict]:
     """Fetch PrizePicks MLB props directly (free, no key required).
-    Railway IPs may get 403 — returns empty list gracefully so agents
-    fall back to sportsbook_reference_layer data.
+
+    Strategy:
+      1. Pre-flight check via /leagues (always unblocked by DataDome) to
+         confirm this Railway IP can reach PP at all.
+      2. If pre-flight 200s, immediately hit /projections — first request
+         sometimes slips through before DataDome flags the IP.
+      3. On 403, wait 2 s and retry once (different network path timing).
+      4. On any failure returns [] so agents fall back to sportsbook_reference_layer.
+      5. STANDARD board_type only — filters out goblin/demon alt lines.
     """
     _PP_HEADERS = {
         "User-Agent": (
@@ -517,20 +524,64 @@ def _fetch_prizepicks_direct() -> list[dict]:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
     }
+
+    # ── Step 1: Pre-flight via /leagues (DataDome doesn't block this) ──
     try:
-        resp = requests.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
+        pf = requests.get(
+            "https://api.prizepicks.com/leagues",
             headers=_PP_HEADERS,
-            timeout=15,
+            timeout=10,
         )
-        if resp.status_code != 200:
-            logger.info("[DataHub] PrizePicks direct returned %d — no props this cycle", resp.status_code)
+        if pf.status_code != 200:
+            logger.info("[DataHub] PrizePicks pre-flight /leagues returned %d — skipping", pf.status_code)
             return []
+        # Confirm MLB (league_id 2) is present
+        leagues = pf.json().get("data", [])
+        mlb_live = any(
+            lg.get("id") == "2" or str(lg.get("attributes", {}).get("league_id", "")) == "2"
+            for lg in leagues
+        )
+        if not mlb_live:
+            logger.info("[DataHub] PrizePicks /leagues: MLB not listed today — skipping")
+            return []
+        logger.debug("[DataHub] PrizePicks pre-flight OK — attempting /projections")
+    except Exception as exc:
+        logger.info("[DataHub] PrizePicks pre-flight failed: %s", exc)
+        return []
+
+    # ── Step 2: Hit /projections with retry ──
+    def _fetch_projections() -> requests.Response | None:
+        try:
+            return requests.get(
+                "https://api.prizepicks.com/projections",
+                params={"per_page": 250, "single_stat": True, "league_id": 2},
+                headers=_PP_HEADERS,
+                timeout=15,
+            )
+        except Exception:
+            return None
+
+    import time as _time
+    resp = _fetch_projections()
+    if resp is None or resp.status_code == 403:
+        _time.sleep(2)
+        resp = _fetch_projections()
+
+    if resp is None or resp.status_code != 200:
+        code = resp.status_code if resp is not None else "timeout"
+        logger.info("[DataHub] PrizePicks /projections returned %s after retry — using Odds API data only", code)
+        return []
+
+    # ── Step 3: Parse — STANDARD board_type only ──
+    try:
         data = resp.json()
         player_map: dict[str, str] = {}
         for item in data.get("included", []):
@@ -542,6 +593,10 @@ def _fetch_prizepicks_direct() -> list[dict]:
         props = []
         for proj in data.get("data", []):
             attrs = proj.get("attributes", {})
+            # STANDARD only — skip goblin / demon / flex alt lines
+            board_type = str(attrs.get("odds_type", "") or attrs.get("board_type", "") or "").lower()
+            if board_type and board_type != "standard":
+                continue
             stat_raw = str(attrs.get("stat_type", "") or "").lower()
             line_val = attrs.get("line_score")
             if line_val is None:
@@ -559,11 +614,12 @@ def _fetch_prizepicks_direct() -> list[dict]:
                 "player_name": pname,
                 "stat":        stat_raw,
                 "line":        float(line_val),
+                "board_type":  board_type or "standard",
             })
-        logger.info("[DataHub] PrizePicks direct: %d props", len(props))
+        logger.info("[DataHub] PrizePicks direct: %d STANDARD props", len(props))
         return props
     except Exception as exc:
-        logger.info("[DataHub] PrizePicks direct fetch failed: %s", exc)
+        logger.warning("[DataHub] PrizePicks parse error: %s", exc)
         return []
 
 
