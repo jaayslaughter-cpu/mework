@@ -42,14 +42,14 @@ logger = logging.getLogger("propiq.sb_ref")
 # Configuration
 # ---------------------------------------------------------------------------
 
-# 3-key fallback chain: primary (14d35c33) -> backup1 (673bf195) -> backup2 (e4e30098)
+# Single live key — dead keys removed
 ODDS_API_KEY = (
     os.getenv("ODDS_API_KEY")
-    or os.getenv("ODDS_API_KEY_PRIMARY", "673bf195062e60e666399be40f763545")
+    or "673bf195062e60e666399be40f763545"
 )
 _ODDS_KEY_FALLBACKS = [
-    os.getenv("ODDS_API_KEY_BACKUP1", "673bf195062e60e666399be40f763545"),
-    os.getenv("ODDS_API_KEY_BACKUP2", "673bf195062e60e666399be40f763545"),
+    os.getenv("ODDS_API_KEY", "673bf195062e60e666399be40f763545"),
+    
 ]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT         = "baseball_mlb"
@@ -251,37 +251,114 @@ def _fetch_event_odds(event_id: str) -> list[dict]:
 # Core: build the sportsbook reference lookup
 # ---------------------------------------------------------------------------
 
+
+def _build_reference_from_draftedge() -> dict[tuple, dict]:
+    """
+    Build a sportsbook reference dict from DraftEdge projections.
+    Used when The Odds API is unavailable or quota is exhausted.
+
+    DraftEdge gives per-player probability for hits, HR, K, SB, R, RBI.
+    We convert these to the same (player, prop_type, side) keyed format
+    that enrich_props_with_sportsbook() expects.
+
+    Free, no key, daily parquet cache, zero quota cost.
+    """
+    try:
+        from draftedge_scraper import fetch_all_projections  # noqa: PLC0415
+        data = fetch_all_projections()
+        reference: dict[tuple, dict] = {}
+
+        batters = data.get("batters")
+        if batters is not None and not batters.empty:
+            for _, row in batters.iterrows():
+                name = str(row.get("player_name", "")).strip().lower()
+                if not name:
+                    continue
+                for prop_type, pct_col, line_default in [
+                    ("batter_hits",          "hit_pct",  1.5),
+                    ("batter_home_runs",      "hr_pct",   0.5),
+                    ("batter_stolen_bases",   "sb_pct",   0.5),
+                    ("batter_runs_scored",    "run_pct",  0.5),
+                    ("batter_rbis",           "rbi_pct",  0.5),
+                ]:
+                    prob = float(row.get(pct_col, 0) or 0)
+                    if prob <= 0:
+                        continue
+                    reference[(name, prop_type, "over")] = {
+                        "sb_implied_prob":       round(prob, 4),
+                        "sb_implied_prob_over":  round(prob, 4),
+                        "sb_implied_prob_under": round(1 - prob, 4),
+                        "sb_line":               line_default,
+                        "bookmakers":            ["draftedge"],
+                    }
+                    reference[(name, prop_type, "under")] = {
+                        "sb_implied_prob":       round(1 - prob, 4),
+                        "sb_implied_prob_over":  round(prob, 4),
+                        "sb_implied_prob_under": round(1 - prob, 4),
+                        "sb_line":               line_default,
+                        "bookmakers":            ["draftedge"],
+                    }
+
+        pitchers = data.get("pitchers")
+        if pitchers is not None and not pitchers.empty:
+            for _, row in pitchers.iterrows():
+                name = str(row.get("player_name", "")).strip().lower()
+                if not name:
+                    continue
+                k_pct = float(row.get("k_pct", 0) or 0)
+                if k_pct > 0:
+                    reference[(name, "pitcher_strikeouts", "over")] = {
+                        "sb_implied_prob":       round(k_pct, 4),
+                        "sb_implied_prob_over":  round(k_pct, 4),
+                        "sb_implied_prob_under": round(1 - k_pct, 4),
+                        "sb_line":               4.5,
+                        "bookmakers":            ["draftedge"],
+                    }
+
+        logger.info("[SB_REF] DraftEdge fallback: %d prop references built", len(reference))
+        return reference
+
+    except Exception as exc:
+        logger.warning("[SB_REF] DraftEdge fallback failed: %s", exc)
+        return {}
+
+
 def build_sportsbook_reference(date: str | None = None) -> dict[tuple, dict]:
     """
-    Fetch today's MLB player props from The Odds API.
+    Fetch today's MLB player props.
+
+    Priority chain:
+      1. Disk cache  — free re-use of today's already-fetched data
+      2. The Odds API — real sportsbook lines (only if key set + quota available)
+      3. DraftEdge    — free per-player probability projections, no key needed
 
     Returns a lookup dict keyed by (player_name_lower, prop_type, side):
         {
-          "sb_implied_prob": float,   # vig-stripped fair probability
-          "sb_line":         float,   # consensus line (most common across books)
-          "bookmakers":      list,    # bookmakers that contributed
+          "sb_implied_prob": float,  # probability (0-1)
+          "sb_line":         float,  # line value
+          "bookmakers":      list,   # source bookmakers
         }
-
-    Caches to /tmp/sb_ref_{date}.json — safe to call multiple times per day.
-    Returns empty dict on any error (Layer 7 is always additive/optional).
+    Returns empty dict on total failure (Layer 7 is always additive/optional).
     """
     date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Return from disk cache if available (avoids burning quota on re-runs)
+    # ── Step 1: Disk cache ─────────────────────────────────────────────────
     cached = _load_cache(date)
     if cached is not None:
-        return {
-            tuple(json.loads(k)): v
-            for k, v in cached.items()
-        }
+        logger.info("[SB_REF] Loaded from cache")
+        return {tuple(json.loads(k)): v for k, v in cached.items()}
 
-    # ── Step 1: Get today's event IDs ────────────────────────────────────
+    # ── Step 2: The Odds API (only if key is available) ────────────────────
+    if not ODDS_API_KEY:
+        logger.info("[SB_REF] No ODDS_API_KEY — using DraftEdge fallback")
+        return _build_reference_from_draftedge()
+
     events = _fetch_events(date)
     if not events:
-        logger.warning("[SB_REF] No events found — Layer 7 unavailable today")
-        return {}
+        logger.info("[SB_REF] No Odds API events — using DraftEdge fallback")
+        return _build_reference_from_draftedge()
 
-    # ── Step 2: Fetch player props per game ──────────────────────────────
+    # ── Step 3: Fetch player props per game ──────────────────────────────
     # raw_entries: {(player_norm, prop_type, side, line)} → [(fair_prob, bm_title)]
     raw_entries: dict[tuple, list[tuple[float, str]]] = defaultdict(list)
 

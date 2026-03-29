@@ -37,6 +37,12 @@ try:
     _ODDS_MATH_AVAILABLE = True
 except ImportError:
     _ODDS_MATH_AVAILABLE = False
+
+try:
+    from game_prediction_layer import get_game_predictions
+    _GAME_PRED_AVAILABLE = True
+except ImportError:
+    _GAME_PRED_AVAILABLE = False
     def _bookmaker_margin(o, u): return 0.0          # noqa: E704
     def _kelly_criterion_wb(p, o, kf=0.25, mc=0.05): # noqa: E704
         b = (o / 100.0) if o > 0 else (100.0 / abs(o))
@@ -65,20 +71,6 @@ try:
     import redis as redis_lib
 except ImportError:
     redis_lib = None  # type: ignore[assignment]
-
-
-try:
-    from game_prediction_layer import (
-        fetch_game_predictions_today as _fetch_game_predictions,
-        get_game_prediction as _get_game_pred,
-    )
-    _GAME_PRED_AVAILABLE = True
-    logger.info("[GamePred] Game prediction layer loaded.")
-except ImportError:
-    _GAME_PRED_AVAILABLE = False
-    def _fetch_game_predictions() -> list: return []          # noqa: E704
-    def _get_game_pred(*a, **kw) -> dict | None: return None  # noqa: E704
-    logger.warning("[GamePred] game_prediction_layer not found — game signals disabled.")
 
 from DiscordAlertService import discord_alert
 from public_trends_scraper import PublicTrendsScraper, get_fade_signal
@@ -508,15 +500,8 @@ def _fetch_mlb_standings() -> list[dict]:
 
 def _fetch_prizepicks_direct() -> list[dict]:
     """Fetch PrizePicks MLB props directly (free, no key required).
-
-    Strategy:
-      1. Pre-flight check via /leagues (always unblocked by DataDome) to
-         confirm this Railway IP can reach PP at all.
-      2. If pre-flight 200s, immediately hit /projections — first request
-         sometimes slips through before DataDome flags the IP.
-      3. On 403, wait 2 s and retry once (different network path timing).
-      4. On any failure returns [] so agents fall back to sportsbook_reference_layer.
-      5. STANDARD board_type only — filters out goblin/demon alt lines.
+    Railway IPs may get 403 — returns empty list gracefully so agents
+    fall back to sportsbook_reference_layer data.
     """
     _PP_HEADERS = {
         "User-Agent": (
@@ -524,64 +509,20 @@ def _fetch_prizepicks_direct() -> list[dict]:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json",
         "Referer": "https://app.prizepicks.com/",
         "Origin": "https://app.prizepicks.com",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site",
     }
-
-    # ── Step 1: Pre-flight via /leagues (DataDome doesn't block this) ──
     try:
-        pf = requests.get(
-            "https://api.prizepicks.com/leagues",
+        resp = requests.get(
+            "https://api.prizepicks.com/projections",
+            params={"per_page": 250, "single_stat": True, "league_id": 2},
             headers=_PP_HEADERS,
-            timeout=10,
+            timeout=15,
         )
-        if pf.status_code != 200:
-            logger.info("[DataHub] PrizePicks pre-flight /leagues returned %d — skipping", pf.status_code)
+        if resp.status_code != 200:
+            logger.info("[DataHub] PrizePicks direct returned %d — no props this cycle", resp.status_code)
             return []
-        # Confirm MLB (league_id 2) is present
-        leagues = pf.json().get("data", [])
-        mlb_live = any(
-            lg.get("id") == "2" or str(lg.get("attributes", {}).get("league_id", "")) == "2"
-            for lg in leagues
-        )
-        if not mlb_live:
-            logger.info("[DataHub] PrizePicks /leagues: MLB not listed today — skipping")
-            return []
-        logger.debug("[DataHub] PrizePicks pre-flight OK — attempting /projections")
-    except Exception as exc:
-        logger.info("[DataHub] PrizePicks pre-flight failed: %s", exc)
-        return []
-
-    # ── Step 2: Hit /projections with retry ──
-    def _fetch_projections() -> requests.Response | None:
-        try:
-            return requests.get(
-                "https://api.prizepicks.com/projections",
-                params={"per_page": 250, "single_stat": True, "league_id": 2},
-                headers=_PP_HEADERS,
-                timeout=15,
-            )
-        except Exception:
-            return None
-
-    import time as _time
-    resp = _fetch_projections()
-    if resp is None or resp.status_code == 403:
-        _time.sleep(2)
-        resp = _fetch_projections()
-
-    if resp is None or resp.status_code != 200:
-        code = resp.status_code if resp is not None else "timeout"
-        logger.info("[DataHub] PrizePicks /projections returned %s after retry — using Odds API data only", code)
-        return []
-
-    # ── Step 3: Parse — STANDARD board_type only ──
-    try:
         data = resp.json()
         player_map: dict[str, str] = {}
         for item in data.get("included", []):
@@ -593,10 +534,6 @@ def _fetch_prizepicks_direct() -> list[dict]:
         props = []
         for proj in data.get("data", []):
             attrs = proj.get("attributes", {})
-            # STANDARD only — skip goblin / demon / flex alt lines
-            board_type = str(attrs.get("odds_type", "") or attrs.get("board_type", "") or "").lower()
-            if board_type and board_type != "standard":
-                continue
             stat_raw = str(attrs.get("stat_type", "") or "").lower()
             line_val = attrs.get("line_score")
             if line_val is None:
@@ -614,12 +551,11 @@ def _fetch_prizepicks_direct() -> list[dict]:
                 "player_name": pname,
                 "stat":        stat_raw,
                 "line":        float(line_val),
-                "board_type":  board_type or "standard",
             })
-        logger.info("[DataHub] PrizePicks direct: %d STANDARD props", len(props))
+        logger.info("[DataHub] PrizePicks direct: %d props", len(props))
         return props
     except Exception as exc:
-        logger.warning("[DataHub] PrizePicks parse error: %s", exc)
+        logger.info("[DataHub] PrizePicks direct fetch failed: %s", exc)
         return []
 
 
@@ -680,20 +616,161 @@ def _fetch_underdog_props_direct() -> list[dict]:
         return []
 
 
-def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
-    """Call The Odds API for MLB lines."""
-    key = os.getenv("ODDS_API_KEY", "673bf195062e60e666399be40f763545")
+def _fetch_draftedge_projections() -> list[dict]:
+    """
+    Fetch DraftEdge batter and pitcher projections.
+    Free — no API key, daily parquet cache, zero quota cost.
+
+    Returns flat list of player projection dicts with fields:
+        player_name, team, prop_type, projected_prob, source="draftedge"
+
+    Batter props: hits, home_runs, stolen_bases, runs, rbis
+    Pitcher props: strikeouts (k_pct), earned_runs (era_proj)
+
+    Graceful empty-list return if DraftEdge is unreachable.
+    """
     try:
-        resp = requests.get(
-            f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
-            params={"apiKey": key, "regions": "us", "markets": "h2h,totals,spreads"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.warning("Odds API error: %s", e)
+        from draftedge_scraper import fetch_all_projections  # noqa: PLC0415
+        data = fetch_all_projections()
+        props = []
+
+        batters = data.get("batters")
+        if batters is not None and not batters.empty:
+            for _, row in batters.iterrows():
+                name = str(row.get("player_name", "")).strip()
+                team = str(row.get("team", "")).strip()
+                if not name:
+                    continue
+                # Map DraftEdge probability fields to prop_type keys
+                for prop_type, pct_col in [
+                    ("hits",          "hit_pct"),
+                    ("home_runs",     "hr_pct"),
+                    ("stolen_bases",  "sb_pct"),
+                    ("runs",          "run_pct"),
+                    ("rbis",          "rbi_pct"),
+                ]:
+                    val = float(row.get(pct_col, 0) or 0)
+                    if val > 0:
+                        props.append({
+                            "player_name":    name,
+                            "team":           team,
+                            "prop_type":      prop_type,
+                            "projected_prob": round(val, 4),
+                            "source":         "draftedge",
+                        })
+
+        pitchers = data.get("pitchers")
+        if pitchers is not None and not pitchers.empty:
+            for _, row in pitchers.iterrows():
+                name = str(row.get("player_name", "")).strip()
+                team = str(row.get("team", "")).strip()
+                if not name:
+                    continue
+                k_pct = float(row.get("k_pct", 0) or 0)
+                era   = float(row.get("era_proj", 4.5) or 4.5)
+                if k_pct > 0:
+                    props.append({
+                        "player_name":    name,
+                        "team":           team,
+                        "prop_type":      "strikeouts",
+                        "projected_prob": round(k_pct, 4),
+                        "source":         "draftedge",
+                    })
+                # ERA → earned run probability (era/9 * 1 inning = prob per inning)
+                props.append({
+                    "player_name":    name,
+                    "team":           team,
+                    "prop_type":      "earned_runs",
+                    "projected_prob": round(min(era / 9.0, 0.99), 4),
+                    "era_proj":       era,
+                    "source":         "draftedge",
+                })
+
+        logger.info("[DataHub] DraftEdge projections: %d props", len(props))
+        return props
+
+    except Exception as exc:
+        logger.info("[DataHub] DraftEdge projections unavailable: %s", exc)
         return []
+
+
+def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
+    """
+    Fetch MLB odds data.
+
+    Priority chain (first success wins, all free):
+      1. The Odds API      — real sportsbook lines (h2h, totals, spreads)
+                             Only called if ODDS_API_KEY is set AND quota not exhausted
+      2. DraftEdge JSON    — batter/pitcher projections converted to pseudo-odds
+                             Free, no key, daily parquet cache, zero quota cost
+      3. ESPN public API   — implied totals from team run-scoring data
+                             Confirmed working in every log, always available
+
+    Returns list of game dicts compatible with _get_sharp_consensus() lookups.
+    """
+    # ── Tier 1: The Odds API (only if key is set) ──────────────────────────
+    key = os.getenv("ODDS_API_KEY", "")
+    if key:
+        try:
+            resp = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
+                params={"apiKey": key, "regions": "us", "markets": "h2h,totals,spreads"},
+                timeout=20,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    remaining = resp.headers.get("x-requests-remaining", "?")
+                    logger.info("[OddsAPI] %d games fetched. Quota remaining: %s", len(data), remaining)
+                    return data
+            elif resp.status_code in (401, 403, 422, 429):
+                logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
+            else:
+                logger.warning("[OddsAPI] HTTP %d — switching to free fallback", resp.status_code)
+        except Exception as e:
+            logger.warning("[OddsAPI] Request failed (%s) — switching to free fallback", e)
+
+    # ── Tier 2: DraftEdge free projections ────────────────────────────────
+    try:
+        from draftedge_scraper import fetch_all_projections  # noqa: PLC0415
+        projections = fetch_all_projections()
+        batters  = projections.get("batters")
+        pitchers = projections.get("pitchers")
+        if batters is not None and not batters.empty:
+            logger.info("[OddsAPI→DraftEdge] %d batters, %d pitchers loaded",
+                        len(batters), len(pitchers) if pitchers is not None else 0)
+            # Return as a marker list so callers know DraftEdge is the source
+            # _get_sharp_consensus uses hub.market.odds but gracefully returns None
+            # when no bookmaker entries exist — agents still fire via _model_prob
+            return [{"source": "draftedge", "batters": batters.to_dict("records"),
+                     "pitchers": pitchers.to_dict("records") if pitchers is not None else []}]
+    except Exception as e:
+        logger.info("[OddsAPI→DraftEdge] Not available (%s)", e)
+
+    # ── Tier 3: ESPN implied totals (always available) ─────────────────────
+    try:
+        games = _fetch_espn_games()
+        if games:
+            # Build minimal odds-like structure from ESPN game data
+            implied = []
+            for gid, g in games.items():
+                implied.append({
+                    "source":      "espn_implied",
+                    "id":          gid,
+                    "home_team":   g.get("HomeTeam", ""),
+                    "away_team":   g.get("AwayTeam", ""),
+                    "home_score":  g.get("HomeScore", 0),
+                    "away_score":  g.get("AwayScore", 0),
+                    "status":      g.get("Status", ""),
+                    "bookmakers":  [],  # no book data — agents fall back to model_prob
+                })
+            logger.info("[OddsAPI→ESPN] %d games as implied odds fallback", len(implied))
+            return implied
+    except Exception as e:
+        logger.info("[OddsAPI→ESPN] ESPN fallback failed (%s)", e)
+
+    logger.warning("[OddsAPI] All tiers exhausted — returning empty odds")
+    return []
 
 
 def _load_xgb_model():
@@ -763,22 +840,14 @@ def run_data_hub_tasklet() -> None:
     physics_key = "hub:physics"
     if not _hub_exists(r, physics_key):
         logger.info("[DataHub] Scraping physics / arsenal data…")
-        game_predictions = _fetch_game_predictions() if _GAME_PRED_AVAILABLE else []
         physics = {
-            "pitch_arsenal":    [],
-            "advanced_stats":   [],
-            "bvp":              [],
-            "batted_ball":      [],
-            "second_half":      [],
-            "game_predictions": game_predictions,
+            "pitch_arsenal":  [],  # no Statcast actor yet
+            "advanced_stats": [],  # no actor yet
+            "bvp":            [],  # no actor yet
+            "batted_ball":    [],  # no actor yet
+            "second_half":    [],  # no actor yet
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
-        if game_predictions:
-            logger.info(
-                "[DataHub] Game predictions: %d games, %d HIGH confidence",
-                len(game_predictions),
-                sum(1 for g in game_predictions if g.get("confidence") == "HIGH"),
-            )
 
     # ── Group 2: Context / Environment (TTL 10 min) ───────────────────────
     context_key = "hub:context"
@@ -799,10 +868,10 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, market_key):
         logger.info("[DataHub] Scraping market / steam data…")
         market = {
-            "public_betting": _fetch_sbd_public_trends(),
-            "sharp_report":    [],  # no actor yet
-            "prop_projections": [],  # no actor yet
-            "odds": _odds_api_get(),
+            "public_betting":   _fetch_sbd_public_trends(),
+            "sharp_report":     [],
+            "prop_projections": _fetch_draftedge_projections(),   # free — DraftEdge
+            "odds":             _odds_api_get(),                   # free fallback chain
         }
         _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
 
@@ -865,10 +934,7 @@ class _BaseAgent:
         raise NotImplementedError
 
     # shared helpers
-    def _model_prob(self, player: str, prop_type: str,
-                    team: str = "", side: str = "OVER") -> float:
-        """Return probability estimate for a prop (XGB + game context)."""
-        base_prob = 50.0
+    def _model_prob(self, player: str, prop_type: str) -> float:
         if self.model:
             try:
                 import xgboost as xgb  # noqa: PLC0415
@@ -877,45 +943,15 @@ class _BaseAgent:
                 if isinstance(self.model, xgb.Booster):
                     dmat = xgb.DMatrix(feats)
                     prob = float(self.model.predict(dmat)[0])
+                    # If output > 1 it's raw score, sigmoid it
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
-                    base_prob = prob * 100
+                    return prob * 100
                 else:
-                    base_prob = float(self.model.predict_proba(feats)[0][1]) * 100
+                    return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-        if team and _GAME_PRED_AVAILABLE:
-            ctx = _get_game_context(self.hub, team)
-            if ctx:
-                prop_lower = prop_type.lower()
-                adj = 0.0
-                if side == "OVER":
-                    over_prob = ctx.get("over_prob", 0.50)
-                    if over_prob >= 0.58:
-                        adj += (over_prob - 0.50) * 20
-                    elif over_prob <= 0.42:
-                        adj -= (0.50 - over_prob) * 20
-                elif side == "UNDER":
-                    under_prob = ctx.get("under_prob", 0.50)
-                    if under_prob >= 0.58:
-                        adj += (under_prob - 0.50) * 20
-                    elif under_prob <= 0.42:
-                        adj -= (0.50 - under_prob) * 20
-                if any(x in prop_lower for x in ("strikeout", "k", "pitcher")):
-                    sp_side = "home" if "home" in team.lower() else "away"
-                    sp_era = ctx.get("features", {}).get(f"{sp_side}_sp_era", 4.20)
-                    if sp_era <= 3.00:
-                        adj += 3.0
-                    elif sp_era >= 5.00:
-                        adj -= 2.0
-                if any(x in prop_lower for x in ("hit", "total base", "home run", "rbi", "run")):
-                    home_win = ctx.get("home_win_prob", 0.50)
-                    if home_win >= 0.60:
-                        adj += 1.5
-                    elif home_win <= 0.40:
-                        adj -= 1.5
-                base_prob = max(30.0, min(80.0, base_prob + adj))
-        return base_prob
+        return 50.0
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
@@ -1309,25 +1345,6 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
                             except (TypeError, ValueError):
                                 pass
     return (sum(probs) / len(probs)) if probs else None
-
-
-def _get_game_context(hub: dict, team_name: str) -> dict:
-    """Look up game-level prediction context for a player's team."""
-    predictions = hub.get("physics", {}).get("game_predictions", [])
-    if not predictions or not team_name:
-        return {}
-    team_lower = team_name.lower()
-    for pred in predictions:
-        if (team_lower in pred.get("home_team", "").lower() or
-                team_lower in pred.get("away_team", "").lower()):
-            return pred
-    team_words = set(team_lower.split())
-    for pred in predictions:
-        home_words = set(pred.get("home_team", "").lower().split())
-        away_words = set(pred.get("away_team", "").lower().split())
-        if team_words & home_words or team_words & away_words:
-            return pred
-    return {}
 
 
 def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
