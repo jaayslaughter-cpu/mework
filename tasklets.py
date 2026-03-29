@@ -503,12 +503,14 @@ def _fetch_mlb_probable_starters() -> list[dict]:
                         "player_id": home_sp.get("id"),
                         "full_name": home_sp.get("fullName", ""),
                         "team": home_team, "side": "home", "venue": venue,
+                        "opponent": away_team,
                     })
                 if away_sp:
                     starters.append({
                         "player_id": away_sp.get("id"),
                         "full_name": away_sp.get("fullName", ""),
                         "team": away_team, "side": "away", "venue": venue,
+                        "opponent": home_team,
                     })
         logger.info("[DataHub] Probable starters: %d pitchers", len(starters))
         return starters
@@ -1030,12 +1032,50 @@ def _fetch_weather_today() -> list[dict]:
 # 1. DataHubTasklet
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _ensure_bet_ledger() -> None:
+    """Create bet_ledger table if it doesn't exist. Called on startup."""
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bet_ledger (
+                    id              SERIAL PRIMARY KEY,
+                    player_name     VARCHAR(150),
+                    prop_type       VARCHAR(60),
+                    line            FLOAT,
+                    side            VARCHAR(10),
+                    odds_american   INTEGER,
+                    kelly_units     FLOAT,
+                    model_prob      FLOAT,
+                    ev_pct          FLOAT,
+                    agent_name      VARCHAR(80),
+                    status          VARCHAR(10)  DEFAULT 'OPEN',
+                    bet_date        DATE         DEFAULT CURRENT_DATE,
+                    platform        VARCHAR(30),
+                    profit_loss     FLOAT,
+                    actual_result   FLOAT,
+                    clv             FLOAT,
+                    graded_at       TIMESTAMP,
+                    features_json   TEXT,
+                    actual_outcome  INTEGER,
+                    created_at      TIMESTAMP    DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+        conn.close()
+        logger.info("[DB] bet_ledger table ensured.")
+    except Exception as exc:
+        logger.warning("[DB] bet_ledger create failed: %s", exc)
+
+
 def run_data_hub_tasklet() -> None:
     """
     Staggered scrape across 4 data groups (physics, context, market, DFS).
     Pre-match gate: skips any game already LIVE or FINAL so we never poll
     in-game data and waste API quota.
     """
+    _ensure_bet_ledger()   # ensure table exists on every startup
     r = _redis()
 
     # ── Pre-match gate: fetch today's game states ──────────────────────────
@@ -1166,7 +1206,7 @@ class _BaseAgent:
         raise NotImplementedError
 
     # shared helpers
-    def _model_prob(self, player: str, prop_type: str) -> float:
+    def _model_prob(self, player: str, prop_type: str, **_ignored) -> float:
         if self.model:
             try:
                 import xgboost as xgb  # noqa: PLC0415
@@ -1755,6 +1795,28 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
     return props
 
 
+
+def _build_pitcher_enrich_map(hub: dict) -> dict[str, dict]:
+    """
+    Build a name→{mlbam_id, opposing_team} map from hub context.
+
+    Uses projected_starters which already has player_id (MLBAM) and
+    opponent field (added Phase 80+ fix).
+    """
+    starters = hub.get("context", {}).get("projected_starters", [])
+    enrich: dict[str, dict] = {}
+    for s in starters:
+        name = (s.get("full_name") or "").strip().lower()
+        if not name:
+            continue
+        enrich[name] = {
+            "mlbam_id":      s.get("player_id"),
+            "opposing_team": s.get("opponent", ""),
+            "team":          s.get("team", ""),
+        }
+    return enrich
+
+
 def _get_props(hub: dict) -> list[dict]:
     """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
     # 1. Try PrizePicks from hub (6,500+ real MLB props)
@@ -1769,15 +1831,21 @@ def _get_props(hub: dict) -> list[dict]:
             line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue
+            _pp_enrich = _build_pitcher_enrich_map(hub)
+            _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
             props.append({
-                "player":        player,
-                "prop_type":     str(prop_type).lower(),
-                "line":          float(line or 1.5),
-                "over_american":  -115,
-                "under_american": -115,
-                "team":          pick.get("player_team", pick.get("team", "")),
-                "venue":         "",
-                "platform":      "prizepicks",
+                "player":           player,
+                "prop_type":        str(prop_type).lower(),
+                "line":             float(line or 1.5),
+                "over_american":    -115,
+                "under_american":   -115,
+                "team":             pick.get("player_team", pick.get("team", "")),
+                "venue":            "",
+                "platform":         "prizepicks",
+                "mlbam_id":         _pp_pitcher.get("mlbam_id"),
+                "player_id":        _pp_pitcher.get("mlbam_id"),
+                "opposing_team":    _pp_pitcher.get("opposing_team", ""),
+                "_context_lineups": hub.get("context", {}).get("lineups", []),
             })
         if props:
             logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
@@ -1905,6 +1973,44 @@ def run_agent_tasklet() -> None:
 
     if producer:
         producer.flush(timeout=5)
+
+    # ── Persist each leg to bet_ledger for grading ───────────────────────────
+    try:
+        _conn = _pg_conn()
+        with _conn.cursor() as _cur:
+            _today = datetime.date.today()
+            for _parlay in all_parlays:
+                for _leg in _parlay.get("legs", []):
+                    _cur.execute(
+                        """
+                        INSERT INTO bet_ledger
+                            (player_name, prop_type, line, side, odds_american,
+                             kelly_units, model_prob, ev_pct, agent_name,
+                             status, bet_date, platform)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                'OPEN', %s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            _leg.get("player") or _leg.get("player_name"),
+                            _leg.get("prop_type"),
+                            _leg.get("line"),
+                            _leg.get("side"),
+                            _leg.get("odds_american"),
+                            _leg.get("kelly_units"),
+                            _leg.get("model_prob"),
+                            _leg.get("ev_pct"),
+                            _parlay.get("agent") or _parlay.get("agent_name"),
+                            _today,
+                            (_leg.get("recommended_platform") or "prizepicks").lower(),
+                        ),
+                    )
+        _conn.commit()
+        _conn.close()
+        logger.info("[AgentTasklet] Persisted %d legs to bet_ledger.",
+                    sum(len(p.get("legs", [])) for p in all_parlays))
+    except Exception as _dbe:
+        logger.warning("[AgentTasklet] bet_ledger INSERT failed: %s", _dbe)
 
     for parlay in all_parlays:
         try:
