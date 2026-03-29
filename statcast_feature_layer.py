@@ -357,6 +357,118 @@ def enrich_props_with_statcast(
     return enriched
 
 
+
+# ===========================================================================
+# 3b. SHADOW ZONE WHIFF RATE (2026 ABS Meta-Stat)
+# ===========================================================================
+# The "Shadow Zone" is the region just off the corner of the strike zone
+# (Statcast zones 11-14: plate edges ±0.7–1.1 ft, height 1.5–3.5 ft).
+# Whiff rate in this zone is the strongest K-rate predictor in the ABS era
+# because automated ball-strike doesn't call borderline pitches — pitchers
+# must generate genuine swings-and-misses rather than relying on framing.
+#
+# Source: Baseball Savant /statcast_search/csv with hfZ=Shadow|| filter
+# No pybaseball dependency — direct CSV endpoint used.
+
+_SHADOW_CACHE_TTL_HOURS = 24
+
+def fetch_shadow_zone_whiff(pitcher_mlbam_id: int, season: int | None = None) -> float | None:
+    """
+    Fetch Shadow Zone whiff rate for a pitcher from Baseball Savant pitch-level
+    search endpoint.  Returns float (0.0–1.0) or None on error.
+
+    Cached per pitcher per day to avoid repeated hits.
+    """
+    import datetime, json, hashlib
+
+    season = season or datetime.date.today().year
+    cache_key = f"shadow_{pitcher_mlbam_id}_{season}"
+    cache_file = CACHE_DIR / f"{cache_key}.json"
+
+    # Check cache
+    if cache_file.exists():
+        age_h = (time.time() - cache_file.stat().st_mtime) / 3600
+        if age_h < _SHADOW_CACHE_TTL_HOURS:
+            try:
+                data = json.loads(cache_file.read_text())
+                return data.get("shadow_whiff_rate")
+            except Exception:
+                pass
+
+    # Baseball Savant statcast_search CSV — shadow zone (hfZ=Shadow||)
+    # Zones 11–14 are the edge zones just outside the defined strike zone
+    url = (
+        "https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?hfPT=&hfZ=Shadow%7C%7C&player_type=pitcher"
+        f"&pitchers_lookup%5B%5D={pitcher_mlbam_id}"
+        f"&game_date_gt={season}-01-01&game_date_lt={season}-12-31"
+        "&hfGT=R%7C&hfC=&hfSea={season}%7C&hfSit=&position=&hfOuts="
+        "&opponent=&pitcher_throws=&batter_stands=&hfSA="
+        "&player_lookup%5B%5D=&team=&home_road=&game_date_gt="
+        "&game_date_lt=&hfFlag=&hfBBL=&metric_1=&hfInn=&min_pitches=0"
+        "&min_results=0&group_by=name&sort_col=pitches&player_event_sort=h_launch_speed"
+        "&sort_order=desc&min_pas=0&type=details"
+    )
+
+    try:
+        import requests as _req
+        resp = _req.get(url, headers=_SAVANT_HEADERS, timeout=20)
+        resp.raise_for_status()
+        import io
+        df = __import__("pandas").read_csv(io.StringIO(resp.text), low_memory=False)
+
+        if df.empty or "description" not in df.columns:
+            return None
+
+        # Shadow whiff = swinging_strike / all swing events in shadow zone
+        swing_events = {"swinging_strike", "swinging_strike_blocked", "foul",
+                        "foul_tip", "hit_into_play", "hit_into_play_no_out",
+                        "hit_into_play_score"}
+        total_swings  = df[df["description"].isin(swing_events)]
+        whiffs        = df[df["description"].isin({"swinging_strike",
+                                                    "swinging_strike_blocked"})]
+
+        if len(total_swings) < 10:   # too small a sample
+            return None
+
+        rate = round(len(whiffs) / len(total_swings), 4)
+
+        # Cache result
+        cache_file.write_text(json.dumps({
+            "pitcher_id":         pitcher_mlbam_id,
+            "season":             season,
+            "shadow_whiff_rate":  rate,
+            "shadow_swings":      len(total_swings),
+            "shadow_whiffs":      len(whiffs),
+        }))
+        return rate
+
+    except Exception as exc:
+        logger.debug("[Savant] Shadow zone fetch failed for %s: %s", pitcher_mlbam_id, exc)
+        return None
+
+
+def enrich_pitchers_shadow_whiff(pitcher_props: list[dict]) -> list[dict]:
+    """
+    Add sc_shadow_whiff_rate to each pitcher prop dict.
+    Only called when pitcher has a strikeout prop — high-value signal.
+    Returns props list (original items extended in-place, unchanged if fetch fails).
+
+    Threshold interpretation (ABS era):
+        ≥ 0.32  → elite shadow whiff (REAL_BREAKOUT signal)
+        0.26–0.31 → above average
+        ≤ 0.20  → below average (fade K props)
+    """
+    enriched = []
+    for prop in pitcher_props:
+        pid = int(prop.get("mlbam_id") or prop.get("player_id") or 0)
+        if pid and prop.get("prop_type") in ("strikeouts", "pitcher_strikeouts", "K"):
+            rate = fetch_shadow_zone_whiff(pid)
+            if rate is not None:
+                prop = {**prop, "sc_shadow_whiff_rate": rate}
+        enriched.append(prop)
+    return enriched
+
 # ===========================================================================
 # 4. STANDALONE TEST
 # ===========================================================================

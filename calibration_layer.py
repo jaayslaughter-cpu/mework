@@ -370,6 +370,42 @@ ABS_FRAMING_WEIGHT: float = 0.20
 
 # ── Z-Score Drift Detection ───────────────────────────────────────────────────
 
+
+def apply_shadow_whiff_boost(model_prob_pct: float, prop: dict, prop_type: str) -> float:
+    """
+    Adjust K-prop probability based on pitcher's Shadow Zone whiff rate.
+    Only fires when sc_shadow_whiff_rate is present on the prop dict.
+
+    ABS Era thresholds (2026):
+        ≥ 0.32  → elite shadow whiff (REAL_BREAKOUT) → +3pp
+        ≥ 0.27  → above average                      → +1pp
+        ≤ 0.20  → below average (fade)                → -2pp
+
+    Args:
+        model_prob_pct: probability as percentage (0–100)
+        prop: prop dict, may contain sc_shadow_whiff_rate
+        prop_type: normalized prop type string
+
+    Returns:
+        adjusted probability percentage (clamped to 3–97)
+    """
+    stat = _norm_stat(prop_type)
+    if stat not in ("strikeouts", "pitcher_strikeouts", "outs_recorded"):
+        return model_prob_pct
+    sw = float(prop.get("sc_shadow_whiff_rate") or 0)
+    if sw <= 0:
+        return model_prob_pct   # no data → no adjustment
+    if sw >= 0.32:
+        boost = +3.0
+    elif sw >= 0.27:
+        boost = +1.0
+    elif sw <= 0.20:
+        boost = -2.0
+    else:
+        boost = 0.0
+    return float(min(97.0, max(3.0, model_prob_pct + boost)))
+
+
 def check_real_time_drift(
     live_stat: float,
     historical_mean: float,

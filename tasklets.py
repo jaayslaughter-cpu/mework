@@ -58,7 +58,8 @@ try:
         sniper_decision_gate, should_cash_out, apply_thermal_correction,
         ABS_FRAMING_WEIGHT, SteamMonitor, get_reliability_score,
         apply_isotonic_calibration,
-    )
+        apply_shadow_whiff_boost,
+)
     _CAL_LAYER_AVAILABLE = True
 except ImportError:
     _CAL_LAYER_AVAILABLE = False
@@ -1191,6 +1192,10 @@ class _BaseAgent:
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
+        # Apply shadow zone whiff boost before Kelly sizing (K-props only)
+        model_prob = apply_shadow_whiff_boost(
+            model_prob, prop, prop.get("prop_type", "")
+        )
         side_odds = (
             prop.get("over_american",  prop.get("odds_american", -115))
             if side == "OVER"
@@ -2146,7 +2151,8 @@ def run_grading_tasklet() -> None:
             cur.execute(
                 """
                 SELECT id, player_name, prop_type, line, side,
-                       odds_american, kelly_units, model_prob, ev_pct, agent_name
+                       odds_american, kelly_units, model_prob, ev_pct, agent_name,
+                       COALESCE(platform, 'prizepicks') AS platform
                 FROM bet_ledger
                 WHERE status = 'OPEN' AND bet_date = %s
                 """,
@@ -2167,9 +2173,9 @@ def run_grading_tasklet() -> None:
         conn = _pg_conn()
         with conn.cursor() as cur:
             for row in open_bets:
-                bid, player, ptype, line, side, odds, units, model_prob, _, agent = row
+                bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat = row
                 stats = stat_lookup.get(player, {})
-                actual = _get_stat(stats, ptype)
+                actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:
                     continue
@@ -2242,7 +2248,7 @@ def run_grading_tasklet() -> None:
         logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
 
 
-def _get_stat(stats: dict, prop_type: str) -> float | None:
+def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
     """Map prop_type string to SportsData.io stat field."""
     mapping = {
         # Normalised lowercase keys (current pipeline)
@@ -2290,23 +2296,50 @@ def _get_stat(stats: dict, prop_type: str) -> float | None:
         rbi = stats.get("RunsBattedIn",  stats.get("RBI", 0)) or 0
         return float(h) + float(r) + float(rbi)
     if field == "__fantasy_score__":
-        # PrizePicks hitter FS: 1×H, 2×2B, 3×3B, 4×HR, 1×R, 1×RBI, 2×SB
-        # Pitcher FS: 3×K, 1×IP, -2×ER (PP convention)
-        # If we don't have enough data, return None so settlement marks pending
-        k   = stats.get("Strikeouts")
-        ip  = stats.get("InningsPitched")
-        er  = stats.get("EarnedRuns")
+        # Official platform scoring tables (2026)
+        # PrizePicks Pitcher:  K×3, Out×1, W×6, QS×4, ER×-3
+        # Underdog  Pitcher:   K×3, IP×3,  W×5, QS×5, ER×-3
+        # PrizePicks Hitter:   1B×3, 2B×5, 3B×8, HR×10, R×2, RBI×2, BB×2, HBP×2, SB×5
+        # Underdog  Hitter:    1B×3, 2B×5, 3B×8, HR×10, R×2, RBI×2, BB×3, HBP×3, SB×4, CS×-2
+        plat = (platform or "prizepicks").lower()
+        k  = stats.get("Strikeouts")
+        ip = stats.get("InningsPitched")
+        er = stats.get("EarnedRuns")
         if k is not None and ip is not None and er is not None:
             # Pitcher fantasy score
-            return round(float(k) * 3 + float(ip) - float(er) * 2, 2)
-        h   = stats.get("Hits");   rn = stats.get("Runs")
-        rbi = stats.get("RunsBattedIn"); hr = stats.get("HomeRuns")
-        sb  = stats.get("StolenBases")
-        if h is not None and rn is not None and rbi is not None:
-            fs = (float(h or 0) + float(rn or 0) + float(rbi or 0) +
-                  float(hr or 0) * 3 + float(sb or 0) * 2)
-            return round(fs, 2)
-        return None
+            k  = float(k  or 0)
+            ip = float(ip or 0)
+            er = float(er or 0)
+            w  = float(stats.get("Wins") or stats.get("Win") or 0)
+            qs = float(stats.get("QualityStart") or 0)
+            if plat == "prizepicks":
+                # Outs = floor(ip)*3 + tenths digit (6.2 IP = 20 outs)
+                full, frac = divmod(ip, 1)
+                outs = int(full) * 3 + round(frac * 10)
+                return round(k * 3 + outs * 1 + w * 6 + qs * 4 + er * (-3), 2)
+            else:  # underdog
+                return round(k * 3 + ip * 3 + w * 5 + qs * 5 + er * (-3), 2)
+        # Hitter fantasy score
+        h   = float(stats.get("Hits")          or stats.get("H")   or 0)
+        rn  = float(stats.get("Runs")          or stats.get("R")   or 0)
+        rbi = float(stats.get("RunsBattedIn")  or stats.get("RBI") or 0)
+        hr  = float(stats.get("HomeRuns")      or stats.get("HR")  or 0)
+        db  = float(stats.get("Doubles")       or stats.get("2B")  or 0)
+        tb3 = float(stats.get("Triples")       or stats.get("3B")  or 0)
+        sb  = float(stats.get("StolenBases")   or stats.get("SB")  or 0)
+        bb  = float(stats.get("Walks")         or stats.get("BB")  or 0)
+        hbp = float(stats.get("HitByPitch")    or stats.get("HBP") or 0)
+        cs  = float(stats.get("CaughtStealing")or stats.get("CS")  or 0)
+        if h == 0 and rn == 0 and rbi == 0:
+            return None   # insufficient data — settlement marks pending
+        singles = max(0.0, h - db - tb3 - hr)
+        if plat == "prizepicks":
+            fs = (singles*3 + db*5 + tb3*8 + hr*10 +
+                  rn*2 + rbi*2 + bb*2 + hbp*2 + sb*5)
+        else:  # underdog
+            fs = (singles*3 + db*5 + tb3*8 + hr*10 +
+                  rn*2 + rbi*2 + bb*3 + hbp*3 + sb*4 + cs*(-2))
+        return round(fs, 2)
     if field:
         val = stats.get(field)
         return float(val) if val is not None else None

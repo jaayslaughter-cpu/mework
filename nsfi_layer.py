@@ -20,7 +20,7 @@ How it works:
          - Platoon splits (vs LHH/RHH, vs LHP/RHP)
          - Year-weighted stats (40% prior year + 60% current season)
          - Park factors (all 30 parks × 8 hit types × 2 handedness)
-         - Combined rate via simple averaging (csf = (batter + pitcher) / 2)
+         - Combined rate via Odds Ratio / Log5 method (csf = odds_ratio(batter, pitcher, lg_avg))
     4. P(NSFI) = fraction of simulated half-innings with zero strikeouts.
     5. Compare P(NSFI) to DraftKings implied probability — bet when edge > 3%.
 
@@ -363,11 +363,22 @@ def simulate_half_inning(
     def wsf(year_val: float, season_val: float, yw: float = 0.4, sw: float = 0.6) -> float:
         return year_val * yw + season_val * sw
 
-    # Helper: combined pitcher+batter rate with league average fallback
+    # Helper: Odds Ratio matchup combination (Log5 method)
+    # More accurate than simple averaging — accounts for interaction between
+    # high-K pitcher vs low-K batter (and vice versa) relative to league avg.
+    # Formula: (p*b/L) / ((p*b/L) + ((1-p)*(1-b)/(1-L)))
+    # Source: Bill James Log5 / PropMatchupEngine odds_ratio
     def csf(bv: float, pv: float, avg: float) -> float:
-        bv = avg if (bv is None or bv != bv) else bv   # nan check
-        pv = avg if (pv is None or pv != pv) else pv
-        return (bv + pv) / 2.0
+        bv = avg if (bv is None or bv != bv or bv <= 0) else bv   # nan/zero guard
+        pv = avg if (pv is None or pv != pv or pv <= 0) else pv
+        avg = max(avg, 1e-6)
+        # Clamp to sane rate range to avoid division by zero at extremes
+        bv  = min(max(bv,  0.001), 0.999)
+        pv  = min(max(pv,  0.001), 0.999)
+        avg = min(max(avg, 0.001), 0.999)
+        num = (pv * bv) / avg
+        den = num + ((1 - pv) * (1 - bv)) / (1 - avg)
+        return num / den if den > 0 else avg
 
     # Pitcher stats
     pstats = _get_pitcher_rates(pitcher_name, fg_data)
