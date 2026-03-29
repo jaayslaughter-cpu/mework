@@ -1393,9 +1393,20 @@ class _BaseAgent:
         )
         # Zone integrity: FRAUD/ELITE_SHADOW multiplier from heart vs shadow whiff
         pitcher_id = prop.get("mlbam_id") or prop.get("player_id")
+        _mp_pre_zi = model_prob
         model_prob = apply_zone_integrity_multiplier(
             model_prob, prop.get("prop_type", ""), pitcher_id
         )
+        # Write multiplier back so feature vector captures it (was always 1.0 before)
+        prop["_zone_integrity_mult"] = round(model_prob / _mp_pre_zi, 4) if _mp_pre_zi else 1.0
+        # Velocity drop check for K-props: pitch vel decline signals K regression
+        _lv = prop.get("_live_velocity", 0.0) or 0.0
+        _sv = prop.get("_season_velocity", 0.0) or 0.0
+        if _lv and _sv and prop.get("prop_type", "").lower() in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
+            _vel_mult = adaptive_velocity_check(_lv, _sv)
+            model_prob = round(model_prob * _vel_mult, 4)
+            logger.debug("[VelCheck] %s live=%.1f season=%.1f mult=%.3f new_prob=%.2f",
+                         prop.get("player", ""), _lv, _sv, _vel_mult, model_prob)
         # Lineup chase difficulty adjustment for pitcher K-props
         _k_prop_types = {"strikeouts", "pitcher_strikeouts", "k", "ks"}
         if prop.get("prop_type", "").lower() in _k_prop_types:
@@ -1509,7 +1520,7 @@ class _EVHunter(_BaseAgent):
         fair_over, _ = _no_vig(over_odds, under_odds)
         model_prob = self._model_prob(
             prop.get("player", ""), prop.get("prop_type", ""),
-            team=prop.get("team", ""), side="OVER",
+            team=prop.get("team", ""), side="OVER", prop=prop,
         )
         implied = _american_to_implied(over_odds) / 100
 
@@ -1541,7 +1552,7 @@ class _UnderMachine(_BaseAgent):
 
         model_prob = 100 - self._model_prob(
             prop.get("player", ""), prop.get("prop_type", ""),
-            team=prop.get("team", ""), side="UNDER",
+            team=prop.get("team", ""), side="UNDER", prop=prop,
         )
         implied = _american_to_implied(under_odds) / 100
 
@@ -1574,7 +1585,7 @@ class _UmpireAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         if _norm_stat(prop_type) not in self._PITCHER_STATS:
             return None
-        model_prob = self._model_prob(prop.get("player", ""), prop_type)
+        model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         model_prob = min(model_prob + 5.0, 95.0)
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
@@ -1592,7 +1603,7 @@ class _F5Agent(_BaseAgent):
         """Targets first-5-innings run props."""
         if "f5" not in prop.get("prop_type", "").lower():
             return None
-        model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
+        model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""), prop=prop)
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
@@ -1656,7 +1667,7 @@ class _LineValueAgent(_BaseAgent):
                 break
         if not steam:
             return None
-        model_prob = self._model_prob(player, prop.get("prop_type", ""))
+        model_prob = self._model_prob(player, prop.get("prop_type", ""), prop=prop)
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
@@ -1718,6 +1729,9 @@ class _WeatherAgent(_BaseAgent):
         if wind_mph >= 10 and "out" in wind_dir.lower() and (
                 _norm_stat(prop_type) in {"home_runs", "total_bases", "hits_runs_rbis", "fantasy_score"}):
             model_prob = self._model_prob(player, prop_type, prop=prop)
+            # Thermal correction: HR/TB props gain/lose ~10% per 10°F from 70°F baseline
+            if _norm_stat(prop_type) in {"home_runs", "total_bases", "hits_runs_rbis"}:
+                model_prob = min(apply_thermal_correction(model_prob, prop.get("_temp_f", 72.0)), 95.0)
             model_prob = min(model_prob + 8.0, 95.0)
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
@@ -1742,7 +1756,7 @@ class _SteamAgent(_BaseAgent):
                 break
         if not rlm:
             return None
-        model_prob = self._model_prob(player, prop.get("prop_type", ""))
+        model_prob = self._model_prob(player, prop.get("prop_type", ""), prop=prop)
         model_prob = min(model_prob + 4.0, 95.0)
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
@@ -1758,7 +1772,7 @@ class _MLEdgeAgent(_BaseAgent):
 
     def evaluate(self, prop: dict) -> dict | None:
         """Pure XGBoost model edge — only fires when model prob diverges ≥8 pp."""
-        model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""))
+        model_prob = self._model_prob(prop.get("player", ""), prop.get("prop_type", ""), prop=prop)
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100 * 100
         divergence = abs(model_prob - implied)
@@ -1917,13 +1931,27 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
                         key = "|".join(sorted(lg["player"] for lg in three))
                         if key not in seen:
                             seen.add(key)
-                            parlays.append(_make_parlay(three, agent_name))
+                            _p3 = _make_parlay(three, agent_name)
+                            # is_ev_positive: Underdog 3-pick parlay EV gate (2026 multipliers)
+                            _avg3 = sum(lg.get("model_prob", 55.0) for lg in three) / 300.0
+                            _ok3, _ev3 = is_ev_positive(_avg3, n_legs=3)
+                            if _ok3:
+                                parlays.append(_p3)
+                            else:
+                                logger.debug("[EVGate] 3-leg parlay rejected ev=%.3f", _ev3)
                         break
 
             key2 = "|".join(sorted(lg["player"] for lg in two))
             if key2 not in seen:
                 seen.add(key2)
-                parlays.append(_make_parlay(two, agent_name))
+                _p2 = _make_parlay(two, agent_name)
+                # is_ev_positive: Underdog 2-pick parlay EV gate (2026 multipliers)
+                _avg2 = sum(lg.get("model_prob", 55.0) for lg in two) / 200.0
+                _ok2, _ev2 = is_ev_positive(_avg2, n_legs=2)
+                if _ok2:
+                    parlays.append(_p2)
+                else:
+                    logger.debug("[EVGate] 2-leg parlay rejected ev=%.3f", _ev2)
 
     return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
 
