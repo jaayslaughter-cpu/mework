@@ -161,8 +161,9 @@ class DiscordAlertService:
         results: list[dict],
         total_profit: float,
         date_str: str,
+        tier_updates: list[str] | None = None,
     ) -> None:
-        """Send end-of-day settlement recap."""
+        """Send end-of-day settlement recap with tier ladder progress."""
         wins   = sum(1 for r in results if r.get("status") == "WIN")
         losses = sum(1 for r in results if r.get("status") == "LOSS")
         pushes = sum(1 for r in results if r.get("status") == "PUSH")
@@ -187,16 +188,25 @@ class DiscordAlertService:
         if len(description) > 3_000:
             description = description[:2_950] + "\n…(truncated)"
 
+        fields = [
+            {"name": "📈 Units",   "value": f"{sign}{total_profit:.2f}u",      "inline": True},
+            {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P", "inline": True},
+        ]
+        # Always show tier ladder progress — promotions AND in-progress streaks
+        if tier_updates:
+            fields.append({
+                "name": "🏅 Tier Ladder",
+                "value": "\n".join(tier_updates),
+                "inline": False,
+            })
+
         self._post({
             "embeds": [{
                 "title": f"📊 PropIQ Daily Recap — {date_str}",
                 "description": description,
                 "color": colour,
-                "fields": [
-                    {"name": "📈 Units",   "value": f"{sign}{total_profit:.2f}u",      "inline": True},
-                    {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P", "inline": True},
-                ],
-                "footer": {"text": "Powered by PropIQ Analytics 🤖"},
+                "fields": fields,
+                "footer": {"text": "Powered by PropIQ Analytics 🤖  |  3 W or 3 L in a row = tier move"},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }]
         })

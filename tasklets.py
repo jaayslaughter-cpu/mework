@@ -2859,8 +2859,49 @@ def run_grading_tasklet() -> None:
     except Exception as _sync_err:
         logger.debug("[GradingTasklet] Season record sync failed: %s", _sync_err)
 
+    # ── Phase 89: Update agent tier ladder + build progress messages ──────
+    # Requirements: need 3 consecutive W or L before tier moves.
+    # Progress is shown in Discord after every result so user always sees
+    # where each agent stands (e.g. "2/3 wins → Tier 2").
+    _TIER_UP_DOLLARS   = {1: 8, 2: 12, 3: 16, 4: 20}
+    _TIER_DOWN_DOLLARS = {2: 5, 3: 8,  4: 12, 5: 16}
+    _tier_progress: list[str] = []
     try:
-        discord_alert.send_daily_recap(results, total_profit, today)
+        from agent_unit_sizing import record_result as _unit_record  # noqa: PLC0415
+        for _ag, _stats in _agent_results.items():
+            # Determine W/L/P for this agent's day
+            _wl = ("W" if _stats["wins"] > _stats["losses"]
+                   else "L" if _stats["losses"] > _stats["wins"]
+                   else "P")
+            _tu = _unit_record(_ag, _wl)
+            if _tu.get("tier_change"):
+                # Full promotion / demotion — show it
+                _tier_progress.append(_tu["tier_change"])
+            else:
+                # Show in-progress streak so user always sees 3 wins/losses building up
+                _cw = _tu.get("consecutive_wins", 0)
+                _cl = _tu.get("consecutive_losses", 0)
+                _nt = _tu.get("new_tier", 1)
+                if _cw > 0 and _nt < 5:
+                    _next_dollar = _TIER_UP_DOLLARS.get(_nt, 20)
+                    _tier_progress.append(
+                        f"🔥 {_ag}: {_cw}/3 wins → Tier {_nt + 1} (${_next_dollar}/unit)"
+                    )
+                elif _cl > 0 and _nt > 1:
+                    _prev_dollar = _TIER_DOWN_DOLLARS.get(_nt, 5)
+                    _tier_progress.append(
+                        f"⚠️ {_ag}: {_cl}/3 losses → Tier {_nt - 1} (${_prev_dollar}/unit)"
+                    )
+                # If both 0 — streak reset (direction changed), nothing to show
+    except Exception as _tier_err:
+        logger.debug("[GradingTasklet] Tier update error: %s", _tier_err)
+    # ── End Phase 89 ──────────────────────────────────────────────────────
+
+    try:
+        discord_alert.send_daily_recap(
+            results, total_profit, today,
+            tier_updates=_tier_progress if _tier_progress else None,
+        )
     except Exception as _disc_err:
         logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
 
