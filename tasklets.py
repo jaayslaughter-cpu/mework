@@ -1358,9 +1358,20 @@ class _BaseAgent:
             except Exception:
                 pass
         if prop:
-            raw_p += float(prop.get("_bayesian_nudge", 0.0)) * 100.0
-            raw_p += float(prop.get("_cv_nudge",       0.0)) * 100.0
-            raw_p += float(prop.get("_form_adj",       0.0)) * 100.0
+            # Phase 91 Step 4: dampen correlated fallback adjustments
+            _fb_adjs = [
+                ("bayesian",        float(prop.get("_bayesian_nudge", 0.0)) * 100.0),
+                ("cv_consistency",  float(prop.get("_cv_nudge",       0.0)) * 100.0),
+                ("form_adj",        float(prop.get("_form_adj",       0.0)) * 100.0),
+            ]
+            _fb_adjs = [(n, d) for n, d in _fb_adjs if abs(d) >= 0.10]
+            if _fb_adjs:
+                try:
+                    from adjustment_dampener import dampen_adjustments as _dampen  # noqa: PLC0415
+                    raw_p = _dampen(raw_p, _fb_adjs, log_tag=prop.get("player", ""))
+                except Exception:
+                    for _, d in _fb_adjs:
+                        raw_p += d
         return round(max(5.0, min(95.0, raw_p)), 2)
 
 
@@ -1475,23 +1486,53 @@ class _BaseAgent:
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
-        # Apply shadow zone whiff boost before Kelly sizing (K-props only)
-        model_prob = apply_shadow_whiff_boost(
-            model_prob, prop, prop.get("prop_type", "")
-        )
-        # Zone integrity: FRAUD/ELITE_SHADOW multiplier from heart vs shadow whiff
-        pitcher_id = prop.get("mlbam_id") or prop.get("player_id")
-        model_prob = apply_zone_integrity_multiplier(
-            model_prob, prop.get("prop_type", ""), pitcher_id
-        )
-        # Lineup chase difficulty adjustment for pitcher K-props
+        # ── Phase 91 Step 4: collect post-model adjustments, apply with
+        #    correlation dampening to prevent stacked-signal inflation ──────
+        _prop_type  = prop.get("prop_type", "")
+        pitcher_id  = prop.get("mlbam_id") or prop.get("player_id")
+        _post_adjs: list[tuple[str, float]] = []
+
+        # Shadow zone whiff boost (K-props) — compute effective delta
+        _sw_prob = apply_shadow_whiff_boost(model_prob, prop, _prop_type)
+        if _sw_prob != model_prob:
+            _post_adjs.append(("shadow_whiff", _sw_prob - model_prob))
+
+        # Zone integrity multiplier (K-props) — convert to effective delta
+        _zi_prob = apply_zone_integrity_multiplier(model_prob, _prop_type, pitcher_id)
+        if abs(_zi_prob - model_prob) >= 0.01:
+            _post_adjs.append(("zone_integrity", _zi_prob - model_prob))
+
+        # Lineup chase difficulty (K-props) — compute delta
         _k_prop_types = {"strikeouts", "pitcher_strikeouts", "k", "ks"}
-        if prop.get("prop_type", "").lower() in _k_prop_types:
+        if _prop_type.lower() in _k_prop_types:
             _ctx_lineups = prop.get("_context_lineups", [])
             _opp_team    = prop.get("opposing_team", "")
             if _opp_team and _ctx_lineups:
-                _chase = get_lineup_chase_score(_opp_team, _ctx_lineups)
-                model_prob = round(model_prob + _chase["k_prob_adjustment"] * 100, 4)
+                _chase   = get_lineup_chase_score(_opp_team, _ctx_lineups)
+                _k_delta = _chase["k_prob_adjustment"] * 100
+                if abs(_k_delta) >= 0.01:
+                    _post_adjs.append(("chase_difficulty", _k_delta))
+
+        # Apply with correlation dampening (or pass-through if no adjustments)
+        if _post_adjs:
+            try:
+                from adjustment_dampener import (  # noqa: PLC0415
+                    dampen_adjustments   as _dampen,
+                    undampened_total     as _undampened,
+                )
+                _raw_total = _undampened(model_prob, _post_adjs)
+                model_prob = _dampen(
+                    model_prob, _post_adjs,
+                    log_tag=prop.get("player", ""),
+                )
+                # Persist both values for audit / feature vector
+                prop["_adj_raw_prob"]     = round(_raw_total, 4)
+                prop["_adj_dampened"]     = round(model_prob,  4)
+                prop["_adj_signals"]      = [n for n, _ in _post_adjs]
+            except Exception:
+                # Fallback: apply adjustments naively (safe degradation)
+                for _, delta in _post_adjs:
+                    model_prob = round(max(3.0, min(97.0, model_prob + delta)), 4)
         side_odds = (
             prop.get("over_american",  prop.get("odds_american", -115))
             if side == "OVER"
