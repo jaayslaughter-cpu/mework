@@ -137,14 +137,15 @@ def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
             out[key] = 0.0
 
     if not is_pitcher:
-        # Derived convenience fields expected by settlement_engine
-        out["rbis"]    = out.get("rbi", 0.0)
-        out["stolen_bases"] = 0.0           # not in standard ESPN box score
-        # total_bases: approximate (1×singles + 2×doubles + 3×triples + 4×HR)
-        # We only have hits and HRs directly, so use a rough estimate
-        h  = out.get("hits", 0.0)
+        out["rbis"] = out.get("rbi", 0.0)
+        # total_bases and stolen_bases are supplemented by _fetch_mlb_gamelog_stats()
+        # after all ESPN data is collected. Set provisional values here.
+        h  = out.get("hits",      0.0)
         hr = out.get("home_runs", 0.0)
-        out["total_bases"]   = h + hr * 3   # conservative: treats non-HR hits as singles
+        out["total_bases"]    = h + hr * 3   # provisional — overwritten by MLB Stats API
+        out["stolen_bases"]   = 0.0           # provisional — overwritten by MLB Stats API
+        out["doubles"]        = 0.0           # will be set by MLB Stats API supplement
+        out["triples"]        = 0.0           # will be set by MLB Stats API supplement
         out["hits_runs_rbis"] = h + out.get("runs", 0.0) + out.get("rbi", 0.0)
 
     return out
@@ -153,6 +154,58 @@ def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
 # ---------------------------------------------------------------------------
 # Main player stats fetcher
 # ---------------------------------------------------------------------------
+
+
+
+def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
+    """
+    Supplement ESPN box scores with MLB Stats API game log data.
+    Provides doubles, triples, stolen_bases — missing from ESPN standard box.
+
+    date_str: 'YYYYMMDD'
+    Returns: dict keyed by lowercase player full name → extra stat fields
+    """
+    import datetime as _dt
+    try:
+        # Convert YYYYMMDD to YYYY-MM-DD for MLB API
+        d = _dt.datetime.strptime(date_str, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        d = date_str  # already formatted
+
+    extra: dict[str, dict] = {}
+    try:
+        resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": d,
+                    "hydrate": "boxscore", "gameType": "R"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return extra
+        data = resp.json()
+        for date_block in data.get("dates", []):
+            for game in date_block.get("games", []):
+                bs = game.get("boxscore", {})
+                for side in ("home", "away"):
+                    team_bs = bs.get("teams", {}).get(side, {})
+                    for entry in team_bs.get("players", {}).values():
+                        info = entry.get("person", {})
+                        name = (info.get("fullName") or "").strip().lower()
+                        if not name:
+                            continue
+                        stats = entry.get("stats", {})
+                        bat   = stats.get("batting", {})
+                        if not bat:
+                            continue
+                        extra[name] = {
+                            "doubles":      float(bat.get("doubles",      0) or 0),
+                            "triples":      float(bat.get("triples",      0) or 0),
+                            "stolen_bases": float(bat.get("stolenBases",  0) or 0),
+                            "total_bases":  float(bat.get("totalBases",   0) or 0),
+                        }
+    except Exception as exc:
+        logger.warning("[ESPN] MLB gamelog supplement failed: %s", exc)
+    return extra
 
 def get_all_player_stats(date_str: str) -> dict[str, dict]:
     """
@@ -224,4 +277,19 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
             time.sleep(_REQUEST_SLEEP)
 
     logger.info("[ESPN] Parsed box-score stats for %d players", len(all_stats))
+
+    # Supplement with MLB Stats API for missing stats (2B, 3B, SB, exact TB)
+    mlb_extra = _fetch_mlb_gamelog_stats(date_str)
+    supplemented = 0
+    for name_lower, extra in mlb_extra.items():
+        if name_lower in all_stats:
+            p = all_stats[name_lower]
+            p["doubles"]      = extra.get("doubles",      0.0)
+            p["triples"]      = extra.get("triples",      0.0)
+            p["stolen_bases"] = extra.get("stolen_bases", 0.0)
+            if extra.get("total_bases", 0) > 0:
+                p["total_bases"] = extra["total_bases"]
+            supplemented += 1
+    logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/SB/TB",
+                supplemented, len(all_stats))
     return all_stats

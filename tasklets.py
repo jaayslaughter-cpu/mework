@@ -1053,6 +1053,25 @@ def _fetch_weather_today() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _ensure_calibration_map() -> None:
+    """Write identity calibration_map.json if it doesn't exist on startup."""
+    cal_path = os.getenv("CALIBRATION_MAP_PATH", "calibration_map.json")
+    if not os.path.exists(cal_path):
+        try:
+            from calibrate_model import _write_identity_map  # noqa: PLC0415
+            _write_identity_map()
+            logger.info("[Startup] calibration_map.json bootstrapped (identity map).")
+        except Exception as _e:
+            # Write minimal identity map inline as last resort
+            import json as _json  # noqa: PLC0415
+            pts = [round(0.40 + i * 0.01, 2) for i in range(51)]
+            try:
+                with open(cal_path, "w") as _f:
+                    _json.dump({str(p): p for p in pts}, _f)
+            except Exception:
+                pass
+
+
 def _ensure_bet_ledger() -> None:
     """Create bet_ledger table if it doesn't exist. Called on startup."""
     try:
@@ -1082,6 +1101,12 @@ def _ensure_bet_ledger() -> None:
                     created_at      TIMESTAMP    DEFAULT NOW()
                 )
             """)
+        # Add units_wagered if it didn't exist in earlier schema versions
+        try:
+            cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS units_wagered FLOAT")
+            conn.commit()
+        except Exception:
+            conn.rollback()
         conn.commit()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
@@ -1095,7 +1120,8 @@ def run_data_hub_tasklet() -> None:
     Pre-match gate: skips any game already LIVE or FINAL so we never poll
     in-game data and waste API quota.
     """
-    _ensure_bet_ledger()   # ensure table exists on every startup
+    _ensure_bet_ledger()       # ensure table exists on every startup
+    _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
     r = _redis()
 
     # ── Pre-match gate: fetch today's game states ──────────────────────────
@@ -1256,8 +1282,18 @@ class _BaseAgent:
                     return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-        # No XGBoost model — use calibrated base rate model instead of flat 50%
-        # base_rate_model uses historical MLB base rates + FanGraphs + context signals
+        # No XGBoost model — try generate_pick 5-stage pipeline first
+        if prop:
+            try:
+                from generate_pick import generate_pick as _gp  # noqa: PLC0415
+                _gp_side = str(prop.get("side", "OVER")).upper()
+                _gp_res  = _gp(raw_prop=prop, side=_gp_side, min_edge=-1.0)
+                if _gp_res is not None:
+                    return round(max(5.0, min(95.0, _gp_res["final_prob"] * 100.0)), 2)
+            except Exception:
+                pass  # fall through to base_rate_model
+
+        # Fallback: base_rate_model (calibrated historical rates + FanGraphs + context signals)
         if _BASE_RATE_AVAILABLE and prop:
             # Determine side from prop context (bet dict may not be available here)
             _side = "OVER"   # default; agents override via their own EV checks
@@ -1303,19 +1339,35 @@ class _BaseAgent:
             except Exception:
                 return 0.0
 
-        # ── Pitcher stats (from FanGraphs cache on prop) ──────────────
-        k_rate      = _clamp(prop.get("k_rate",    prop.get("k_pct",    0.22)))
-        bb_rate     = _clamp(prop.get("bb_rate",   prop.get("bb_pct",   0.08)))
-        era         = _clamp((prop.get("era", 4.0)) / 9.0)          # 0 ERA→0, 9 ERA→1
-        whip        = _clamp((prop.get("whip", 1.3)) / 3.0)
+        # ── Player stats — pitcher OR batter signals depending on prop type ──
+        _PITCHER_PT = {"strikeouts","pitching_outs","earned_runs","hits_allowed",
+                       "walks_allowed","fantasy_pitcher"}
+        _pt_raw     = str(prop.get("prop_type","") or bet.get("prop_type","") if bet else "").lower()
+        _is_pitcher = _pt_raw in _PITCHER_PT
 
-        # ── Statcast / zone signals ───────────────────────────────────
-        # FanGraphs csw_pct / swstr_pct used as shadow_whiff proxy when Statcast unavailable
-        shadow_whiff = _clamp(
-            prop.get("shadow_whiff_rate",
-            prop.get("csw_pct",
-            prop.get("swstr_pct", 0.25)))
-        )
+        if _is_pitcher:
+            # Pitcher signals (FanGraphs)
+            k_rate       = _clamp(prop.get("k_rate",    prop.get("k_pct",    0.22)))
+            bb_rate      = _clamp(prop.get("bb_rate",   prop.get("bb_pct",   0.08)))
+            era          = _clamp((prop.get("era", 4.0)) / 9.0)
+            whip         = _clamp((prop.get("whip", 1.3)) / 3.0)
+            shadow_whiff = _clamp(prop.get("shadow_whiff_rate",
+                                  prop.get("csw_pct",
+                                  prop.get("swstr_pct", 0.25))))
+        else:
+            # Batter signals (FanGraphs) mapped into the same 5 slots
+            # slot 0: wRC+ normalized (100=avg → 0.5, 140=elite → 0.7, 70=poor → 0.35)
+            k_rate  = _clamp(float(prop.get("wrc_plus", 100.0) or 100.0) / 200.0)
+            # slot 1: ISO / power (0=weak, 0.15=avg, 0.30=elite)
+            bb_rate = _clamp(float(prop.get("iso", 0.155) or 0.155) / 0.35)
+            # slot 2: BABIP / contact quality (0.250–0.350 range)
+            era     = _clamp((float(prop.get("babip", 0.300) or 0.300) - 0.200) / 0.200)
+            # slot 3: batter bb_pct (plate discipline)
+            whip    = _clamp(float(prop.get("bb_pct", 0.085) or 0.085) / 0.20)
+            # slot 4: batter K% (inverse contact — higher K = worse contact)
+            shadow_whiff = _clamp(float(prop.get("k_pct", 0.224) or 0.224) / 0.35)
+
+        # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
         zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
 
         # ── Lineup context ────────────────────────────────────────────
@@ -2026,23 +2078,37 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
 
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
-    # Multiplicative EV: (1+e1) * (1+e2) * ... - 1
-    combined_ev = round(
-        (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
-    ) if legs else 0.0
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
     platform = legs[0].get("recommended_platform", "PrizePicks").lower() if legs else "prizepicks"
+
+    # Use underdog_math_engine for accurate Flex vs Standard EV with real payout tables
+    entry_type = "STANDARD"
+    combined_ev = 0.0
+    try:
+        from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
+        _engine = UnderdogMathEngine()
+        _probs  = [min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)) for lg in legs]
+        _eval   = _engine.evaluate_slip(_probs)
+        combined_ev = round(_eval.recommended_ev * 100, 2)
+        entry_type  = _eval.recommended_entry_type   # "FLEX" or "STANDARD"
+    except Exception:
+        # Fallback: multiplicative EV
+        combined_ev = round(
+            (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
+        ) if legs else 0.0
+
     return {
         "agent":           agent_name,
-        "agent_name":      agent_name,      # Discord field
+        "agent_name":      agent_name,
         "legs":            legs,
         "leg_count":       len(legs),
+        "entry_type":      entry_type,
         "combined_ev_pct": combined_ev,
-        "ev_pct":          combined_ev,     # Discord field
-        "stake":           10.0,            # Discord field (default $10)
-        "confidence":      avg_conf,        # Discord field
-        "platform":        platform,        # Discord field
-        "season_stats":    {},              # filled by dispatcher if available
+        "ev_pct":          combined_ev,
+        "stake":           10.0,
+        "confidence":      avg_conf,
+        "platform":        platform,
+        "season_stats":    {},
         "ts":              datetime.datetime.utcnow().isoformat(),
     }
 
@@ -2271,6 +2337,15 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
+    # Decision logger — audit trail for every prop evaluation
+    _DL = None
+    try:
+        from decision_logger import log_leg as _dl_log, flush_buffer as _dl_flush  # noqa: PLC0415
+        _DL = True
+    except Exception:
+        _dl_log   = lambda **kw: None   # noqa: E731
+        _dl_flush = lambda: None        # noqa: E731
+
     props = _get_props(hub)
     if not props:
         logger.info("[AgentTasklet] No live UD/PP props this cycle — skipping.")
@@ -2498,6 +2573,12 @@ def run_agent_tasklet() -> None:
             discord_alert.send_parlay_alert(parlay)
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
+
+    # Flush decision log buffer to DB in one batch
+    try:
+        _dl_flush()
+    except Exception:
+        pass
 
     active_agents = len({p["agent"] for p in all_parlays})
     best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
@@ -2938,6 +3019,20 @@ def run_grading_tasklet() -> None:
     except Exception as _disc_err:
         logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
 
+    # ── Post-grading monitoring: calibration + edge health ──────────────────
+    try:
+        from calibration_monitor import run as _cal_run  # noqa: PLC0415
+        _cal_run(days=30, quiet=True)
+        logger.info("[GradingTasklet] Calibration monitor complete.")
+    except Exception as _cal_err:
+        logger.debug("[GradingTasklet] Calibration monitor skipped: %s", _cal_err)
+    try:
+        from edge_health_monitor import run as _edge_run  # noqa: PLC0415
+        _edge_run(days=30, quiet=True)
+        logger.info("[GradingTasklet] Edge health monitor complete.")
+    except Exception as _edge_err:
+        logger.debug("[GradingTasklet] Edge health monitor skipped: %s", _edge_err)
+
     # Update drift monitor with today's Brier score
     if results:
         try:
@@ -3221,6 +3316,14 @@ def run_xgboost_tasklet() -> None:
 
     logger.info("[XGBoostTasklet] Retrain complete. Accuracy=%.3f | Train=%d Test=%d | Saved→%s",
                 accuracy, len(X_train), len(X_test), model_path)
+
+    # ── Rebuild isotonic calibration map from settled bets ────────────────────
+    try:
+        from calibrate_model import generate_calibration_map_from_db  # noqa: PLC0415
+        generate_calibration_map_from_db()
+        logger.info("[XGBoostTasklet] Calibration map rebuilt from bet_ledger.")
+    except Exception as _cal_err:
+        logger.warning("[XGBoostTasklet] Calibration map rebuild failed: %s", _cal_err)
 
     # ── Hot-reload: update the global model so live agents use it immediately ──
     try:

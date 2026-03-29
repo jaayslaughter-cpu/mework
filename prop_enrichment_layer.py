@@ -103,20 +103,31 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
         if pid:
             p2mlbam[name] = int(pid)
 
-    # From projected starters (adds opposing_team)
+    # From projected starters (adds opposing_team for pitchers)
+    # Also builds a team→opponent map for wiring batters to their opponents
+    team_to_opp: dict[str, str] = {}
     for s in ctx.get("projected_starters", []):
         name = _norm(s.get("full_name", ""))
-        if not name:
-            continue
         team = s.get("team", "")
         opp  = s.get("opponent", "")
         pid  = s.get("player_id")
-        if team:
-            p2team[name] = team
-        if opp:
-            p2opp[name] = opp
-        if pid:
-            p2mlbam[name] = int(pid)
+        if name:
+            if team:
+                p2team[name] = team
+            if opp:
+                p2opp[name] = opp
+            if pid:
+                try: p2mlbam[name] = int(pid)
+                except (ValueError, TypeError): pass
+        # Build bidirectional team→opponent map from any game we see
+        if team and opp:
+            team_to_opp[team] = opp
+            team_to_opp[opp]  = team
+
+    # Wire batters to their opponents using the team→opponent map
+    for batter_name, batter_team in list(p2team.items()):
+        if batter_name not in p2opp and batter_team in team_to_opp:
+            p2opp[batter_name] = team_to_opp[batter_team]
 
     return p2team, p2opp, p2mlbam
 
@@ -174,9 +185,18 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
         side       = prop.get("side", "OVER")
         player     = prop.get("player", "")
         line       = float(prop.get("line", 1.5) or 1.5)
-        # Use k_rate as player_rate proxy for all prop types (best we have)
-        player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.224)) or 0.224)
-        player_pa   = 27 if "strikeout" in prop_type else 4
+        # Use appropriate player rate for prop type — k_rate for pitchers, batting metrics for hitters
+        _is_pitcher_pt = prop_type in {"strikeouts","pitching_outs","earned_runs",
+                                        "hits_allowed","walks_allowed","fantasy_pitcher"}
+        if _is_pitcher_pt:
+            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.224)) or 0.224)
+            player_pa   = 27
+        else:
+            # Batter props: use wRC+ normalized, BABIP, or hit rate proxy
+            _wrc = float(prop.get("wrc_plus", 100.0) or 100.0) / 100.0
+            _h_per_ab = float(prop.get("babip", 0.300) or 0.300)
+            player_rate = min(0.400, max(0.180, (_wrc * 0.275 + _h_per_ab) / 2))
+            player_pa   = 4
         return bayesian_adjustment(
             prop_type=prop_type,
             side=side,
