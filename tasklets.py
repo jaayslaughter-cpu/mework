@@ -185,6 +185,11 @@ TTL_MARKET   = 300    #  5 min
 TTL_DFS      = 480    #  8 min
 TTL_HUB      = 600    # 10 min — master hub key
 
+# ── Per-agent daily send gate (in-memory, resets at midnight) ────────────────
+# Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
+# An agent may send AT MOST ONE play per calendar day.
+_AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
+
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
 
@@ -2435,32 +2440,47 @@ def run_agent_tasklet() -> None:
     except Exception as _dbe:
         logger.warning("[AgentTasklet] bet_ledger INSERT failed: %s", _dbe)
 
-    # ── Cross-cycle dedup — skip parlays already sent in the last 6 hours
-    r_dedup = _redis()
-    _SENT_TTL = 6 * 3600  # 6 hours — covers one full game day
+    # ── Per-agent daily gate — each agent sends AT MOST ONE play per calendar day ──
+    # Uses in-memory dict _AGENT_SENT_TODAY (agent → "YYYY-MM-DD") as primary
+    # gate so it works with or without Redis.  Redis is also written as a
+    # cross-process backup (e.g. multiple Railway replicas).
+    today_str  = datetime.date.today().isoformat()   # "2026-03-29"
+    r_dedup    = _redis()
+    _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
+
     fresh_parlays = []
     for parlay in all_parlays:
-        fp   = _parlay_fingerprint(parlay)
-        rkey = "sent_parlay:" + ":".join(sorted(str(x) for x in fp))
+        agent_name = parlay.get("agent", "unknown")
+
+        # ── In-memory check (primary — always works) ──
+        if _AGENT_SENT_TODAY.get(agent_name) == today_str:
+            logger.debug("[AgentTasklet] %s already sent today — skipping.", agent_name)
+            continue
+
+        # ── Redis check (secondary — cross-process guard) ──
+        r_daily_key = f"agent_sent:{agent_name}:{today_str}"
         try:
-            already = r_dedup.exists(rkey)
+            if r_dedup.exists(r_daily_key):
+                # Sync in-memory so subsequent cycles skip without Redis round-trip
+                _AGENT_SENT_TODAY[agent_name] = today_str
+                logger.debug("[AgentTasklet] %s already sent today (Redis) — skipping.", agent_name)
+                continue
         except Exception:
-            already = False
-        if already:
-            logger.debug("[AgentTasklet] Skipping already-sent parlay: %s", rkey[:80])
-        else:
-            fresh_parlays.append((parlay, rkey))
+            pass   # Redis down — in-memory gate is sufficient
+
+        fresh_parlays.append((parlay, agent_name, r_daily_key))
 
     skipped = len(all_parlays) - len(fresh_parlays)
     if skipped:
-        logger.info("[AgentTasklet] Skipped %d already-sent parlay(s) from prior cycles.", skipped)
+        logger.info("[AgentTasklet] Skipped %d parlay(s) — agents already sent today.", skipped)
 
-    for parlay, rkey in fresh_parlays:
+    for parlay, agent_name, r_daily_key in fresh_parlays:
         try:
             discord_alert.send_parlay_alert(parlay)
-            # Mark as sent in Redis — expires after 6 hours so new-day props get through
+            # Mark sent in both in-memory dict and Redis
+            _AGENT_SENT_TODAY[agent_name] = today_str
             try:
-                r_dedup.setex(rkey, _SENT_TTL, "1")
+                r_dedup.setex(r_daily_key, _DAY_TTL, "1")
             except Exception:
                 pass
         except Exception as _disc_err:
