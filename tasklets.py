@@ -59,6 +59,8 @@ try:
         ABS_FRAMING_WEIGHT, SteamMonitor, get_reliability_score,
         apply_isotonic_calibration,
         apply_shadow_whiff_boost,
+        apply_zone_integrity_multiplier,
+        adaptive_velocity_check,
 )
     _CAL_LAYER_AVAILABLE = True
 except ImportError:
@@ -88,6 +90,8 @@ except ImportError:
     _NSFI_AVAILABLE = True
 except ImportError:
     _NSFI_AVAILABLE = False
+
+from lineup_chase_layer import get_lineup_chase_score
 
 try:
     from game_prediction_layer import get_game_predictions
@@ -1196,6 +1200,19 @@ class _BaseAgent:
         model_prob = apply_shadow_whiff_boost(
             model_prob, prop, prop.get("prop_type", "")
         )
+        # Zone integrity: FRAUD/ELITE_SHADOW multiplier from heart vs shadow whiff
+        pitcher_id = prop.get("mlbam_id") or prop.get("player_id")
+        model_prob = apply_zone_integrity_multiplier(
+            model_prob, prop.get("prop_type", ""), pitcher_id
+        )
+        # Lineup chase difficulty adjustment for pitcher K-props
+        _k_prop_types = {"strikeouts", "pitcher_strikeouts", "k", "ks"}
+        if prop.get("prop_type", "").lower() in _k_prop_types:
+            _ctx_lineups = prop.get("_context_lineups", [])
+            _opp_team    = prop.get("opposing_team", "")
+            if _opp_team and _ctx_lineups:
+                _chase = get_lineup_chase_score(_opp_team, _ctx_lineups)
+                model_prob = round(model_prob + _chase["k_prob_adjustment"] * 100, 4)
         side_odds = (
             prop.get("over_american",  prop.get("odds_american", -115))
             if side == "OVER"

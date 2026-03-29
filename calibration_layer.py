@@ -371,6 +371,79 @@ ABS_FRAMING_WEIGHT: float = 0.20
 # ── Z-Score Drift Detection ───────────────────────────────────────────────────
 
 
+
+# ---------------------------------------------------------------------------
+# Adaptive Velocity Check  (Phase 80)
+# ---------------------------------------------------------------------------
+
+def adaptive_velocity_check(live_avg_vel: float, season_avg_vel: float) -> float:
+    """
+    Compare a pitcher's live velocity to their season average.
+    A drop > 1.5 mph indicates 'stuff is gone' — reduce K-probability.
+
+    Returns a multiplier:
+        drop > 3.0 mph  →  0.55 (severe command loss)
+        drop > 2.0 mph  →  0.65 (significant drop)
+        drop > 1.5 mph  →  0.70 (ABS-era threshold)
+        drop > 0.8 mph  →  0.85 (minor fatigue warning)
+        neutral         →  1.00
+        gain > 1.0 mph  →  1.05 (extra juice today)
+    """
+    vel_diff = season_avg_vel - live_avg_vel
+    if vel_diff > 3.0:
+        return 0.55
+    if vel_diff > 2.0:
+        return 0.65
+    if vel_diff > 1.5:
+        return 0.70
+    if vel_diff > 0.8:
+        return 0.85
+    if vel_diff < -1.0:    # pitcher running hotter than season avg
+        return 1.05
+    return 1.00
+
+
+# ---------------------------------------------------------------------------
+# Zone Integrity Multiplier  (Phase 80)
+# ---------------------------------------------------------------------------
+
+def apply_zone_integrity_multiplier(
+    model_prob: float,
+    prop_type: str,
+    pitcher_mlbam_id: int | None,
+) -> float:
+    """
+    For pitcher strikeout props, fetch zone integrity data and apply the
+    Heart vs Shadow whiff rate comparison:
+
+        FRAUD        (heart_whiff > shadow_whiff) → multiply by 0.85
+        ELITE_SHADOW (shadow_whiff ≥ 0.35)        → multiply by 1.10
+        NEUTRAL                                   → no change
+
+    Returns adjusted probability (unchanged if not a K-prop or ID missing).
+    """
+    K_PROPS = {"strikeouts", "pitcher_strikeouts", "k", "ks"}
+    if prop_type.lower() not in K_PROPS:
+        return model_prob
+    if not pitcher_mlbam_id:
+        return model_prob
+
+    try:
+        from statcast_feature_layer import analyze_zone_integrity  # noqa: PLC0415
+        integrity = analyze_zone_integrity(int(pitcher_mlbam_id))
+        mult = integrity.get("integrity_multiplier", 1.00)
+        verdict = integrity.get("verdict", "NEUTRAL")
+        if mult != 1.00:
+            import logging
+            logging.getLogger(__name__).info(
+                "[ZoneIntegrity] %s  mult=%.2f → prob %.2f→%.2f",
+                verdict, mult, model_prob, model_prob * mult,
+            )
+        return round(model_prob * mult, 4)
+    except Exception:
+        return model_prob
+
+
 def apply_shadow_whiff_boost(model_prob_pct: float, prop: dict, prop_type: str) -> float:
     """
     Adjust K-prop probability based on pitcher's Shadow Zone whiff rate.

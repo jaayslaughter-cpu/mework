@@ -448,6 +448,175 @@ def fetch_shadow_zone_whiff(pitcher_mlbam_id: int, season: int | None = None) ->
         return None
 
 
+
+# ===========================================================================
+# 5. ZONE INTEGRITY ANALYZER  (Phase 80)
+# ===========================================================================
+# Statcast attack zone coordinate definitions
+# HEART  : |plate_x| < 0.6,  1.8 < plate_z < 3.2   (true meatball)
+# SHADOW : |plate_x| < 1.1,  1.2 < plate_z < 3.8   (edge of zone)
+# CHASE  : |plate_x| < 1.5,  0.8 < plate_z < 4.2   (just outside)
+# WASTE  : everything else
+
+_ZONE_CACHE_DIR = pathlib.Path("/tmp/zone_integrity_cache")
+
+
+def _classify_zone(plate_x: float, plate_z: float) -> str:
+    ax = abs(plate_x)
+    if ax < 0.6 and 1.8 < plate_z < 3.2:
+        return "HEART"
+    if ax < 1.1 and 1.2 < plate_z < 3.8:
+        return "SHADOW"
+    if ax < 1.5 and 0.8 < plate_z < 4.2:
+        return "CHASE"
+    return "WASTE"
+
+
+def analyze_zone_integrity(
+    pitcher_mlbam_id: int,
+    season: int | None = None,
+) -> dict:
+    """
+    Pull Statcast pitch-level data for *pitcher_mlbam_id* and compute
+    per-zone whiff rates (HEART / SHADOW / CHASE / WASTE).
+
+    Returns
+    -------
+    {
+        "zone_rates": {
+            "HEART":  {"whiff_rate": float, "whiffs": int, "swings": int},
+            "SHADOW": {...},
+            "CHASE":  {...},
+            "WASTE":  {...},
+        },
+        "integrity_multiplier": float,   # 0.85 = fraud, 1.10 = elite shadow
+        "verdict": str,                  # "FRAUD" | "ELITE_SHADOW" | "NEUTRAL"
+        "heart_whiff":  float,
+        "shadow_whiff": float,
+    }
+
+    Verdict logic (ABS era):
+        FRAUD        : heart_whiff > shadow_whiff  → multiplier 0.85
+        ELITE_SHADOW : shadow_whiff ≥ 0.35         → multiplier 1.10
+        NEUTRAL                                    → multiplier 1.00
+
+    Returns empty dict {} if data is unavailable (safe default).
+    """
+    import datetime as _dt  # noqa: PLC0415
+
+    if season is None:
+        season = _dt.date.today().year
+
+    _ZONE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = _ZONE_CACHE_DIR / f"{pitcher_mlbam_id}_{season}.json"
+
+    # ── Cache hit (daily) ─────────────────────────────────────────────────
+    if cache_file.exists():
+        try:
+            age = _dt.datetime.now().timestamp() - cache_file.stat().st_mtime
+            if age < 86400:
+                return json.loads(cache_file.read_text())
+        except Exception:
+            pass
+
+    # ── Fetch from Baseball Savant pitch-level CSV ───────────────────────
+    # Same endpoint as shadow whiff; full pitch log with plate_x / plate_z
+    start_dt = f"{season}-03-01"
+    end_dt   = _dt.date.today().isoformat()
+    url = (
+        "https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?hfSea={season}%7C&player_type=pitcher"
+        f"&pitchers_lookup%5B%5D={pitcher_mlbam_id}"
+        f"&game_date_gt={start_dt}&game_date_lt={end_dt}"
+        "&min_pitches=0&group_by=name&sort_col=pitches&player_event_sort=api_p_release_speed"
+        "&sort_order=desc&min_abs=0&type=details&"
+    )
+
+    try:
+        import io
+        import urllib.request
+
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        if not raw.strip() or "," not in raw:
+            return {}
+
+        import csv as _csv
+        reader = _csv.DictReader(io.StringIO(raw))
+
+        # Tally swings and whiffs by zone
+        zone_swings: dict[str, int] = {"HEART": 0, "SHADOW": 0, "CHASE": 0, "WASTE": 0}
+        zone_whiffs: dict[str, int] = {"HEART": 0, "SHADOW": 0, "CHASE": 0, "WASTE": 0}
+
+        SWING_EVENTS = {
+            "swinging_strike", "swinging_strike_blocked",
+            "foul", "foul_tip", "hit_into_play",
+            "hit_into_play_no_out", "hit_into_play_score",
+        }
+        WHIFF_EVENTS = {"swinging_strike", "swinging_strike_blocked"}
+
+        for row in reader:
+            try:
+                px = float(row.get("plate_x") or "")
+                pz = float(row.get("plate_z") or "")
+            except (ValueError, TypeError):
+                continue
+            desc = (row.get("description") or "").strip()
+            if desc not in SWING_EVENTS:
+                continue
+            zone = _classify_zone(px, pz)
+            zone_swings[zone] += 1
+            if desc in WHIFF_EVENTS:
+                zone_whiffs[zone] += 1
+
+        # Build per-zone rates
+        zone_rates: dict[str, dict] = {}
+        for z in ("HEART", "SHADOW", "CHASE", "WASTE"):
+            sw = zone_swings[z]
+            wh = zone_whiffs[z]
+            rate = round(wh / sw, 4) if sw >= 5 else None
+            zone_rates[z] = {
+                "whiff_rate": rate,
+                "whiffs":     wh,
+                "swings":     sw,
+            }
+
+        heart_r  = zone_rates["HEART"]["whiff_rate"]  or 0.0
+        shadow_r = zone_rates["SHADOW"]["whiff_rate"] or 0.0
+
+        # Verdict
+        if shadow_r >= 0.35:
+            verdict = "ELITE_SHADOW"
+            mult    = 1.10
+        elif heart_r > shadow_r and zone_rates["HEART"]["swings"] >= 10:
+            verdict = "FRAUD"
+            mult    = 0.85
+        else:
+            verdict = "NEUTRAL"
+            mult    = 1.00
+
+        result = {
+            "zone_rates":             zone_rates,
+            "integrity_multiplier":   mult,
+            "verdict":                verdict,
+            "heart_whiff":            round(heart_r,  4),
+            "shadow_whiff":           round(shadow_r, 4),
+        }
+
+        cache_file.write_text(json.dumps(result))
+        logger.info(
+            "[ZoneIntegrity] pitcher=%s  heart=%.3f  shadow=%.3f  verdict=%s  mult=%.2f",
+            pitcher_mlbam_id, heart_r, shadow_r, verdict, mult,
+        )
+        return result
+
+    except Exception as exc:
+        logger.debug("[ZoneIntegrity] Failed for pitcher %s: %s", pitcher_mlbam_id, exc)
+        return {}
+
+
 def enrich_pitchers_shadow_whiff(pitcher_props: list[dict]) -> list[dict]:
     """
     Add sc_shadow_whiff_rate to each pitcher prop dict.
