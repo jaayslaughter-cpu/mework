@@ -3473,7 +3473,8 @@ def run_grading_tasklet() -> None:
                 """
                 SELECT id, player_name, prop_type, line, side,
                        odds_american, kelly_units, model_prob, ev_pct, agent_name,
-                       COALESCE(platform, 'prizepicks') AS platform
+                       COALESCE(platform, 'prizepicks') AS platform,
+                       mlbam_id
                 FROM bet_ledger
                 WHERE status = 'OPEN' AND bet_date = %s
                 """,
@@ -3494,17 +3495,9 @@ def run_grading_tasklet() -> None:
         conn = _pg_conn()
         with conn.cursor() as cur:
             for row in open_bets:
-                bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat = row
+                bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat, bet_mlbam = row
 
                 # Grade by mlbam_id when available — accent-safe, always unique
-                # mlbam_id must be fetched from bet_ledger (stored at bet time)
-                _bid_mlbam = None
-                try:
-                    # mlbam_id stored in bet_ledger — add to SELECT if schema has it
-                    pass  # placeholder — mlbam_id grading wired via accent normalize above
-                except Exception:
-                    pass
-
                 import unicodedata as _ud2
                 _pn_norm = "".join(
                     c for c in _ud2.normalize("NFD", player)
@@ -3515,6 +3508,37 @@ def run_grading_tasklet() -> None:
                          or stat_lookup.get(player.lower())
                          or stat_lookup.get(_pn_norm.lower())
                          or {})
+
+                # mlbam_id fallback: if name lookup missed (accent bug, name mismatch),
+                # hit MLB Stats API directly using the unique player ID stored at bet time.
+                if not stats and bet_mlbam:
+                    try:
+                        import urllib.request as _urlr, json as _json2  # noqa: PLC0415
+                        _mlb_url = (
+                            f"https://statsapi.mlb.com/api/v1/people/{bet_mlbam}/stats"
+                            f"?stats=gameLog&season={today[:4]}&group=hitting&limit=5"
+                        )
+                        with _urlr.urlopen(_mlb_url, timeout=5) as _r2:
+                            _mlb_data = _json2.loads(_r2.read())
+                        for _sp in reversed((_mlb_data.get("stats") or [{}])[0].get("splits", [])):
+                            if _sp.get("date") == today:
+                                _s = _sp.get("stat", {})
+                                stats = {
+                                    "Hits":         float(_s.get("hits", 0)),
+                                    "HomeRuns":     float(_s.get("homeRuns", 0)),
+                                    "RunsBattedIn": float(_s.get("rbi", 0)),
+                                    "Runs":         float(_s.get("runs", 0)),
+                                    "StolenBases":  float(_s.get("stolenBases", 0)),
+                                    "TotalBases":   float(_s.get("totalBases", 0)),
+                                    "Walks":        float(_s.get("baseOnBalls", 0)),
+                                    "Strikeouts":   float(_s.get("strikeOuts", 0)),
+                                }
+                                break
+                        if stats:
+                            logger.info("[Grading] mlbam fallback resolved %s via id=%s", player, bet_mlbam)
+                    except Exception as _mlb_err:
+                        logger.debug("[Grading] mlbam fallback failed for %s (%s): %s",
+                                     player, bet_mlbam, _mlb_err)
                 actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:

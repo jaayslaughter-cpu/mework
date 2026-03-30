@@ -57,6 +57,20 @@ except ImportError:
     def _run_monthly_leaderboard():
         raise NotImplementedError("monthly_leaderboard module not available")
 
+# ── StreakAgent (19th agent: Underdog Streak format, 11-pick $1k-$10k) ───────
+try:
+    from streak_agent import (
+        ensure_streak_tables  as _ensure_streak_tables,
+        run_streak_pick        as _run_streak_pick,
+        settle_streak_picks    as _settle_streak_picks,
+    )
+    _STREAK_AVAILABLE = True
+except ImportError:
+    _STREAK_AVAILABLE = False
+    def _ensure_streak_tables(): pass                        # noqa: E704
+    def _run_streak_pick(**kw): return None                  # noqa: E704
+    def _settle_streak_picks(d): pass                       # noqa: E704
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -245,6 +259,24 @@ async def job_settle():
     asyncio.create_task(_run_subprocess("NightlyRecap", script))
 
 
+async def job_streak_pick():
+    """8:30 AM PT daily — select today's Streak pick and post to Discord."""
+    if not _STREAK_AVAILABLE:
+        logger.info("[orchestrator] StreakAgent not available — skipping streak pick")
+        return
+    await _safe_run("StreakPick", _run_streak_pick)
+
+
+async def job_streak_settle():
+    """11:30 PM PT daily — settle yesterday's Streak picks against ESPN boxscores."""
+    if not _STREAK_AVAILABLE:
+        logger.info("[orchestrator] StreakAgent not available — skipping streak settle")
+        return
+    import datetime as _dt
+    yesterday = (_dt.date.today() - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    await _safe_run("StreakSettle", _settle_streak_picks, yesterday)
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -289,7 +321,26 @@ async def lifespan(_app: FastAPI):
         id="nightly_recap",
     )
 
+    # ── StreakAgent: pick at 8:30 AM PT, settle at 11:30 PM PT ──────────────
+    scheduler.add_job(
+        job_streak_pick,
+        CronTrigger(hour=8, minute=30, timezone="America/Los_Angeles"),
+        id="streak_pick",
+    )
+    scheduler.add_job(
+        job_streak_settle,
+        CronTrigger(hour=23, minute=30, timezone="America/Los_Angeles"),
+        id="streak_settle",
+    )
+
     scheduler.start()
+
+    # Ensure streak DB tables exist (streak_state + streak_picks)
+    try:
+        _ensure_streak_tables()
+        logger.info("[orchestrator] StreakAgent tables ensured.")
+    except Exception as _se:
+        logger.warning("[orchestrator] ensure_streak_tables failed: %s", _se)
 
     # Discord startup ping
     try:
