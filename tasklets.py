@@ -3447,8 +3447,16 @@ def run_grading_tasklet() -> None:
     calculate CLV, then send daily recap to Discord.
     SportsData.io replaced — was returning 403 on all calls.
     """
-    # GradingTasklet runs at 1:05 AM — must grade YESTERDAY's bets (not today's)
-    _yesterday = (datetime.date.today() - datetime.timedelta(days=1))
+    # GradingTasklet runs at 1:05 AM PT — must grade YESTERDAY's bets (not today's).
+    # Use America/Los_Angeles explicitly so Railway's UTC clock never shifts the date.
+    try:
+        import pytz as _pytz  # noqa: PLC0415
+        _pt_now = datetime.datetime.now(_pytz.timezone("America/Los_Angeles"))
+    except ImportError:
+        # Fallback: UTC-8 (PST floor). During PDT (UTC-7) this is 1h conservative
+        # but still the correct calendar day at 1:05 AM PT.
+        _pt_now = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=8)
+    _yesterday = (_pt_now - datetime.timedelta(days=1)).date()
     today      = _yesterday.strftime("%Y-%m-%d")   # used as grade_date throughout
     espn_date  = _yesterday.strftime("%Y%m%d")     # ESPN format
 

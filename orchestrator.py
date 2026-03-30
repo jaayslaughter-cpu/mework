@@ -528,7 +528,7 @@ async def get_season_record():
     if not db_url:
         return JSONResponse({"error": "DATABASE_URL not set"}, status_code=503)
     try:
-        conn = psycopg2.connect(db_url)
+        conn = psycopg2.connect(db_url, sslmode="require")
         cur = conn.cursor()
         cur.execute(
             """

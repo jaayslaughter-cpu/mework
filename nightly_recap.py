@@ -1,7 +1,7 @@
 """
 nightly_recap.py
 ================
-Runs at midnight ET every night.
+Runs at 11:00 PM PT every night.
 
 1. Fetches actual MLB player stats from ESPN for yesterday's games
 2. Settles all PENDING parlays from that date (WIN / LOSS / PUSH)
@@ -84,28 +84,26 @@ _OUTCOME_EMOJI = {"WIN": "\u2705", "LOSS": "\u274c", "PUSH": "\u23e9"}
 # DST-aware "yesterday in ET" helper
 # ---------------------------------------------------------------------------
 
-def _yesterday_et() -> str:
+def _yesterday_pt() -> str:
     """
-    Return yesterday's date as YYYY-MM-DD in America/New_York, DST-aware.
+    Return yesterday's date as YYYY-MM-DD in America/Los_Angeles, DST-aware.
 
-    Replaces the old `datetime.now(utc) - timedelta(hours=7) - timedelta(days=1)`
-    which hardcoded PDT (UTC-7) and was wrong during EDT (UTC-4), causing
-    settlement to always grade one extra day back.
-
-    Uses pytz when available; falls back to a fixed UTC-5 offset (safe for
-    both EDT and EST — worst case off by 1 hour, never off by a day).
+    Uses pytz when available; falls back to a fixed UTC-8 offset (PST safe
+    floor — worst case off by 1 hour during PDT, never off by a calendar day
+    since Railway runs UTC which is always ahead of PT).
     """
     try:
         import pytz  # noqa: PLC0415
-        et_tz = pytz.timezone("America/New_York")
-        now_et = datetime.now(et_tz)
-        yesterday_et = now_et - timedelta(days=1)
-        return yesterday_et.strftime("%Y-%m-%d")
+        pt_tz = pytz.timezone("America/Los_Angeles")
+        now_pt = datetime.now(pt_tz)
+        yesterday_pt = now_pt - timedelta(days=1)
+        return yesterday_pt.strftime("%Y-%m-%d")
     except ImportError:
         pass
-    # Fallback: UTC-5 (between EDT=-4 and EST=-5, never off by a calendar day)
-    now_et_approx = datetime.now(timezone.utc) - timedelta(hours=5)
-    yesterday_approx = now_et_approx - timedelta(days=1)
+    # Fallback: UTC-8 (PST). During PDT (UTC-7) this is 1h conservative,
+    # which still returns the correct calendar day.
+    now_pt_approx = datetime.now(timezone.utc) - timedelta(hours=8)
+    yesterday_approx = now_pt_approx - timedelta(days=1)
     return yesterday_approx.strftime("%Y-%m-%d")
 
 
@@ -245,7 +243,7 @@ def run(settle_date: Optional[str] = None) -> None:
     settle_date: 'YYYY-MM-DD' — defaults to yesterday ET (DST-aware).
     """
     if settle_date is None:
-        settle_date = _yesterday_et()
+        settle_date = _yesterday_pt()
 
     logger.info("=== PropIQ Nightly Settlement: %s ===", settle_date)
 
