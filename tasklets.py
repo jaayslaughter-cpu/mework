@@ -3542,12 +3542,26 @@ def run_grading_tasklet() -> None:
                     if _ud2.category(c) != "Mn"
                 )
                 # Primary: grade by mlbam_id (accent-safe, always unique)
+                # stat_lookup is name-keyed (ESPN doesn't embed mlbam_id).
+                # Use MLB Stats API to resolve mlbam_id -> canonical name,
+                # then look up that name in stat_lookup.
                 _stats_by_id = {}
                 if _grade_mlbam:
-                    for _esp_name, _esp_stats in stat_lookup.items():
-                        if _esp_stats.get("mlbam_id") == _grade_mlbam:
-                            _stats_by_id = _esp_stats
-                            break
+                    try:
+                        import requests as _req
+                        _id_resp = _req.get(
+                            f"https://statsapi.mlb.com/api/v1/people/{_grade_mlbam}"
+                            "?fields=people,fullName",
+                            timeout=5,
+                        ).json()
+                        _canon = _id_resp["people"][0]["fullName"]
+                        _stats_by_id = (
+                            stat_lookup.get(_canon)
+                            or stat_lookup.get(_canon.lower())
+                            or {}
+                        )
+                    except Exception:
+                        pass
                 stats = (_stats_by_id
                          or stat_lookup.get(player)
                          or stat_lookup.get(_pn_norm)
