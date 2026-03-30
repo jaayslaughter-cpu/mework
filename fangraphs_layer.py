@@ -170,6 +170,72 @@ _PITCHING_PARAMS = {
 # Daily cache path template
 _CACHE_PATH_TMPL = "/tmp/propiq_fg_cache_{year}.json"
 
+
+# ---------------------------------------------------------------------------
+# Postgres cache helpers (survives Railway container restarts)
+# ---------------------------------------------------------------------------
+
+def _pg_load_cache(season: int) -> tuple[dict, dict]:
+    """Load FanGraphs cache from Postgres.  Returns (batters, pitchers) or ({}, {})."""
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return {}, {}
+    try:
+        import psycopg2  # type: ignore
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT data_type, data FROM fg_cache WHERE season = %s",
+            (season,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        batters: dict = {}
+        pitchers: dict = {}
+        for data_type, blob in rows:
+            if data_type == "batters":
+                batters = blob if isinstance(blob, dict) else json.loads(blob)
+            elif data_type == "pitchers":
+                pitchers = blob if isinstance(blob, dict) else json.loads(blob)
+        if batters or pitchers:
+            logger.info(
+                "[FG] Postgres cache hit — %d batters  %d pitchers (season=%d)",
+                len(batters), len(pitchers), season,
+            )
+        return batters, pitchers
+    except Exception as exc:
+        logger.warning("[FG] Postgres cache load failed: %s", exc)
+        return {}, {}
+
+
+def _pg_save_cache(season: int, batters: dict, pitchers: dict) -> None:
+    """Upsert FanGraphs cache into Postgres fg_cache table."""
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        import psycopg2          # type: ignore
+        import psycopg2.extras   # type: ignore
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        cur = conn.cursor()
+        for data_type, payload in (("batters", batters), ("pitchers", pitchers)):
+            cur.execute(
+                """
+                INSERT INTO fg_cache (season, data_type, data, cached_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (season, data_type) DO UPDATE
+                    SET data = EXCLUDED.data,
+                        cached_at = EXCLUDED.cached_at
+                """,
+                (season, data_type, psycopg2.extras.Json(payload)),
+            )
+        conn.commit()
+        conn.close()
+        logger.info("[FG] Postgres cache updated (season=%d)", season)
+    except Exception as exc:
+        logger.warning("[FG] Postgres cache save failed: %s", exc)
+
+
 # ─── Module-level caches ──────────────────────────────────────────────────────
 _BATTER_CACHE: dict[str, dict[str, float]] = {}
 _PITCHER_CACHE: dict[str, dict[str, float]] = {}
@@ -315,6 +381,23 @@ def _load() -> None:
         _loaded = True
         return
 
+    # ── Postgres cache (survives Railway restarts, checked after /tmp miss) ────
+    pg_batters, pg_pitchers = _pg_load_cache(season)
+    if pg_batters or pg_pitchers:
+        _BATTER_CACHE  = pg_batters
+        _PITCHER_CACHE = pg_pitchers
+        _data_year     = season
+        _loaded        = True
+        try:
+            with open(cache_path, "w") as fh:
+                json.dump(
+                    {"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE, "season": season},
+                    fh,
+                )
+        except Exception:
+            pass
+        return
+
     # ── Live fetch — prefer current year data, blend with prior if sample small ─
     # min=10 PA threshold means 2026 data appears from Opening Day.
     # If 2026 has <100 players (early season), merge with 2025 for stability.
@@ -370,11 +453,10 @@ def _load() -> None:
                     },
                     fh,
                 )
-            logger.info("[FG] Disk cache written to %s", cache_path)
+            logger.info("[FG] /tmp cached: %s", cache_path)
         except Exception as exc:
-            logger.warning("[FG] Disk cache write failed: %s", exc)
-        # Dual-write to Postgres — survives Railway container restarts
-        _pg_write_cache(yr, _BATTER_CACHE, _PITCHER_CACHE)
+            logger.warning("[FG] /tmp cache write failed: %s", exc)
+        _pg_save_cache(yr, _BATTER_CACHE, _PITCHER_CACHE)
 
         break
     else:
