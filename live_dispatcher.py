@@ -854,6 +854,100 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
+def _apify_proxy_get(url: str, headers: dict, params: dict | None = None, timeout: int = 15):
+    """Route HTTP GET through Apify residential proxy (APIFY_API_KEY env var required).
+    Returns a Response or None if key missing / proxy errors.
+    Each request uses a fresh residential IP -- bypasses Railway IP blocks on PP/UD.
+    """
+    apify_key = os.getenv("APIFY_API_KEY", "")
+    if not apify_key:
+        logger.debug("[Apify] APIFY_API_KEY not set -- proxy skipped")
+        return None
+    proxy_url = (
+        f"http://groups-RESIDENTIAL,country-US:{apify_key}@proxy.apify.com:8000"
+    )
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        resp = requests.get(
+            url, headers=headers, params=params,
+            proxies=proxies, timeout=timeout, verify=True,
+        )
+        logger.info("[Apify] Proxy %s -> HTTP %d", url[:60], resp.status_code)
+        return resp
+    except Exception as exc:
+        logger.warning("[Apify] Proxy request failed: %s", exc)
+        return None
+
+
+def _fetch_underdog_via_apify_proxy() -> list[dict]:
+    """Fallback: fetch Underdog over/under lines via Apify residential proxy."""
+    _ud_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
+    }
+    resp = _apify_proxy_get(
+        "https://api.underdogfantasy.com/beta/v5/over_under_lines",
+        headers=_ud_headers,
+        timeout=20,
+    )
+    if not resp or resp.status_code != 200:
+        status = resp.status_code if resp else "no response"
+        logger.warning("[UD-Apify] Proxy failed (HTTP %s) -- returning empty", status)
+        return []
+    try:
+        data = resp.json()
+        players_map: dict[str, dict] = {p["id"]: p for p in data.get("players", [])}
+        appearances_map: dict[str, dict] = {a["id"]: a for a in data.get("appearances", [])}
+        props: list[dict] = []
+        seen: set[str] = set()
+        for line in data.get("over_under_lines", []):
+            if line.get("status") != "active":
+                continue
+            stable_id = line.get("stable_id", line.get("id", ""))
+            if stable_id in seen:
+                continue
+            ou = line.get("over_under") or {}
+            app_stat = ou.get("appearance_stat") or {}
+            stat_ud = app_stat.get("stat", "")
+            app_id = app_stat.get("appearance_id", "")
+            if not stat_ud or not app_id:
+                continue
+            if "inning" in stat_ud.lower():
+                continue
+            appearance = appearances_map.get(app_id, {})
+            player_id = appearance.get("player_id", "")
+            player = players_map.get(player_id, {})
+            if player.get("sport_id") != "MLB":
+                continue
+            pname = f"{player.get('first_name','')} {player.get('last_name','')}".strip()
+            if not pname:
+                continue
+            line_val = float(line.get("stat_value") or 0)
+            position = player.get("position_name", "")
+            opts = line.get("options", [])
+            higher_opt = next((o for o in opts if o.get("choice") == "higher"), {})
+            entry_type = "FLEX" if higher_opt.get("payout_multiplier") else "STANDARD"
+            seen.add(stable_id)
+            props.append({
+                "source":      "underdog",
+                "player_name": pname,
+                "stat_type":   stat_ud,
+                "line":        line_val,
+                "entry_type":  entry_type,
+                "position":    position,
+            })
+        logger.info("[UD-Apify] Proxy fetched %d MLB lines", len(props))
+        return props
+    except Exception as exc:
+        logger.warning("[UD-Apify] Parse failed: %s", exc)
+        return []
+
+
 def _fetch_prizepicks_via_apify() -> list[dict]:
     """
     APIFY MEMORY EXHAUSTED — replaced with sportsbook_reference_layer fallback.
@@ -916,8 +1010,27 @@ def fetch_prizepicks_props() -> list[dict]:
         if resp.status_code == 200:
             data = resp.json()
         else:
-            logger.info("[PP] HTTP %d — routing to sportsbook fallback (no retries)", resp.status_code)
-            return _fetch_prizepicks_via_apify()
+            logger.info("[PP] HTTP %d — trying Apify residential proxy", resp.status_code)
+            _pp_proxy_headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+                ),
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://app.prizepicks.com/",
+                "Origin": "https://app.prizepicks.com",
+            }
+            _proxy_resp = _apify_proxy_get(
+                "https://api.prizepicks.com/projections",
+                headers=_pp_proxy_headers,
+                params={"per_page": 250, "single_stat": True, "league_id": 2},
+            )
+            if _proxy_resp and _proxy_resp.status_code == 200:
+                data = _proxy_resp.json()
+                logger.info("[PP] Apify proxy succeeded")
+            else:
+                logger.info("[PP] Apify proxy failed — routing to sportsbook fallback")
+                return _fetch_prizepicks_via_apify()
 
         # Build player id -> name map from included resources
         player_map: dict[str, str] = {}
@@ -996,8 +1109,8 @@ def fetch_underdog_props() -> list[dict]:
             headers=_ud_headers, timeout=20,
         )
         if resp.status_code != 200:
-            logger.warning("[UD] HTTP %d", resp.status_code)
-            return []
+            logger.warning("[UD] HTTP %d — trying Apify proxy", resp.status_code)
+            return _fetch_underdog_via_apify_proxy()
         data = resp.json()
 
         # Build lookup maps
@@ -1070,8 +1183,8 @@ def fetch_underdog_props() -> list[dict]:
         logger.info("[UD] Fetched %d MLB lines", len(props))
         return props
     except Exception as exc:
-        logger.warning("[UD] Fetch failed: %s", exc)
-        return []
+        logger.warning("[UD] Fetch failed: %s — trying Apify proxy", exc)
+        return _fetch_underdog_via_apify_proxy()
 
 
 # ---------------------------------------------------------------------------
