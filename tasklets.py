@@ -145,13 +145,6 @@ try:
 except ImportError:
     _BASE_RATE_AVAILABLE = False
     def _base_rate_prob(prop, side="OVER"): return 50.0  # noqa: E704
-
-try:
-    from bullpen_fatigue_scorer import build_bullpen_fatigue_scorer as _build_bullpen_scorer
-    _BULLPEN_SCORER_AVAILABLE = True
-except ImportError:
-    _BULLPEN_SCORER_AVAILABLE = False
-    def _build_bullpen_scorer(): return None  # noqa: E704
 try:
     from prop_enrichment_layer import enrich_props as _enrich_props
     _ENRICHMENT_AVAILABLE = True
@@ -1282,24 +1275,24 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, bullpen_key):
         if _BULLPEN_SCORER_AVAILABLE:
             try:
-                _bp_scorer = _build_bullpen_scorer()   # fetches MLB API internally
+                _games_for_bp = hub.get("physics", {}).get("schedule", [])
+                _bp_scorer = _build_bullpen_scorer(_games_for_bp)
                 if _bp_scorer is not None:
                     _bp_map = {}
                     for _team in [
-                        "arizona diamondbacks", "atlanta braves", "baltimore orioles",
-                        "boston red sox", "chicago cubs", "chicago white sox", "cincinnati reds",
-                        "cleveland guardians", "colorado rockies", "detroit tigers",
-                        "houston astros", "kansas city royals", "los angeles angels",
-                        "los angeles dodgers", "miami marlins", "milwaukee brewers",
-                        "minnesota twins", "new york mets", "new york yankees", "oakland athletics",
-                        "philadelphia phillies", "pittsburgh pirates", "san diego padres",
-                        "san francisco giants", "seattle mariners", "st. louis cardinals",
-                        "tampa bay rays", "texas rangers", "toronto blue jays", "washington nationals",
+                        "arizona diamondbacks","atlanta braves","baltimore orioles",
+                        "boston red sox","chicago cubs","chicago white sox","cincinnati reds",
+                        "cleveland guardians","colorado rockies","detroit tigers",
+                        "houston astros","kansas city royals","los angeles angels",
+                        "los angeles dodgers","miami marlins","milwaukee brewers",
+                        "minnesota twins","new york mets","new york yankees","oakland athletics",
+                        "philadelphia phillies","pittsburgh pirates","san diego padres",
+                        "san francisco giants","seattle mariners","st. louis cardinals",
+                        "tampa bay rays","texas rangers","toronto blue jays","washington nationals",
                     ]:
-                        _bp_map[_team] = {
-                            "fatigue_score": _bp_scorer.score(_team),
-                            "boost":         _bp_scorer.get_fatigue_boost(_team),
-                        }
+                        score   = _bp_scorer.score(_team)
+                        boost   = _bp_scorer.get_fatigue_boost(_team)
+                        _bp_map[_team] = {"fatigue_score": score, "boost": boost}
                     hub["bullpen_fatigue"] = _bp_map
                     try:
                         r.setex(bullpen_key, 3600, json.dumps(_bp_map))
@@ -2385,7 +2378,42 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
-    platform = legs[0].get("recommended_platform", "PrizePicks").lower() if legs else "prizepicks"
+
+    # Wire line_comparator — pick best platform per leg (lower line for OVER, higher for UNDER)
+    try:
+        from line_comparator import build_line_lookup, compare_prop  # noqa: PLC0415
+        _hub_snap = read_hub()
+        _ud_raw   = _hub_snap.get("dfs", {}).get("underdog",   [])
+        _pp_raw   = _hub_snap.get("dfs", {}).get("prizepicks", [])
+        _ud_lkp   = build_line_lookup(_ud_raw)
+        _pp_lkp   = build_line_lookup(_pp_raw)
+        _lc_ok    = True
+    except Exception:
+        _lc_ok = False
+
+    enriched_legs = []
+    for lg in legs:
+        if _lc_ok:
+            try:
+                result = compare_prop(
+                    lg.get("player", lg.get("player_name", "")),
+                    lg.get("prop_type", ""),
+                    lg.get("side", "OVER"),
+                    _ud_lkp, _pp_lkp,
+                )
+                # Override platform and line if comparator found a better number
+                if result.get("platform") and result.get("line") is not None:
+                    lg = {**lg,
+                          "recommended_platform": result["platform"],
+                          "line":                 result["line"],
+                          "_line_note":           result.get("note", ""),
+                    }
+            except Exception:
+                pass
+        enriched_legs.append(lg)
+    legs = enriched_legs
+
+    platform = legs[0].get("recommended_platform", "Underdog").lower() if legs else "underdog"
 
     # Use underdog_math_engine for accurate Flex vs Standard EV with real payout tables
     entry_type = "STANDARD"
@@ -3495,50 +3523,37 @@ def run_grading_tasklet() -> None:
         conn = _pg_conn()
         with conn.cursor() as cur:
             for row in open_bets:
-                bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat, bet_mlbam = row
+                row_data = row
+                bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat = row_data[:11]
+                _grade_mlbam = row_data[11] if len(row_data) > 11 else None
 
                 # Grade by mlbam_id when available — accent-safe, always unique
+                # mlbam_id must be fetched from bet_ledger (stored at bet time)
+                _bid_mlbam = None
+                try:
+                    # mlbam_id stored in bet_ledger — add to SELECT if schema has it
+                    pass  # placeholder — mlbam_id grading wired via accent normalize above
+                except Exception:
+                    pass
+
                 import unicodedata as _ud2
                 _pn_norm = "".join(
                     c for c in _ud2.normalize("NFD", player)
                     if _ud2.category(c) != "Mn"
                 )
-                stats = (stat_lookup.get(player)
+                # Primary: grade by mlbam_id (accent-safe, always unique)
+                _stats_by_id = {}
+                if _grade_mlbam:
+                    for _esp_name, _esp_stats in stat_lookup.items():
+                        if _esp_stats.get("mlbam_id") == _grade_mlbam:
+                            _stats_by_id = _esp_stats
+                            break
+                stats = (_stats_by_id
+                         or stat_lookup.get(player)
                          or stat_lookup.get(_pn_norm)
                          or stat_lookup.get(player.lower())
                          or stat_lookup.get(_pn_norm.lower())
                          or {})
-
-                # mlbam_id fallback: if name lookup missed (accent bug, name mismatch),
-                # hit MLB Stats API directly using the unique player ID stored at bet time.
-                if not stats and bet_mlbam:
-                    try:
-                        import urllib.request as _urlr, json as _json2  # noqa: PLC0415
-                        _mlb_url = (
-                            f"https://statsapi.mlb.com/api/v1/people/{bet_mlbam}/stats"
-                            f"?stats=gameLog&season={today[:4]}&group=hitting&limit=5"
-                        )
-                        with _urlr.urlopen(_mlb_url, timeout=5) as _r2:
-                            _mlb_data = _json2.loads(_r2.read())
-                        for _sp in reversed((_mlb_data.get("stats") or [{}])[0].get("splits", [])):
-                            if _sp.get("date") == today:
-                                _s = _sp.get("stat", {})
-                                stats = {
-                                    "Hits":         float(_s.get("hits", 0)),
-                                    "HomeRuns":     float(_s.get("homeRuns", 0)),
-                                    "RunsBattedIn": float(_s.get("rbi", 0)),
-                                    "Runs":         float(_s.get("runs", 0)),
-                                    "StolenBases":  float(_s.get("stolenBases", 0)),
-                                    "TotalBases":   float(_s.get("totalBases", 0)),
-                                    "Walks":        float(_s.get("baseOnBalls", 0)),
-                                    "Strikeouts":   float(_s.get("strikeOuts", 0)),
-                                }
-                                break
-                        if stats:
-                            logger.info("[Grading] mlbam fallback resolved %s via id=%s", player, bet_mlbam)
-                    except Exception as _mlb_err:
-                        logger.debug("[Grading] mlbam fallback failed for %s (%s): %s",
-                                     player, bet_mlbam, _mlb_err)
                 actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:
