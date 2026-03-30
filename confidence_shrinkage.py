@@ -478,6 +478,69 @@ def blend_matchup_rates(
 
 
 # ---------------------------------------------------------------------------
+# Step 5: Per-prop-type thin-data shrinkage
+# ---------------------------------------------------------------------------
+
+# Sample count thresholds for per-prop-type confidence
+_THIN_MIN_SAMPLES  = 25    # below this: maximum shrinkage (confidence = 0.10)
+_THIN_FULL_SAMPLES = 400   # above this: no thin-data shrinkage applied
+
+
+def sample_size_confidence(n_samples: int) -> float:
+    """
+    Map ledger sample count for a prop-type → thin-data confidence factor [0.10, 1.0].
+
+    n=0    → 0.10 (max shrinkage — no data at all)
+    n=25   → 0.10 (still too thin)
+    n=100  → 0.40
+    n=200  → 0.67
+    n=400+ → 1.00 (full confidence — no thin-data shrinkage)
+
+    This is combined multiplicatively with the market-agreement confidence
+    in shrink_toward_market() below.
+    """
+    if n_samples <= _THIN_MIN_SAMPLES:
+        return 0.10
+    if n_samples >= _THIN_FULL_SAMPLES:
+        return 1.0
+    span = _THIN_FULL_SAMPLES - _THIN_MIN_SAMPLES
+    return 0.10 + 0.90 * ((n_samples - _THIN_MIN_SAMPLES) / span)
+
+
+def shrink_toward_market(
+    model_prob_pct: float,
+    market_implied_pct: float,
+    n_samples: int,
+    games_played: int = 50,
+    alpha: float = 1.0,
+) -> tuple[float, float]:
+    """
+    Shrink model probability toward market implied probability.
+    Returns (adjusted_prob_pct, confidence) tuple.
+
+    Combines two independent confidence signals multiplicatively:
+      1. Thin-data confidence — how many ledger rows does this prop-type have
+      2. Model-market agreement — do model and sportsbook agree on direction
+
+    When fully confident (n≥400, same direction): no shrinkage.
+    When thin (n<25): model_prob moves ~90% of the way toward market.
+    When flipped direction + thin: near-full shrinkage to market.
+    """
+    model_prob  = model_prob_pct  / 100.0
+    market_prob = market_implied_pct / 100.0
+
+    thin_conf      = sample_size_confidence(n_samples)
+    depth_conf     = _season_depth_score(games_played)
+    agreement_conf = _model_market_agreement(model_prob, market_prob)
+
+    # Combined confidence (alpha scales aggressiveness)
+    confidence = max(0.09, min(1.0, thin_conf * depth_conf * agreement_conf * alpha))
+
+    adjusted = shrink_prob(model_prob, market_prob, confidence)
+    return round(adjusted * 100.0, 2), round(confidence, 3)
+
+
+# ---------------------------------------------------------------------------
 # Quick smoke test
 # ---------------------------------------------------------------------------
 
