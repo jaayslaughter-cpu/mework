@@ -178,6 +178,90 @@ def _get_fg_batter(name: str) -> dict:
 # Step 3 — Bayesian nudge
 # ---------------------------------------------------------------------------
 
+def _get_pitch_whiff_vs_hand(pitcher_name: str, batter_hand: str, fg_cache: dict) -> float:
+    """Return pitcher's whiff rate vs specific batter handedness.
+    Uses FanGraphs platoon splits (csw_pct_vs_rhh / csw_pct_vs_lhh) if available.
+    Falls back to overall csw_pct, then league average 0.275.
+    batter_hand: 'R', 'L', or '' (unknown).
+    """
+    fg = fg_cache.get(pitcher_name.lower().replace(" ", "_"), {}) if fg_cache else {}
+    hand = (batter_hand or "").upper()
+    if hand == "R":
+        return float(fg.get("csw_pct_vs_rhh", fg.get("csw_pct", 0.275)) or 0.275)
+    if hand == "L":
+        return float(fg.get("csw_pct_vs_lhh", fg.get("csw_pct", 0.275)) or 0.275)
+    return float(fg.get("csw_pct", 0.275) or 0.275)
+
+
+def _get_bullpen_era(team: str, hub: dict) -> float:
+    """Return opposing team's bullpen ERA for last 7 days.
+    Reads hub.bullpen_fatigue[team] if populated (DataHub 30s refresh).
+    Falls back to MLB Stats API bullpen ERA endpoint, then league avg 4.50.
+    """
+    if not team:
+        return 4.50
+    # Try hub bullpen_fatigue map (populated by DataHub)
+    fatigue_map = hub.get("bullpen_fatigue", {})
+    if team in fatigue_map:
+        entry = fatigue_map[team]
+        if isinstance(entry, dict):
+            era = entry.get("era_last7") or entry.get("era") or entry.get("fatigue_score")
+            if era is not None:
+                try:
+                    return float(era)
+                except (TypeError, ValueError):
+                    pass
+    # Try MLB Stats API free bullpen endpoint
+    try:
+        import urllib.request as _ul, json as _json  # noqa: PLC0415
+        _TEAM_IDS = {
+            "NYY": 147, "BOS": 111, "LAD": 119, "SF": 137, "CHC": 112,
+            "STL": 138, "ATL": 144, "MIA": 146, "PHI": 143, "WSN": 120,
+            "NYM": 121, "CIN": 113, "MIL": 158, "PIT": 134, "ARI": 109,
+            "COL": 115, "SD": 135, "LAA": 108, "OAK": 133, "SEA": 136,
+            "TEX": 140, "HOU": 117, "MIN": 142, "KC": 118, "CLE": 114,
+            "DET": 116, "CWS": 145, "TOR": 141, "BAL": 110, "TB": 139,
+        }
+        tid = _TEAM_IDS.get(team.upper())
+        if tid:
+            url = f"https://statsapi.mlb.com/api/v1/teams/{tid}/stats?stats=season&group=pitching&season=2026"
+            with _ul.urlopen(url, timeout=3) as resp:
+                data = _json.loads(resp.read())
+            splits = data.get("stats", [{}])[0].get("splits", [])
+            for s in splits:
+                era = s.get("stat", {}).get("era")
+                if era is not None:
+                    return float(era)
+    except Exception:
+        pass
+    return 4.50
+
+
+def _get_batting_order_slot(player_name: str, lineups: list) -> int:
+    """Return batter's lineup slot (1-9) from confirmed lineups.
+    Returns 0 if not found (unknown position).
+    """
+    if not player_name or not lineups:
+        return 0
+    pn_lower = player_name.lower().strip()
+    for game_lineup in lineups:
+        if not isinstance(game_lineup, dict):
+            continue
+        for side in ("home", "away"):
+            batters = game_lineup.get(side, {}).get("batters", []) or game_lineup.get(side, [])
+            if not isinstance(batters, list):
+                continue
+            for i, batter in enumerate(batters, start=1):
+                bname = ""
+                if isinstance(batter, dict):
+                    bname = batter.get("fullName", batter.get("name", "")).lower()
+                elif isinstance(batter, str):
+                    bname = batter.lower()
+                if pn_lower in bname or bname in pn_lower:
+                    return i
+    return 0
+
+
 def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
     try:
         from bayesian_layer import bayesian_adjustment  # noqa: PLC0415
@@ -720,6 +804,25 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # ── Bayesian nudge (uses implied_prob if set, else 52.4% default) ────
         base_prob = float(prop.get("implied_prob", 52.4))
         prop["_bayesian_nudge"] = _get_bayesian_nudge(prop, base_prob)
+
+        # ── Pitch type whiff vs batter handedness (slot 20) ──────────────────
+        if is_pitcher_prop:
+            batter_hand = prop.get("_batter_hand", "")   # set upstream if known
+            prop["_pitch_whiff_vs_hand"] = _get_pitch_whiff_vs_hand(
+                player, batter_hand, _fg_pitcher_cache
+            )
+        else:
+            prop.setdefault("_pitch_whiff_vs_hand", 0.275)
+
+        # ── Bullpen ERA for opposing team (slot 21) ───────────────────────────
+        if opp_team not in _weather_cache:  # reuse weather_cache key pattern, new dict
+            pass
+        prop["_bullpen_era"] = _get_bullpen_era(opp_team, hub)
+
+        # ── Batting order slot (slot 22) ──────────────────────────────────────
+        prop["_batting_order_slot"] = _get_batting_order_slot(
+            player, hub.get("context", {}).get("lineups", [])
+        )
 
         enriched_count += 1
 

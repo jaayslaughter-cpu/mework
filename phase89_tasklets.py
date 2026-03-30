@@ -95,6 +95,12 @@ except ImportError:
     _MARKET_VALIDATOR_AVAILABLE = False
 
 try:
+    from line_comparator import build_line_lookup as _build_line_lookup, compare_prop as _compare_prop
+    _LINE_COMP_AVAILABLE = True
+except ImportError:
+    _LINE_COMP_AVAILABLE = False
+
+try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
     _NSFI_AVAILABLE = True
 except ImportError:
@@ -1117,25 +1123,6 @@ def _fetch_weather_today() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _ensure_calibration_map() -> None:
-    """Write identity calibration_map.json if it doesn't exist on startup."""
-    cal_path = os.getenv("CALIBRATION_MAP_PATH", "calibration_map.json")
-    if not os.path.exists(cal_path):
-        try:
-            from calibrate_model import _write_identity_map  # noqa: PLC0415
-            _write_identity_map()
-            logger.info("[Startup] calibration_map.json bootstrapped (identity map).")
-        except Exception as _e:
-            # Write minimal identity map inline as last resort
-            import json as _json  # noqa: PLC0415
-            pts = [round(0.40 + i * 0.01, 2) for i in range(51)]
-            try:
-                with open(cal_path, "w") as _f:
-                    _json.dump({str(p): p for p in pts}, _f)
-            except Exception:
-                pass
-
-
 def _ensure_bet_ledger() -> None:
     """Create bet_ledger table if it doesn't exist. Called on startup."""
     try:
@@ -1162,16 +1149,12 @@ def _ensure_bet_ledger() -> None:
                     graded_at       TIMESTAMP,
                     features_json   TEXT,
                     actual_outcome  INTEGER,
-                    mlbam_id        INTEGER,          -- for accent-safe grading
-                    created_at      TIMESTAMP    DEFAULT NOW()
+                    created_at      TIMESTAMP    DEFAULT NOW(),
+                    lookahead_safe  BOOLEAN      DEFAULT TRUE,
+                    game_time_utc   VARCHAR(30),
+                    game_state      VARCHAR(20)
                 )
             """)
-        # Add units_wagered if it didn't exist in earlier schema versions
-        try:
-            cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS units_wagered FLOAT")
-            conn.commit()
-        except Exception:
-            conn.rollback()
         conn.commit()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
@@ -1185,8 +1168,7 @@ def run_data_hub_tasklet() -> None:
     Pre-match gate: skips any game already LIVE or FINAL so we never poll
     in-game data and waste API quota.
     """
-    _ensure_bet_ledger()       # ensure table exists on every startup
-    _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
+    _ensure_bet_ledger()   # ensure table exists on every startup
     r = _redis()
 
     # ── Pre-match gate: fetch today's game states ──────────────────────────
@@ -1204,17 +1186,6 @@ def run_data_hub_tasklet() -> None:
     def _is_pre_match(game_id: str) -> bool:
         state = game_states.get(game_id, "Scheduled")
         return state not in ("InProgress", "Live", "Final", "F/OT", "Completed")
-
-    # ── Pre-warm FanGraphs cache before agents run ───────────────────────────
-    # FG data is lazy-loaded on first get_pitcher/get_batter call.
-    # Pre-warming here (once per DataHub cycle) avoids cold-start delay in agents.
-    try:
-        from fangraphs_layer import _load as _fg_load, _loaded as _fg_loaded  # noqa: PLC0415
-        if not _fg_loaded:
-            _fg_load()
-            logger.info("[DataHub] FanGraphs cache pre-warmed.")
-    except Exception as _fg_err:
-        logger.debug("[DataHub] FanGraphs pre-warm skipped: %s", _fg_err)
 
     # ── Group 1: Physics / Arsenal (TTL 15 min) ────────────────────────────
     physics_key = "hub:physics"
@@ -1274,12 +1245,27 @@ def run_data_hub_tasklet() -> None:
     dfs_key = "hub:dfs"
     if not _hub_exists(r, dfs_key):
         logger.info("[DataHub] Scraping DFS target data…")
+        _ud_raw = _fetch_underdog_props_direct()
+        _pp_raw = _fetch_prizepicks_direct()
         dfs = {
-            "underdog":   _fetch_underdog_props_direct(),
-            "prizepicks": _fetch_prizepicks_direct(),
+            "underdog":   _ud_raw,
+            "prizepicks": _pp_raw,
             "sleeper":    [],  # removed per DFS compliance directive
             "optimizer":  [],  # no actor yet
         }
+        # ── Phase 92: build line-comparison lookup caches ──────────────────
+        # Stored alongside DFS props so _build_bet() can compare lines once
+        # per cycle without re-fetching.  Keys: (name_key, stat_norm) → line.
+        if _LINE_COMP_AVAILABLE:
+            try:
+                dfs["_ud_lookup"] = _build_line_lookup(_ud_raw)
+                dfs["_pp_lookup"] = _build_line_lookup(_pp_raw)
+                logger.info("[DataHub] Line lookups: UD=%d PP=%d",
+                            len(dfs["_ud_lookup"]), len(dfs["_pp_lookup"]))
+            except Exception as _lce:
+                logger.debug("[DataHub] Line lookup build error: %s", _lce)
+                dfs["_ud_lookup"] = {}
+                dfs["_pp_lookup"] = {}
         _hub_setex(r, dfs_key, TTL_DFS, json.dumps(dfs))
 
     # ── Merge all groups into master hub key ───────────────────────────────
@@ -1391,34 +1377,13 @@ class _BaseAgent:
                     return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
-        # No XGBoost model — try generate_pick 5-stage pipeline first
-        if prop:
-            try:
-                from generate_pick import generate_pick as _gp  # noqa: PLC0415
-                _gp_side = str(prop.get("side", "OVER")).upper()
-                # Use player-specific prob if enrichment computed one (fixes OVER bias)
-                _ps_prob = prop.get("_player_specific_prob")
-                if _ps_prob is not None:
-                    # Override base rate in generate_pick by pre-setting it
-                    _prop_override = {**prop, "_base_rate_override": float(_ps_prob)}
-                else:
-                    _prop_override = prop
-                _gp_res = _gp(raw_prop=_prop_override, side=_gp_side, min_edge=-1.0)
-                if _gp_res is not None:
-                    return round(max(5.0, min(95.0, _gp_res["final_prob"] * 100.0)), 2)
-            except Exception:
-                pass  # fall through to base_rate_model
-
-        # Fallback: base_rate_model (calibrated historical rates + FanGraphs + context signals)
+        # No XGBoost model — use calibrated base rate model instead of flat 50%
+        # base_rate_model uses historical MLB base rates + FanGraphs + context signals
         if _BASE_RATE_AVAILABLE and prop:
-            _side = str(prop.get("side", "OVER")).upper()
-            # Use player-specific rate if enrichment computed one
-            _ps_prob = prop.get("_player_specific_prob")
-            raw_p = float(_ps_prob) * 100.0 if _ps_prob else _base_rate_prob(prop, _side)
-            # Layer Marcel and Predict+ adjustments
-            raw_p += float(prop.get("_marcel_adj",       0.0)) * 100.0
-            raw_p += float(prop.get("_predict_plus_adj", 0.0)) * 100.0
-            # Brier calibration governor
+            # Determine side from prop context (bet dict may not be available here)
+            _side = "OVER"   # default; agents override via their own EV checks
+            raw_p = _base_rate_prob(prop, _side)
+            # Apply Brier calibration governor on top of base rate
             if _DRIFT_MONITOR_AVAILABLE:
                 try:
                     brier = get_current_brier()
@@ -1460,9 +1425,9 @@ class _BaseAgent:
 
     @staticmethod
     def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
-        """Return a 27-element float list usable by XGBoost.
+        """Return a 23-element float list usable by XGBoost.
         All values normalised to [0, 1] or small bounded floats.
-        Schema is FIXED — any future changes must keep len == 27.
+        Schema is FIXED — any future changes must keep len == FEATURE_DIM.
         """
         import math
 
@@ -1472,35 +1437,19 @@ class _BaseAgent:
             except Exception:
                 return 0.0
 
-        # ── Player stats — pitcher OR batter signals depending on prop type ──
-        _PITCHER_PT = {"strikeouts","pitching_outs","earned_runs","hits_allowed",
-                       "walks_allowed","fantasy_pitcher"}
-        _pt_raw     = str(prop.get("prop_type","") or bet.get("prop_type","") if bet else "").lower()
-        _is_pitcher = _pt_raw in _PITCHER_PT
+        # ── Pitcher stats (from FanGraphs cache on prop) ──────────────
+        k_rate      = _clamp(prop.get("k_rate",    prop.get("k_pct",    0.22)))
+        bb_rate     = _clamp(prop.get("bb_rate",   prop.get("bb_pct",   0.08)))
+        era         = _clamp((prop.get("era", 4.0)) / 9.0)          # 0 ERA→0, 9 ERA→1
+        whip        = _clamp((prop.get("whip", 1.3)) / 3.0)
 
-        if _is_pitcher:
-            # Pitcher signals (FanGraphs)
-            k_rate       = _clamp(prop.get("k_rate",    prop.get("k_pct",    0.22)))
-            bb_rate      = _clamp(prop.get("bb_rate",   prop.get("bb_pct",   0.08)))
-            era          = _clamp((prop.get("era", 4.0)) / 9.0)
-            whip         = _clamp((prop.get("whip", 1.3)) / 3.0)
-            shadow_whiff = _clamp(prop.get("shadow_whiff_rate",
-                                  prop.get("csw_pct",
-                                  prop.get("swstr_pct", 0.25))))
-        else:
-            # Batter signals (FanGraphs) mapped into the same 5 slots
-            # slot 0: wRC+ normalized (100=avg → 0.5, 140=elite → 0.7, 70=poor → 0.35)
-            k_rate  = _clamp(float(prop.get("wrc_plus", 100.0) or 100.0) / 200.0)
-            # slot 1: ISO / power (0=weak, 0.15=avg, 0.30=elite)
-            bb_rate = _clamp(float(prop.get("iso", 0.155) or 0.155) / 0.35)
-            # slot 2: BABIP / contact quality (0.250–0.350 range)
-            era     = _clamp((float(prop.get("babip", 0.300) or 0.300) - 0.200) / 0.200)
-            # slot 3: batter bb_pct (plate discipline)
-            whip    = _clamp(float(prop.get("bb_pct", 0.085) or 0.085) / 0.20)
-            # slot 4: batter K% (inverse contact — higher K = worse contact)
-            shadow_whiff = _clamp(float(prop.get("k_pct", 0.224) or 0.224) / 0.35)
-
-        # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
+        # ── Statcast / zone signals ───────────────────────────────────
+        # FanGraphs csw_pct / swstr_pct used as shadow_whiff proxy when Statcast unavailable
+        shadow_whiff = _clamp(
+            prop.get("shadow_whiff_rate",
+            prop.get("csw_pct",
+            prop.get("swstr_pct", 0.25)))
+        )
         zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
 
         # ── Lineup context ────────────────────────────────────────────
@@ -1520,12 +1469,7 @@ class _BaseAgent:
         ev_pct      = _clamp((b.get("ev_pct")      or prop.get("ev_pct",       3.0) + 20) / 40.0)
         kelly       = _clamp((b.get("kelly_units")  or prop.get("kelly_units",  0.5)) / 3.0)
         line_val    = _clamp((b.get("line")         or prop.get("line",         1.5)) / 10.0)
-        # Use sharp-book vig-stripped probability when available (more accurate than -115 flat)
-        _sb_implied = prop.get("sb_implied_prob", 0.0) or 0.0
-        _ud_implied = b.get("implied_prob") or prop.get("implied_prob", 52.4)
-        impl_prob   = _clamp((_sb_implied if _sb_implied > 0.30 else _ud_implied) / 100.0)
-        # Also encode sharp-book line gap as a feature (negative = DFS line favorable for Over)
-        sb_line_gap = _clamp((prop.get("sb_line_gap", 0.0) or 0.0 + 2.0) / 4.0)  # -2 to +2 range
+        impl_prob   = _clamp((b.get("implied_prob") or prop.get("implied_prob", 52.4)) / 100.0)
 
         # ── Prop type encoding ────────────────────────────────────────
         _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0,
@@ -1549,39 +1493,38 @@ class _BaseAgent:
         _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
         conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
 
-        # ── Enrichment signal slots (Phase 97) ───────────────────────────────
-        # These 7 signals were computed by prop_enrichment_layer and attached to
-        # every prop but never fed to XGBoost — now they are.  Normalised [0,1].
-        form_adj      = _clamp((float(prop.get("_form_adj",            0.0) or 0.0) + 0.20) / 0.40)  # hot/cold streak
-        cv_nudge      = _clamp((float(prop.get("_cv_nudge",            0.0) or 0.0) + 0.15) / 0.30)  # CV consistency
-        bayesian_nudge= _clamp((float(prop.get("_bayesian_nudge",      0.0) or 0.0) + 0.15) / 0.30)  # Bayesian update
-        marcel_adj    = _clamp((float(prop.get("_marcel_adj",          0.0) or 0.0) + 0.02) / 0.04)  # Marcel ±1.8pp
-        predict_plus  = _clamp((float(prop.get("_predict_plus_adj",    0.0) or 0.0) + 0.08) / 0.16)  # Predict+ arsenal
-        ps_prob       = _clamp(float(prop.get("_player_specific_prob", 0.0) or 0.0))                  # Poisson/binomial rate
-        has_enrich    = float(any([
-            prop.get("_form_adj"), prop.get("_cv_nudge"), prop.get("_bayesian_nudge"),
-            prop.get("_marcel_adj"), prop.get("_predict_plus_adj"), prop.get("_player_specific_prob"),
-        ]))  # 1.0 = enrichment ran; 0.0 = cold start / enrichment unavailable
+        # ── Pitch type whiff vs batter hand (slot 20) ─────────────────
+        # _pitch_whiff_vs_hand written by prop_enrichment_layer
+        pitch_whiff_vs_hand = _clamp(prop.get("_pitch_whiff_vs_hand", 0.25))
+
+        # ── Bullpen ERA normalized (slot 21) ──────────────────────────
+        # _bullpen_era written by prop_enrichment_layer; 4.5 ERA = 0.5
+        raw_bp_era = float(prop.get("_bullpen_era", 4.50) or 4.50)
+        bullpen_era_norm = _clamp(raw_bp_era / 9.0)
+
+        # ── Batting order slot normalized (slot 22) ───────────────────
+        # _batting_order_slot: 1=leadoff (0.0), 9=last (1.0); 0=unknown→0.44 (mid)
+        raw_slot = int(prop.get("_batting_order_slot", 0) or 0)
+        batting_order_norm = _clamp((raw_slot - 1) / 8.0) if raw_slot > 0 else 0.44
 
         vec = [
-            k_rate, bb_rate, era, whip,           # 0-3  pitcher/batter stats
-            shadow_whiff, zone_mult,               # 4-5  statcast contact quality
-            chase_adj, o_swing,                    # 6-7  lineup chase
-            wind_speed, temp,                      # 8-9  weather
-            is_spring,                             # 10   context flag
-            model_prob, ev_pct, kelly,             # 11-13 bet quality
-            line_val, impl_prob,                   # 14-15 market (sb_implied when avail)
-            pt_enc, side_enc,                      # 16-17 prop meta
-            brier, sb_line_gap,                    # 18-19 calibration + sharp line gap
-            form_adj,                              # 20   hot/cold form streak
-            cv_nudge,                              # 21   CV consistency nudge
-            bayesian_nudge,                        # 22   Bayesian update nudge
-            marcel_adj,                            # 23   Marcel projection adjustment
-            predict_plus,                          # 24   Predict+ arsenal adjustment
-            ps_prob,                               # 25   player-specific Poisson/binomial prob
-            has_enrich,                            # 26   enrichment completeness flag
+            k_rate, bb_rate, era, whip,          # 0-3  pitcher
+            shadow_whiff, zone_mult,              # 4-5  statcast
+            chase_adj, o_swing,                   # 6-7  lineup
+            wind_speed, temp,                     # 8-9  weather
+            is_spring,                            # 10   context
+            model_prob, ev_pct, kelly,            # 11-13 bet quality
+            line_val, impl_prob,                  # 14-15 market
+            pt_enc, side_enc,                     # 16-17 prop meta
+            brier, conf_enc,                      # 18-19 calibration
+            pitch_whiff_vs_hand,                  # 20   pitch type matchup
+            bullpen_era_norm,                     # 21   bullpen strength
+            batting_order_norm,                   # 22   lineup slot
+            # Slot 23: simulation outcome variance — wide dist → model less confident
+            # Prevents stacked boosts from inflating confidence on high-variance props
+            _clamp(float(prop.get("_sim_std") or 0.0) / 3.0),  # 23  sim std (norm)
         ]
-        assert len(vec) == 27, f"Feature vector length {len(vec)} != 27"
+        assert len(vec) == 24, f"Feature vector length {len(vec)} != 24"
         return [round(v, 6) for v in vec]
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
@@ -1714,7 +1657,7 @@ class _BaseAgent:
             "spring_training": _is_spring_training(),
         })
         kelly = _kelly_units(model_prob / 100, side_odds)
-        platforms = self._dfs_platforms(prop, side)
+        platforms, _line_note = self._dfs_platforms(prop, side)
         return {
             "agent":              self.name,
             "player":             prop.get("player", "Unknown"),
@@ -1728,6 +1671,7 @@ class _BaseAgent:
             "ev_pct":             round(ev_pct, 1),
             "kelly_units":        round(kelly, 3),
             "recommended_platform": platforms[0] if platforms else "PrizePicks",
+            "line_comparison_note": _line_note,
             "checklist":          self._checklist(prop),
             "confidence":         self._confidence(ev_pct),
             "spring_training":    _is_spring_training(),
@@ -1742,8 +1686,31 @@ class _BaseAgent:
             "sim_bullpen_prob":   prop.get("_sim_bullpen_prob"),
         }
 
-    def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
+    def _dfs_platforms(self, prop: dict, side: str) -> tuple[list[str], str]:
+        """
+        Returns (platforms_list, line_comparison_note).
+        Phase 92: uses line_comparator to pick the platform with the better
+        line for the recommended direction, instead of just checking presence.
+        """
         dfs = self.hub.get("dfs", {})
+        # ── Phase 92: line comparison ────────────────────────────────────────
+        if _LINE_COMP_AVAILABLE:
+            try:
+                ud_lookup = dfs.get("_ud_lookup") or {}
+                pp_lookup = dfs.get("_pp_lookup") or {}
+                comp = _compare_prop(
+                    prop.get("player", ""),
+                    prop.get("prop_type", ""),
+                    side,
+                    ud_lookup,
+                    pp_lookup,
+                )
+                note = comp.get("note", "")
+                platform = comp.get("platform", "Underdog")
+                return [platform], note
+            except Exception as _lce:
+                logger.debug("[DFSPlatforms] line_comparator error: %s", _lce)
+        # ── Fallback: original presence-check ───────────────────────────────
         matched = []
         for platform in ("prizepicks", "underdog", "sleeper"):
             picks = dfs.get(platform, [])
@@ -1752,7 +1719,7 @@ class _BaseAgent:
                     if prop.get("player", "").lower() in str(pick).lower():
                         matched.append(platform.capitalize())
                         break
-        return matched or ["PrizePicks"]
+        return matched or ["PrizePicks"], ""
 
     def _checklist(self, prop: dict) -> dict:
         ctx = self.hub.get("context", {})
@@ -2337,37 +2304,23 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
 
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
+    # Multiplicative EV: (1+e1) * (1+e2) * ... - 1
+    combined_ev = round(
+        (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
+    ) if legs else 0.0
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
     platform = legs[0].get("recommended_platform", "PrizePicks").lower() if legs else "prizepicks"
-
-    # Use underdog_math_engine for accurate Flex vs Standard EV with real payout tables
-    entry_type = "STANDARD"
-    combined_ev = 0.0
-    try:
-        from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
-        _engine = UnderdogMathEngine()
-        _probs  = [min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)) for lg in legs]
-        _eval   = _engine.evaluate_slip(_probs)
-        combined_ev = round(_eval.recommended_ev * 100, 2)
-        entry_type  = _eval.recommended_entry_type   # "FLEX" or "STANDARD"
-    except Exception:
-        # Fallback: multiplicative EV
-        combined_ev = round(
-            (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
-        ) if legs else 0.0
-
     return {
         "agent":           agent_name,
-        "agent_name":      agent_name,
+        "agent_name":      agent_name,      # Discord field
         "legs":            legs,
         "leg_count":       len(legs),
-        "entry_type":      entry_type,
         "combined_ev_pct": combined_ev,
-        "ev_pct":          combined_ev,
-        "stake":           10.0,
-        "confidence":      avg_conf,
-        "platform":        platform,
-        "season_stats":    {},
+        "ev_pct":          combined_ev,     # Discord field
+        "stake":           10.0,            # Discord field (default $10)
+        "confidence":      avg_conf,        # Discord field
+        "platform":        platform,        # Discord field
+        "season_stats":    {},              # filled by dispatcher if available
         "ts":              datetime.datetime.utcnow().isoformat(),
     }
 
@@ -2657,7 +2610,10 @@ _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
-    _LineValueAgent, _BullpenAgent, _WeatherAgent, _MLEdgeAgent,  # SteamAgent: internal-only, not in Discord picks
+    _LineValueAgent, _BullpenAgent, _WeatherAgent, _SteamAgent, _MLEdgeAgent,
+    # Phase 90 — 8 new agents complete the roster to 18
+    _CorrelatedParlayAgent, _StackSmithAgent, _ChalkBusterAgent, _SharpFadeAgent,
+    _TimeValueAgent, _LineupChaseAgent, _PropCycleAgent, _UnderDogAgent,
 ]
 
 
@@ -2827,15 +2783,6 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
-    # Decision logger — audit trail for every prop evaluation
-    _DL = None
-    try:
-        from decision_logger import log_leg as _dl_log, flush_buffer as _dl_flush  # noqa: PLC0415
-        _DL = True
-    except Exception:
-        _dl_log   = lambda **kw: None   # noqa: E731
-        _dl_flush = lambda: None        # noqa: E731
-
     props = _get_props(hub)
     if not props:
         logger.info("[AgentTasklet] No live UD/PP props this cycle — skipping.")
@@ -2961,26 +2908,6 @@ def run_agent_tasklet() -> None:
         logger.info("[AgentTasklet] All parlays were duplicates — skipping.")
         return
 
-    # ── Global player appearance cap: max 2 slips per player per cycle ────────
-    _MAX_PLAYER_APP = 2
-    _player_count: dict[str, int] = {}
-    capped_parlays: list[dict] = []
-    for _p in all_parlays:
-        _players = [lg.get("player", lg.get("player_name", ""))
-                    for lg in _p.get("legs", []) if lg.get("player") or lg.get("player_name")]
-        if any(_player_count.get(pl, 0) >= _MAX_PLAYER_APP for pl in _players):
-            logger.debug("[AgentTasklet] Slip dropped — player at cap (%d slips).", _MAX_PLAYER_APP)
-            continue
-        for pl in _players:
-            _player_count[pl] = _player_count.get(pl, 0) + 1
-        capped_parlays.append(_p)
-    if len(capped_parlays) < len(all_parlays):
-        logger.info("[AgentTasklet] Player cap removed %d slip(s) (max %d per player/cycle).",
-                    len(all_parlays) - len(capped_parlays), _MAX_PLAYER_APP)
-    all_parlays = capped_parlays
-    if not all_parlays:
-        return
-
     producer = _kafka_producer()
     r        = _redis()
     for parlay in all_parlays:
@@ -3012,10 +2939,11 @@ def run_agent_tasklet() -> None:
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
-                             units_wagered, mlbam_id)
+                             units_wagered, sim_edge_reasons,
+                             lookahead_safe, game_time_utc, game_state)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s), %s)
+                                ABS(%s), %s, %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -3032,7 +2960,10 @@ def run_agent_tasklet() -> None:
                             (_leg.get("recommended_platform") or "prizepicks").lower(),
                             _leg.get("_features_json"),
                             _leg.get("kelly_units") or 0.02,
-                            _leg.get("mlbam_id") or _leg.get("player_id"),
+                            __import__("json").dumps(_leg.get("sim_edge_reasons") or []),
+                            _leg.get("lookahead_safe", True),
+                            _leg.get("game_time_utc", ""),
+                            _leg.get("game_state", "unknown"),
                         ),
                     )
         _conn.commit()
@@ -3048,24 +2979,6 @@ def run_agent_tasklet() -> None:
     # cross-process backup (e.g. multiple Railway replicas).
     today_str  = datetime.date.today().isoformat()   # "2026-03-29"
     r_dedup    = _redis()
-
-    # ── DB-backed dedup preload — survives crash + Redis cold restart ──────────
-    # On cycle start, restore _AGENT_SENT_TODAY from bet_ledger for today so
-    # a fresh restart never re-sends picks that were already Discord-sent today.
-    try:
-        _pg = _get_pg()
-        if _pg:
-            with _pg.cursor() as _c:
-                _c.execute(
-                    "SELECT DISTINCT agent_name FROM bet_ledger "
-                    "WHERE bet_date = %s AND discord_sent = TRUE",
-                    (today_str,)
-                )
-                for (_ag,) in _c.fetchall():
-                    _AGENT_SENT_TODAY.setdefault(_ag, today_str)
-            _pg.commit()
-    except Exception as _dbe:
-        logger.debug("[AgentTasklet] dedup preload skipped: %s", _dbe)
     _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
 
     # ── One play per agent per day — hard gate ───────────────────────────────────────
@@ -3115,27 +3028,8 @@ def run_agent_tasklet() -> None:
             pass
         try:
             discord_alert.send_parlay_alert(parlay)
-            # Mark as sent in DB — crash-safe dedup
-            try:
-                _pg2 = _get_pg()
-                if _pg2:
-                    with _pg2.cursor() as _c2:
-                        _c2.execute(
-                            "UPDATE bet_ledger SET discord_sent = TRUE "
-                            "WHERE agent_name = %s AND bet_date = %s",
-                            (agent_name, today_str)
-                        )
-                    _pg2.commit()
-            except Exception as _dbe2:
-                logger.debug("[AgentTasklet] discord_sent update skipped: %s", _dbe2)
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
-
-    # Flush decision log buffer to DB in one batch
-    try:
-        _dl_flush()
-    except Exception:
-        pass
 
     active_agents = len({p["agent"] for p in all_parlays})
     best = max(all_parlays, key=lambda p: p["combined_ev_pct"])
@@ -3290,15 +3184,14 @@ def run_backtest_tasklet() -> None:
         logger.info("[BacktestTasklet] Insufficient data (%d rows) — skipping.", len(rows))
         return
 
-    # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
-    _TARGET_FEATS = 27
-    _raw_feats = [json.loads(r[0]) for r in rows]
-    _padded    = [
-        f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
-        else f[:_TARGET_FEATS]
-        for f in _raw_feats
+    # Normalize all feature vectors to FEATURE_DIM (handles mixed 20/23 rows)
+    _bt_fdim = _BaseAgent.FEATURE_DIM
+    _bt_raw = [json.loads(r[0]) for r in rows]
+    _bt_raw = [
+        v + [0.0] * (_bt_fdim - len(v)) if len(v) < _bt_fdim else v[:_bt_fdim]
+        for v in _bt_raw
     ]
-    X = np.array(_padded, dtype=np.float32)
+    X = np.array(_bt_raw, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     split      = int(len(X) * 0.8)
@@ -3372,10 +3265,8 @@ def run_grading_tasklet() -> None:
     calculate CLV, then send daily recap to Discord.
     SportsData.io replaced — was returning 403 on all calls.
     """
-    # GradingTasklet runs at 1:05 AM — must grade YESTERDAY's bets (not today's)
-    _yesterday = (datetime.date.today() - datetime.timedelta(days=1))
-    today      = _yesterday.strftime("%Y-%m-%d")   # used as grade_date throughout
-    espn_date  = _yesterday.strftime("%Y%m%d")     # ESPN format
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    espn_date = today.replace("-", "")
 
     # Use ESPN box score scraper (same source as nightly_recap.py)
     try:
@@ -3395,10 +3286,6 @@ def run_grading_tasklet() -> None:
     for name_lower, espn in raw_stats.items():
         # Normalise to title case for _get_stat key matching
         display_name = espn.get("full_name", name_lower.title())
-        # Accent-normalized key for players like Acuña, Peña, Báez
-        import unicodedata as _ud
-        _accent_norm = _ud.normalize("NFD", display_name)
-        _ascii_name  = "".join(c for c in _accent_norm if _ud.category(c) != "Mn")
         mapped = {
             "Hits":           espn.get("hits", 0.0),
             "HomeRuns":       espn.get("home_runs", 0.0),
@@ -3414,9 +3301,7 @@ def run_grading_tasklet() -> None:
             "WalksAllowed":   espn.get("base_on_balls", 0.0),
         }
         stat_lookup[display_name] = mapped
-        stat_lookup[name_lower]   = mapped   # lowercase index
-        stat_lookup[_ascii_name]  = mapped   # accent-stripped index (Acuña → Acuna)
-        stat_lookup[_ascii_name.lower()] = mapped   # accent-stripped lowercase
+        stat_lookup[name_lower] = mapped  # also index by lowercase
 
     open_bets: list[tuple] = []
     try:
@@ -3448,26 +3333,7 @@ def run_grading_tasklet() -> None:
         with conn.cursor() as cur:
             for row in open_bets:
                 bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat = row
-
-                # Grade by mlbam_id when available — accent-safe, always unique
-                # mlbam_id must be fetched from bet_ledger (stored at bet time)
-                _bid_mlbam = None
-                try:
-                    # mlbam_id stored in bet_ledger — add to SELECT if schema has it
-                    pass  # placeholder — mlbam_id grading wired via accent normalize above
-                except Exception:
-                    pass
-
-                import unicodedata as _ud2
-                _pn_norm = "".join(
-                    c for c in _ud2.normalize("NFD", player)
-                    if _ud2.category(c) != "Mn"
-                )
-                stats = (stat_lookup.get(player)
-                         or stat_lookup.get(_pn_norm)
-                         or stat_lookup.get(player.lower())
-                         or stat_lookup.get(_pn_norm.lower())
-                         or {})
+                stats = stat_lookup.get(player, {})
                 actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:
@@ -3624,20 +3490,6 @@ def run_grading_tasklet() -> None:
         )
     except Exception as _disc_err:
         logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
-
-    # ── Post-grading monitoring: calibration + edge health ──────────────────
-    try:
-        from calibration_monitor import run as _cal_run  # noqa: PLC0415
-        _cal_run(days=30, quiet=True)
-        logger.info("[GradingTasklet] Calibration monitor complete.")
-    except Exception as _cal_err:
-        logger.debug("[GradingTasklet] Calibration monitor skipped: %s", _cal_err)
-    try:
-        from edge_health_monitor import run as _edge_run  # noqa: PLC0415
-        _edge_run(days=30, quiet=True)
-        logger.info("[GradingTasklet] Edge health monitor complete.")
-    except Exception as _edge_err:
-        logger.debug("[GradingTasklet] Edge health monitor skipped: %s", _edge_err)
 
     # Update drift monitor with today's Brier score
     if results:
@@ -3861,15 +3713,14 @@ def run_xgboost_tasklet() -> None:
         logger.info("[XGBoostTasklet] Insufficient training data (%d rows) — skipping.", len(rows))
         return
 
-    # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
-    _TARGET_FEATS = 27
-    _raw_feats = [json.loads(r[0]) for r in rows]
-    _padded    = [
-        f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
-        else f[:_TARGET_FEATS]
-        for f in _raw_feats
+    # Normalize all feature vectors to FEATURE_DIM (handles mixed 20/23 rows)
+    FEATURE_DIM = _BaseAgent.FEATURE_DIM
+    X_raw = [json.loads(r[0]) for r in rows]
+    X_raw = [
+        v + [0.0] * (FEATURE_DIM - len(v)) if len(v) < FEATURE_DIM else v[:FEATURE_DIM]
+        for v in X_raw
     ]
-    X = np.array(_padded, dtype=np.float32)
+    X = np.array(X_raw, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
@@ -3954,14 +3805,6 @@ def run_xgboost_tasklet() -> None:
 
     logger.info("[XGBoostTasklet] Retrain complete. Accuracy=%.3f | Train=%d Test=%d | Saved→%s",
                 accuracy, len(X_train), len(X_test), model_path)
-
-    # ── Rebuild isotonic calibration map from settled bets ────────────────────
-    try:
-        from calibrate_model import generate_calibration_map_from_db  # noqa: PLC0415
-        generate_calibration_map_from_db()
-        logger.info("[XGBoostTasklet] Calibration map rebuilt from bet_ledger.")
-    except Exception as _cal_err:
-        logger.warning("[XGBoostTasklet] Calibration map rebuild failed: %s", _cal_err)
 
     # ── Hot-reload: update the global model so live agents use it immediately ──
     try:

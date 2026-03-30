@@ -46,7 +46,7 @@ except ImportError:
     _PLATFORM_SELECTOR_AVAILABLE = False
     platform_selector = None  # type: ignore[assignment]
 
-from DiscordAlertService import discord_alert, MAX_STAKE_USD
+from phase89_DiscordAlertService import discord_alert, MAX_STAKE_USD
 
 # ── Phase 48 gap-fix: per-agent unit sizing ───────────────────────────────────
 try:
@@ -263,6 +263,65 @@ except ImportError:
     _DL_AVAILABLE = False
     _decision_logger = None  # type: ignore[assignment]
     logger.warning("[DL] decision_logger not available -- leg decisions will not be logged")
+
+# ── Phase 91 Step 1: Monte Carlo simulation engine ────────────────────────────
+try:
+    from simulation_engine import simulate_prop as _simulate_prop, variance_penalty as _variance_penalty
+    _SIM_ENGINE_AVAILABLE = True
+except ImportError:
+    _SIM_ENGINE_AVAILABLE = False
+    def _simulate_prop(prop, n_sims=10_000): return None   # noqa: E704
+    def _variance_penalty(result): return 1.0              # noqa: E704
+
+# ── Phase 91 Step 3: Lock-time gate (prevent lookahead bias) ──────────────────
+try:
+    from lock_time_gate import (
+        should_skip_prop      as _should_skip_prop,
+        stamp_prop            as _stamp_prop,
+        fetch_game_times_today as _fetch_game_times_today,
+    )
+    _LOCK_GATE_AVAILABLE = True
+except ImportError:
+    _LOCK_GATE_AVAILABLE = False
+    def _should_skip_prop(prop, game_times): return (False, "gate_unavailable")  # noqa: E704
+    def _stamp_prop(prop, game_times): return prop                               # noqa: E704
+    def _fetch_game_times_today(): return {}                                     # noqa: E704
+
+# ── Phase 91 Step 2: CLV feedback / adaptive EV thresholds ───────────────────
+try:
+    from clv_feedback_engine import (
+        get_threshold      as _get_ev_threshold,
+        load_thresholds    as _load_ev_thresholds,
+    )
+    _CLV_ENGINE_AVAILABLE = True
+except ImportError:
+    _CLV_ENGINE_AVAILABLE = False
+    def _get_ev_threshold(edge_reasons=None): return 0.030  # noqa: E704
+    def _load_ev_thresholds(): return {}                    # noqa: E704
+
+# ── Phase 91 Step 6: Market validator ────────────────────────────────────────
+try:
+    from market_validator import stamp_market_validation as _stamp_market_validation
+    _MARKET_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _MARKET_VALIDATOR_AVAILABLE = False
+    def _stamp_market_validation(prop): return prop  # noqa: E704
+
+# ── Phase 91 Step 4: Confidence shrinkage ────────────────────────────────────
+try:
+    from confidence_shrinkage import shrink_and_size as _shrink_and_size
+    _SHRINKAGE_AVAILABLE = True
+except ImportError:
+    _SHRINKAGE_AVAILABLE = False
+
+# ── Phase 92: Line comparator (Underdog vs PrizePicks better-of-two) ──────────
+try:
+    from line_comparator import build_line_lookup as _build_line_lookup, compare_prop as _compare_prop
+    _LINE_COMP_AVAILABLE = True
+except ImportError:
+    _LINE_COMP_AVAILABLE = False
+    def _build_line_lookup(props): return {}        # noqa: E704
+    def _compare_prop(*a, **kw): return None        # noqa: E704
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1139,6 +1198,8 @@ class PropLeg:
     cv_nudge:        float = 0.0   # probability nudge from CV consistency layer
     # Phase 98: bullpen fatigue score for opposing team's relievers (0=fresh, 4=exhausted, 2=neutral)
     bullpen_fatigue: float = 2.0
+    # Phase 92: line comparison note for Discord (e.g. "PrizePicks 1.5 vs Underdog 2.0 (PP -0.5 ✅ OVER)")
+    line_comparison_note: str = ""
 
 
 def build_parlay(
@@ -1532,6 +1593,24 @@ class LiveDispatcher:
             return
         logger.info("%d games scheduled", len(games))
 
+        # ── Phase 91 Step 3: Pre-fetch game times for lock-time gate ─────
+        self._game_times: dict = {}
+        if _LOCK_GATE_AVAILABLE:
+            try:
+                self._game_times = _fetch_game_times_today()
+                logger.info("[LockGate] %d game times loaded", len(self._game_times))
+            except Exception as _lt_err:
+                logger.warning("[LockGate] Fetch failed: %s -- gate disabled", _lt_err)
+
+        # ── Phase 91 Step 2: Load adaptive EV thresholds from DB ─────────
+        if _CLV_ENGINE_AVAILABLE:
+            try:
+                _load_ev_thresholds()
+                logger.info("[CLV] Adaptive EV thresholds loaded from edge_thresholds table")
+            except Exception as _clv_err:
+                logger.warning("[CLV] Threshold load failed: %s -- using default %.3f",
+                               _clv_err, MIN_EV_PCT / 100.0)
+
         # ── Phase 51: Build team/venue maps for dome adjustment ───────────
         self._team_venue_map: dict = {}
         self._home_teams: set = set()
@@ -1589,6 +1668,20 @@ class LiveDispatcher:
         if not all_raw:
             logger.warning("No props fetched from either platform -- aborting.")
             return
+
+        # ── Phase 92: Build line lookup caches for better-of-two comparison ──
+        self._pp_lookup: dict = {}
+        self._ud_lookup: dict = {}
+        if _LINE_COMP_AVAILABLE:
+            try:
+                self._pp_lookup = _build_line_lookup(pp_props)
+                self._ud_lookup = _build_line_lookup(ud_std)
+                logger.info(
+                    "[LineComp] Lookups built — PP=%d entries  UD=%d entries",
+                    len(self._pp_lookup), len(self._ud_lookup),
+                )
+            except Exception as _lc_err:
+                logger.warning("[LineComp] Lookup build failed: %s -- notes disabled", _lc_err)
 
         # ── Phase 27: Enrich raw props with enhancement layers ────────────
         # Step 1: DraftEdge projections (name-based, adds de_* fields)
@@ -1878,10 +1971,11 @@ class LiveDispatcher:
                     ev_pct=ev,
                     legs=[
                         {
-                            "player_name": l.get("player_name", l.get("player", "")),
-                            "prop_type":   l["prop_type"],
-                            "side":        l["side"],
-                            "line":        l["line"],
+                            "player_name":         l.get("player_name", l.get("player", "")),
+                            "prop_type":           l["prop_type"],
+                            "side":                l["side"],
+                            "line":                l["line"],
+                            "line_comparison_note": l.get("line_comparison_note", ""),
                         }
                         for l in parlay["legs"]
                     ],
@@ -2122,6 +2216,33 @@ class LiveDispatcher:
                 entry_type = chosen_entry.get("entry_type", "FLEX")
                 pname      = chosen_entry.get("player_name",
                              player_lower.title())
+
+                # ── Phase 92: Line comparator — override with better-of-two ──
+                _line_comp_note = ""
+                if _LINE_COMP_AVAILABLE:
+                    try:
+                        _lc = _compare_prop(
+                            pname, prop_type, side.upper(),
+                            getattr(self, "_ud_lookup", {}),
+                            getattr(self, "_pp_lookup", {}),
+                        )
+                        if _lc:
+                            _line_comp_note = _lc.get("note", "")
+                            _lc_platform = _lc.get("platform", "")
+                            _lc_line = _lc.get("line")
+                            # Override chosen platform/entry if comparator found a better line
+                            if _lc_platform == "PrizePicks" and pp_entry:
+                                chosen_entry    = pp_entry
+                                chosen_platform = "PrizePicks"
+                                if _lc_line is not None:
+                                    line_val = _lc_line
+                            elif _lc_platform == "Underdog" and ud_entry:
+                                chosen_entry    = ud_entry
+                                chosen_platform = "Underdog"
+                                if _lc_line is not None:
+                                    line_val = _lc_line
+                    except Exception as _lc_err:
+                        logger.debug("[LineComp] compare_prop failed: %s", _lc_err)
 
                 # Block season-long props (e.g., RBI Under 76.5 is a season total)
                 if not is_game_prop(prop_type, line_val):
@@ -2374,6 +2495,66 @@ class LiveDispatcher:
                         pass  # dome adjustment is additive -- never crash a leg
                 # ── End Phase 51 ────────────────────────────────────────────
 
+                # ── Phase 91 Step 3: Lock-time gate ───────────────────────────────
+                _sim_edge_reasons: list = []
+                if _LOCK_GATE_AVAILABLE:
+                    try:
+                        _lt_team = getattr(self, "_player_team_map", {}).get(pname.lower(), "")
+                        _lt_prop = {"team": _lt_team, "player": pname}
+                        _lt_skip, _lt_reason = _should_skip_prop(_lt_prop, getattr(self, "_game_times", {}))
+                        if _lt_skip:
+                            logger.info("[LockGate] BLOCKED — %s %s %s: %s",
+                                        pname, prop_type, side, _lt_reason)
+                            continue
+                    except Exception as _lt_err:
+                        logger.debug("[LockGate] check failed: %s", _lt_err)
+
+                # ── Phase 91 Step 1: Monte Carlo simulation blend ──────────────────
+                if _SIM_ENGINE_AVAILABLE:
+                    try:
+                        _sim_prop = {
+                            "player_name":      pname,
+                            "prop_type":        prop_type,
+                            "line":             line_val,
+                            "side":             side,
+                            "batting_order_pos": int(chosen_entry.get("batting_order_pos", 0) or 0),
+                            "sc_whiff_rate":    float(chosen_entry.get("sc_whiff_rate",    0.0) or 0.0),
+                            "sc_hard_hit_rate": float(chosen_entry.get("sc_hard_hit_rate", 0.0) or 0.0),
+                            "sc_season_avg":    float(chosen_entry.get("sc_season_avg",    0.0) or 0.0),
+                        }
+                        _sim_result = _simulate_prop(_sim_prop, n_sims=5_000)
+                        if _sim_result is not None:
+                            _sim_p   = _sim_result.prob_over if side == "Over" else _sim_result.prob_under
+                            _vpen    = _variance_penalty(_sim_result)
+                            # Blend: 40% simulation + 60% enrichment-layer prob
+                            _blended = 0.60 * prob + 0.40 * (_sim_p * _vpen)
+                            prob     = min(0.80, max(0.40, _blended))
+                            _sim_edge_reasons = list(_sim_result.edge_reasons)
+                            logger.debug("[Sim] %-22s %-16s %-5s sim=%.3f vpen=%.2f blended=%.3f",
+                                         pname, prop_type, side, _sim_p, _vpen, prob)
+                    except Exception as _sim_err:
+                        logger.debug("[Sim] Skipped for %s %s: %s", pname, prop_type, _sim_err)
+
+                # ── Phase 91 Step 6: Market validator ────────────────────────────
+                if _MARKET_VALIDATOR_AVAILABLE:
+                    try:
+                        _sb_mkt = float(chosen_entry.get("sb_implied_prob", 0.0) or 0.0)
+                        if _sb_mkt > 0.0:
+                            _mv_prop = {
+                                "model_prob_pct":    prob * 100.0,
+                                "sb_implied_prob":   _sb_mkt * 100.0,
+                                "prop_type":         prop_type,
+                                "player_name":       pname,
+                            }
+                            _mv_prop = _stamp_market_validation(_mv_prop)
+                            if _mv_prop.get("_market_capped"):
+                                _cap_prob = (_sb_mkt * 100.0 + 20.0) / 100.0
+                                prob = min(prob, _cap_prob)
+                                logger.debug("[MarketVal] %s %s %s soft-capped at market+20pp → %.3f",
+                                             pname, prop_type, side, prob)
+                    except Exception as _mv_err:
+                        logger.debug("[MarketVal] Skipped: %s", _mv_err)
+
                 # Gate checks -- Phase 35: log all decisions with full feature trail
                 if prob < cfg["min_prob"]:
                     if _DL_AVAILABLE:
@@ -2394,7 +2575,11 @@ class LiveDispatcher:
                     continue
 
                 ev = calc_ev(prob)
-                if ev < MIN_EV_PCT:
+                _ev_threshold = (
+                    _get_ev_threshold(edge_reasons=_sim_edge_reasons) * 100.0
+                    if _CLV_ENGINE_AVAILABLE else MIN_EV_PCT
+                )
+                if ev < _ev_threshold:
                     if _DL_AVAILABLE:
                         _decision_logger.log_leg(
                             agent_name="dispatcher", player_name=pname,
@@ -2408,7 +2593,7 @@ class LiveDispatcher:
                             prob_fangraphs=round(prob - _prob_after_form, 4),
                             prob_final=prob, edge_pct=ev,
                             decision="REJECTED",
-                            reject_reason=f"EV {ev:.4f} < min {MIN_EV_PCT:.4f}",
+                            reject_reason=f"EV {ev:.4f} < adaptive_min {_ev_threshold:.4f}",
                         )
                     continue
 
@@ -2438,6 +2623,8 @@ class LiveDispatcher:
                     bullpen_fatigue=self._team_fatigue_cache.get(
                         str(chosen_entry.get("opposing_team", "") or ""), 2.0
                     ),
+                    # Phase 92: line comparison note
+                    line_comparison_note=_line_comp_note,
                 ))
                 # Phase 35: log INCLUDED leg with full feature trail
                 if _DL_AVAILABLE:
