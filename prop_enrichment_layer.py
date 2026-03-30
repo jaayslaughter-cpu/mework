@@ -634,6 +634,55 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
 
     return None
 
+
+# ---------------------------------------------------------------------------
+# Step 13 — DraftEdge projections (hit_pct, hr_pct, sb_pct, rbi_pct per player)
+# Already fetched into hub["market"]["prop_projections"] by DataHub.
+# Adds: de_hit_pct, de_hr_pct, de_sb_pct, de_rbi_pct, de_run_pct,
+#       de_k_pct, de_dfs_proj, de_batting_order
+# ---------------------------------------------------------------------------
+
+def _get_draftedge(props: list[dict], hub: dict) -> list[dict]:
+    """Enrich props with DraftEdge projections from hub market data.
+    Falls back to calling enrich_props_with_draftedge() directly if hub empty.
+    """
+    # Try hub first (already fetched by DataHub every 15min)
+    proj = hub.get("market", {}).get("prop_projections", {})
+    batter_rows  = proj.get("batters",  []) if isinstance(proj, dict) else []
+    pitcher_rows = proj.get("pitchers", []) if isinstance(proj, dict) else []
+
+    if batter_rows or pitcher_rows:
+        # Build lookup from hub data
+        import unicodedata as _ud
+        def _norm(n):
+            s = _ud.normalize("NFD", (n or "").lower())
+            return "".join(c for c in s if _ud.category(c) != "Mn")
+
+        bat_lkp = {_norm(r.get("player_name","")): r for r in batter_rows if r.get("player_name")}
+        pit_lkp = {_norm(r.get("player_name","")): r for r in pitcher_rows if r.get("player_name")}
+
+        for prop in props:
+            key = _norm(prop.get("player", prop.get("player_name", "")))
+            row = bat_lkp.get(key) or pit_lkp.get(key) or {}
+            prop["de_hit_pct"]      = float(row.get("hit_pct",      0.0) or 0.0)
+            prop["de_hr_pct"]       = float(row.get("hr_pct",       0.0) or 0.0)
+            prop["de_sb_pct"]       = float(row.get("sb_pct",       0.0) or 0.0)
+            prop["de_rbi_pct"]      = float(row.get("rbi_pct",      0.0) or 0.0)
+            prop["de_run_pct"]      = float(row.get("run_pct",      0.0) or 0.0)
+            prop["de_k_pct"]        = float(row.get("k_pct",        0.0) or 0.0)
+            prop["de_dfs_proj"]     = float(row.get("dfs_proj",     0.0) or 0.0)
+            prop["de_batting_order"] = str(row.get("batting_order", "") or "")
+        return props
+
+    # Fallback: call scraper directly
+    try:
+        from draftedge_scraper import enrich_props_with_draftedge  # noqa: PLC0415
+        return enrich_props_with_draftedge(props)
+    except Exception as exc:
+        logger.debug("[Enrichment] DraftEdge skipped: %s", exc)
+        return props
+
+
 def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> list[dict]:
     """
     Enrich a list of raw Underdog/PrizePicks prop dicts with all analytics
@@ -662,6 +711,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     # Run sportsbook reference first — provides sharp-book market_implied
     # which replaces Underdog's flat -115 and fixes OVER-bet bias
     props = _get_sportsbook_ref(props)
+    # DraftEdge projections — hit_pct, hr_pct, rbi_pct, batting_order per player
+    props = _get_draftedge(props, hub)
 
     # Run Statcast enrichment — provides player-specific barrel/whiff/xwOBA
     # Requires mlbam_id which gets attached per-prop in the loop below
@@ -820,9 +871,17 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         prop["_bullpen_era"] = _get_bullpen_era(opp_team, hub)
 
         # ── Batting order slot (slot 22) ──────────────────────────────────────
-        prop["_batting_order_slot"] = _get_batting_order_slot(
+        _slot = _get_batting_order_slot(
             player, hub.get("context", {}).get("lineups", [])
         )
+        # Fallback: use DraftEdge batting_order if confirmed lineups not yet posted
+        if _slot == 0:
+            _de_order = prop.get("de_batting_order", "")
+            try:
+                _slot = int(_de_order) if _de_order else 0
+            except (ValueError, TypeError):
+                _slot = 0
+        prop["_batting_order_slot"] = _slot
 
         enriched_count += 1
 
@@ -830,25 +889,11 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     props = _get_statcast(props)
     sc_hits = sum(1 for p in props if p.get("sc_xwoba") or p.get("sc_whiff_rate"))
 
-    # ── DraftEdge batch enrichment (independent probability source + batting order) ──
-    # Provides de_hit_pct, de_hr_pct, de_sb_pct, de_rbi_pct, de_batting_order per player.
-    # enrich_props_with_draftedge uses 'player_name' key; alias from 'player' if needed.
-    de_hits = 0
-    try:
-        from draftedge_scraper import enrich_props_with_draftedge as _de_enrich  # noqa: PLC0415
-        for _p in props:
-            if not _p.get("player_name") and _p.get("player"):
-                _p["player_name"] = _p["player"]
-        props = _de_enrich(props)
-        de_hits = sum(1 for p in props if p.get("de_hit_pct") or p.get("de_rbi_pct"))
-    except Exception as _de_err:
-        logger.warning("[Enrichment] DraftEdge enrichment failed: %s", _de_err)
-
     logger.info(
-        "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | DraftEdge: %d | "
+        "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | "
         "Marcel/PP wired | SB reference wired | "
         "chase: %d teams | weather: %d stadiums",
-        enriched_count, fg_hits, sc_hits, de_hits,
+        enriched_count, fg_hits, sc_hits,
         len(_chase_cache), len(_weather_cache),
     )
     return props
