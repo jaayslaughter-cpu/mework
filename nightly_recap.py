@@ -289,19 +289,40 @@ def run(settle_date: Optional[str] = None) -> None:
             units_profit=result.units_profit,
         )
 
-        # ── Phase 43: Update per-agent unit tier ─────────────────────────
+        # ── Phase 43/89: Update per-agent unit tier ──────────────────────
         # Consecutive wins climb the ladder ($5→$8→$12→$16→$20).
         # Consecutive losses descend back down (floor: $5).
         # 3 in a row either direction triggers a tier move.
+        # Phase 89: Show progress after every W/L (not just on promotion)
+        # so user always sees 1/3, 2/3, then 3/3 → tier move.
+        _TIER_UP_DOLLARS_NR   = {1: 8, 2: 12, 3: 16, 4: 20}
+        _TIER_DOWN_DOLLARS_NR = {2: 5, 3: 8,  4: 12, 5: 16}
         try:
             wl = _outcome_to_result.get(result.outcome, "P")
             tier_update = _unit_record_result(agent_name, wl)
             if tier_update.get("tier_change"):
+                # Full promotion or demotion
                 tier_change_msgs.append(tier_update["tier_change"])
                 logger.info("[Phase43] %s", tier_update["tier_change"])
+            else:
+                # Show in-progress streak — user must see 3 W or 3 L building up
+                _cw = tier_update.get("consecutive_wins", 0)
+                _cl = tier_update.get("consecutive_losses", 0)
+                _nt = tier_update.get("new_tier", 1)
+                if _cw > 0 and _nt < 5:
+                    _nd = _TIER_UP_DOLLARS_NR.get(_nt, 20)
+                    tier_change_msgs.append(
+                        f"🔥 {agent_name}: {_cw}/3 wins → Tier {_nt + 1} (${_nd}/unit)"
+                    )
+                elif _cl > 0 and _nt > 1:
+                    _pd = _TIER_DOWN_DOLLARS_NR.get(_nt, 5)
+                    tier_change_msgs.append(
+                        f"⚠️ {agent_name}: {_cl}/3 losses → Tier {_nt - 1} (${_pd}/unit)"
+                    )
+                # Both 0 = streak reset (direction changed) — nothing to show
         except Exception as _unit_err:
             logger.warning("[Phase43] Unit tier update error for %s: %s", agent_name, _unit_err)
-        # ── End Phase 43 ─────────────────────────────────────────────────
+        # ── End Phase 43/89 ──────────────────────────────────────────────
 
         # Phase 47: Write per-leg calibration data
         if _TEMP_CAL_AVAILABLE and result.outcome in ("WIN", "LOSS"):
