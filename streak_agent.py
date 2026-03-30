@@ -1573,6 +1573,65 @@ def run_streak_pick(
     )
 
     _line_comparison_note = _apply_line_comp(pick)
+    # ── Phase 92: compare Underdog vs PrizePicks — use better line ──────────
+    _line_comparison_note = ""
+    if _LINE_COMP_AVAILABLE:
+        try:
+            # Fetch both platforms fresh for the streak (small overhead, once/day)
+            _ud_props = fetch_underdog_props_with_teams()
+            _pp_resp  = requests.get(
+                "https://partner-api.prizepicks.com/projections",
+                params={"league_id": 2, "per_page": 1000, "include": "new_player"},
+                headers={"Accept": "application/json",
+                         "Referer": "https://app.prizepicks.com/",
+                         "User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            _pp_raw: list[dict] = []
+            if _pp_resp.status_code == 200:
+                _pp_data = _pp_resp.json()
+                _pp_pmap = {
+                    p["id"]: (
+                        p.get("attributes", {}).get("name") or
+                        p.get("attributes", {}).get("display_name", "")
+                    )
+                    for p in _pp_data.get("included", [])
+                    if p.get("type") == "new_player"
+                }
+                for _proj in _pp_data.get("data", []):
+                    _a = _proj.get("attributes", {})
+                    if str(_a.get("odds_type", "standard") or "standard").lower() not in ("standard", ""):
+                        continue
+                    if _a.get("adjusted_odds") or _a.get("is_live"):
+                        continue
+                    _pid = (_proj.get("relationships", {})
+                                 .get("new_player", {})
+                                 .get("data", {})
+                                 .get("id", ""))
+                    _pname = _pp_pmap.get(_pid, "")
+                    _line_v = _a.get("line_score")
+                    _stat   = _a.get("stat_type", "")
+                    if _pname and _line_v is not None and _stat:
+                        _pp_raw.append({"player_name": _pname,
+                                        "prop_type":   _stat,
+                                        "line":        float(_line_v)})
+
+            _ud_lookup = _build_ll(_ud_props)
+            _pp_lookup = _build_ll(_pp_raw)
+            _comp = _cmp_prop(pick.player_name, pick.prop_type, pick.side,
+                              _ud_lookup, _pp_lookup)
+            _line_comparison_note = _comp.get("note", "")
+
+            # If PrizePicks has a better line, update the pick's platform + line
+            if _comp.get("platform") == "PrizePicks" and _comp.get("line") is not None:
+                logger.info("[Streak] Better line on PrizePicks: %s (was UD %.1f)",
+                            _line_comparison_note, pick.line)
+                pick.platform = "PrizePicks"
+                pick.line     = _comp["line"]
+            elif _comp.get("platform") == "Underdog" and _comp.get("line") is not None:
+                pick.line = _comp["line"]   # confirm UD line from live fetch
+        except Exception as _lce:
+            logger.debug("[Streak] Line comparison error: %s", _lce)
 
     # Persist to DB
     if not dry_run:
