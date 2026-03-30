@@ -25,6 +25,48 @@ from __future__ import annotations
 import logging as _early_logging
 logger = _early_logging.getLogger("propiq.tasklets")
 
+# ── Simulation engine (Step 1 upgrade: distribution-based probabilities) ──────
+try:
+    from simulation_engine import simulate_prop as _simulate_prop, variance_penalty as _variance_penalty, inject_team_total as _inject_team_total
+    _SIM_ENGINE_AVAILABLE = True
+except ImportError:
+    _SIM_ENGINE_AVAILABLE = False
+    def _simulate_prop(prop, n_sims=10_000): return None   # noqa: E704
+    def _variance_penalty(result): return 1.0              # noqa: E704
+    def _inject_team_total(prop, hub): pass                # noqa: E704
+
+# ── Lock-Time Gate (Step 3 upgrade: prevent lookahead bias) ───────────────────
+try:
+    from lock_time_gate import (
+        should_skip_prop      as _should_skip_prop,
+        stamp_prop            as _stamp_prop,
+        fetch_game_times_today as _fetch_game_times_today,
+        data_is_contaminated  as _data_is_contaminated,
+    )
+    _LOCK_GATE_AVAILABLE = True
+except ImportError:
+    _LOCK_GATE_AVAILABLE = False
+    def _should_skip_prop(prop, game_times): return (False, "gate_unavailable")   # noqa: E704
+    def _stamp_prop(prop, game_times): return prop                                 # noqa: E704
+    def _fetch_game_times_today(): return {}                                       # noqa: E704
+    def _data_is_contaminated(prop, ts, game_times): return False                 # noqa: E704
+
+# ── CLV Feedback Engine (Step 2 upgrade: per-edge-tag adaptive thresholds) ────
+try:
+    from clv_feedback_engine import (
+        get_threshold       as _get_ev_threshold,
+        rebuild_thresholds  as _rebuild_ev_thresholds,
+        load_thresholds     as _load_ev_thresholds,
+        build_discord_summary as _clv_discord_summary,
+    )
+    _CLV_ENGINE_AVAILABLE = True
+except ImportError:
+    _CLV_ENGINE_AVAILABLE = False
+    def _get_ev_threshold(edge_reasons=None): return MIN_EV_THRESH   # noqa: E704
+    def _rebuild_ev_thresholds(): return {}                          # noqa: E704
+    def _load_ev_thresholds(): return {}                             # noqa: E704
+    def _clv_discord_summary(): return ""                            # noqa: E704
+
 # WagerBrain-enhanced odds math (bookmaker_margin, kelly_criterion, true_odds_ev)
 try:
     from odds_math import (
@@ -45,6 +87,12 @@ try:
     _SHRINKAGE_AVAILABLE = True
 except ImportError:
     _SHRINKAGE_AVAILABLE = False
+
+try:
+    from market_validator import stamp_market_validation as _stamp_market_validation
+    _MARKET_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _MARKET_VALIDATOR_AVAILABLE = False
 
 try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
@@ -366,6 +414,22 @@ def _kelly_units(edge: float, odds_american: int) -> float:
     q = 1 - p
     kelly = (b * p - q) / b
     return min(KELLY_FRACTION * kelly, MAX_UNIT_CAP)
+
+
+def _get_sample_count(prop_type: str) -> int:
+    """Return the number of settled ledger rows for this prop-type.
+    Used by thin-data shrinkage in _build_bet().
+    Populated by run_xgboost_tasklet() under key 'xgb_sample_counts'.
+    Returns 0 on any Redis miss/error (triggers max shrinkage for unknown types).
+    """
+    try:
+        raw = _redis().get("xgb_sample_counts")
+        if raw:
+            counts: dict = json.loads(raw)
+            return int(counts.get(str(prop_type).lower(), 0))
+    except Exception:
+        pass
+    return 0
 
 
 def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
@@ -1079,7 +1143,10 @@ def _ensure_bet_ledger() -> None:
                     graded_at       TIMESTAMP,
                     features_json   TEXT,
                     actual_outcome  INTEGER,
-                    created_at      TIMESTAMP    DEFAULT NOW()
+                    created_at      TIMESTAMP    DEFAULT NOW(),
+                    lookahead_safe  BOOLEAN      DEFAULT TRUE,
+                    game_time_utc   VARCHAR(30),
+                    game_state      VARCHAR(20)
                 )
             """)
         conn.commit()
@@ -1152,6 +1219,7 @@ def run_data_hub_tasklet() -> None:
             "lineups":            _fetch_mlb_lineups_today(),
             "projected_starters": _fetch_mlb_probable_starters(),
             "standings":          _fetch_mlb_standings(),
+            "game_times":         _fetch_game_times_today(),  # Step 3: first-pitch UTC + status
         }
         _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
 
@@ -1228,6 +1296,32 @@ class _BaseAgent:
 
     # shared helpers
     def _model_prob(self, player: str, prop_type: str, prop: dict | None = None, **_ignored) -> float:
+        # ── Step 1: Try distribution-based simulation engine first ────────────
+        # The simulation engine returns a proper outcome distribution and
+        # derives P(over) from it.  This replaces the single-scalar approach.
+        # Falls back to XGBoost / base_rate if sim engine unavailable.
+        if _SIM_ENGINE_AVAILABLE and prop:
+            try:
+                _inject_team_total(prop, self.hub)
+                sim = _simulate_prop(prop, n_sims=8_000)
+                if sim and sim.prob_over > 0.0:
+                    raw = sim.prob_over * 100.0
+                    # Apply variance penalty: wide distribution → reduce confidence
+                    pen = _variance_penalty(sim)
+                    # Shift probability toward 50% by penalty factor
+                    raw = 50.0 + (raw - 50.0) * pen
+                    # Store distribution on prop for downstream bet sizing / logging
+                    prop["_sim_prob_over"]    = round(sim.prob_over, 4)
+                    prop["_sim_mean"]         = sim.mean
+                    prop["_sim_std"]          = sim.std
+                    prop["_sim_dist"]         = sim.dist
+                    prop["_sim_edge_reasons"] = sim.edge_reasons
+                    prop["_sim_starter_prob"] = sim.starter_prob
+                    prop["_sim_bullpen_prob"]  = sim.bullpen_prob
+                    return round(max(5.0, min(95.0, raw)), 2)
+            except Exception as _sim_err:
+                logger.debug("[BaseAgent._model_prob] SimEngine error: %s", _sim_err)
+        # ── Fallback: XGBoost model ───────────────────────────────────────────
         if self.model:
             try:
                 import xgboost as xgb  # noqa: PLC0415
@@ -1245,6 +1339,12 @@ class _BaseAgent:
                                 feats_list[_idx] = 0.0
                 except Exception:
                     pass
+                # Pad / trim to FEATURE_DIM so old 20-feat models don't crash
+                _dim = _BaseAgent.FEATURE_DIM
+                if len(feats_list) < _dim:
+                    feats_list = feats_list + [0.0] * (_dim - len(feats_list))
+                elif len(feats_list) > _dim:
+                    feats_list = feats_list[:_dim]
                 feats = np.array([feats_list], dtype=np.float32)
                 if isinstance(self.model, xgb.Booster):
                     dmat = xgb.DMatrix(feats)
@@ -1280,20 +1380,33 @@ class _BaseAgent:
             except Exception:
                 pass
         if prop:
-            raw_p += float(prop.get("_bayesian_nudge", 0.0)) * 100.0
-            raw_p += float(prop.get("_cv_nudge",       0.0)) * 100.0
-            raw_p += float(prop.get("_form_adj",       0.0)) * 100.0
+            # Phase 91 Step 4: dampen correlated fallback adjustments
+            _fb_adjs = [
+                ("bayesian",        float(prop.get("_bayesian_nudge", 0.0)) * 100.0),
+                ("cv_consistency",  float(prop.get("_cv_nudge",       0.0)) * 100.0),
+                ("form_adj",        float(prop.get("_form_adj",       0.0)) * 100.0),
+            ]
+            _fb_adjs = [(n, d) for n, d in _fb_adjs if abs(d) >= 0.10]
+            if _fb_adjs:
+                try:
+                    from adjustment_dampener import dampen_adjustments as _dampen  # noqa: PLC0415
+                    raw_p = _dampen(raw_p, _fb_adjs, log_tag=prop.get("player", ""))
+                except Exception:
+                    for _, d in _fb_adjs:
+                        raw_p += d
         return round(max(5.0, min(95.0, raw_p)), 2)
 
 
     # ─────────────────────────────────────────────────────────────────────
-    # Feature vector (20 signals) — identical schema at INSERT and predict
+    # Feature vector (23 signals) — identical schema at INSERT and predict
     # ─────────────────────────────────────────────────────────────────────
+    FEATURE_DIM = 24  # bump when adding columns; old models padded automatically
+
     @staticmethod
     def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
-        """Return a 20-element float list usable by XGBoost.
+        """Return a 23-element float list usable by XGBoost.
         All values normalised to [0, 1] or small bounded floats.
-        Schema is FIXED — any future changes must keep len == 20.
+        Schema is FIXED — any future changes must keep len == FEATURE_DIM.
         """
         import math
 
@@ -1359,6 +1472,20 @@ class _BaseAgent:
         _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
         conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
 
+        # ── Pitch type whiff vs batter hand (slot 20) ─────────────────
+        # _pitch_whiff_vs_hand written by prop_enrichment_layer
+        pitch_whiff_vs_hand = _clamp(prop.get("_pitch_whiff_vs_hand", 0.25))
+
+        # ── Bullpen ERA normalized (slot 21) ──────────────────────────
+        # _bullpen_era written by prop_enrichment_layer; 4.5 ERA = 0.5
+        raw_bp_era = float(prop.get("_bullpen_era", 4.50) or 4.50)
+        bullpen_era_norm = _clamp(raw_bp_era / 9.0)
+
+        # ── Batting order slot normalized (slot 22) ───────────────────
+        # _batting_order_slot: 1=leadoff (0.0), 9=last (1.0); 0=unknown→0.44 (mid)
+        raw_slot = int(prop.get("_batting_order_slot", 0) or 0)
+        batting_order_norm = _clamp((raw_slot - 1) / 8.0) if raw_slot > 0 else 0.44
+
         vec = [
             k_rate, bb_rate, era, whip,          # 0-3  pitcher
             shadow_whiff, zone_mult,              # 4-5  statcast
@@ -1369,29 +1496,128 @@ class _BaseAgent:
             line_val, impl_prob,                  # 14-15 market
             pt_enc, side_enc,                     # 16-17 prop meta
             brier, conf_enc,                      # 18-19 calibration
+            pitch_whiff_vs_hand,                  # 20   pitch type matchup
+            bullpen_era_norm,                     # 21   bullpen strength
+            batting_order_norm,                   # 22   lineup slot
+            # Slot 23: simulation outcome variance — wide dist → model less confident
+            # Prevents stacked boosts from inflating confidence on high-variance props
+            _clamp(float(prop.get("_sim_std") or 0.0) / 3.0),  # 23  sim std (norm)
         ]
-        assert len(vec) == 20, f"Feature vector length {len(vec)} != 20"
+        assert len(vec) == 24, f"Feature vector length {len(vec)} != 24"
         return [round(v, 6) for v in vec]
 
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
-        # Apply shadow zone whiff boost before Kelly sizing (K-props only)
-        model_prob = apply_shadow_whiff_boost(
-            model_prob, prop, prop.get("prop_type", "")
-        )
-        # Zone integrity: FRAUD/ELITE_SHADOW multiplier from heart vs shadow whiff
-        pitcher_id = prop.get("mlbam_id") or prop.get("player_id")
-        model_prob = apply_zone_integrity_multiplier(
-            model_prob, prop.get("prop_type", ""), pitcher_id
-        )
-        # Lineup chase difficulty adjustment for pitcher K-props
+        # ── Phase 91 Step 4: collect post-model adjustments, apply with
+        #    correlation dampening to prevent stacked-signal inflation ──────
+        _prop_type  = prop.get("prop_type", "")
+        pitcher_id  = prop.get("mlbam_id") or prop.get("player_id")
+        _post_adjs: list[tuple[str, float]] = []
+
+        # Shadow zone whiff boost (K-props) — compute effective delta
+        _sw_prob = apply_shadow_whiff_boost(model_prob, prop, _prop_type)
+        if _sw_prob != model_prob:
+            _post_adjs.append(("shadow_whiff", _sw_prob - model_prob))
+
+        # Zone integrity multiplier (K-props) — convert to effective delta
+        _zi_prob = apply_zone_integrity_multiplier(model_prob, _prop_type, pitcher_id)
+        if abs(_zi_prob - model_prob) >= 0.01:
+            _post_adjs.append(("zone_integrity", _zi_prob - model_prob))
+
+        # Lineup chase difficulty (K-props) — compute delta
         _k_prop_types = {"strikeouts", "pitcher_strikeouts", "k", "ks"}
-        if prop.get("prop_type", "").lower() in _k_prop_types:
+        if _prop_type.lower() in _k_prop_types:
             _ctx_lineups = prop.get("_context_lineups", [])
             _opp_team    = prop.get("opposing_team", "")
             if _opp_team and _ctx_lineups:
-                _chase = get_lineup_chase_score(_opp_team, _ctx_lineups)
-                model_prob = round(model_prob + _chase["k_prob_adjustment"] * 100, 4)
+                _chase   = get_lineup_chase_score(_opp_team, _ctx_lineups)
+                _k_delta = _chase["k_prob_adjustment"] * 100
+                if abs(_k_delta) >= 0.01:
+                    _post_adjs.append(("chase_difficulty", _k_delta))
+
+        # Apply with correlation dampening (or pass-through if no adjustments)
+        if _post_adjs:
+            try:
+                from adjustment_dampener import (  # noqa: PLC0415
+                    dampen_adjustments   as _dampen,
+                    undampened_total     as _undampened,
+                )
+                _raw_total = _undampened(model_prob, _post_adjs)
+                model_prob = _dampen(
+                    model_prob, _post_adjs,
+                    log_tag=prop.get("player", ""),
+                )
+                # Persist both values for audit / feature vector
+                prop["_adj_raw_prob"]     = round(_raw_total, 4)
+                prop["_adj_dampened"]     = round(model_prob,  4)
+                prop["_adj_signals"]      = [n for n, _ in _post_adjs]
+            except Exception:
+                # Fallback: apply adjustments naively (safe degradation)
+                for _, delta in _post_adjs:
+                    model_prob = round(max(3.0, min(97.0, model_prob + delta)), 4)
+
+        # ── Phase 91 Step 5: Thin-data shrinkage ─────────────────────────────
+        # If this prop-type has few settled training rows, shrink model_prob
+        # toward the market implied probability. Proven prop-types pass through
+        # at full strength; cold-start prop-types are heavily dampened.
+        if _SHRINKAGE_AVAILABLE:
+            try:
+                from confidence_shrinkage import shrink_toward_market as _shrink_toward_market  # noqa: PLC0415
+                _n_samples = _get_sample_count(_prop_type)
+                _shrunk, _conf = _shrink_toward_market(
+                    model_prob_pct=model_prob,
+                    market_implied_pct=implied_prob * 100.0,
+                    n_samples=_n_samples,
+                )
+                prop["_shrinkage_n"]     = _n_samples
+                prop["_shrinkage_conf"]  = _conf
+                prop["_shrinkage_delta"] = round(_shrunk - model_prob, 3)
+                model_prob = _shrunk
+                logger.debug("[ThinData] %s %s n=%d conf=%.2f delta=%.2fpp",
+                             prop.get("player", ""), _prop_type,
+                             _n_samples, _conf,
+                             prop["_shrinkage_delta"])
+            except Exception as _se:
+                logger.debug("[ThinData] Shrinkage error: %s", _se)
+
+        # ── Phase 91 Step 6: Market line validation ───────────────────────────
+        # After shrinkage, check how far model_prob departs from the sportsbook's
+        # implied probability.  Divergence >20pp → soft-cap (likely data error).
+        # Divergence 12-20pp → WIDE flag (monitor).  Logs + stamps prop for audit.
+        if _MARKET_VALIDATOR_AVAILABLE:
+            try:
+                _market_implied_pct = implied_prob * 100.0
+                model_prob, _mv_valid = _stamp_market_validation(
+                    prop,
+                    model_prob_pct=model_prob,
+                    market_implied_pct=_market_implied_pct,
+                )
+                if not _mv_valid:
+                    logger.error(
+                        "[MarketValidator] INVALID prob after validation %s %s prob=%.1f",
+                        prop.get("player", ""), _prop_type, model_prob,
+                    )
+            except Exception as _mve:
+                logger.debug("[MarketValidator] Error: %s", _mve)
+
+        # ── Recalculate ev_pct from final model_prob (shrinkage + cap may have changed it) ──
+        # ev_pct was computed from raw model_p before _build_bet(); recalculate
+        # so Kelly / confidence downstream reflect the actual adjusted probability.
+        try:
+            _side_american = (
+                prop.get("over_american",  prop.get("odds_american", -115))
+                if side == "OVER"
+                else prop.get("under_american", prop.get("odds_american", -115))
+            )
+            _decimal = (
+                (100 / abs(_side_american) + 1) if _side_american < 0
+                else (_side_american / 100 + 1)
+            )
+            _profit  = _decimal - 1
+            ev_pct   = round((_profit * (model_prob / 100) - (1 - model_prob / 100)) * 100, 3)
+        except Exception:
+            pass   # keep original ev_pct on error
+
         side_odds = (
             prop.get("over_american",  prop.get("odds_american", -115))
             if side == "OVER"
@@ -1429,6 +1655,13 @@ class _BaseAgent:
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.utcnow().isoformat(),
             "_features_json":     json.dumps(_feat_vec),
+            # Simulation engine outputs (present only when sim ran successfully)
+            "sim_mean":           prop.get("_sim_mean"),
+            "sim_std":            prop.get("_sim_std"),
+            "sim_dist":           prop.get("_sim_dist"),
+            "sim_edge_reasons":   prop.get("_sim_edge_reasons", []),
+            "sim_starter_prob":   prop.get("_sim_starter_prob"),
+            "sim_bullpen_prob":   prop.get("_sim_bullpen_prob"),
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
@@ -1542,7 +1775,7 @@ class _UnderMachine(_BaseAgent):
         else:
             ev_pct = (model_prob / 100 - implied) / implied
 
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1601,7 +1834,7 @@ class _UmpireAgent(_BaseAgent):
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1638,7 +1871,7 @@ class _F5Agent(_BaseAgent):
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1681,7 +1914,7 @@ class _FadeAgent(_BaseAgent):
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
         ev_pct     = (fade_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", fade_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1728,7 +1961,7 @@ class _LineValueAgent(_BaseAgent):
         over_odds  = prop.get("over_american", -110)
         implied    = _american_to_implied(over_odds) / 100
         ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1774,7 +2007,7 @@ class _BullpenAgent(_BaseAgent):
         over_odds = prop.get("over_american", -110)
         implied   = _american_to_implied(over_odds) / 100
         ev_pct    = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1828,7 +2061,7 @@ class _WeatherAgent(_BaseAgent):
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
             ev_pct     = (model_prob / 100 - implied) / implied
-            if ev_pct >= MIN_EV_THRESH:
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "OVER", model_prob,
                                        implied * 100, ev_pct * 100)
 
@@ -1840,7 +2073,7 @@ class _WeatherAgent(_BaseAgent):
             over_odds  = prop.get("over_american", -110)
             implied    = _american_to_implied(over_odds) / 100
             ev_pct     = (model_prob / 100 - implied) / implied
-            if ev_pct >= MIN_EV_THRESH:
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "OVER", model_prob,
                                        implied * 100, ev_pct * 100)
 
@@ -1900,7 +2133,7 @@ class _SteamAgent(_BaseAgent):
             model_prob = 100 - model_prob  # flip for Under
 
         ev_pct = (model_prob / 100 - implied) / implied
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, fade_side, model_prob,
                                    implied * 100, ev_pct * 100)
         return None
@@ -1926,7 +2159,7 @@ class _MLEdgeAgent(_BaseAgent):
         odds   = over_odds if side == "OVER" else prop.get("under_american", -110)
         imp    = _american_to_implied(odds)
         ev_pct = (model_prob / 100 - imp) / imp
-        if ev_pct >= MIN_EV_THRESH:
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, side, model_prob, imp * 100, ev_pct * 100)
         return None
 
@@ -2096,12 +2329,246 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
     return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
 
 
+class _CorrelatedParlayAgent(_BaseAgent):
+    """Finds props within the same game that are positively correlated
+    (e.g. pitcher facing a high-K lineup → striker Ks UP + opposing batters hits DOWN).
+    Targets the cross-side EV boost when both legs reinforce the same game narrative.
+    """
+    name = "CorrelatedParlayAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        team      = prop.get("team", "")
+        opp_team  = prop.get("opposing_team", "")
+        if not (team and opp_team):
+            return None
+        # Pitcher strikeout correlation: high K-lineup + chase-heavy opponent
+        if prop_type in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
+            chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
+            if chase_adj < 0.03:  # opponent isn't a high-chase lineup
+                return None
+        model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        over_odds  = prop.get("over_american", -115)
+        implied    = _american_to_implied(over_odds) * 100
+        ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _StackSmithAgent(_BaseAgent):
+    """Builds same-game team stacks.
+    Targets multiple batters from the same lineup against a fatigued bullpen
+    or a pitcher with poor zone metrics.  Fires on batter props only.
+    """
+    name = "StackSmithAgent"
+
+    _BATTER_TYPES = {"hits", "total_bases", "home_runs", "rbis", "runs_scored", "singles"}
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        if prop_type not in self._BATTER_TYPES:
+            return None
+        # Stack signal: opposing pitcher has high ERA or low K rate
+        era   = float(prop.get("era", 4.20) or 4.20)
+        k_rate = float(prop.get("k_rate", 0.22) or 0.22)
+        # Only stack against pitchers with ERA > 4.5 or K-rate < 0.20
+        if era <= 4.50 and k_rate >= 0.20:
+            return None
+        model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        over_odds  = prop.get("over_american", -115)
+        implied    = _american_to_implied(over_odds) * 100
+        ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _ChalkBusterAgent(_BaseAgent):
+    """Fades heavy public chalk — seeks value on under-served unders and contrarian overs
+    when public betting percentage diverges sharply from model probability.
+    """
+    name = "ChalkBusterAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        market     = self.hub.get("market", {})
+        pub        = market.get("public_betting", {})
+        player     = prop.get("player", "")
+        prop_type  = prop.get("prop_type", "").lower()
+        pub_over   = float(pub.get(player, {}).get("over_pct", 50) if isinstance(pub.get(player), dict) else 50)
+        # Fade if public is piling on overs (>68%) — contrarian under edge
+        if pub_over > 68:
+            model_prob = self._model_prob(player, prop_type, prop=prop)
+            under_odds = prop.get("under_american", -115)
+            implied    = _american_to_implied(under_odds) * 100
+            under_prob = 100.0 - model_prob
+            ev_pct     = (under_prob / 100 - _american_to_implied(under_odds)) / _american_to_implied(under_odds) * 100
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, "UNDER", model_prob, implied, ev_pct)
+        return None
+
+
+class _SharpFadeAgent(_BaseAgent):
+    """Follows reverse line movement — fires when public money is on one side
+    but the line moves the other way (sharp money signal).
+    Uses ticket%/money% divergence from SBD/The Odds API.
+    """
+    name = "SharpFadeAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        market    = self.hub.get("market", {})
+        sbd       = market.get("sharp_report", [])
+        player    = prop.get("player", "")
+        prop_type = prop.get("prop_type", "").lower()
+        for entry in sbd:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("player", "").lower() != player.lower():
+                continue
+            ticket_pct = float(entry.get("ticket_pct", 50) or 50)
+            money_pct  = float(entry.get("money_pct",  50) or 50)
+            # Sharp signal: ≥15pp divergence (money% < ticket% = sharp on UNDER)
+            divergence = ticket_pct - money_pct
+            if abs(divergence) < 15:
+                continue
+            sharp_side = "UNDER" if divergence > 0 else "OVER"
+            model_prob = self._model_prob(player, prop_type, prop=prop)
+            odds       = prop.get("under_american", -115) if sharp_side == "UNDER" else prop.get("over_american", -115)
+            implied    = _american_to_implied(odds) * 100
+            prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
+            ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+        return None
+
+
+class _TimeValueAgent(_BaseAgent):
+    """Time-based edge agent.
+    Targets props where line value has drifted since open — captures overnight
+    steam and early-sharp movement by comparing current implied vs model.
+    Also applies a dome/afternoon multiplier (dome + day game = higher scoring pace).
+    """
+    name = "TimeValueAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        is_dome   = bool(prop.get("_is_dome", False))
+        temp_f    = float(prop.get("_temp_f", 72.0) or 72.0)
+        # Dome boost for batter props — controlled environment inflates totals
+        batter_types = {"hits", "total_bases", "home_runs", "rbis", "runs_scored"}
+        dome_boost = 2.5 if (is_dome and prop_type in batter_types) else 0.0
+        # Hot weather boost for batter power props
+        temp_boost = 1.5 if (temp_f >= 85 and prop_type in {"home_runs", "total_bases"}) else 0.0
+        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        model_prob  = min(95.0, model_prob + dome_boost + temp_boost)
+        over_odds   = prop.get("over_american", -115)
+        implied     = _american_to_implied(over_odds) * 100
+        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _LineupChaseAgent(_BaseAgent):
+    """Lineup confirmation specialist.
+    Only fires once confirmed lineups are in DataHub.  Applies max lineup-chase
+    difficulty boost for pitcher K-props against strikeout-prone lineups.
+    """
+    name = "LineupChaseAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        lineups = self.hub.get("context", {}).get("lineups", [])
+        if not lineups:
+            return None  # wait for confirmed lineups
+        prop_type = prop.get("prop_type", "").lower()
+        if prop_type not in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
+            return None
+        chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
+        if chase_adj < 0.04:  # only high-chase lineups
+            return None
+        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        model_prob  = min(95.0, model_prob + chase_adj * 120)
+        over_odds   = prop.get("over_american", -115)
+        implied     = _american_to_implied(over_odds) * 100
+        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+        return None
+
+
+class _PropCycleAgent(_BaseAgent):
+    """Prop cycle tracker.
+    Detects when a prop line has been consistently above (or below) a player's
+    recent rolling average — captures mean-reversion value on over/under.
+    Uses _form_adj and _cv_nudge enrichment signals already on the prop.
+    """
+    name = "PropCycleAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        prop_type = prop.get("prop_type", "").lower()
+        form_adj  = float(prop.get("_form_adj", 0.0))
+        cv_nudge  = float(prop.get("_cv_nudge", 0.0))
+        # Needs meaningful form signal to fire
+        if abs(form_adj) < 0.02 and abs(cv_nudge) < 0.02:
+            return None
+        # Positive form + positive CV = OVER cycle; negative = UNDER cycle
+        cycle_score = form_adj + cv_nudge
+        side        = "OVER" if cycle_score > 0 else "UNDER"
+        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+        # Boost model in direction of cycle
+        boost       = abs(cycle_score) * 100 * 0.5  # max ~5pp at 0.10 score
+        model_prob  = min(95.0, model_prob + (boost if side == "OVER" else -boost))
+        odds        = prop.get("over_american", -115) if side == "OVER" else prop.get("under_american", -115)
+        implied     = _american_to_implied(odds) * 100
+        prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
+        ev_pct      = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, side, model_prob, implied, ev_pct)
+        return None
+
+
+class _UnderDogAgent(_BaseAgent):
+    """Underdog Fantasy specialist.
+    Only evaluates props sourced directly from Underdog Fantasy.
+    Targets lines where Underdog has moved away from the sharp-book consensus
+    (Underdog line < consensus implied = over value; > consensus = under value).
+    """
+    name = "UnderDogAgent"
+
+    def evaluate(self, prop: dict) -> dict | None:
+        if prop.get("platform", "").lower() != "underdog":
+            return None
+        player    = prop.get("player", "")
+        prop_type = prop.get("prop_type", "").lower()
+        # Get sharp consensus from hub market data
+        sharp_prob = _get_sharp_consensus(self.hub, player, prop_type)
+        if sharp_prob is None:
+            return None
+        ud_over_odds = prop.get("over_american", -115)
+        ud_implied   = _american_to_implied(ud_over_odds) * 100
+        divergence   = sharp_prob - ud_implied
+        if abs(divergence) < 5.0:  # need at least 5pp gap vs sharp books
+            return None
+        side       = "OVER" if divergence > 0 else "UNDER"
+        model_prob = self._model_prob(player, prop_type, prop=prop)
+        odds       = ud_over_odds if side == "OVER" else prop.get("under_american", -115)
+        implied    = _american_to_implied(odds) * 100
+        prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
+        ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, side, model_prob, implied, ev_pct)
+        return None
+
+
 # Module-level SteamMonitor instance — tracks line movement across DataHub refreshes
 _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _SteamAgent, _MLEdgeAgent,
+    # Phase 90 — 8 new agents complete the roster to 18
+    _CorrelatedParlayAgent, _StackSmithAgent, _ChalkBusterAgent, _SharpFadeAgent,
+    _TimeValueAgent, _LineupChaseAgent, _PropCycleAgent, _UnderDogAgent,
 ]
 
 
@@ -2280,6 +2747,21 @@ def run_agent_tasklet() -> None:
     # This populates the fields _build_feature_vector() reads (k_rate, shadow_whiff, etc.)
     import datetime as _dt
     props = _enrich_props(props, hub, season=_dt.date.today().year)
+
+    # ── Step 3: Stamp game_time_utc / game_state / lookahead_safe on each prop ──
+    game_times = (hub.get("context") or {}).get("game_times", {})
+    if _LOCK_GATE_AVAILABLE and game_times:
+        for _p in props:
+            _stamp_prop(_p, game_times)
+        props_before = len(props)
+        props = [
+            p for p in props
+            if not _should_skip_prop(p, game_times)[0]
+        ]
+        dropped = props_before - len(props)
+        if dropped:
+            logger.info("[LockGate] Dropped %d props (game Live/Final).", dropped)
+
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
 
     all_parlays: list[dict] = []
@@ -2412,10 +2894,11 @@ def run_agent_tasklet() -> None:
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
-                             units_wagered)
+                             units_wagered, sim_edge_reasons,
+                             lookahead_safe, game_time_utc, game_state)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s))
+                                ABS(%s), %s, %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -2432,6 +2915,10 @@ def run_agent_tasklet() -> None:
                             (_leg.get("recommended_platform") or "prizepicks").lower(),
                             _leg.get("_features_json"),
                             _leg.get("kelly_units") or 0.02,
+                            __import__("json").dumps(_leg.get("sim_edge_reasons") or []),
+                            _leg.get("lookahead_safe", True),
+                            _leg.get("game_time_utc", ""),
+                            _leg.get("game_state", "unknown"),
                         ),
                     )
         _conn.commit()
@@ -2652,7 +3139,14 @@ def run_backtest_tasklet() -> None:
         logger.info("[BacktestTasklet] Insufficient data (%d rows) — skipping.", len(rows))
         return
 
-    X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
+    # Normalize all feature vectors to FEATURE_DIM (handles mixed 20/23 rows)
+    _bt_fdim = _BaseAgent.FEATURE_DIM
+    _bt_raw = [json.loads(r[0]) for r in rows]
+    _bt_raw = [
+        v + [0.0] * (_bt_fdim - len(v)) if len(v) < _bt_fdim else v[:_bt_fdim]
+        for v in _bt_raw
+    ]
+    X = np.array(_bt_raw, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     split      = int(len(X) * 0.8)
@@ -2700,6 +3194,20 @@ def run_backtest_tasklet() -> None:
     else:
         logger.warning("[BacktestTasklet] ⚠️ Model below threshold (%.3f < %.3f). "
                        "Retraining queued.", accuracy, ACCURACY_THRESHOLD)
+
+    # ── Step 2: Rebuild edge thresholds from settled bet history ──────────────
+    # After every weekly retrain, update per-tag EV thresholds so edge types
+    # with proven win-rates lower their bar and noisy edge types raise theirs.
+    try:
+        new_thresholds = _rebuild_ev_thresholds()
+        if new_thresholds:
+            logger.info("[BacktestTasklet] 🎯 Rebuilt %d edge thresholds: %s",
+                        len(new_thresholds), new_thresholds)
+        else:
+            logger.info("[BacktestTasklet] No edge threshold overrides generated "
+                        "(insufficient settled history).")
+    except Exception as _thr_exc:
+        logger.warning("[BacktestTasklet] Edge threshold rebuild failed: %s", _thr_exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3146,6 +3654,7 @@ def run_xgboost_tasklet() -> None:
                 WHERE graded_at IS NOT NULL
                   AND features_json IS NOT NULL
                   AND actual_outcome IS NOT NULL
+                  AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                 ORDER BY graded_at DESC
                 LIMIT 20000
                 """
@@ -3159,7 +3668,14 @@ def run_xgboost_tasklet() -> None:
         logger.info("[XGBoostTasklet] Insufficient training data (%d rows) — skipping.", len(rows))
         return
 
-    X = np.array([json.loads(r[0]) for r in rows], dtype=np.float32)
+    # Normalize all feature vectors to FEATURE_DIM (handles mixed 20/23 rows)
+    FEATURE_DIM = _BaseAgent.FEATURE_DIM
+    X_raw = [json.loads(r[0]) for r in rows]
+    X_raw = [
+        v + [0.0] * (FEATURE_DIM - len(v)) if len(v) < FEATURE_DIM else v[:FEATURE_DIM]
+        for v in X_raw
+    ]
+    X = np.array(X_raw, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
@@ -3218,6 +3734,29 @@ def run_xgboost_tasklet() -> None:
         "target_accuracy": 0.842,
         "passed":        accuracy >= 0.777,
     }))
+
+    # ── Phase 91 Step 5: Cache per-prop-type sample counts for thin-data shrinkage ──
+    # Agents read this at bet-evaluation time to know how much to trust the model
+    # for prop types with few settled training rows.
+    try:
+        _sc_conn = _pg_conn()
+        with _sc_conn.cursor() as _sc_cur:
+            _sc_cur.execute(
+                """
+                SELECT prop_type, COUNT(*) AS n
+                FROM bet_ledger
+                WHERE actual_outcome IS NOT NULL
+                  AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
+                GROUP BY prop_type
+                """
+            )
+            _counts = {row[0]: int(row[1]) for row in _sc_cur.fetchall() if row[0]}
+        _sc_conn.close()
+        r.setex("xgb_sample_counts", 604800, json.dumps(_counts))
+        logger.info("[XGBoostTasklet] Cached sample counts for %d prop types: %s",
+                    len(_counts), _counts)
+    except Exception as _sce:
+        logger.warning("[XGBoostTasklet] Could not cache sample counts: %s", _sce)
 
     logger.info("[XGBoostTasklet] Retrain complete. Accuracy=%.3f | Train=%d Test=%d | Saved→%s",
                 accuracy, len(X_train), len(X_test), model_path)
