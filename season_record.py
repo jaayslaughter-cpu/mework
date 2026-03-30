@@ -175,6 +175,48 @@ def get_pending_parlays(date: str) -> list[dict]:
             pass
 
 
+def get_all_pending_parlays() -> list[dict]:
+    """Return ALL PENDING parlays across all dates (for rollover settlement).
+
+    Used by nightly_recap.py to pick up any prior-day parlays where games
+    ran past the midnight window and could not be settled the previous night.
+    """
+    conn = _get_conn()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, date, agent_name, stake, legs_json
+                FROM   propiq_season_record
+                WHERE  status = 'PENDING'
+                ORDER  BY date ASC
+                """
+            )
+            rows = cur.fetchall()
+        results = []
+        for row in rows:
+            pid, date, agent, stake, legs_json = row
+            legs = json.loads(legs_json) if legs_json else []
+            results.append({
+                "id": pid,
+                "date": str(date),
+                "agent_name": agent,
+                "stake": float(stake),
+                "legs": legs,
+            })
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SeasonRecord] get_all_pending_parlays failed: %s", exc)
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def get_overall_season_stats() -> dict:
     """Return aggregate W/L/ROI stats for the full season."""
     conn = _get_conn()

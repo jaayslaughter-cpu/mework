@@ -22,10 +22,11 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from espn_scraper import get_all_player_stats
+from espn_scraper import get_all_player_stats, get_game_states
 from settlement_engine import settle_parlay
 from season_record import (
     get_pending_parlays,
+    get_all_pending_parlays,
     settle_parlay_record,
     get_overall_season_stats,
 )
@@ -221,8 +222,8 @@ def run(settle_date: Optional[str] = None) -> None:
 
     logger.info("=== PropIQ Nightly Settlement: %s ===", settle_date)
 
-    # 1. Fetch all PENDING parlays for this date
-    pending = get_pending_parlays(settle_date)
+    # 1. Fetch all PENDING parlays across all dates (rollover-aware)
+    pending = get_all_pending_parlays()
     if not pending:
         logger.info("No PENDING parlays for %s — nothing to settle", settle_date)
         # Still post a recap showing no action today
@@ -244,6 +245,30 @@ def run(settle_date: Optional[str] = None) -> None:
     # 3. Settle each parlay
     settled_results = []
     for parlay_row in pending:
+        # ── Rollover guard: skip parlays whose games haven't finished yet ──
+        parlay_date = parlay_row.get("date", settle_date)
+        espn_parlay_date = parlay_date.replace("-", "") if isinstance(parlay_date, str) else settle_date.replace("-", "")
+        parlay_games = get_game_states(espn_parlay_date)
+        # If ESPN returned data and NO games are FINAL at all → skip
+        all_final = all(g["status"] == "FINAL" for g in parlay_games) if parlay_games else True
+        # Force-settle after 2 days to prevent permanent hangs
+        today_et = datetime.now(timezone.utc).date()
+        parlay_dt = datetime.strptime(parlay_date, "%Y-%m-%d").date() if isinstance(parlay_date, str) else today_et
+        days_old = (today_et - parlay_dt).days
+        if not all_final and days_old < 2:
+            logger.info(
+                "[Rollover] Parlay %s from %s skipped — games not yet FINAL (age=%d day(s))",
+                parlay_row.get("id"), parlay_date, days_old
+            )
+            continue  # leave PENDING, pick up tomorrow night
+        # If 2+ days old with no final stats → force PUSH to avoid permanent hang
+        if not all_final and days_old >= 2:
+            logger.warning(
+                "[Rollover] Parlay %s from %s force-pushed after %d days without FINAL stats",
+                parlay_row.get("id"), parlay_date, days_old
+            )
+            # fall through to normal settle_parlay — will PUSH legs without stats
+
         parlay_id  = parlay_row["id"]
         agent_name = parlay_row["agent_name"]
         stake      = parlay_row["stake"]

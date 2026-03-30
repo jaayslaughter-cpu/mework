@@ -743,7 +743,8 @@ def main() -> None:
             moves = detect_steam_moves(props, previous_snap)
             if moves:
                 logger.info("[Steam] %d significant moves detected", len(moves))
-                post_steam_alert(today, moves)
+                # post_steam_alert(today, moves)  # Phase 95: removed intra-day Discord alert
+                logger.info("[Phase95] Steam moves detected (%d) — Discord suppressed", len(moves))
             else:
                 logger.info("[Steam] No significant moves this window")
         else:
@@ -763,7 +764,8 @@ def main() -> None:
         parlays = get_pending_parlays(today)
         if parlays and player_stats:
             enriched = check_parlay_legs_live(parlays, player_stats)
-            post_ingame_update(today, enriched, games)
+            # post_ingame_update(today, enriched, games)  # Phase 95: removed intra-day Discord alert
+            logger.info("[Phase95] In-game update computed (%d parlays) — Discord suppressed", len(enriched))
         else:
             logger.info("[InGame] No pending parlays or no ESPN stats — skipping update")
 
@@ -783,7 +785,8 @@ def main() -> None:
             parlays = get_pending_parlays(today)
             if parlays:
                 clv_results = compute_and_store_clv(conn, today, parlays)
-                post_clv_report(today, clv_results)
+                # post_clv_report(today, clv_results)  # Phase 95: removed intra-day Discord alert
+                logger.info("[Phase95] CLV report computed — Discord suppressed")
             else:
                 logger.info("[CLV] No pending parlays found for CLV calc")
         else:
