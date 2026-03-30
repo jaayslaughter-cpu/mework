@@ -136,9 +136,12 @@ class SavantFetcher:
                 logger.warning("[Savant] Empty CSV for %s", name)
                 return None
 
-            df.to_parquet(cache, index=False)
-            logger.info("[Savant] %s → %d rows cached", name, len(df))
-            return df
+            if not df.empty:
+                df.to_parquet(cache, index=False)
+                logger.info("[Savant] %s → %d rows cached", name, len(df))
+            else:
+                logger.info("[Savant] %s → empty, not caching (will retry tomorrow)", name)
+            return df if not df.empty else None
 
         except ImportError:
             logger.warning("[Savant] pandas/requests not available")
@@ -156,9 +159,18 @@ class SavantFetcher:
         year = self._today_year()
         url = (
             f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-            f"?type=batter&year={year}&position=&team=&min=q&csv=true"
+            f"?type=batter&year={year}&position=&team=&min=10&csv=true"
         )
         df = self._csv_to_df(url, f"savant_batter_expected_{year}")
+        # If current year returns empty (early season), fall back to prior year
+        if df is None or df.empty:
+            prior_year = year - 1
+            logger.info("[Savant] %d batter data empty — falling back to %d", year, prior_year)
+            url_prior = (
+                f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+                f"?type=batter&year={prior_year}&position=&team=&min=q&csv=true"
+            )
+            df = self._csv_to_df(url_prior, f"savant_batter_expected_{prior_year}")
         if df is None or df.empty:
             return {}
 
@@ -202,14 +214,23 @@ class SavantFetcher:
         # Primary: expected stats (contact quality allowed)
         url_exp = (
             f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-            f"?type=pitcher&year={year}&position=&team=&min=q&csv=true"
+            f"?type=pitcher&year={year}&position=&team=&min=10&csv=true"
         )
         df_exp = self._csv_to_df(url_exp, f"savant_pitcher_expected_{year}")
+        # Fall back to prior year if current season is empty (early April)
+        if df_exp is None or df_exp.empty:
+            prior_year = year - 1
+            logger.info("[Savant] %d pitcher data empty — falling back to %d", year, prior_year)
+            df_exp = self._csv_to_df(
+                f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
+                f"?type=pitcher&year={prior_year}&position=&team=&min=q&csv=true",
+                f"savant_pitcher_expected_{prior_year}"
+            )
 
         # Secondary: statcast leaderboard (whiff%)
         url_ldr = (
             f"https://baseballsavant.mlb.com/statcast_leaderboard"
-            f"?year={year}&abs=&player_type=pitcher&min_pitches=q&csv=true"
+            f"?year={year}&abs=&player_type=pitcher&min_pitches=50&csv=true"
         )
         df_ldr = self._csv_to_df(url_ldr, f"savant_pitcher_leaderboard_{year}")
 

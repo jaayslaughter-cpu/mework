@@ -242,7 +242,9 @@ def _load() -> None:
         except Exception as exc:
             logger.warning("[FG] Cache read failed (%s) — fetching live", exc)
 
-    # ── Live fetch — try current year, fall back to previous ────────────────
+    # ── Live fetch — prefer current year data, blend with prior if sample small ─
+    # min=10 PA threshold means 2026 data appears from Opening Day.
+    # If 2026 has <100 players (early season), merge with 2025 for stability.
     for yr in (season, season - 1):
         logger.info("[FG] Fetching season %d from FanGraphs API...", yr)
 
@@ -262,6 +264,27 @@ def _load() -> None:
             "[FG] Loaded %d batters  %d pitchers from season %d",
             len(_BATTER_CACHE), len(_PITCHER_CACHE), yr,
         )
+
+        # ── Blend with prior year when current season sample is small ──────────
+        # Early season (April/May): 2026 has <150 players vs 2025's ~700+
+        # Merge: prefer 2026 values when available, fill gaps with 2025
+        if yr == season and len(_BATTER_CACHE) < 150:
+            logger.info(
+                "[FG] Season %d small sample (%d batters) — blending with %d",
+                yr, len(_BATTER_CACHE), yr - 1,
+            )
+            prior_bat = _parse_batters(_fetch_season("bat", yr - 1))
+            prior_pit = _parse_pitchers(_fetch_season("pit", yr - 1))
+            # Merge: current season overrides prior (current is more recent)
+            merged_bat = {**prior_bat, **_BATTER_CACHE}
+            merged_pit = {**prior_pit, **_PITCHER_CACHE}
+            _BATTER_CACHE  = merged_bat
+            _PITCHER_CACHE = merged_pit
+            logger.info(
+                "[FG] Blended cache: %d batters, %d pitchers (current=%d + prior=%d)",
+                len(_BATTER_CACHE), len(_PITCHER_CACHE),
+                len(_BATTER_CACHE), len(prior_bat),
+            )
 
         # ── Persist cache ────────────────────────────────────────────────────
         try:

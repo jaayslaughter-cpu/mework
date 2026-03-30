@@ -53,9 +53,43 @@ def _get_conn():
 # Fetch settled bets from propiq_season_record
 # ---------------------------------------------------------------------------
 def fetch_settled_bets(days: int = 30, agent_name: str | None = None) -> list[dict]:
-    """Return settled bets with per-leg probabilities from legs_json."""
+    """Return settled bets with per-leg model_prob from bet_ledger.
+    Falls back to propiq_season_record.legs_json if bet_ledger unavailable."""
     since = (date.today() - timedelta(days=days)).isoformat()
-    query = """
+    # Primary: bet_ledger has per-row model_prob (accurate for calibration)
+    primary_query = """
+        SELECT agent_name, model_prob, status, ev_pct, bet_date
+        FROM bet_ledger
+        WHERE graded_at >= %s
+          AND model_prob IS NOT NULL
+          AND status IN ('WIN', 'LOSS', 'PUSH')
+    """
+    if agent_name:
+        primary_query += " AND agent_name = %s"
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            params = (since, agent_name) if agent_name else (since,)
+            cur.execute(primary_query, params)
+            rows = cur.fetchall()
+        conn.close()
+        if rows:
+            bets = []
+            for row in rows:
+                bets.append({
+                    "agent_name": row[0],
+                    "model_prob": float(row[1] or 0.5),
+                    "status":     row[2],
+                    "ev_pct":     float(row[3] or 0),
+                    "leg_probs":  [float(row[1] or 0.5)],  # single prob per bet
+                })
+            logger.info("[CalibMonitor] Loaded %d bets from bet_ledger", len(bets))
+            return bets
+    except Exception as exc:
+        logger.warning("[CalibMonitor] bet_ledger read failed (%s), falling back to season_record", exc)
+
+    # Fallback: propiq_season_record legs_json
+    fallback_query = """
         SELECT agent_name, legs_json, status, confidence, created_at
         FROM propiq_season_record
         WHERE status IN ('WIN', 'LOSS', 'PUSH')

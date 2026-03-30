@@ -57,6 +57,12 @@ except ImportError:
     def _get_all_units() -> dict: return {}  # noqa: E704
 
 # ── Phase 27: Enhancement layer imports (all optional -- graceful fallback) ──
+# Phase 98: Bullpen fatigue scorer
+try:
+    from bullpen_fatigue_scorer import BullpenFatigueScorer as _BullpenFatigueScorer
+    _BULLPEN_FATIGUE_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _BULLPEN_FATIGUE_AVAILABLE = False
 try:
     from draftedge_scraper import enrich_props_with_draftedge as _de_enrich
     _DE_AVAILABLE = True
@@ -1190,6 +1196,8 @@ class PropLeg:
     # Phase 44 (Layer 9): CV consistency gate
     mlbam_id:        int   = 0     # MLBAM player ID (for CV game log fetch)
     cv_nudge:        float = 0.0   # probability nudge from CV consistency layer
+    # Phase 98: bullpen fatigue score for opposing team's relievers (0=fresh, 4=exhausted, 2=neutral)
+    bullpen_fatigue: float = 2.0
     # Phase 92: line comparison note for Discord (e.g. "PrizePicks 1.5 vs Underdog 2.0 (PP -0.5 ✅ OVER)")
     line_comparison_note: str = ""
 
@@ -1222,10 +1230,17 @@ def build_parlay(
         Phase 47: applies Platt temperature scaling to compress overconfident
         raw probabilities.  T=1.5 by default (conservative prior); refitted
         nightly after >= 30 graded picks per agent.
+        Phase 98: BullpenAgent/VultureStack apply bullpen fatigue boost.
+          fatigue 4.0 (exhausted) -> +0.03 on Under ER/Runs props
+          fatigue 2.0 (neutral)   ->  0.00 (no change)
+          fatigue 0.0 (fresh)     -> -0.03 (reduces Under probability)
         """
         raw = leg.prob_pre_form if _use_pre_form else leg.implied_prob
         if _TEMP_CAL_AVAILABLE and agent_T != 1.0:
-            return _apply_temperature(raw, agent_T)
+            raw = _apply_temperature(raw, agent_T)
+        # Phase 98: fatigue adjustment for bullpen-facing agents
+        if agent["name"] in ("BullpenAgent", "VultureStack"):
+            raw = min(0.95, max(0.05, raw + (leg.bullpen_fatigue - 2.0) * 0.015))
         return raw
 
     filtered = [
@@ -1616,6 +1631,30 @@ class LiveDispatcher:
             "[Dome] Venue map: %d teams | Player map: %d players",
             len(self._team_venue_map), len(self._player_team_map),
         )
+
+        # ── Phase 98: Pre-fetch bullpen fatigue scores (once per cycle) ──────
+        self._team_fatigue_cache: dict[str, float] = {}
+        if _BULLPEN_FATIGUE_AVAILABLE:
+            try:
+                _scorer = _BullpenFatigueScorer()
+                _all_teams = (
+                    {g.get("home_team", "") for g in games}
+                    | {g.get("away_team", "") for g in games}
+                ) - {""}
+                for _tm in _all_teams:
+                    self._team_fatigue_cache[_tm] = _scorer.get_team_fatigue(_tm)
+                logger.info(
+                    "[Phase98] Bullpen fatigue loaded: %d teams (avg=%.2f)",
+                    len(self._team_fatigue_cache),
+                    sum(self._team_fatigue_cache.values()) / max(len(self._team_fatigue_cache), 1),
+                )
+            except Exception as _fat_err:
+                logger.warning(
+                    "[Phase98] Bullpen fatigue load failed: %s -- neutral 2.0 applied",
+                    _fat_err,
+                )
+        else:
+            logger.debug("[Phase98] BullpenFatigueScorer not available -- neutral 2.0 applied")
 
         # 2. Fetch live props from both platforms
         pp_props = fetch_prizepicks_props()
@@ -2580,6 +2619,10 @@ class LiveDispatcher:
                     sb_implied_prob=float(chosen_entry.get("sb_implied_prob", 0.0) or 0.0),
                     sb_line_gap=float(chosen_entry.get("sb_line_gap", 0.0) or 0.0),
                     mlbam_id=int(chosen_entry.get("mlbam_id", 0) or 0),
+                    # Phase 98: bullpen fatigue for opposing team's relievers
+                    bullpen_fatigue=self._team_fatigue_cache.get(
+                        str(chosen_entry.get("opposing_team", "") or ""), 2.0
+                    ),
                     # Phase 92: line comparison note
                     line_comparison_note=_line_comp_note,
                 ))

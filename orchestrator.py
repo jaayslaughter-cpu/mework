@@ -346,23 +346,30 @@ async def root():
 
 @app.get("/props")
 async def get_props():
-    """Live player props."""
+    """Live player props from Underdog + PrizePicks."""
     hub = read_hub()
-    props = hub.get("player_props", [])
+    ud_props = hub.get("dfs", {}).get("underdog", [])
+    pp_props = hub.get("dfs", {}).get("prizepicks", [])
+    all_raw  = ud_props + pp_props
     formatted = []
-    for p in props[:60]:
-        over_odds = p.get("over_odds")
-        under_odds = p.get("under_odds")
+    for p in all_raw[:100]:
+        over_odds  = p.get("over_american",  p.get("over_odds",  -115))
+        under_odds = p.get("under_american", p.get("under_odds", -115))
         formatted.append({
-            "player": p.get("player_name", ""),
-            "prop_type": p.get("prop_type", ""),
-            "line": p.get("line", 0),
-            "book": p.get("bookmaker", ""),
-            "over": f"+{over_odds}" if over_odds and int(over_odds) > 0 else str(over_odds or "-"),
-            "under": f"+{under_odds}" if under_odds and int(under_odds) > 0 else str(under_odds or "-"),
+            "player":    p.get("player", p.get("player_name", "")),
+            "prop_type": p.get("stat_type", p.get("prop_type", "")),
+            "line":      p.get("line", p.get("stat_value", 0)),
+            "platform":  p.get("platform", "underdog"),
+            "over":  f"+{over_odds}"  if isinstance(over_odds,  int) and over_odds  > 0 else str(over_odds  or "-"),
+            "under": f"+{under_odds}" if isinstance(under_odds, int) and under_odds > 0 else str(under_odds or "-"),
         })
-    return JSONResponse({"props": formatted, "count": len(formatted), "timestamp": hub.get("timestamp")})
-
+    return JSONResponse({
+        "props": formatted,
+        "count": len(formatted),
+        "underdog": len(ud_props),
+        "prizepicks": len(pp_props),
+        "timestamp": datetime.utcnow().isoformat(),
+    })
 
 @app.get("/insights")
 async def get_insights():
@@ -406,6 +413,8 @@ async def get_backtest():
 
 
 @app.post("/backtest/run")
+async def trigger_backtest():
+    asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet))
 async def trigger_backtest(start_date: str = None, end_date: str = None):
     asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet, start_date, end_date))
     return JSONResponse({"status": "started", "message": "Backtest running in background"})
@@ -486,8 +495,8 @@ async def get_propiq_status():
         "version": "2.1.0",
         "status": "healthy",
         "scheduler_running": scheduler.running,
-        "hub_props": len(hub.get("player_props", [])),
-        "hub_games": len(hub.get("games_today", [])),
+        "hub_ud_props": len(hub.get("dfs", {}).get("underdog", [])),
+        "hub_starters": len(hub.get("context", {}).get("projected_starters", [])),
         "leaderboard_agents": len(lb.get("leaderboard", [])),
         "last_hub_run": _last_hub_run,
         "last_agent_run": _last_agent_run,

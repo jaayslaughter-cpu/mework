@@ -162,14 +162,27 @@ def generate_pick(
         if side == "OVER"
         else raw_prop.get("under_american", -115)
     )
-    market_implied = _american_to_implied(int(odds_american))
+    # Use sharp-book vig-stripped probability when available.
+    # This replaces Underdog's flat -115 (53.5%) with the actual sharp line,
+    # which fixes OVER bias for props where sharp books price differently.
+    _sb_over  = float(raw_prop.get("sb_implied_prob_over",  0.0) or 0.0)
+    _sb_under = float(raw_prop.get("sb_implied_prob_under", 0.0) or 0.0)
+    if side == "OVER"  and _sb_over  > 0.30:
+        market_implied = _sb_over     # sharp book Over implied (more accurate)
+    elif side == "UNDER" and _sb_under > 0.30:
+        market_implied = _sb_under    # sharp book Under implied
+    else:
+        market_implied = _american_to_implied(int(odds_american))
+
+    # If player-specific base rate was computed, use it instead of population avg
+    _ps_prob = raw_prop.get("_base_rate_override") or raw_prop.get("_player_specific_prob")
 
     # ── Stage 2: Zone Integrity Fraud Detector ──────────────────────────────
     # Reads heart-vs-shadow whiff rates from statcast cache.
     # FRAUD (heart zone dominance) → multiplier < 1 → compresses probability.
     # ELITE_SHADOW dominance → multiplier > 1 → boosts probability.
     # Non-K props return multiplier = 1.0 (no-op).
-    raw_base_prob = _base_rate_prob(stat_norm, line, side)
+    raw_base_prob = float(_ps_prob) if _ps_prob else _base_rate_prob(stat_norm, line, side)
 
     # Convert to percentage for apply_zone_integrity_multiplier (expects 0–100)
     integrity_prob_pct = apply_zone_integrity_multiplier(
