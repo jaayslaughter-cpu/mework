@@ -854,11 +854,44 @@ _UD_STAT_MAP: dict[str, str] = {
 _UD_PITCHER_POSITIONS = {"SP", "RP", "P", "CP"}
 
 
-def _fetch_prizepicks_via_apify() -> list[dict]:
+def _apify_proxy_get(
+    url: str,
+    headers: dict,
+    params: dict | None = None,
+    timeout: int = 20,
+) -> "requests.Response | None":
+    """Route an HTTP GET through Apify's residential proxy network.
+
+    Returns a Response object on success, or None if:
+      - APIFY_API_KEY is not set in env (silent skip, no crash)
+      - The proxy request itself fails
+
+    Apify rotates residential IPs on every request, bypassing
+    Cloudflare/Fastly blocks on Railway's shared IP range.
     """
-    APIFY MEMORY EXHAUSTED — replaced with sportsbook_reference_layer fallback.
+    api_key = os.environ.get("APIFY_API_KEY", "")
+    if not api_key:
+        return None
+    proxy_url = f"http://{api_key}:@proxy.apify.com:8000"
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        resp = requests.get(
+            url, headers=headers, params=params,
+            proxies=proxies, timeout=timeout,
+        )
+        logger.info("[Apify] Proxy request %d — %s", resp.status_code, url)
+        return resp
+    except Exception as exc:
+        logger.warning("[Apify] Proxy request failed: %s", exc)
+        return None
+
+
+def _fetch_prizepicks_via_sportsbook() -> list[dict]:
+    """
+    Tier 3 PrizePicks fallback — sportsbook_reference_layer (Odds API).
     Fetches MLB player prop lines from The Odds API (sportsbooks: DK, FD, Pinnacle).
-    Returns same format as original Apify implementation so all downstream code works.
+    Returns same format as PrizePicks direct fetch so all downstream code works.
+    Called only when direct fetch AND Apify proxy both fail/return 0 props.
     """
     try:
         from sportsbook_reference_layer import build_sportsbook_reference  # noqa: PLC0415
@@ -908,16 +941,23 @@ def fetch_prizepicks_props() -> list[dict]:
         # Single attempt — Railway IP is 403-blocked; jump straight to Apify on failure
         data = None
         sess = _get_pp_session()
-        resp = sess.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
-            timeout=15,
-        )
+        _pp_url = "https://api.prizepicks.com/projections"
+        _pp_params = {"per_page": 250, "single_stat": True, "league_id": 2}
+
+        # Tier 1: Direct fetch
+        resp = sess.get(_pp_url, params=_pp_params, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
         else:
-            logger.info("[PP] HTTP %d — routing to sportsbook fallback (no retries)", resp.status_code)
-            return _fetch_prizepicks_via_apify()
+            logger.info("[PP] HTTP %d — Tier 1 blocked, trying Apify proxy (Tier 2)", resp.status_code)
+            # Tier 2: Apify residential proxy (rotates IPs, bypasses Cloudflare block)
+            _apify_resp = _apify_proxy_get(_pp_url, dict(sess.headers), _pp_params)
+            if _apify_resp and _apify_resp.status_code == 200:
+                data = _apify_resp.json()
+                logger.info("[PP] Apify proxy success — %d bytes", len(_apify_resp.content))
+            else:
+                logger.info("[PP] Apify proxy failed — falling back to Sportsbook API (Tier 3)")
+                return _fetch_prizepicks_via_sportsbook()
 
         # Build player id -> name map from included resources
         player_map: dict[str, str] = {}
@@ -965,8 +1005,8 @@ def fetch_prizepicks_props() -> list[dict]:
         logger.info("[PP] Fetched %d MLB props", len(props))
         return props
     except Exception as exc:
-        logger.warning("[PP] Fetch failed: %s — trying sportsbook fallback", exc)
-        return _fetch_prizepicks_via_apify()
+        logger.warning("[PP] Fetch failed (%s) — Tier 3 sportsbook fallback", exc)
+        return _fetch_prizepicks_via_sportsbook()
 
 
 def fetch_underdog_props() -> list[dict]:
@@ -996,8 +1036,17 @@ def fetch_underdog_props() -> list[dict]:
             headers=_ud_headers, timeout=20,
         )
         if resp.status_code != 200:
-            logger.warning("[UD] HTTP %d", resp.status_code)
-            return []
+            logger.warning("[UD] HTTP %d — trying Apify proxy (Tier 2)", resp.status_code)
+            _ud_apify = _apify_proxy_get(
+                "https://api.underdogfantasy.com/beta/v5/over_under_lines",
+                _ud_headers,
+            )
+            if _ud_apify and _ud_apify.status_code == 200:
+                data = _ud_apify.json()
+                logger.info("[UD] Apify proxy success")
+            else:
+                logger.warning("[UD] Apify proxy also failed — no Underdog props")
+                return []
         data = resp.json()
 
         # Build lookup maps
@@ -1070,7 +1119,7 @@ def fetch_underdog_props() -> list[dict]:
         logger.info("[UD] Fetched %d MLB lines", len(props))
         return props
     except Exception as exc:
-        logger.warning("[UD] Fetch failed: %s", exc)
+        logger.warning("[UD] Fetch failed (%s) — no Underdog props", exc)
         return []
 
 
