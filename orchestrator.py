@@ -195,10 +195,9 @@ async def _startup_dispatch_if_ready() -> None:
         # Read hub directly from in-memory fallback (_mem_get) — avoids
         # Redis dependency that caused "waiting" loops in prior deployments
         try:
-            from tasklets import _mem_get  # noqa: PLC0415
-            hub = _mem_get("mlb_hub") or {}
-        except Exception:
             hub = read_hub()
+        except Exception:
+            hub = {}
 
         # DataHub is ready when game_states is populated (ESPN always works)
         game_states = hub.get("game_states", {})

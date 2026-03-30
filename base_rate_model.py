@@ -65,7 +65,7 @@ import math
 logger = logging.getLogger("propiq.base_rate_model")
 
 # ---------------------------------------------------------------------------
-# Base rates from MLB 2022-2024 calibration
+# Base rates from MLB 2022-2025 calibration
 # (x, p_over) pairs: probability of stat exceeding x
 # Source: live_dispatcher.py _BASE_RATES (same table, centralized here)
 # ---------------------------------------------------------------------------
@@ -78,10 +78,10 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
         (0.5, 0.09), (1.5, 0.005),
     ],
     "rbis": [
-        (0.5, 0.42), (1.5, 0.20), (2.5, 0.08), (3.5, 0.025),
+        (0.5, 0.37), (1.5, 0.17), (2.5, 0.07), (3.5, 0.022),  # corrected: 2025 actual ~37%
     ],
     "rbi": [
-        (0.5, 0.42), (1.5, 0.20), (2.5, 0.08), (3.5, 0.025),
+        (0.5, 0.37), (1.5, 0.17), (2.5, 0.07), (3.5, 0.022),  # corrected: 2025 actual ~37%
     ],
     "runs": [
         (0.5, 0.45), (1.5, 0.18), (2.5, 0.06), (3.5, 0.015),
@@ -90,7 +90,7 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
         (0.5, 0.85), (1.5, 0.55), (2.5, 0.28), (3.5, 0.12), (4.5, 0.04),
     ],
     "stolen_bases": [
-        (0.5, 0.06), (1.5, 0.008),
+        (0.5, 0.045), (1.5, 0.006),  # corrected: 2025 actual ~4.5% per game
     ],
     "hits_runs_rbis": [
         (0.5, 0.95), (1.5, 0.72), (2.5, 0.48), (3.5, 0.28),
@@ -135,7 +135,7 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     ],
 }
 
-# League defaults for FanGraphs signals (2024)
+# League defaults for FanGraphs signals (2025 season)
 _LG_CSW      = 0.275   # pitcher CSW%
 _LG_SWSTR    = 0.110   # pitcher SwStr%
 _LG_K_BB     = 0.139   # pitcher K-BB%

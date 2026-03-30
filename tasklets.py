@@ -145,6 +145,13 @@ try:
 except ImportError:
     _BASE_RATE_AVAILABLE = False
     def _base_rate_prob(prop, side="OVER"): return 50.0  # noqa: E704
+
+try:
+    from bullpen_fatigue_scorer import build_bullpen_fatigue_scorer as _build_bullpen_scorer
+    _BULLPEN_SCORER_AVAILABLE = True
+except ImportError:
+    _BULLPEN_SCORER_AVAILABLE = False
+    def _build_bullpen_scorer(): return None  # noqa: E704
 try:
     from prop_enrichment_layer import enrich_props as _enrich_props
     _ENRICHMENT_AVAILABLE = True
@@ -1269,6 +1276,46 @@ def run_data_hub_tasklet() -> None:
             "odds":             _odds_api_get(),                   # free fallback chain
         }
         _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
+
+    # ── Bullpen fatigue (TTL 60 min) ─────────────────────────────────────────
+    bullpen_key = "hub:bullpen"
+    if not _hub_exists(r, bullpen_key):
+        if _BULLPEN_SCORER_AVAILABLE:
+            try:
+                _bp_scorer = _build_bullpen_scorer()   # fetches MLB API internally
+                if _bp_scorer is not None:
+                    _bp_map = {}
+                    for _team in [
+                        "arizona diamondbacks", "atlanta braves", "baltimore orioles",
+                        "boston red sox", "chicago cubs", "chicago white sox", "cincinnati reds",
+                        "cleveland guardians", "colorado rockies", "detroit tigers",
+                        "houston astros", "kansas city royals", "los angeles angels",
+                        "los angeles dodgers", "miami marlins", "milwaukee brewers",
+                        "minnesota twins", "new york mets", "new york yankees", "oakland athletics",
+                        "philadelphia phillies", "pittsburgh pirates", "san diego padres",
+                        "san francisco giants", "seattle mariners", "st. louis cardinals",
+                        "tampa bay rays", "texas rangers", "toronto blue jays", "washington nationals",
+                    ]:
+                        _bp_map[_team] = {
+                            "fatigue_score": _bp_scorer.score(_team),
+                            "boost":         _bp_scorer.get_fatigue_boost(_team),
+                        }
+                    hub["bullpen_fatigue"] = _bp_map
+                    try:
+                        r.setex(bullpen_key, 3600, json.dumps(_bp_map))
+                    except Exception:
+                        pass
+                    logger.info("[DataHub] Bullpen fatigue built for %d teams.", len(_bp_map))
+            except Exception as _bp_err:
+                logger.debug("[DataHub] Bullpen fatigue failed: %s", _bp_err)
+                hub["bullpen_fatigue"] = {}
+        else:
+            hub["bullpen_fatigue"] = {}
+    else:
+        try:
+            hub["bullpen_fatigue"] = json.loads(r.get(bullpen_key) or "{}")
+        except Exception:
+            hub["bullpen_fatigue"] = {}
 
     # ── Group 4: DFS targets (TTL 8 min) ──────────────────────────────────
     dfs_key = "hub:dfs"
