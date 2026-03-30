@@ -830,11 +830,25 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     props = _get_statcast(props)
     sc_hits = sum(1 for p in props if p.get("sc_xwoba") or p.get("sc_whiff_rate"))
 
+    # ── DraftEdge batch enrichment (independent probability source + batting order) ──
+    # Provides de_hit_pct, de_hr_pct, de_sb_pct, de_rbi_pct, de_batting_order per player.
+    # enrich_props_with_draftedge uses 'player_name' key; alias from 'player' if needed.
+    de_hits = 0
+    try:
+        from draftedge_scraper import enrich_props_with_draftedge as _de_enrich  # noqa: PLC0415
+        for _p in props:
+            if not _p.get("player_name") and _p.get("player"):
+                _p["player_name"] = _p["player"]
+        props = _de_enrich(props)
+        de_hits = sum(1 for p in props if p.get("de_hit_pct") or p.get("de_rbi_pct"))
+    except Exception as _de_err:
+        logger.warning("[Enrichment] DraftEdge enrichment failed: %s", _de_err)
+
     logger.info(
-        "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | "
+        "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | DraftEdge: %d | "
         "Marcel/PP wired | SB reference wired | "
         "chase: %d teams | weather: %d stadiums",
-        enriched_count, fg_hits, sc_hits,
+        enriched_count, fg_hits, sc_hits, de_hits,
         len(_chase_cache), len(_weather_cache),
     )
     return props
