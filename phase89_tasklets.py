@@ -95,6 +95,12 @@ except ImportError:
     _MARKET_VALIDATOR_AVAILABLE = False
 
 try:
+    from line_comparator import build_line_lookup as _build_line_lookup, compare_prop as _compare_prop
+    _LINE_COMP_AVAILABLE = True
+except ImportError:
+    _LINE_COMP_AVAILABLE = False
+
+try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
     _NSFI_AVAILABLE = True
 except ImportError:
@@ -1239,12 +1245,27 @@ def run_data_hub_tasklet() -> None:
     dfs_key = "hub:dfs"
     if not _hub_exists(r, dfs_key):
         logger.info("[DataHub] Scraping DFS target data…")
+        _ud_raw = _fetch_underdog_props_direct()
+        _pp_raw = _fetch_prizepicks_direct()
         dfs = {
-            "underdog":   _fetch_underdog_props_direct(),
-            "prizepicks": _fetch_prizepicks_direct(),
+            "underdog":   _ud_raw,
+            "prizepicks": _pp_raw,
             "sleeper":    [],  # removed per DFS compliance directive
             "optimizer":  [],  # no actor yet
         }
+        # ── Phase 92: build line-comparison lookup caches ──────────────────
+        # Stored alongside DFS props so _build_bet() can compare lines once
+        # per cycle without re-fetching.  Keys: (name_key, stat_norm) → line.
+        if _LINE_COMP_AVAILABLE:
+            try:
+                dfs["_ud_lookup"] = _build_line_lookup(_ud_raw)
+                dfs["_pp_lookup"] = _build_line_lookup(_pp_raw)
+                logger.info("[DataHub] Line lookups: UD=%d PP=%d",
+                            len(dfs["_ud_lookup"]), len(dfs["_pp_lookup"]))
+            except Exception as _lce:
+                logger.debug("[DataHub] Line lookup build error: %s", _lce)
+                dfs["_ud_lookup"] = {}
+                dfs["_pp_lookup"] = {}
         _hub_setex(r, dfs_key, TTL_DFS, json.dumps(dfs))
 
     # ── Merge all groups into master hub key ───────────────────────────────
@@ -1636,7 +1657,7 @@ class _BaseAgent:
             "spring_training": _is_spring_training(),
         })
         kelly = _kelly_units(model_prob / 100, side_odds)
-        platforms = self._dfs_platforms(prop, side)
+        platforms, _line_note = self._dfs_platforms(prop, side)
         return {
             "agent":              self.name,
             "player":             prop.get("player", "Unknown"),
@@ -1650,6 +1671,7 @@ class _BaseAgent:
             "ev_pct":             round(ev_pct, 1),
             "kelly_units":        round(kelly, 3),
             "recommended_platform": platforms[0] if platforms else "PrizePicks",
+            "line_comparison_note": _line_note,
             "checklist":          self._checklist(prop),
             "confidence":         self._confidence(ev_pct),
             "spring_training":    _is_spring_training(),
@@ -1664,8 +1686,31 @@ class _BaseAgent:
             "sim_bullpen_prob":   prop.get("_sim_bullpen_prob"),
         }
 
-    def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
+    def _dfs_platforms(self, prop: dict, side: str) -> tuple[list[str], str]:
+        """
+        Returns (platforms_list, line_comparison_note).
+        Phase 92: uses line_comparator to pick the platform with the better
+        line for the recommended direction, instead of just checking presence.
+        """
         dfs = self.hub.get("dfs", {})
+        # ── Phase 92: line comparison ────────────────────────────────────────
+        if _LINE_COMP_AVAILABLE:
+            try:
+                ud_lookup = dfs.get("_ud_lookup") or {}
+                pp_lookup = dfs.get("_pp_lookup") or {}
+                comp = _compare_prop(
+                    prop.get("player", ""),
+                    prop.get("prop_type", ""),
+                    side,
+                    ud_lookup,
+                    pp_lookup,
+                )
+                note = comp.get("note", "")
+                platform = comp.get("platform", "Underdog")
+                return [platform], note
+            except Exception as _lce:
+                logger.debug("[DFSPlatforms] line_comparator error: %s", _lce)
+        # ── Fallback: original presence-check ───────────────────────────────
         matched = []
         for platform in ("prizepicks", "underdog", "sleeper"):
             picks = dfs.get(platform, [])
@@ -1674,7 +1719,7 @@ class _BaseAgent:
                     if prop.get("player", "").lower() in str(pick).lower():
                         matched.append(platform.capitalize())
                         break
-        return matched or ["PrizePicks"]
+        return matched or ["PrizePicks"], ""
 
     def _checklist(self, prop: dict) -> dict:
         ctx = self.hub.get("context", {})
