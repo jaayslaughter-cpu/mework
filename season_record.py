@@ -1,4 +1,5 @@
 # season_record.py — FIXED: renamed _ev_pct -> ev_pct (Problem 1 & 17)
+# Phase 104: added sslmode=require to _get_conn() -- Railway Postgres requires SSL
 # All other logic unchanged.
 
 from __future__ import annotations
@@ -25,7 +26,10 @@ def _get_conn():
         return None
     try:
         import psycopg2  # noqa: PLC0415
-        return psycopg2.connect(db_url)
+        # sslmode=require is mandatory for Railway Postgres external connections.
+        # Without it, psycopg2 silently fails on Railway and record_parlay()
+        # returns False -- parlays reach Discord but never hit the DB.
+        return psycopg2.connect(db_url, sslmode="require")
     except Exception as exc:
         logger.warning("[SeasonRecord] DB connect failed: %s", exc)
         return None
@@ -72,6 +76,7 @@ def record_parlay(
     """Insert a new PENDING parlay into the season record."""
     conn = _get_conn()
     if not conn:
+        logger.warning("[SeasonRecord] record_parlay skipped — no DB connection")
         return False
     try:
         _ensure_table(conn)
@@ -92,6 +97,8 @@ def record_parlay(
         )
         conn.commit()
         cur.close()
+        logger.info("[SeasonRecord] Recorded parlay: %s %s %d-leg conf=%.1f",
+                    date, agent, num_legs, confidence)
         return True
     except Exception as exc:
         logger.warning("[SeasonRecord] record_parlay failed: %s", exc)

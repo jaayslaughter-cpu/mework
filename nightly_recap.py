@@ -9,7 +9,7 @@ Runs at midnight ET every night.
 4. Updates the propiq_season_record table with final results
 
 Run directly: python3 nightly_recap.py [YYYY-MM-DD]
-If no date given, defaults to yesterday (UTC-7).
+If no date given, defaults to yesterday (America/New_York, DST-aware).
 """
 
 from __future__ import annotations
@@ -57,27 +57,56 @@ logger = logging.getLogger("nightly_recap")
 
 # Emoji map for agent names
 _AGENT_EMOJI: dict[str, str] = {
-    "EVHunter":      "🎯",
-    "UnderMachine":  "🔽",
-    "F5Agent":       "5️⃣",
-    "MLEdgeAgent":   "🧠",
-    "UmpireAgent":   "⚖️",
-    "FadeAgent":     "👻",
-    "LineValueAgent": "📊",
-    "BullpenAgent":  "🔥",
-    "WeatherAgent":  "🌬️",
-    "SteamAgent":    "♨️",
-    "ArsenalAgent":  "⚔️",
-    "PlatoonAgent":  "🤝",
-    "CatcherAgent":  "🧤",
-    "LineupAgent":   "📋",
-    "GetawayAgent":  "✈️",
-    "ArbitrageAgent": "💰",
-    "VultureStack":  "🦅",
-    "OmegaStack":    "🔱",
+    "EVHunter":      "\U0001f3af",
+    "UnderMachine":  "\U0001f53d",
+    "F5Agent":       "5\ufe0f\u20e3",
+    "MLEdgeAgent":   "\U0001f9e0",
+    "UmpireAgent":   "\u2696\ufe0f",
+    "FadeAgent":     "\U0001f47b",
+    "LineValueAgent": "\U0001f4ca",
+    "BullpenAgent":  "\U0001f525",
+    "WeatherAgent":  "\U0001f32c\ufe0f",
+    "SteamAgent":    "\u2668\ufe0f",
+    "ArsenalAgent":  "\u2694\ufe0f",
+    "PlatoonAgent":  "\U0001f91d",
+    "CatcherAgent":  "\U0001f9e4",
+    "LineupAgent":   "\U0001f4cb",
+    "GetawayAgent":  "\u2708\ufe0f",
+    "ArbitrageAgent": "\U0001f4b0",
+    "VultureStack":  "\U0001f985",
+    "OmegaStack":    "\U0001f531",
 }
 
-_OUTCOME_EMOJI = {"WIN": "✅", "LOSS": "❌", "PUSH": "⏩"}
+_OUTCOME_EMOJI = {"WIN": "\u2705", "LOSS": "\u274c", "PUSH": "\u23e9"}
+
+
+# ---------------------------------------------------------------------------
+# DST-aware "yesterday in ET" helper
+# ---------------------------------------------------------------------------
+
+def _yesterday_et() -> str:
+    """
+    Return yesterday's date as YYYY-MM-DD in America/New_York, DST-aware.
+
+    Replaces the old `datetime.now(utc) - timedelta(hours=7) - timedelta(days=1)`
+    which hardcoded PDT (UTC-7) and was wrong during EDT (UTC-4), causing
+    settlement to always grade one extra day back.
+
+    Uses pytz when available; falls back to a fixed UTC-5 offset (safe for
+    both EDT and EST — worst case off by 1 hour, never off by a day).
+    """
+    try:
+        import pytz  # noqa: PLC0415
+        et_tz = pytz.timezone("America/New_York")
+        now_et = datetime.now(et_tz)
+        yesterday_et = now_et - timedelta(days=1)
+        return yesterday_et.strftime("%Y-%m-%d")
+    except ImportError:
+        pass
+    # Fallback: UTC-5 (between EDT=-4 and EST=-5, never off by a calendar day)
+    now_et_approx = datetime.now(timezone.utc) - timedelta(hours=5)
+    yesterday_approx = now_et_approx - timedelta(days=1)
+    return yesterday_approx.strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +162,8 @@ def _build_recap_embed(
     # Build per-parlay fields (max 24 fields, Discord limit)
     fields = []
     for r in results[:23]:
-        emoji = _AGENT_EMOJI.get(r["agent_name"], "🤖")
-        outcome_emoji = _OUTCOME_EMOJI.get(r["outcome"], "❓")
+        emoji = _AGENT_EMOJI.get(r["agent_name"], "\U0001f916")
+        outcome_emoji = _OUTCOME_EMOJI.get(r["outcome"], "\u2753")
         profit = r["units_profit"]
         profit_str = f"{'+' if profit >= 0 else ''}{profit:.1f}u"
 
@@ -144,11 +173,11 @@ def _build_recap_embed(
             act = leg.get("actual", -1)
             act_str = f" (actual: {act:.0f})" if act >= 0 else ""
             leg_lines.append(
-                f"• {leg['player_name']} {leg['side']} {leg['line']} {leg['prop_type']}{act_str}"
+                f"\u2022 {leg['player_name']} {leg['side']} {leg['line']} {leg['prop_type']}{act_str}"
             )
 
         fields.append({
-            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} — {profit_str}",
+            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} \u2014 {profit_str}",
             "value":  "\n".join(leg_lines) or "No leg details available",
             "inline": False,
         })
@@ -157,12 +186,12 @@ def _build_recap_embed(
     if clv_summary and clv_summary.get("available"):
         beat_pct = clv_summary["beat_pct"]
         avg_clv = clv_summary["avg_clv_pts"]
-        clv_icon = "📈" if beat_pct >= 55 else ("➡️" if beat_pct >= 45 else "📉")
+        clv_icon = "\U0001f4c8" if beat_pct >= 55 else ("\u27a1\ufe0f" if beat_pct >= 45 else "\U0001f4c9")
         fields.append({
             "name": f"{clv_icon} Closing Line Value",
             "value": (
                 f"Beat close on **{clv_summary['beat_close']}/{clv_summary['total_legs']} legs "
-                f"({beat_pct:.0f}%)** · "
+                f"({beat_pct:.0f}%)** \u00b7 "
                 f"Avg CLV: **{'+' if avg_clv >= 0 else ''}{avg_clv:.2f}**"
             ),
             "inline": False,
@@ -173,7 +202,7 @@ def _build_recap_embed(
         edge_summary = _build_edge_summary()
         if edge_summary and edge_summary != "No edge threshold data yet.":
             fields.append({
-                "name": "🎯 Edge Threshold Health",
+                "name": "\U0001f3af Edge Threshold Health",
                 "value": edge_summary[:1024],  # Discord field limit
                 "inline": False,
             })
@@ -186,18 +215,18 @@ def _build_recap_embed(
 
     embed = {
         "embeds": [{
-            "title": f"📊 PropIQ Nightly Recap — {date_str}",
+            "title": f"\U0001f4ca PropIQ Nightly Recap \u2014 {date_str}",
             "description": (
-                f"**Today:** {day_record} · {day_units} · {total} parlays settled\n"
+                f"**Today:** {day_record} \u00b7 {day_units} \u00b7 {total} parlays settled\n"
                 f"{'No parlays sent today.' if total == 0 else ''}"
             ),
             "color": color,
             "fields": fields,
             "footer": {
                 "text": (
-                    f"Season: {season_record} · "
-                    f"{'+' if season_units >= 0 else ''}{season_units:.1f}u · "
-                    f"ROI: {'+' if season_roi >= 0 else ''}{season_roi:.1f}% · "
+                    f"Season: {season_record} \u00b7 "
+                    f"{'+' if season_units >= 0 else ''}{season_units:.1f}u \u00b7 "
+                    f"ROI: {'+' if season_roi >= 0 else ''}{season_roi:.1f}% \u00b7 "
                     f"{pending_count} pending"
                 )
             },
@@ -213,12 +242,10 @@ def _build_recap_embed(
 
 def run(settle_date: Optional[str] = None) -> None:
     """
-    settle_date: 'YYYY-MM-DD' — defaults to yesterday ET.
+    settle_date: 'YYYY-MM-DD' — defaults to yesterday ET (DST-aware).
     """
     if settle_date is None:
-        et_offset  = timedelta(hours=7)  # UTC-7 (PDT)
-        yesterday  = datetime.now(timezone.utc) - et_offset - timedelta(days=1)
-        settle_date = yesterday.strftime("%Y-%m-%d")
+        settle_date = _yesterday_et()
 
     logger.info("=== PropIQ Nightly Settlement: %s ===", settle_date)
 
@@ -386,8 +413,6 @@ def run(settle_date: Optional[str] = None) -> None:
     )
 
     # ── StreakAgent settlement (19th agent) ────────────────────────────────
-    # Grade today's Streaks pick via ESPN box scores, update streak state,
-    # and post a settlement embed to Discord.
     try:
         from streak_agent import settle_streak_picks
         logger.info("[StreakAgent] Running streak settlement for %s", settle_date)
@@ -398,12 +423,10 @@ def run(settle_date: Optional[str] = None) -> None:
         logger.warning("[StreakAgent] Settlement error: %s", _streak_settle_err)
 
     # ── Phase 35: Calibration + Edge Health (post-settlement) ────────────────
-    # Run after every settlement to check if our probabilities are well-calibrated
-    # and flag agents that are statistically underperforming their backtest baseline.
     try:
         from calibration_monitor import run as run_calibration
         logger.info("[Phase35] Running calibration monitor (30-day window)...")
-        run_calibration(days=30, quiet=False)  # posts to Discord if degraded
+        run_calibration(days=30, quiet=False)
     except ImportError:
         logger.debug("[Phase35] calibration_monitor.py not found — skipping.")
     except Exception as _cal_err:
@@ -413,8 +436,7 @@ def run(settle_date: Optional[str] = None) -> None:
         from edge_health_monitor import run as run_edge_health
         from risk_manager import RiskManager
         logger.info("[Phase35] Running edge health monitor...")
-        edge_metrics = run_edge_health(days=30, quiet=False)  # posts Discord report
-        # Apply cool-downs to any agents that breached ROI/CLV/Brier thresholds
+        edge_metrics = run_edge_health(days=30, quiet=False)
         if edge_metrics:
             rm = RiskManager()
             rm.check_and_apply_cool_downs(edge_metrics)
