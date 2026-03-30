@@ -949,22 +949,10 @@ def _fetch_underdog_via_apify_proxy() -> list[dict]:
 
 
 def _fetch_prizepicks_via_apify() -> list[dict]:
+    """Tier 3 PrizePicks fallback -- delegates to sportsbook_reference_layer.
+    Called when direct fetch AND Apify residential proxy both fail.
     """
-    api_key = os.environ.get("APIFY_API_KEY", "")
-    if not api_key:
-        return None
-    proxy_url = f"http://{api_key}:@proxy.apify.com:8000"
-    proxies = {"http": proxy_url, "https": proxy_url}
-    try:
-        resp = requests.get(
-            url, headers=headers, params=params,
-            proxies=proxies, timeout=timeout,
-        )
-        logger.info("[Apify] Proxy request %d — %s", resp.status_code, url)
-        return resp
-    except Exception as exc:
-        logger.warning("[Apify] Proxy request failed: %s", exc)
-        return None
+    return _fetch_prizepicks_via_sportsbook()
 
 
 def _fetch_prizepicks_via_sportsbook() -> list[dict]:
