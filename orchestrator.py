@@ -413,9 +413,8 @@ async def get_backtest():
 
 
 @app.post("/backtest/run")
-async def trigger_backtest():
-    asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet))
 async def trigger_backtest(start_date: str = None, end_date: str = None):
+    """Trigger backtest in background. Optional start_date/end_date params (YYYY-MM-DD)."""
     asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet, start_date, end_date))
     return JSONResponse({"status": "started", "message": "Backtest running in background"})
 

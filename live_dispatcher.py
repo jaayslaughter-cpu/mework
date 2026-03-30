@@ -950,9 +950,29 @@ def _fetch_underdog_via_apify_proxy() -> list[dict]:
 
 def _fetch_prizepicks_via_apify() -> list[dict]:
     """
-    APIFY MEMORY EXHAUSTED — replaced with sportsbook_reference_layer fallback.
+    api_key = os.environ.get("APIFY_API_KEY", "")
+    if not api_key:
+        return None
+    proxy_url = f"http://{api_key}:@proxy.apify.com:8000"
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        resp = requests.get(
+            url, headers=headers, params=params,
+            proxies=proxies, timeout=timeout,
+        )
+        logger.info("[Apify] Proxy request %d — %s", resp.status_code, url)
+        return resp
+    except Exception as exc:
+        logger.warning("[Apify] Proxy request failed: %s", exc)
+        return None
+
+
+def _fetch_prizepicks_via_sportsbook() -> list[dict]:
+    """
+    Tier 3 PrizePicks fallback — sportsbook_reference_layer (Odds API).
     Fetches MLB player prop lines from The Odds API (sportsbooks: DK, FD, Pinnacle).
-    Returns same format as original Apify implementation so all downstream code works.
+    Returns same format as PrizePicks direct fetch so all downstream code works.
+    Called only when direct fetch AND Apify proxy both fail/return 0 props.
     """
     try:
         from sportsbook_reference_layer import build_sportsbook_reference  # noqa: PLC0415
@@ -1002,11 +1022,11 @@ def fetch_prizepicks_props() -> list[dict]:
         # Single attempt — Railway IP is 403-blocked; jump straight to Apify on failure
         data = None
         sess = _get_pp_session()
-        resp = sess.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
-            timeout=15,
-        )
+        _pp_url = "https://api.prizepicks.com/projections"
+        _pp_params = {"per_page": 250, "single_stat": True, "league_id": 2}
+
+        # Tier 1: Direct fetch
+        resp = sess.get(_pp_url, params=_pp_params, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
         else:
@@ -1078,8 +1098,8 @@ def fetch_prizepicks_props() -> list[dict]:
         logger.info("[PP] Fetched %d MLB props", len(props))
         return props
     except Exception as exc:
-        logger.warning("[PP] Fetch failed: %s — trying sportsbook fallback", exc)
-        return _fetch_prizepicks_via_apify()
+        logger.warning("[PP] Fetch failed (%s) — Tier 3 sportsbook fallback", exc)
+        return _fetch_prizepicks_via_sportsbook()
 
 
 def fetch_underdog_props() -> list[dict]:
