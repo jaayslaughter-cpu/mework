@@ -543,6 +543,40 @@ def select_streak_pick(
     return qualified[0]
 
 
+def select_start_picks(
+    candidates: list[StreakCandidate],
+) -> list[StreakCandidate]:
+    """
+    Select the top 2 picks from different teams for a fresh streak start.
+    Rules (Underdog Streaks): picks 1 & 2 must be from different teams.
+    Returns list of 2 (ideal), 1 (diversity unavoidable), or 0 if nothing qualifies.
+    """
+    qualified = [
+        c for c in candidates
+        if c.confidence >= STREAK_CONF_MIN
+        and c.implied_prob >= STREAK_PROB_MIN
+        and c.ev_pct >= STREAK_EV_MIN
+    ]
+    if not qualified:
+        return []
+
+    qualified.sort(key=lambda c: (-c.confidence, -c.signal_count))
+
+    pick1 = qualified[0]
+    pick2 = next(
+        (c for c in qualified[1:] if c.team.upper() != pick1.team.upper()),
+        None,
+    )
+    if not pick2 and len(qualified) > 1:
+        logger.warning(
+            "[Streak] Start picks: all from %s — diversity relaxed, taking top 2",
+            pick1.team,
+        )
+        pick2 = qualified[1]
+
+    return [pick1, pick2] if pick2 else [pick1]
+
+
 # ---------------------------------------------------------------------------
 # Postgres state management
 # ---------------------------------------------------------------------------
@@ -884,6 +918,77 @@ def post_pick_alert(
         logger.info("[Streak] Pick alert sent: pick %d/%d", pick_number, STREAK_TOTAL_WINS)
 
 
+def post_start_picks_alert(
+    picks: list[StreakCandidate],
+    entry_amount: int,
+    season_picks: int,
+    season_wins: int,
+    notes: list | None = None,
+) -> None:
+    """Post the combined 2-pick announcement for a fresh streak start."""
+    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
+    prize_tier  = _PRIZE_EMOJI.get(entry_amount, "💰")
+    season_rate = f"{season_wins}/{season_picks}" if season_picks else "0/0"
+    notes       = notes or ["", ""]
+
+    fields = []
+    for i, pick in enumerate(picks, start=1):
+        prop_label = _PROP_LABELS.get(pick.prop_type, pick.prop_type.replace("_", " ").title())
+        direction  = "OVER 📈" if pick.side == "Over" else "UNDER 📉"
+        team_str   = f" ({pick.team})" if pick.team else ""
+        note       = notes[i - 1] if i - 1 < len(notes) else ""
+        note_str   = f"\n📌 {note}" if note and "Not found" not in note else ""
+        filled     = int(round(pick.confidence))
+        conf_bar   = "█" * filled + "░" * (10 - filled)
+        prob_pct   = round(pick.implied_prob * 100, 1)
+        fields.append({
+            "name": f"🎯 Pick {i} — {pick.player_name}{team_str}",
+            "value": (
+                f"**{direction}  {pick.line}  {prop_label}**\n"
+                f"Platform: **{pick.platform}** | Entry: `{pick.entry_type}`{note_str}\n"
+                f"Win Prob: **{prob_pct}%** | EV: **+{pick.ev_pct:.1f}%** | "
+                f"Signals: **{pick.signal_count}/18**\n"
+                f"`{conf_bar}` **{pick.confidence:.1f}/10**"
+            ),
+            "inline": False,
+        })
+
+    fields += [
+        {
+            "name": f"{prize_tier} Prize",
+            "value": f"**${prize_usd:,.0f}** on a **${stake_usd:.0f}** entry",
+            "inline": True,
+        },
+        {
+            "name": "📈 Season Record",
+            "value": f"Streak picks: {season_rate} (W/total)",
+            "inline": True,
+        },
+    ]
+
+    embed = {
+        "title": "🔥 StreakAgent — FRESH START (Picks 1 & 2)",
+        "description": (
+            "New streak begins! Picks 1 & 2 are from **different teams**.\n"
+            "All 11 must be correct — any wrong pick **auto-resets** to Pick 1."
+        ),
+        "color":     0x2ECC71,   # green — new streak
+        "fields":    fields,
+        "footer":    {
+            "text": (
+                f"PropIQ StreakAgent • "
+                f"{datetime.now(timezone.utc).strftime('%b %d %Y %H:%M')} UTC • "
+                f"Confidence gate ≥ {STREAK_CONF_MIN}/10 • "
+                f"Prob gate ≥ {int(STREAK_PROB_MIN * 100)}%"
+            )
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if _send_webhook({"embeds": [embed]}):
+        logger.info("[Streak] Fresh-start alert sent (%d picks)", len(picks))
+
+
 def post_settlement_alert(
     pick_number: int,
     player_name: str,
@@ -912,7 +1017,7 @@ def post_settlement_alert(
     if streak_status == "WON":
         status_line = f"🏆 **STREAK COMPLETE! {STREAK_TOTAL_WINS}/{STREAK_TOTAL_WINS}** — You won **${prize_usd:,.0f}**! 🎉"
     elif streak_status == "LOST":
-        status_line = f"💔 Streak reset after pick {pick_number}. Start fresh tomorrow."
+        status_line = f"💔 Pick {pick_number} missed — streak **auto-reset**! New streak starts tomorrow with 2 fresh picks."
     elif streak_status == "VOIDED":
         status_line = (
             "🔄 Pick voided — streak advances automatically. "
@@ -1094,6 +1199,7 @@ def settle_streak_picks(game_date: str) -> None:
                 FROM streak_picks sp
                 JOIN streak_state ss ON ss.id = sp.streak_id
                 WHERE sp.game_date = %s AND sp.status = 'PENDING'
+                ORDER BY sp.pick_number ASC
                 """,
                 (game_date,),
             )
@@ -1111,7 +1217,18 @@ def settle_streak_picks(game_date: str) -> None:
     # Fetch ESPN stats once
     stat_lookup = fetch_espn_boxscore_stats(game_date)
 
+    lost_streaks: set[int] = set()   # streak IDs that auto-reset this batch
+
     for pick in pending:
+        _sid_check = pick["streak_id"]
+        if _sid_check in lost_streaks:
+            # Streak already reset this batch — skip remaining picks from it
+            logger.info(
+                "[Streak] Skip pick #%d for streak %d (already auto-reset this batch)",
+                pick["pick_number"], _sid_check,
+            )
+            continue
+
         outcome, actual = _grade_pick(
             stat_lookup,
             pick["player_name"],
@@ -1153,6 +1270,19 @@ def settle_streak_picks(game_date: str) -> None:
                     cur.execute(
                         "UPDATE streak_state SET status='LOST' WHERE id=%s",
                         (streak_id,),
+                    )
+                    # AUTO-RESET: create a fresh ACTIVE streak immediately
+                    cur.execute(
+                        """
+                        INSERT INTO streak_state (entry_amount, current_pick, wins_in_row, status)
+                        VALUES (%s, 0, 0, 'ACTIVE')
+                        """,
+                        (entry_amount,),
+                    )
+                    lost_streaks.add(streak_id)
+                    logger.info(
+                        "[Streak] Auto-reset: new streak created after loss on pick %d",
+                        pick_number,
                     )
                 elif outcome == "VOID":
                     streak_status = "VOIDED"
@@ -1268,9 +1398,12 @@ def run_streak_pick(
         logger.warning("[Streak] Could not load/create streak state — aborting.")
         return None
 
-    streak_id   = streak["id"]
-    wins_in_row = streak["wins_in_row"]
-    pick_number = wins_in_row + 1    # next pick needed
+    streak_id    = streak["id"]
+    wins_in_row  = streak["wins_in_row"]
+    current_pick = streak["current_pick"]
+    pick_number  = wins_in_row + 1    # next pick needed
+    # True when the streak is brand-new (no picks recorded yet)
+    is_fresh_start = (wins_in_row == 0 and current_pick == 0)
 
     # Already picked today?
     if already_picked_today(streak_id, date):
@@ -1299,10 +1432,130 @@ def run_streak_pick(
         STREAK_PROB_MIN * 100, STREAK_EV_MIN, STREAK_CONF_MIN,
     )
 
-    # Team-diversity gate for picks 1 & 2
+    # ── Pre-fetch both platforms once for line comparison ───────────────────
+    _ud_props_lc: list[dict] = []
+    _pp_raw_lc:   list[dict] = []
+    if _LINE_COMP_AVAILABLE:
+        try:
+            _ud_props_lc = fetch_underdog_props_with_teams()
+            _pp_resp = requests.get(
+                "https://partner-api.prizepicks.com/projections",
+                params={"league_id": 2, "per_page": 1000, "include": "new_player"},
+                headers={"Accept": "application/json",
+                         "Referer": "https://app.prizepicks.com/",
+                         "User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            if _pp_resp.status_code == 200:
+                _pp_data = _pp_resp.json()
+                _pp_pmap = {
+                    p["id"]: (
+                        p.get("attributes", {}).get("name") or
+                        p.get("attributes", {}).get("display_name", "")
+                    )
+                    for p in _pp_data.get("included", [])
+                    if p.get("type") == "new_player"
+                }
+                for _proj in _pp_data.get("data", []):
+                    _a = _proj.get("attributes", {})
+                    if str(_a.get("odds_type", "standard") or "standard").lower() not in ("standard", ""):
+                        continue
+                    if _a.get("adjusted_odds") or _a.get("is_live"):
+                        continue
+                    _pid = (_proj.get("relationships", {})
+                                 .get("new_player", {})
+                                 .get("data", {})
+                                 .get("id", ""))
+                    _pname  = _pp_pmap.get(_pid, "")
+                    _line_v = _a.get("line_score")
+                    _stat   = _a.get("stat_type", "")
+                    if _pname and _line_v is not None and _stat:
+                        _pp_raw_lc.append({"player_name": _pname,
+                                           "prop_type":   _stat,
+                                           "line":        float(_line_v)})
+        except Exception as _fe:
+            logger.debug("[Streak] Platform pre-fetch error: %s", _fe)
+
+    def _apply_line_comp(p: StreakCandidate) -> str:
+        """Compare UD vs PP for one pick; mutates p.platform/p.line if better. Returns note."""
+        if not _LINE_COMP_AVAILABLE:
+            return ""
+        try:
+            _ud_lk = _build_ll(_ud_props_lc)
+            _pp_lk = _build_ll(_pp_raw_lc)
+            _c = _cmp_prop(p.player_name, p.prop_type, p.side, _ud_lk, _pp_lk)
+            _n = _c.get("note", "")
+            if _c.get("platform") == "PrizePicks" and _c.get("line") is not None:
+                logger.info("[Streak] Better PP line: %s", _n)
+                p.platform = "PrizePicks"
+                p.line     = _c["line"]
+            elif _c.get("platform") == "Underdog" and _c.get("line") is not None:
+                p.line = _c["line"]
+            return _n
+        except Exception as _ce:
+            logger.debug("[Streak] Line comp error: %s", _ce)
+            return ""
+
+    # ── FRESH START: select 2 picks from different teams ────────────────────
+    if is_fresh_start:
+        start_picks = select_start_picks(candidates)
+        if len(start_picks) < 2:
+            logger.info(
+                "[Streak] Need 2 qualifying picks to start streak — only %d qualify today. "
+                "Skipping until more props are available.",
+                len(start_picks),
+            )
+            return None
+
+        notes = [_apply_line_comp(sp) for sp in start_picks]
+
+        for i, sp in enumerate(start_picks, start=1):
+            logger.info(
+                "[Streak] ✅ Start pick #%d: %s %s %.1f %s | conf=%.1f/10 | "
+                "prob=%.1f%% | ev=+%.1f%% | signals=%d",
+                i, sp.player_name, sp.prop_type, sp.line, sp.side,
+                sp.confidence, sp.implied_prob * 100, sp.ev_pct, sp.signal_count,
+            )
+
+        if not dry_run:
+            for i, sp in enumerate(start_picks, start=1):
+                record_streak_pick(streak_id, i, sp, date)
+            season_total, season_wins_c = get_streak_season_stats()
+            post_start_picks_alert(start_picks, entry_amount, season_total, season_wins_c, notes)
+        else:
+            for i, sp in enumerate(start_picks, start=1):
+                logger.info(
+                    "[DRY-RUN] Start pick %d/%d — %s %s %.1f %s | conf=%.1f | %s",
+                    i, STREAK_TOTAL_WINS, sp.player_name, sp.prop_type,
+                    sp.line, sp.side, sp.confidence, notes[i - 1],
+                )
+
+        return {
+            "streak_id":   streak_id,
+            "fresh_start": True,
+            "picks": [
+                {
+                    "pick_number":        i,
+                    "player_name":        sp.player_name,
+                    "team":               sp.team,
+                    "prop_type":          sp.prop_type,
+                    "line":               sp.line,
+                    "direction":          sp.side,
+                    "platform":           sp.platform,
+                    "confidence":         sp.confidence,
+                    "probability":        round(sp.implied_prob, 4),
+                    "ev_pct":             sp.ev_pct,
+                    "signal_count":       sp.signal_count,
+                    "game_date":          date,
+                    "line_compare_note":  notes[i - 1],
+                }
+                for i, sp in enumerate(start_picks, start=1)
+            ],
+        }
+
+    # ── CONTINUING STREAK: 1 pick ────────────────────────────────────────────
     prior_team = get_prior_pick_team(streak_id) if pick_number <= 2 else None
 
-    # Select best pick
     pick = select_streak_pick(candidates, pick_number, prior_team)
     if not pick:
         logger.info(
@@ -1319,6 +1572,7 @@ def run_streak_pick(
         pick.confidence, pick.implied_prob * 100, pick.ev_pct, pick.signal_count,
     )
 
+    _line_comparison_note = _apply_line_comp(pick)
     # ── Phase 92: compare Underdog vs PrizePicks — use better line ──────────
     _line_comparison_note = ""
     if _LINE_COMP_AVAILABLE:
@@ -1407,6 +1661,7 @@ def run_streak_pick(
 
     return {
         "streak_id":          streak_id,
+        "fresh_start":        False,
         "pick_number":        pick_number,
         "player_name":        pick.player_name,
         "team":               pick.team,
