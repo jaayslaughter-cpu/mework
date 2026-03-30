@@ -75,10 +75,49 @@ def _ensure_tables() -> None:
             updated_at    TIMESTAMP    DEFAULT NOW()
         )
         """,
-        # Add sim_edge_reasons column to bet_ledger (safe if already exists)
+        # Full bet_ledger table — created here so all columns exist on first run
+        """
+        CREATE TABLE IF NOT EXISTS bet_ledger (
+            id                SERIAL       PRIMARY KEY,
+            date              TEXT         NOT NULL,
+            agent             TEXT         NOT NULL,
+            player_name       TEXT         NOT NULL,
+            prop_type         TEXT         NOT NULL,
+            direction         TEXT         NOT NULL,
+            line              FLOAT,
+            platform          TEXT,
+            prob_final        FLOAT,
+            ev_pct            FLOAT,
+            sim_edge_reasons  TEXT         DEFAULT '[]',
+            actual_outcome    INTEGER,
+            profit_loss       FLOAT,
+            clv               FLOAT,
+            kelly_units       FLOAT,
+            status            TEXT         DEFAULT 'PENDING',
+            settled_at        TIMESTAMP,
+            created_at        TIMESTAMP    DEFAULT NOW()
+        )
+        """,
+        # Safe migration: add any columns introduced after initial deploy
         """
         ALTER TABLE bet_ledger
             ADD COLUMN IF NOT EXISTS sim_edge_reasons TEXT DEFAULT '[]'
+        """,
+        """
+        ALTER TABLE bet_ledger
+            ADD COLUMN IF NOT EXISTS actual_outcome INTEGER
+        """,
+        """
+        ALTER TABLE bet_ledger
+            ADD COLUMN IF NOT EXISTS profit_loss FLOAT
+        """,
+        """
+        ALTER TABLE bet_ledger
+            ADD COLUMN IF NOT EXISTS clv FLOAT
+        """,
+        """
+        ALTER TABLE bet_ledger
+            ADD COLUMN IF NOT EXISTS kelly_units FLOAT
         """,
     ]
     conn = _get_conn()
