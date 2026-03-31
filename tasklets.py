@@ -3290,6 +3290,35 @@ def run_agent_tasklet() -> None:
                     _pg2.commit()
             except Exception as _dbe2:
                 logger.debug("[AgentTasklet] discord_sent update skipped: %s", _dbe2)
+
+            # Record parlay in propiq_season_record so nightly_recap.py can settle it
+            # Without this, recap always shows "No parlays sent today" even when plays fire
+            try:
+                from season_record import record_parlay as _record_parlay  # noqa: PLC0415
+                _legs_for_record = [
+                    {
+                        "player_name": lg.get("player") or lg.get("player_name", ""),
+                        "prop_type":   lg.get("prop_type", ""),
+                        "side":        lg.get("side", "OVER"),
+                        "line":        lg.get("line", 0),
+                        "odds":        lg.get("odds_american", -110),
+                    }
+                    for lg in parlay.get("legs", [])
+                ]
+                _record_parlay(
+                    date=today_str,
+                    agent=agent_name,
+                    num_legs=len(_legs_for_record),
+                    confidence=float(parlay.get("avg_confidence", parlay.get("confidence", 7.0))),
+                    ev_pct=float(parlay.get("combined_ev_pct", 3.0)),
+                    platform=parlay.get("platform", "Mixed"),
+                    stake=5.0,
+                    legs=_legs_for_record,
+                )
+                logger.info("[AgentTasklet] Parlay recorded in season_record for %s (%s)",
+                            agent_name, today_str)
+            except Exception as _sr_err:
+                logger.debug("[AgentTasklet] season_record insert skipped: %s", _sr_err)
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
