@@ -250,7 +250,7 @@ def calculate_brier_score(predictions: list) -> Optional[float]:
 # 2026 Underdog STANDARD payout multipliers
 _UD_MULTIPLIERS: Dict[int, float] = {
     2: 3.5,
-    3: 6.5,
+    3: 5.0,   # Underdog 2026 STANDARD 3-leg = 5.0x (corrected from 6.5)
     4: 10.0,
     5: 20.0,
 }

@@ -3579,7 +3579,10 @@ def run_grading_tasklet() -> None:
                 if side == "OVER":
                     if actual > line:
                         status = "WIN"
-                        pl = units * (100 / _american_to_implied(int(odds or -110)) - 1)
+                        # decimal odds - 1 = net profit per unit (e.g. -110 → 0.909 units profit per unit risked)
+                        _o = int(odds or -110)
+                        _dec_odds = (1 + 100/abs(_o)) if _o < 0 else (1 + _o/100)
+                        pl = round(units * (_dec_odds - 1.0), 4)
                     elif actual < line:
                         status = "LOSS"
                         pl = -units
@@ -3589,7 +3592,10 @@ def run_grading_tasklet() -> None:
                 else:
                     if actual < line:
                         status = "WIN"
-                        pl = units * (100 / _american_to_implied(int(odds or -110)) - 1)
+                        # decimal odds - 1 = net profit per unit (e.g. -110 → 0.909 units profit per unit risked)
+                        _o = int(odds or -110)
+                        _dec_odds = (1 + 100/abs(_o)) if _o < 0 else (1 + _o/100)
+                        pl = round(units * (_dec_odds - 1.0), 4)
                     elif actual > line:
                         status = "LOSS"
                         pl = -units
@@ -3598,7 +3604,8 @@ def run_grading_tasklet() -> None:
                         pl = 0.0
 
                 closing_odds = _fetch_closing_odds(player, ptype, side) or odds
-                clv = float(model_prob or 50) - _american_to_implied(int(closing_odds or -110))
+                # CLV = model edge over closing line (both in decimal 0-1 scale)
+                clv = round(float(model_prob or 50) / 100.0 - _american_to_implied(int(closing_odds or -110)), 4)
 
                 # actual_outcome: 1=WIN, 0=LOSS (used by XGBoost retraining)
                 actual_outcome = 1 if status == "WIN" else 0 if status == "LOSS" else None
