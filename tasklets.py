@@ -870,7 +870,9 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                              Only called if ODDS_API_KEY is set AND quota not exhausted
       2. DraftEdge JSON    — batter/pitcher projections converted to pseudo-odds
                              Free, no key, daily parquet cache, zero quota cost
-      3. ESPN public API   — implied totals from team run-scoring data
+      3. TheRundown API    — real sportsbook K prop lines (free 100/day with key)
+                             market_id=19 = pitcher_strikeouts  (sport_id=3 = MLB)
+      4. ESPN public API   — implied totals from team run-scoring data
                              Confirmed working in every log, always available
 
     Returns list of game dicts compatible with _get_sharp_consensus() lookups.
@@ -914,7 +916,73 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     except Exception as e:
         logger.info("[OddsAPI→DraftEdge] Not available (%s)", e)
 
-    # ── Tier 3: ESPN implied totals (always available) ─────────────────────
+    # ── Tier 3: TheRundown — real sportsbook K prop lines (market_id=19) ────
+    # Free 100 requests/day with key. Covers pitcher_strikeouts for all MLB games.
+    _rundown_key = os.getenv("RUNDOWN_API_KEY", "a455831fa40a562b43d7f7830f6ab467fa38074d46d078e0d47de324b46bea79")
+    if _rundown_key:
+        try:
+            import datetime as _dt
+            _rd_date = _dt.date.today().strftime("%Y-%m-%d")
+            _rd_resp = requests.get(
+                f"https://therundown.io/api/v2/sports/3/events/{_rd_date}",
+                headers={"X-TheRundown-Key": _rundown_key, "Accept": "application/json"},
+                params={"market_ids": 19},   # 19 = pitcher_strikeouts, sport 3 = MLB
+                timeout=12,
+            )
+            if _rd_resp.status_code == 200:
+                _rd_events = _rd_resp.json().get("events", [])
+                if _rd_events:
+                    # Parse into odds-compatible list so _get_sharp_consensus can use it
+                    _rd_odds = []
+                    for _ev in _rd_events:
+                        _teams  = _ev.get("teams", [])
+                        _home   = next((t_["name"] for t_ in _teams if t_.get("is_home")), "")
+                        _away   = next((t_["name"] for t_ in _teams if t_.get("is_away")), "")
+                        _bms    = []
+                        for _mkt in _ev.get("markets", []):
+                            if _mkt.get("market_id") != 19:
+                                continue
+                            for _part in _mkt.get("participants", []):
+                                _outcomes = []
+                                for _line in _part.get("lines", []):
+                                    _parts = _line.get("value", "").strip().lower().split()
+                                    if len(_parts) != 2:
+                                        continue
+                                    _side_str, _val_str = _parts
+                                    for _bk, _pi in _line.get("prices", {}).items():
+                                        try:
+                                            _price = int(float(str(_pi.get("price", -110)).replace("+", "")))
+                                        except (ValueError, TypeError):
+                                            continue
+                                        _outcomes.append({
+                                            "name":        _side_str.capitalize(),
+                                            "description": _part.get("name", ""),
+                                            "price":       _price,
+                                            "point":       float(_val_str),
+                                        })
+                                if _outcomes:
+                                    _bms.append({
+                                        "key":    f"rundown_book_{_bk}",
+                                        "title":  "TheRundown",
+                                        "markets": [{"key": "pitcher_strikeouts", "outcomes": _outcomes}],
+                                    })
+                        _rd_odds.append({
+                            "source":     "therundown",
+                            "home_team":  _home,
+                            "away_team":  _away,
+                            "bookmakers": _bms,
+                        })
+                    logger.info("[OddsAPI→Rundown] %d K prop events, %d game entries",
+                                len(_rd_events), len(_rd_odds))
+                    return _rd_odds
+            elif _rd_resp.status_code == 429:
+                logger.debug("[OddsAPI→Rundown] Rate limited — falling through to ESPN")
+            else:
+                logger.debug("[OddsAPI→Rundown] HTTP %d — falling through to ESPN", _rd_resp.status_code)
+        except Exception as _rd_err:
+            logger.debug("[OddsAPI→Rundown] Failed: %s — falling through to ESPN", _rd_err)
+
+    # ── Tier 4: ESPN implied totals (always available) ─────────────────────
     try:
         games = _fetch_espn_games()
         if games:
@@ -1497,7 +1565,7 @@ class _BaseAgent:
     # ─────────────────────────────────────────────────────────────────────
     # Feature vector (23 signals) — identical schema at INSERT and predict
     # ─────────────────────────────────────────────────────────────────────
-    FEATURE_DIM = 24  # bump when adding columns; old models padded automatically
+    FEATURE_DIM = 27  # 27-element vector — bump when adding columns; old models padded automatically
 
     @staticmethod
     def _build_feature_vector(prop: dict, bet: dict | None = None) -> list[float]:
@@ -3222,6 +3290,35 @@ def run_agent_tasklet() -> None:
                     _pg2.commit()
             except Exception as _dbe2:
                 logger.debug("[AgentTasklet] discord_sent update skipped: %s", _dbe2)
+
+            # Record parlay in propiq_season_record so nightly_recap.py can settle it
+            # Without this, recap always shows "No parlays sent today" even when plays fire
+            try:
+                from season_record import record_parlay as _record_parlay  # noqa: PLC0415
+                _legs_for_record = [
+                    {
+                        "player_name": lg.get("player") or lg.get("player_name", ""),
+                        "prop_type":   lg.get("prop_type", ""),
+                        "side":        lg.get("side", "OVER"),
+                        "line":        lg.get("line", 0),
+                        "odds":        lg.get("odds_american", -110),
+                    }
+                    for lg in parlay.get("legs", [])
+                ]
+                _record_parlay(
+                    date=today_str,
+                    agent=agent_name,
+                    num_legs=len(_legs_for_record),
+                    confidence=float(parlay.get("avg_confidence", parlay.get("confidence", 7.0))),
+                    ev_pct=float(parlay.get("combined_ev_pct", 3.0)),
+                    platform=parlay.get("platform", "Mixed"),
+                    stake=5.0,
+                    legs=_legs_for_record,
+                )
+                logger.info("[AgentTasklet] Parlay recorded in season_record for %s (%s)",
+                            agent_name, today_str)
+            except Exception as _sr_err:
+                logger.debug("[AgentTasklet] season_record insert skipped: %s", _sr_err)
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
