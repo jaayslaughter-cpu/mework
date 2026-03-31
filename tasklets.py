@@ -1163,6 +1163,7 @@ def _ensure_bet_ledger() -> None:
                     features_json   TEXT,
                     actual_outcome  INTEGER,
                     mlbam_id        INTEGER,          -- for accent-safe grading
+                    discord_sent    BOOLEAN      NOT NULL DEFAULT FALSE,
                     created_at      TIMESTAMP    DEFAULT NOW()
                 )
             """)
