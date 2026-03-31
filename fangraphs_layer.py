@@ -256,15 +256,17 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
         "babip":     0.300,
     },
     "batter": {
-        "wrc_plus":  100.0,
-        "woba":      0.320,
-        "iso":       0.150,
-        "babip":     0.300,
-        "o_swing":   0.310,
-        "z_contact": 0.850,
-        "hr_fb_pct": 0.120,
-        "k_pct":     0.230,
-        "bb_pct":    0.085,
+        "wrc_plus":    100.0,
+        "woba":        0.320,
+        "iso":         0.150,
+        "babip":       0.300,
+        "o_swing":     0.310,
+        "z_contact":   0.850,
+        "hr_fb_pct":   0.120,
+        "k_pct":       0.230,
+        "bb_pct":      0.085,
+        "slg":         0.405,   # league avg SLG — #3 feature for TB (16% importance)
+        "xbh_per_game": 0.50,   # extra base hits per game — #1 feature for TB (45% importance)
     },
 }
 
@@ -304,16 +306,26 @@ def _parse_batters(rows: list[dict]) -> dict[str, dict[str, float]]:
         key = _normalise_name(name)
         if not key:
             continue
+        # Compute xbh_per_game = (2B + 3B + HR) / G — #1 feature for TB props (45% importance)
+        # Source: baseball-models feature importance analysis (gmalbert/baseball-predictions)
+        _hr  = _safe_float(row.get("HR"),  0.0)
+        _2b  = _safe_float(row.get("2B"),  0.0)
+        _3b  = _safe_float(row.get("3B"),  0.0)
+        _g   = max(1.0, _safe_float(row.get("G"), 1.0))
+        _xbh_pg = (_hr + _2b + _3b) / _g
+
         cache[key] = {
-            "wrc_plus":  _safe_float(row.get("wRC+"),       bd["wrc_plus"]),
-            "woba":      _safe_float(row.get("wOBA"),       bd["woba"]),
-            "iso":       _safe_float(row.get("ISO"),        bd["iso"]),
-            "babip":     _safe_float(row.get("BABIP"),      bd["babip"]),
-            "o_swing":   _safe_float(row.get("O-Swing%"),   bd["o_swing"]),
-            "z_contact": _safe_float(row.get("Z-Contact%"), bd["z_contact"]),
-            "hr_fb_pct": _safe_float(row.get("HR/FB"),      bd["hr_fb_pct"]),
-            "k_pct":     _safe_float(row.get("K%"),         bd["k_pct"]),
-            "bb_pct":    _safe_float(row.get("BB%"),        bd["bb_pct"]),
+            "wrc_plus":     _safe_float(row.get("wRC+"),       bd["wrc_plus"]),
+            "woba":         _safe_float(row.get("wOBA"),       bd["woba"]),
+            "iso":          _safe_float(row.get("ISO"),        bd["iso"]),
+            "babip":        _safe_float(row.get("BABIP"),      bd["babip"]),
+            "o_swing":      _safe_float(row.get("O-Swing%"),   bd["o_swing"]),
+            "z_contact":    _safe_float(row.get("Z-Contact%"), bd["z_contact"]),
+            "hr_fb_pct":    _safe_float(row.get("HR/FB"),      bd["hr_fb_pct"]),
+            "k_pct":        _safe_float(row.get("K%"),         bd["k_pct"]),
+            "bb_pct":       _safe_float(row.get("BB%"),        bd["bb_pct"]),
+            "slg":          _safe_float(row.get("SLG"),        bd["slg"]),
+            "xbh_per_game": _xbh_pg if _xbh_pg > 0 else bd["xbh_per_game"],
         }
     return cache
 

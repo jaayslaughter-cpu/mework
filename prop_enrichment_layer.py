@@ -160,15 +160,17 @@ def _get_fg_batter(name: str) -> dict:
         from fangraphs_layer import get_batter  # noqa: PLC0415
         stats = get_batter(name) or {}
         return {
-            "wrc_plus":   stats.get("wrc_plus",  100.0),
-            "woba":       stats.get("woba",       0.310),
-            "iso":        stats.get("iso",        0.155),
-            "babip":      stats.get("babip",      0.300),
-            "o_swing":    stats.get("o_swing",    0.310),
-            "z_contact":  stats.get("z_contact",  0.850),
-            "hr_fb_pct":  stats.get("hr_fb_pct",  0.105),
-            "k_pct":      stats.get("k_pct",      0.224),
-            "bb_pct":     stats.get("bb_pct",     0.085),
+            "wrc_plus":     stats.get("wrc_plus",     100.0),
+            "woba":         stats.get("woba",          0.310),
+            "iso":          stats.get("iso",           0.155),
+            "babip":        stats.get("babip",         0.300),
+            "o_swing":      stats.get("o_swing",       0.310),
+            "z_contact":    stats.get("z_contact",     0.850),
+            "hr_fb_pct":    stats.get("hr_fb_pct",     0.105),
+            "k_pct":        stats.get("k_pct",         0.224),
+            "bb_pct":       stats.get("bb_pct",        0.085),
+            "slg":          stats.get("slg",           0.405),  # SLG — #3 TB feature (16%)
+            "xbh_per_game": stats.get("xbh_per_game",  0.50),   # XBH/G — #1 TB feature (45%)
         }
     except Exception:
         return {}
