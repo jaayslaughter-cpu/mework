@@ -1530,12 +1530,30 @@ class _BaseAgent:
                                   prop.get("swstr_pct", 0.25))))
         else:
             # Batter signals (FanGraphs) mapped into the same 5 slots
+            # Prop-type-aware: TB props use xbh_per_game (#1 feature, 45% importance)
+            # Source: baseball-models feature importance (gmalbert/baseball-predictions)
+            _is_tb_prop = _pt_raw in {"total_bases", "home_runs", "hits_runs_rbis",
+                                       "fantasy_hitter", "fantasy_score"}
+
             # slot 0: wRC+ normalized (100=avg → 0.5, 140=elite → 0.7, 70=poor → 0.35)
             k_rate  = _clamp(float(prop.get("wrc_plus", 100.0) or 100.0) / 200.0)
-            # slot 1: ISO / power (0=weak, 0.15=avg, 0.30=elite)
-            bb_rate = _clamp(float(prop.get("iso", 0.155) or 0.155) / 0.35)
-            # slot 2: BABIP / contact quality (0.250–0.350 range)
-            era     = _clamp((float(prop.get("babip", 0.300) or 0.300) - 0.200) / 0.200)
+
+            # slot 1: xbh_per_game for TB/power props (45% feature importance for TB)
+            #         ISO for all other batter props
+            if _is_tb_prop:
+                _xbh = float(prop.get("xbh_per_game", 0.50) or 0.50)
+                bb_rate = _clamp(_xbh / 1.50)   # 0=0, 0.50=avg(0.33), 1.0=elite(0.67)
+            else:
+                bb_rate = _clamp(float(prop.get("iso", 0.155) or 0.155) / 0.35)
+
+            # slot 2: SLG for TB/power props (16% feature importance)
+            #         BABIP for all other batter props
+            if _is_tb_prop:
+                _slg = float(prop.get("slg", 0.405) or 0.405)
+                era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.405=avg(0.39), 0.650=elite(1.0)
+            else:
+                era = _clamp((float(prop.get("babip", 0.300) or 0.300) - 0.200) / 0.200)
+
             # slot 3: batter bb_pct (plate discipline)
             whip    = _clamp(float(prop.get("bb_pct", 0.085) or 0.085) / 0.20)
             # slot 4: batter K% (inverse contact — higher K = worse contact)
