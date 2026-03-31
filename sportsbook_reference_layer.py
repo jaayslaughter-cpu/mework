@@ -48,8 +48,8 @@ ODDS_API_KEY = (
     or "673bf195062e60e666399be40f763545"
 )
 _ODDS_KEY_FALLBACKS = [
-    os.getenv("ODDS_API_KEY", "673bf195062e60e666399be40f763545"),
-    
+    os.getenv("ODDS_API_KEY",   "673bf195062e60e666399be40f763545"),  # primary key
+    os.getenv("ODDS_API_KEY_2", "adb0c9efeec40b3aff7b6843d449ef93"),  # secondary key — second free account
 ]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT         = "baseball_mlb"
