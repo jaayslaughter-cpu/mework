@@ -983,6 +983,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                         if _lu.get("side") == "home":
                             _home_team = _lu.get("team", "")
                             break
+            _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team)
             _batter_hand = prop.get("batter_hand") or prop.get("_batter_hand") or ""
             _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team,
                                 batter_hand=_batter_hand)

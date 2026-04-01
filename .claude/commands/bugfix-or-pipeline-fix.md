@@ -10,16 +10,13 @@ Use this workflow when working on **bugfix-or-pipeline-fix** in `mework`.
 
 ## Goal
 
-Fixes bugs or pipeline issues, often related to grading, recap, math, or date/time logic. These fixes frequently involve tasklets.py and sometimes other pipeline-related files.
+Fixes bugs or issues in the data pipeline, often related to calculations, data mismatches, or logic errors. May also include hotfixes for production issues.
 
 ## Common Files
 
 - `tasklets.py`
-- `DiscordAlertService.py`
 - `calibration_layer.py`
-- `nightly_recap.py`
-- `orchestrator.py`
-- `season_record.py`
+- `DiscordAlertService.py`
 
 ## Suggested Sequence
 
@@ -30,10 +27,9 @@ Fixes bugs or pipeline issues, often related to grading, recap, math, or date/ti
 
 ## Typical Commit Signals
 
-- Identify the bug or issue and locate the relevant logic in tasklets.py or related files.
-- Edit tasklets.py to fix the bug (e.g., grading, recap, math, query filters).
-- If the bug affects other modules (e.g., DiscordAlertService.py, calibration_layer.py), update those as well.
-- Commit with a message referencing the fix and affected area.
+- Identify and fix the bug in the relevant Python file(s) (commonly tasklets.py, calibration_layer.py, DiscordAlertService.py, etc.)
+- If needed, update related files to ensure consistency (e.g., update both calibration_layer.py and tasklets.py for payout logic)
+- Commit the fix with a descriptive message (often includes 'Fix', 'Hotfix', or 'bug' in the message)
 
 ## Notes
 

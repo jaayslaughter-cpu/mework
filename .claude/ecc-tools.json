@@ -3,6 +3,8 @@
   "schemaVersion": "1.0",
   "generatedBy": "ecc-tools",
   "generatedAt": "2026-04-01T03:01:45.762Z",
+  "generatedAt": "2026-04-01T03:00:34.184Z",
+  "generatedAt": "2026-04-01T03:00:45.490Z",
   "repo": "https://github.com/jaayslaughter-cpu/mework",
   "profiles": {
     "requested": "full",
@@ -120,8 +122,10 @@
     ".codex/agents/docs-researcher.toml",
     ".claude/homunculus/instincts/inherited/mework-instincts.yaml",
     ".claude/commands/feature-development.md",
-    ".claude/commands/feature-development-phase-update.md",
-    ".claude/commands/ecc-bundle-addition.md"
+    ".claude/commands/mework-ecc-bundle-addition.md",
+    ".claude/commands/feature-phase-development-or-bugfix.md"
+    ".claude/commands/feature-phase-development.md",
+    ".claude/commands/bugfix-or-pipeline-fix.md"
   ],
   "packageFiles": {
     "runtime-core": [
@@ -138,8 +142,10 @@
     ],
     "workflow-pack": [
       ".claude/commands/feature-development.md",
-      ".claude/commands/feature-development-phase-update.md",
-      ".claude/commands/ecc-bundle-addition.md"
+      ".claude/commands/feature-phase-development.md",
+      ".claude/commands/bugfix-or-pipeline-fix.md"
+      ".claude/commands/mework-ecc-bundle-addition.md",
+      ".claude/commands/feature-phase-development-or-bugfix.md"
     ]
   },
   "moduleFiles": {
@@ -157,8 +163,10 @@
     ],
     "workflow-pack": [
       ".claude/commands/feature-development.md",
-      ".claude/commands/feature-development-phase-update.md",
-      ".claude/commands/ecc-bundle-addition.md"
+      ".claude/commands/feature-phase-development.md",
+      ".claude/commands/bugfix-or-pipeline-fix.md"
+      ".claude/commands/mework-ecc-bundle-addition.md",
+      ".claude/commands/feature-phase-development-or-bugfix.md"
     ]
   },
   "files": [
@@ -219,13 +227,13 @@
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/feature-development-phase-update.md",
-      "description": "Workflow command scaffold for feature-development-phase-update."
+      "path": ".claude/commands/mework-ecc-bundle-addition.md",
+      "description": "Workflow command scaffold for mework-ecc-bundle-addition."
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/ecc-bundle-addition.md",
-      "description": "Workflow command scaffold for ecc-bundle-addition."
+      "path": ".claude/commands/feature-phase-development-or-bugfix.md",
+      "description": "Workflow command scaffold for feature-phase-development-or-bugfix."
     }
   ],
   "workflows": [
@@ -234,12 +242,12 @@
       "path": ".claude/commands/feature-development.md"
     },
     {
-      "command": "feature-development-phase-update",
-      "path": ".claude/commands/feature-development-phase-update.md"
+      "command": "mework-ecc-bundle-addition",
+      "path": ".claude/commands/mework-ecc-bundle-addition.md"
     },
     {
-      "command": "ecc-bundle-addition",
-      "path": ".claude/commands/ecc-bundle-addition.md"
+      "command": "feature-phase-development-or-bugfix",
+      "path": ".claude/commands/feature-phase-development-or-bugfix.md"
     }
   ],
   "adapters": {
@@ -248,8 +256,10 @@
       "identityPath": ".claude/identity.json",
       "commandPaths": [
         ".claude/commands/feature-development.md",
-        ".claude/commands/feature-development-phase-update.md",
-        ".claude/commands/ecc-bundle-addition.md"
+        ".claude/commands/feature-phase-development.md",
+        ".claude/commands/bugfix-or-pipeline-fix.md"
+        ".claude/commands/mework-ecc-bundle-addition.md",
+        ".claude/commands/feature-phase-development-or-bugfix.md"
       ]
     },
     "codex": {
