@@ -485,36 +485,48 @@ def _load() -> None:
 # ---------------------------------------------------------------------------
 
 _PARK_FACTORS_2025: dict[str, dict[str, int]] = {
-    "angels":        {"hr": 105, "so": 102, "basic": 101, "1b": 100, "2b": 97},
-    "orioles":       {"hr": 99,  "so": 99,  "basic": 99,  "1b": 103, "2b": 96},
-    "red sox":       {"hr": 98,  "so": 98,  "basic": 104, "1b": 104, "2b": 109},
-    "white sox":     {"hr": 105, "so": 99,  "basic": 100, "1b": 100, "2b": 96},
-    "guardians":     {"hr": 98,  "so": 101, "basic": 99,  "1b": 100, "2b": 100},
-    "tigers":        {"hr": 96,  "so": 98,  "basic": 100, "1b": 100, "2b": 100},
-    "royals":        {"hr": 95,  "so": 97,  "basic": 103, "1b": 103, "2b": 108},
-    "twins":         {"hr": 99,  "so": 100, "basic": 101, "1b": 101, "2b": 105},
-    "yankees":       {"hr": 104, "so": 100, "basic": 99,  "1b": 97,  "2b": 95},
-    "athletics":     {"hr": 103, "so": 101, "basic": 103, "1b": 102, "2b": 107},
-    "mariners":      {"hr": 96,  "so": 104, "basic": 94,  "1b": 95,  "2b": 93},
-    "rays":          {"hr": 104, "so": 100, "basic": 101, "1b": 103, "2b": 96},
-    "rangers":       {"hr": 102, "so": 101, "basic": 99,  "1b": 98,  "2b": 100},
-    "blue jays":     {"hr": 103, "so": 100, "basic": 99,  "1b": 98,  "2b": 102},
-    "diamondbacks":  {"hr": 91,  "so": 99,  "basic": 101, "1b": 103, "2b": 105},
-    "braves":        {"hr": 99,  "so": 102, "basic": 100, "1b": 101, "2b": 99},
-    "cubs":          {"hr": 98,  "so": 101, "basic": 98,  "1b": 100, "2b": 94},
-    "reds":          {"hr": 114, "so": 101, "basic": 105, "1b": 101, "2b": 101},
-    "rockies":       {"hr": 107, "so": 96,  "basic": 113, "1b": 108, "2b": 111},
-    "marlins":       {"hr": 97,  "so": 100, "basic": 101, "1b": 102, "2b": 101},
-    "astros":        {"hr": 102, "so": 102, "basic": 99,  "1b": 99,  "2b": 100},
-    "dodgers":       {"hr": 110, "so": 100, "basic": 99,  "1b": 96,  "2b": 98},
-    "brewers":       {"hr": 104, "so": 104, "basic": 99,  "1b": 96,  "2b": 97},
-    "nationals":     {"hr": 100, "so": 98,  "basic": 100, "1b": 100, "2b": 99},
-    "mets":          {"hr": 99,  "so": 101, "basic": 96,  "1b": 97,  "2b": 94},
-    "phillies":      {"hr": 105, "so": 101, "basic": 101, "1b": 99,  "2b": 97},
-    "pirates":       {"hr": 93,  "so": 97,  "basic": 102, "1b": 103, "2b": 105},
-    "cardinals":     {"hr": 94,  "so": 97,  "basic": 98,  "1b": 101, "2b": 99},
-    "padres":        {"hr": 101, "so": 102, "basic": 96,  "1b": 97,  "2b": 95},
-    "giants":        {"hr": 91,  "so": 98,  "basic": 97,  "1b": 102, "2b": 102},
+    # hr=overall, hr_vs_l=vs LHB, hr_vs_r=vs RHB, so=strikeouts, basic=runs, 1b, 2b
+    "angels":        {"hr": 105, "hr_vs_l": 103, "hr_vs_r": 107, "so": 102, "basic": 101, "1b": 100, "2b": 97},
+    "orioles":       {"hr": 99,  "hr_vs_l": 101, "hr_vs_r":  97, "so":  99, "basic":  99, "1b": 103, "2b": 96},
+    "red sox":       {"hr": 98,  "hr_vs_l":  96, "hr_vs_r": 100, "so":  98, "basic": 104, "1b": 104, "2b": 109},
+    "white sox":     {"hr": 105, "hr_vs_l": 106, "hr_vs_r": 104, "so":  99, "basic": 100, "1b": 100, "2b": 96},
+    "guardians":     {"hr": 98,  "hr_vs_l":  96, "hr_vs_r": 101, "so": 101, "basic":  99, "1b": 100, "2b": 100},
+    "tigers":        {"hr": 96,  "hr_vs_l":  94, "hr_vs_r":  97, "so":  98, "basic": 100, "1b": 100, "2b": 100},
+    "royals":        {"hr": 95,  "hr_vs_l":  93, "hr_vs_r":  97, "so":  97, "basic": 103, "1b": 103, "2b": 108},
+    "twins":         {"hr": 99,  "hr_vs_l":  98, "hr_vs_r": 100, "so": 100, "basic": 101, "1b": 101, "2b": 105},
+    # Yankee Stadium: iconic short RF porch → big LHB advantage
+    "yankees":       {"hr": 104, "hr_vs_l": 118, "hr_vs_r":  92, "so": 100, "basic":  99, "1b":  97, "2b": 95},
+    "athletics":     {"hr": 103, "hr_vs_l": 104, "hr_vs_r": 102, "so": 101, "basic": 103, "1b": 102, "2b": 107},
+    # T-Mobile: marine air, deep gaps → LHB disadvantage
+    "mariners":      {"hr": 96,  "hr_vs_l":  93, "hr_vs_r":  98, "so": 104, "basic":  94, "1b":  95, "2b": 93},
+    "rays":          {"hr": 104, "hr_vs_l": 105, "hr_vs_r": 103, "so": 100, "basic": 101, "1b": 103, "2b": 96},
+    "rangers":       {"hr": 102, "hr_vs_l": 103, "hr_vs_r": 101, "so": 101, "basic":  99, "1b":  98, "2b": 100},
+    "blue jays":     {"hr": 103, "hr_vs_l": 105, "hr_vs_r": 101, "so": 100, "basic":  99, "1b":  98, "2b": 102},
+    # Chase Field: AZ heat but pitcher-friendly dimensions — both hands suppressed
+    "diamondbacks":  {"hr": 91,  "hr_vs_l":  90, "hr_vs_r":  92, "so":  99, "basic": 101, "1b": 103, "2b": 105},
+    "braves":        {"hr": 99,  "hr_vs_l": 100, "hr_vs_r":  98, "so": 102, "basic": 100, "1b": 101, "2b": 99},
+    "cubs":          {"hr": 98,  "hr_vs_l":  99, "hr_vs_r":  97, "so": 101, "basic":  98, "1b": 100, "2b": 94},
+    # GABP: known extreme HR park, both hands benefit
+    "reds":          {"hr": 114, "hr_vs_l": 117, "hr_vs_r": 111, "so": 101, "basic": 105, "1b": 101, "2b": 101},
+    # Coors: altitude lifts all; thin-air effect slightly larger for pull hitters
+    "rockies":       {"hr": 107, "hr_vs_l": 106, "hr_vs_r": 108, "so":  96, "basic": 113, "1b": 108, "2b": 111},
+    "marlins":       {"hr": 97,  "hr_vs_l":  96, "hr_vs_r":  98, "so": 100, "basic": 101, "1b": 102, "2b": 101},
+    # Minute Maid: Crawford Boxes in LF → RHB pull to LF is easier
+    "astros":        {"hr": 102, "hr_vs_l":  98, "hr_vs_r": 106, "so": 102, "basic":  99, "1b":  99, "2b": 100},
+    # Dodger Stadium: power alleys, LHB slight edge
+    "dodgers":       {"hr": 110, "hr_vs_l": 113, "hr_vs_r": 107, "so": 100, "basic":  99, "1b":  96, "2b": 98},
+    "brewers":       {"hr": 104, "hr_vs_l": 106, "hr_vs_r": 102, "so": 104, "basic":  99, "1b":  96, "2b": 97},
+    "nationals":     {"hr": 100, "hr_vs_l": 101, "hr_vs_r":  99, "so":  98, "basic": 100, "1b": 100, "2b": 99},
+    # Citi Field: pitcher-friendly, deep CF/LC; RHB pulls to short RF
+    "mets":          {"hr": 99,  "hr_vs_l":  96, "hr_vs_r": 102, "so": 101, "basic":  96, "1b":  97, "2b": 94},
+    "phillies":      {"hr": 105, "hr_vs_l": 107, "hr_vs_r": 103, "so": 101, "basic": 101, "1b":  99, "2b": 97},
+    # PNC Park: deep RF → LHBs disadvantaged
+    "pirates":       {"hr": 93,  "hr_vs_l":  90, "hr_vs_r":  96, "so":  97, "basic": 102, "1b": 103, "2b": 105},
+    "cardinals":     {"hr": 94,  "hr_vs_l":  92, "hr_vs_r":  95, "so":  97, "basic":  98, "1b": 101, "2b": 99},
+    # Petco: pitcher-friendly, LHB especially hurt by deep LCF/CF
+    "padres":        {"hr": 101, "hr_vs_l":  98, "hr_vs_r": 103, "so": 102, "basic":  96, "1b":  97, "2b": 95},
+    # Oracle Park: McCovey Cove, strong marine wind in from CF/LCF — LHB hit into wind
+    "giants":        {"hr": 91,  "hr_vs_l":  82, "hr_vs_r":  98, "so":  98, "basic":  97, "1b": 102, "2b": 102},
 }
 
 # Full name → canonical key (covers full names, city+name combos, abbreviations)
@@ -602,8 +614,9 @@ def get_park_factors(team: str) -> dict[str, int]:
 
 def park_factor_adjustment(
     prop_type: str,
-    direction: str,   # "Over" or "Under"
+    direction: str,       # "Over" or "Under"
     home_team: str,
+    batter_hand: str = "", # "L", "R", or "" (unknown → use overall hr)
 ) -> float:
     """
     Probability nudge from park factors for the given prop type and direction.
@@ -627,7 +640,14 @@ def park_factor_adjustment(
     flip    = 1.0 if is_over else -1.0
 
     # Convert factor (100-scale) to fractional deviation from neutral
-    hr_dev    = (pf.get("hr",    100) - 100) / 100.0
+    # Use platoon split when batter handedness is known
+    _hand = (batter_hand or "").upper().strip()
+    if _hand == "L" and "hr_vs_l" in pf:
+        hr_dev = (pf["hr_vs_l"] - 100) / 100.0
+    elif _hand == "R" and "hr_vs_r" in pf:
+        hr_dev = (pf["hr_vs_r"] - 100) / 100.0
+    else:
+        hr_dev = (pf.get("hr", 100) - 100) / 100.0
     so_dev    = (pf.get("so",    100) - 100) / 100.0
     basic_dev = (pf.get("basic", 100) - 100) / 100.0
     b1_dev    = (pf.get("1b",    100) - 100) / 100.0
