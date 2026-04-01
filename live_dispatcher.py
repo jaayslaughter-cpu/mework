@@ -1430,6 +1430,8 @@ def build_parlay(
                 "implied_prob": round(l.implied_prob, 4),
                 "entry_type":   l.entry_type,
                 "fantasy_pts":  round(l.fantasy_pts, 2),
+                "model_prob":   round(_eff_prob(l) * 100.0, 1),
+                "ev_pct":       round(calc_ev(_eff_prob(l)), 2),
             }
             for l in selected
         ],
@@ -1542,6 +1544,8 @@ def build_omega_parlay(
                 "implied_prob": round(sp, 4),
                 "entry_type":   l.entry_type,
                 "fantasy_pts":  round(l.fantasy_pts, 2),
+                "model_prob":   round(sp * 100.0, 1),
+                "ev_pct":       round(calc_ev(sp), 2),
             }
             for l, sp in zip(selected_legs, selected_probs)
         ],
@@ -2016,9 +2020,9 @@ class LiveDispatcher:
             if ev < MIN_EV_PCT:
                 logger.info("[%s] EV %.1f%% below gate -- skipped.", agent["name"], ev)
                 continue
-            if conf < 5.5:
+            if conf < 7.0:
                 logger.info(
-                    "[%s] Confidence %.1f/10 below 5.5 gate -- skipped.",
+                    "[%s] Confidence %.1f/10 below 7.0 gate -- skipped.",
                     agent["name"], conf,
                 )
                 continue
@@ -2031,12 +2035,12 @@ class LiveDispatcher:
         if omega:
             ev_o   = omega.get("ev_pct", 0)
             conf_o = omega.get("confidence", 0)
-            if ev_o >= MIN_EV_PCT and conf_o >= 5.5:
+            if ev_o >= MIN_EV_PCT and conf_o >= 7.0:
                 omega["_agent_meta"] = None
                 candidate_parlays.append(omega)
             else:
                 logger.info(
-                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 -- below 5.5 gate, skipped.",
+                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 -- below 7.0 gate, skipped.",
                     ev_o, conf_o,
                 )
         else:
