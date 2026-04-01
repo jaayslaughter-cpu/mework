@@ -2,7 +2,7 @@
   "version": "1.3",
   "schemaVersion": "1.0",
   "generatedBy": "ecc-tools",
-  "generatedAt": "2026-04-01T02:57:30.542Z",
+  "generatedAt": "2026-04-01T03:01:45.762Z",
   "repo": "https://github.com/jaayslaughter-cpu/mework",
   "profiles": {
     "requested": "full",
@@ -119,9 +119,9 @@
     ".codex/agents/reviewer.toml",
     ".codex/agents/docs-researcher.toml",
     ".claude/homunculus/instincts/inherited/mework-instincts.yaml",
-    ".claude/commands/database-migration.md",
-    ".claude/commands/feature-phase-development.md",
-    ".claude/commands/bugfix-or-pipeline-fix.md"
+    ".claude/commands/feature-development.md",
+    ".claude/commands/feature-development-phase-update.md",
+    ".claude/commands/ecc-bundle-addition.md"
   ],
   "packageFiles": {
     "runtime-core": [
@@ -137,9 +137,9 @@
       ".claude/homunculus/instincts/inherited/mework-instincts.yaml"
     ],
     "workflow-pack": [
-      ".claude/commands/database-migration.md",
-      ".claude/commands/feature-phase-development.md",
-      ".claude/commands/bugfix-or-pipeline-fix.md"
+      ".claude/commands/feature-development.md",
+      ".claude/commands/feature-development-phase-update.md",
+      ".claude/commands/ecc-bundle-addition.md"
     ]
   },
   "moduleFiles": {
@@ -156,9 +156,9 @@
       ".claude/homunculus/instincts/inherited/mework-instincts.yaml"
     ],
     "workflow-pack": [
-      ".claude/commands/database-migration.md",
-      ".claude/commands/feature-phase-development.md",
-      ".claude/commands/bugfix-or-pipeline-fix.md"
+      ".claude/commands/feature-development.md",
+      ".claude/commands/feature-development-phase-update.md",
+      ".claude/commands/ecc-bundle-addition.md"
     ]
   },
   "files": [
@@ -214,32 +214,32 @@
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/database-migration.md",
-      "description": "Workflow command scaffold for database-migration."
+      "path": ".claude/commands/feature-development.md",
+      "description": "Workflow command scaffold for feature-development."
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/feature-phase-development.md",
-      "description": "Workflow command scaffold for feature-phase-development."
+      "path": ".claude/commands/feature-development-phase-update.md",
+      "description": "Workflow command scaffold for feature-development-phase-update."
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/bugfix-or-pipeline-fix.md",
-      "description": "Workflow command scaffold for bugfix-or-pipeline-fix."
+      "path": ".claude/commands/ecc-bundle-addition.md",
+      "description": "Workflow command scaffold for ecc-bundle-addition."
     }
   ],
   "workflows": [
     {
-      "command": "database-migration",
-      "path": ".claude/commands/database-migration.md"
+      "command": "feature-development",
+      "path": ".claude/commands/feature-development.md"
     },
     {
-      "command": "feature-phase-development",
-      "path": ".claude/commands/feature-phase-development.md"
+      "command": "feature-development-phase-update",
+      "path": ".claude/commands/feature-development-phase-update.md"
     },
     {
-      "command": "bugfix-or-pipeline-fix",
-      "path": ".claude/commands/bugfix-or-pipeline-fix.md"
+      "command": "ecc-bundle-addition",
+      "path": ".claude/commands/ecc-bundle-addition.md"
     }
   ],
   "adapters": {
@@ -247,9 +247,9 @@
       "skillPath": ".claude/skills/mework/SKILL.md",
       "identityPath": ".claude/identity.json",
       "commandPaths": [
-        ".claude/commands/database-migration.md",
-        ".claude/commands/feature-phase-development.md",
-        ".claude/commands/bugfix-or-pipeline-fix.md"
+        ".claude/commands/feature-development.md",
+        ".claude/commands/feature-development-phase-update.md",
+        ".claude/commands/ecc-bundle-addition.md"
       ]
     },
     "codex": {
