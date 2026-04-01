@@ -1010,7 +1010,7 @@ def fetch_prizepicks_props() -> list[dict]:
         # Single attempt — Railway IP is 403-blocked; jump straight to Apify on failure
         data = None
         sess = _get_pp_session()
-        _pp_url = "https://api.prizepicks.com/projections"
+        _pp_url = "https://partner-api.prizepicks.com/projections"
         _pp_params = {"per_page": 250, "single_stat": True, "league_id": 2}
 
         # Tier 1: Direct fetch
@@ -1029,7 +1029,7 @@ def fetch_prizepicks_props() -> list[dict]:
                 "Origin": "https://app.prizepicks.com",
             }
             _proxy_resp = _apify_proxy_get(
-                "https://api.prizepicks.com/projections",
+                "https://partner-api.prizepicks.com/projections",
                 headers=_pp_proxy_headers,
                 params={"per_page": 250, "single_stat": True, "league_id": 2},
             )
@@ -1786,9 +1786,9 @@ class LiveDispatcher:
         ud_props = fetch_underdog_props()
         # Both platforms feed the main pool — but agents only pick all-PP
         # or all-UD parlays (never mixed). FLEX lines stripped here.
-        ud_std   = [p for p in ud_props
-                    if p.get("entry_type", "FLEX") == "STANDARD"]
-        all_raw  = pp_props + ud_std
+        # Include all Underdog lines (FLEX is the primary entry type).
+        # Platform decision tree picks the better of PP vs UD per agent.
+        all_raw  = pp_props + ud_props
 
         if not all_raw:
             logger.warning("No props fetched from either platform -- aborting.")
@@ -1800,7 +1800,7 @@ class LiveDispatcher:
         if _LINE_COMP_AVAILABLE:
             try:
                 self._pp_lookup = _build_line_lookup(pp_props)
-                self._ud_lookup = _build_line_lookup(ud_std)
+                self._ud_lookup = _build_line_lookup(ud_props)
                 logger.info(
                     "[LineComp] Lookups built — PP=%d entries  UD=%d entries",
                     len(self._pp_lookup), len(self._ud_lookup),
