@@ -639,26 +639,60 @@ def _fetch_mlb_standings() -> list[dict]:
         return []
 
 
+def _resilient_get(url: str, headers: dict, params: dict | None = None,
+                   timeout: int = 15) -> "requests.Response":
+    """
+    GET with automatic ScraperAPI fallback on 403/429.
+    If SCRAPERAPI_KEY env var is set and direct call fails, retries via proxy.
+    ScraperAPI free tier: 1,000 calls/month — only used as fallback.
+    """
+    import os as _os
+    resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+    if resp.status_code in (403, 429, 407):
+        scraper_key = _os.getenv("SCRAPERAPI_KEY", "")
+        if scraper_key:
+            proxy_url = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+            proxies = {"http": proxy_url, "https": proxy_url}
+            logger.info("[DataHub] Direct fetch %d — retrying via ScraperAPI proxy", resp.status_code)
+            resp = requests.get(url, headers=headers, params=params,
+                                timeout=30, proxies=proxies, verify=False)
+    return resp
+
+
 def _fetch_prizepicks_direct() -> list[dict]:
-    """Fetch PrizePicks MLB props directly (free, no key required).
-    Railway IPs may get 403 — returns empty list gracefully so agents
-    fall back to sportsbook_reference_layer data.
+    """Fetch PrizePicks MLB props via partner-api (public, no key required).
+    Uses partner-api.prizepicks.com — confirmed public endpoint with no bot block.
+    Falls back to ScraperAPI proxy on 403 if SCRAPERAPI_KEY env var is set.
     """
     _PP_HEADERS = {
         "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 Safari/537.36"
+            "Chrome/122.0.0.0 Safari/537.36"
         ),
         "Accept": "application/json",
-        "Referer": "https://app.prizepicks.com/",
-        "Origin": "https://app.prizepicks.com",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
     }
+    # Dynamically resolve MLB league_id — avoids hardcoded ID being stale
+    league_id = 2  # default
     try:
-        resp = requests.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
+        leagues_resp = _resilient_get(
+            "https://partner-api.prizepicks.com/leagues",
+            headers=_PP_HEADERS, timeout=10,
+        )
+        if leagues_resp.status_code == 200:
+            for item in leagues_resp.json().get("data", []):
+                if (item.get("attributes", {}).get("name") or "").upper() == "MLB":
+                    league_id = item["id"]
+                    break
+    except Exception:
+        pass
+    try:
+        resp = _resilient_get(
+            "https://partner-api.prizepicks.com/projections",
             headers=_PP_HEADERS,
+            params={"per_page": 1000, "league_id": league_id},
             timeout=15,
         )
         if resp.status_code != 200:
@@ -715,17 +749,18 @@ def _fetch_prizepicks_direct() -> list[dict]:
 
 
 def _fetch_underdog_props_direct() -> list[dict]:
-    """Fetch Underdog Fantasy MLB over/under lines (free, no key required)."""
+    """Fetch Underdog Fantasy MLB over/under lines (free, no key required).
+    Falls back to ScraperAPI proxy on 403 if SCRAPERAPI_KEY env var is set.
+    """
     # Headers confirmed working by aidanhall21/underdog-fantasy-pickem-scraper
-    # No API key needed — standard browser UA with Google Referer is sufficient
     _UD_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.google.com/",
     }
     try:
-        resp = requests.get(
+        resp = _resilient_get(
             "https://api.underdogfantasy.com/beta/v5/over_under_lines",
             headers=_UD_HEADERS,
             timeout=20,
