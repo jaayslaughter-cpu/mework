@@ -1,417 +1,153 @@
----
-name: mework-conventions
-description: Development conventions and patterns for mework. Python project with conventional commits.
----
+```markdown
+# mework Development Patterns
 
-# Mework Conventions
-
-> Generated from [jaayslaughter-cpu/mework](https://github.com/jaayslaughter-cpu/mework) on 2026-03-20
+> Auto-generated skill from repository analysis
 
 ## Overview
 
-This skill teaches Claude the development patterns and conventions used in mework.
-
-## Tech Stack
-
-- **Primary Language**: Python
-- **Architecture**: hybrid module organization
-- **Test Location**: separate
-
-## When to Use This Skill
-
-Activate this skill when:
-- Making changes to this repository
-- Adding new features following established patterns
-- Writing tests that match project conventions
-- Creating commits with proper message format
-
-## Commit Conventions
-
-Follow these commit message conventions based on 55 analyzed commits.
-
-### Commit Style: Conventional Commits
-
-### Prefixes Used
-
-- `feat`
-- `fix`
-- `chore`
-
-### Message Guidelines
-
-- Average message length: ~58 characters
-- Keep first line concise and descriptive
-- Use imperative mood ("Add feature" not "Added feature")
-
-
-*Commit message example*
-
-```text
-feat: PropIQ complete implementation [fix/sync-worker-bugs]
-```
-
-*Commit message example*
-
-```text
-fix(docker): Add REDIS_PASSWORD env var to hub service
-```
-
-*Commit message example*
-
-```text
-chore: Tighten CORS origins, remove wildcard
-```
-
-*Commit message example*
-
-```text
-Merge pull request #25 from jaayslaughter-cpu/ticket-6.4-defensive-contrast
-```
-
-*Commit message example*
-
-```text
-Merge branch 'main' into ticket-6.4-defensive-contrast
-```
-
-*Commit message example*
-
-```text
-chore: Remove Streamlit dashboard
-```
-
-*Commit message example*
-
-```text
-feat(scripts): Enhanced training pipeline with multi-source data
-```
-
-*Commit message example*
-
-```text
-feat(api): Defensive Contrast Engine for batted-ball profile mismatches
-```
-
-## Architecture
-
-### Project Structure: Single Package
-
-This project uses **hybrid** module organization.
-
-### Configuration Files
-
-- `.github/workflows/npm-publish-github-packages.yml`
-- `api/Dockerfile`
-- `docker-compose.yml`
-- `hub/Dockerfile`
-- `hub/package.json`
-
-### Guidelines
-
-- This project uses a hybrid organization
-- Follow existing patterns when adding new code
-
-## Code Style
-
-### Language: Python
-
-### Naming Conventions
-
-| Element | Convention |
-|---------|------------|
-| Files | snake_case |
-| Functions | camelCase |
-| Classes | PascalCase |
-| Constants | SCREAMING_SNAKE_CASE |
-
-### Import Style: Mixed Style
-
-### Export Style: Mixed Style
-
-
-## Error Handling
-
-### Error Handling Style: Try-Catch Blocks
-
-
-*Standard error handling pattern*
-
-```typescript
-try {
-  const result = await riskyOperation()
-  return result
-} catch (error) {
-  console.error('Operation failed:', error)
-  throw new Error('User-friendly message')
-}
-```
-
-## Common Workflows
-
-These workflows were detected from analyzing commit patterns.
-
-### Database Migration
-
-Database schema changes with migration files
-
-**Frequency**: ~10 times per month
-
-**Steps**:
-1. Create migration file
-2. Update schema definitions
-3. Generate/update types
-
-**Example commit sequence**:
-```
-fix: CI bot feedback - placeholder files, security, and schema fixes
-Merge pull request #4 from jaayslaughter-cpu/ticket-1.4-bets-log-views-indexes
-fix: change npm ci to npm install, reorder USER before EXPOSE
-```
-
-### Feature Development
-
-Standard feature implementation workflow
-
-**Frequency**: ~17 times per month
-
-**Steps**:
-1. Add feature implementation
-2. Add tests for feature
-3. Update documentation
-
-**Files typically involved**:
-- `**/api/**`
-
-**Example commit sequence**:
-```
-fix: CI bot feedback - placeholder files, security, and schema fixes
-Merge pull request #4 from jaayslaughter-cpu/ticket-1.4-bets-log-views-indexes
-fix: change npm ci to npm install, reorder USER before EXPOSE
-```
-
-### Refactoring
-
-Code refactoring and cleanup workflow
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Ensure tests pass before refactor
-2. Refactor code structure
-3. Verify tests still pass
-
-**Files typically involved**:
-- `src/**/*`
-
-**Example commit sequence**:
-```
-fix: 8 architecture improvements from CI bot review
-fix: 5 architecture refinements from CI bot review
-feat(api): FastAPI bootstrap with async SQLAlchemy
-```
-
-### Add Or Update Database Table Or Schema
-
-Adds or updates a database table, view, or index, often for new features or analytics. Includes SQL migration files and sometimes updates to related backend code.
-
-**Frequency**: ~4 times per month
-
-**Steps**:
-1. Create or update SQL migration file in db/init/*.sql
-2. Sometimes update related backend code (e.g., api/database.py, hub/src/sync.js) to use new/changed tables
-3. Commit migration and related code
-
-**Files typically involved**:
-- `db/init/01_core_reference.sql`
-- `db/init/02_projection_market_layer.sql`
-- `db/init/03_bets_log_views_indexes.sql`
-
-**Example commit sequence**:
-```
-Create or update SQL migration file in db/init/*.sql
-Sometimes update related backend code (e.g., api/database.py, hub/src/sync.js) to use new/changed tables
-Commit migration and related code
-```
-
-### Add Or Enhance Api Endpoint
-
-Adds or updates FastAPI endpoints, including new routers, services, and sometimes model or requirements updates.
-
-**Frequency**: ~3 times per month
-
-**Steps**:
-1. Create or update api/routers/*.py for endpoint logic
-2. Create or update api/services/*.py for business logic
-3. Update api/main.py to register new routers
-4. Update api/requirements.txt if new dependencies are needed
-5. Commit all related files
-
-**Files typically involved**:
-- `api/routers/*.py`
-- `api/services/*.py`
-- `api/main.py`
-- `api/requirements.txt`
-
-**Example commit sequence**:
-```
-Create or update api/routers/*.py for endpoint logic
-Create or update api/services/*.py for business logic
-Update api/main.py to register new routers
-Update api/requirements.txt if new dependencies are needed
-Commit all related files
-```
-
-### Add Or Train Ml Model
-
-Adds new ML models, training scripts, and updates model artifacts for predictions.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Create or update scripts/train_model.py for training logic
-2. Generate or update model artifact files in api/models/*.json
-3. Update api/services/predictor.py to use new models if needed
-4. Update api/requirements.txt if new ML dependencies are needed
-5. Commit all related files
-
-**Files typically involved**:
-- `scripts/train_model.py`
-- `api/models/*.json`
-- `api/services/predictor.py`
-- `api/requirements.txt`
-
-**Example commit sequence**:
-```
-Create or update scripts/train_model.py for training logic
-Generate or update model artifact files in api/models/*.json
-Update api/services/predictor.py to use new models if needed
-Update api/requirements.txt if new ML dependencies are needed
-Commit all related files
-```
-
-### Add Or Enhance Hub Sync Worker
-
-Implements or updates the Node.js hub's background sync worker for polling APIs and syncing betting markets.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Update or create hub/src/sync.js for polling logic
-2. Update related fetchers (hub/src/fetchers/*.js) for new data sources
-3. Update hub/src/server.js to integrate sync worker
-4. Update docker-compose.yml or .env.example if new env vars are needed
-5. Commit all related files
-
-**Files typically involved**:
-- `hub/src/sync.js`
-- `hub/src/fetchers/*.js`
-- `hub/src/server.js`
-- `docker-compose.yml`
-- `.env.example`
-
-**Example commit sequence**:
-```
-Update or create hub/src/sync.js for polling logic
-Update related fetchers (hub/src/fetchers/*.js) for new data sources
-Update hub/src/server.js to integrate sync worker
-Update docker-compose.yml or .env.example if new env vars are needed
-Commit all related files
-```
-
-### Add Or Enhance Dashboard Feature
-
-Adds or updates the Streamlit dashboard, including app logic, requirements, and Dockerfile.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Create or update dashboard/app.py for Streamlit UI
-2. Update dashboard/requirements.txt for new dependencies
-3. Update dashboard/Dockerfile if needed
-4. Update docker-compose.yml if dashboard service changes
-5. Commit all related files
-
-**Files typically involved**:
-- `dashboard/app.py`
-- `dashboard/requirements.txt`
-- `dashboard/Dockerfile`
-- `docker-compose.yml`
-
-**Example commit sequence**:
-```
-Create or update dashboard/app.py for Streamlit UI
-Update dashboard/requirements.txt for new dependencies
-Update dashboard/Dockerfile if needed
-Update docker-compose.yml if dashboard service changes
-Commit all related files
-```
-
-### Add Or Update Docker Orchestration
-
-Updates Docker Compose and service Dockerfiles to orchestrate multi-service deployments, often when adding new services or changing environment variables.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Update docker-compose.yml with new/changed services or env vars
-2. Update service Dockerfiles as needed (api/Dockerfile, dashboard/Dockerfile, hub/Dockerfile)
-3. Update .env.example for new environment variables
-4. Commit all related files
-
-**Files typically involved**:
-- `docker-compose.yml`
-- `api/Dockerfile`
-- `dashboard/Dockerfile`
-- `hub/Dockerfile`
-- `.env.example`
-
-**Example commit sequence**:
-```
-Update docker-compose.yml with new/changed services or env vars
-Update service Dockerfiles as needed (api/Dockerfile, dashboard/Dockerfile, hub/Dockerfile)
-Update .env.example for new environment variables
-Commit all related files
-```
-
-### Add Or Update Backend Service Logic
-
-Implements or enhances backend service logic, especially in api/services/*.py, often for analytics engines (fatigue, usage vacuums, defensive contrast, etc).
-
-**Frequency**: ~3 times per month
-
-**Steps**:
-1. Create or update api/services/*.py with new logic
-2. Update api/services/predictor.py to integrate new logic
-3. Update or create tests if needed
-4. Commit all related files
-
-**Files typically involved**:
-- `api/services/*.py`
-
-**Example commit sequence**:
-```
-Create or update api/services/*.py with new logic
-Update api/services/predictor.py to integrate new logic
-Update or create tests if needed
-Commit all related files
-```
-
-
-## Best Practices
-
-Based on analysis of the codebase, follow these practices:
-
-### Do
-
-- Use conventional commit format (feat:, fix:, etc.)
-- Use snake_case for file names
-- Prefer mixed exports
-
-### Don't
-
-- Don't write vague commit messages
-- Don't deviate from established patterns without discussion
+This skill teaches you how to contribute effectively to the `mework` Python codebase. You'll learn the project's coding conventions, commit patterns, and the main workflows for adding features, extending the database, fixing bugs, wiring pipelines, and merging branches. The guide includes practical code and workflow examples, plus suggested `/commands` for common tasks.
+
+## Coding Conventions
+
+- **File Naming:**  
+  Use `snake_case` for all Python files.  
+  *Example:*  
+  ```python
+  # Good
+  prop_enrichment_layer.py
+
+  # Bad
+  PropEnrichmentLayer.py
+  ```
+
+- **Import Style:**  
+  Use **relative imports** within the package.  
+  *Example:*  
+  ```python
+  from .fangraphs_layer import FangraphsLayer
+  ```
+
+- **Export Style:**  
+  Mixed; both explicit `__all__` and implicit exports are used.  
+  *Example:*  
+  ```python
+  # Explicit
+  __all__ = ["FangraphsLayer", "PropEnrichmentLayer"]
+
+  # Implicit (no __all__, all top-level symbols exported)
+  ```
+
+- **Commit Messages:**  
+  - Freeform, but often start with `fix`, `refactor`, or `Phase XX:`
+  - Average length: ~82 characters  
+  *Example:*  
+  ```
+  fix: correct cache invalidation logic in fangraphs_layer.py
+  Phase 105: xbh_per_game + SLG as TB/power prop features
+  ```
+
+## Workflows
+
+### Feature Phase Release
+**Trigger:** When introducing a new feature or major enhancement as part of a named "Phase" (e.g., "Phase 105: xbh_per_game + SLG as TB/power prop features").  
+**Command:** `/new-phase-feature`
+
+1. Edit or add logic in one or more of the following core pipeline files:
+   - `fangraphs_layer.py`
+   - `prop_enrichment_layer.py`
+   - `calibration_layer.py`
+   - `sportsbook_reference_layer.py`
+   - `line_comparator.py`
+   - `base_rate_model.py`
+2. Update orchestration logic in `tasklets.py`.
+3. Sometimes update `orchestrator.py` for API or pipeline wiring.
+4. Commit with a message like:
+   ```
+   Phase 106: Add new player prop enrichment for walk rate
+   ```
+5. Test the new feature end-to-end.
 
 ---
 
-*This skill was auto-generated by [ECC Tools](https://ecc.tools). Review and customize as needed for your team.*
+### Database Schema and Cache Extension
+**Trigger:** When adding/modifying database tables, migrations, or cache layers to support new features or performance improvements.  
+**Command:** `/new-db-migration`
+
+1. Create or edit migration SQL files in `migrations/` (e.g., `V28__fg_cache.sql`).
+2. Update related Python data access layers (e.g., `fangraphs_layer.py` for cache logic).
+3. Update `tasklets.py` if logic is affected (e.g., Discord sent flag).
+4. Update `.env.example` if new environment variables are required.
+5. Update `orchestrator.py` if pipeline wiring is needed.
+6. Apply the migration and test.
+
+*Example migration file:*
+```sql
+-- migrations/V28__fg_cache.sql
+ALTER TABLE fangraphs_cache ADD COLUMN last_updated TIMESTAMP;
+```
+
+---
+
+### Bugfix or Hotfix Pipeline
+**Trigger:** When a bug is discovered in production or QA, especially in core pipeline logic.  
+**Command:** `/bugfix`
+
+1. Identify the bug in the relevant core file (e.g., `tasklets.py`, `calibration_layer.py`).
+2. Fix the bug and update related files if necessary.
+3. Commit with a message starting with `Fix:` or `Hotfix:`.
+   ```
+   Fix: handle NoneType in DiscordAlertService.py notifications
+   ```
+4. Test to confirm the fix.
+
+---
+
+### Multi-file Pipeline Wiring
+**Trigger:** When integrating a new data source, enrichment, or agent into the main pipeline.  
+**Command:** `/wire-pipeline`
+
+1. Edit or add logic in `prop_enrichment_layer.py`, `fangraphs_layer.py`, or other data layers.
+2. Update `orchestrator.py` and/or `tasklets.py` to wire the new logic into the pipeline.
+3. Commit with a message referencing the pipeline change or phase.
+   ```
+   Wire new Statcast enrichment into main pipeline
+   ```
+4. Test the full pipeline for correct integration.
+
+---
+
+### Merge Pull Request Main Into Feature
+**Trigger:** When synchronizing feature branches with main or completing a feature via pull request.  
+**Command:** `/merge-main`
+
+1. Run `git merge main` into the feature branch (or vice versa).
+2. Resolve any conflicts, which may touch many files.
+3. Commit with a message like:
+   ```
+   Merge branch 'main' into feature/phase-106
+   ```
+4. Run tests to ensure stability.
+
+---
+
+## Testing Patterns
+
+- **Framework:** Unknown (not detected in Python codebase).
+- **Test File Pattern:** Some tests may be written in TypeScript (`*.test.ts`), suggesting cross-language or integration tests.
+- **Best Practice:** If adding tests, follow the pattern of placing them in files ending with `.test.ts` or in a dedicated test directory.
+
+*Example test file name:*
+```
+player_stats_enrichment.test.ts
+```
+
+## Commands
+
+| Command            | Purpose                                                      |
+|--------------------|--------------------------------------------------------------|
+| /new-phase-feature | Start a new feature or major enhancement phase               |
+| /new-db-migration  | Add or modify a database schema or cache layer               |
+| /bugfix            | Apply a bugfix or urgent hotfix to the pipeline              |
+| /wire-pipeline     | Wire up new data sources, enrichments, or agent logic        |
+| /merge-main        | Merge main into a feature branch or complete a pull request  |
+```
