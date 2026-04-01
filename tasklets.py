@@ -1559,9 +1559,10 @@ class _BaseAgent:
             # Use player-specific rate if enrichment computed one
             _ps_prob = prop.get("_player_specific_prob")
             raw_p = float(_ps_prob) * 100.0 if _ps_prob else _base_rate_prob(prop, _side)
-            # Layer Marcel and Predict+ adjustments
+            # Layer Marcel, Predict+, and park factor adjustments
             raw_p += float(prop.get("_marcel_adj",       0.0)) * 100.0
             raw_p += float(prop.get("_predict_plus_adj", 0.0)) * 100.0
+            raw_p += float(prop.get("_park_factor_adj",  0.0)) * 100.0
             # Brier calibration governor
             if _DRIFT_MONITOR_AVAILABLE:
                 try:
@@ -1582,9 +1583,10 @@ class _BaseAgent:
         if prop:
             # Phase 91 Step 4: dampen correlated fallback adjustments
             _fb_adjs = [
-                ("bayesian",        float(prop.get("_bayesian_nudge", 0.0)) * 100.0),
-                ("cv_consistency",  float(prop.get("_cv_nudge",       0.0)) * 100.0),
-                ("form_adj",        float(prop.get("_form_adj",       0.0)) * 100.0),
+                ("bayesian",        float(prop.get("_bayesian_nudge",   0.0)) * 100.0),
+                ("cv_consistency",  float(prop.get("_cv_nudge",         0.0)) * 100.0),
+                ("form_adj",        float(prop.get("_form_adj",         0.0)) * 100.0),
+                ("park_factor",     float(prop.get("_park_factor_adj",  0.0)) * 100.0),
             ]
             _fb_adjs = [(n, d) for n, d in _fb_adjs if abs(d) >= 0.10]
             if _fb_adjs:
