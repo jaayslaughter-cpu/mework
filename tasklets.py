@@ -3741,6 +3741,7 @@ def run_grading_tasklet() -> None:
                     "line": line, "side": side, "actual": actual,
                     "status": status, "profit_loss": round(pl, 4),
                     "clv": round(clv, 2), "agent": agent,
+                    "odds_american": int(odds or -110),
                 })
 
         conn.commit()
