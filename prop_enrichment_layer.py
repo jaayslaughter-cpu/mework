@@ -311,6 +311,68 @@ def _get_cv_nudge(player_id: int | None, prop_type: str, season: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Step 5a — Team standings streak adjustment
+# ---------------------------------------------------------------------------
+
+def _get_streak_adj(team: str, hub: dict) -> float:
+    """
+    Parse the team's current W/L streak from standings (hub context group).
+    Returns a probability nudge in [-0.015, +0.015].
+
+    Logic:
+      - Only meaningful streaks (≥3 games) produce a nudge.
+      - Win streak → positive nudge (team hot → scoring environment better).
+      - Loss streak → negative nudge (team cold → worse run env).
+      - Capped at 5-game streak magnitude (±1.5pp max).
+      - Applied to run/RBI/total props in _model_prob; neutral for K props.
+    """
+    standings = hub.get("context", {}).get("standings", [])
+    if not standings or not team:
+        return 0.0
+    team_lower = team.lower()
+    for s in standings:
+        if team_lower in (s.get("team_name") or "").lower():
+            streak = (s.get("streak") or "").strip()
+            if not streak or len(streak) < 2:
+                return 0.0
+            try:
+                direction = 1.0 if streak[0].upper() == "W" else -1.0
+                magnitude = int(streak[1:])
+                if magnitude < 3:
+                    return 0.0
+                return round(max(-0.015, min(0.015, direction * min(magnitude, 5) * 0.003)), 4)
+            except (ValueError, IndexError):
+                return 0.0
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Step 5b — Team last-10 win rate adjustment
+# ---------------------------------------------------------------------------
+
+def _get_last10_adj(team: str, hub: dict) -> float:
+    """
+    Nudge based on team's wins in their last 10 games vs .500 baseline.
+    Returns a probability nudge in [-0.010, +0.010].
+
+    Logic:
+      - 5 wins in last 10 → neutral (0.0)
+      - Each win above/below 5 → ±0.002 (2-10 wins → ±0.010 max)
+      - Complements streak signal: streak catches direction, last-10 catches depth.
+      - Applied to run/RBI/total props; neutral for K/hits props.
+    """
+    standings = hub.get("context", {}).get("standings", [])
+    if not standings or not team:
+        return 0.0
+    team_lower = team.lower()
+    for s in standings:
+        if team_lower in (s.get("team_name") or "").lower():
+            last10 = int(s.get("last_10", 5) or 5)
+            deviation = last10 - 5  # -5 to +5
+            return round(max(-0.010, min(0.010, deviation * 0.002)), 4)
+    return 0.0
+
+
 # Step 5 — MLB form (hot/cold streak) adjustment
 # ---------------------------------------------------------------------------
 
@@ -825,6 +887,11 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # ── Game prediction context ───────────────────────────────────────────
         prop.update(_get_game_context(team, hub))
 
+        # ── Team streak adjustment (standings hot/cold) ───────────────────────
+        prop["_streak_adj"]  = _get_streak_adj(team, hub)
+        prop["_last10_adj"]  = _get_last10_adj(team, hub)
+        prop["_streak_adj"] = _get_streak_adj(team, hub)
+
         # ── Lineup chase (pitcher props only) ─────────────────────────────────
         if is_pitcher_prop and opp_team:
             if opp_team not in _chase_cache:
@@ -916,7 +983,9 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                         if _lu.get("side") == "home":
                             _home_team = _lu.get("team", "")
                             break
-            _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team)
+            _batter_hand = prop.get("batter_hand") or prop.get("_batter_hand") or ""
+            _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team,
+                                batter_hand=_batter_hand)
             prop["_park_factor_adj"] = _pf_nudge
             prop["_park_factor_team"] = _home_team
         except Exception as _pf_err:
