@@ -1280,11 +1280,36 @@ def _ensure_bet_ledger() -> None:
             conn.commit()
         except Exception:
             conn.rollback()
+        try:
+            cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20)")
+            conn.commit()
+        except Exception:
+            conn.rollback()
         conn.commit()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
     except Exception as exc:
         logger.warning("[DB] bet_ledger create failed: %s", exc)
+
+    # ── UD streak state — tracks Underdog Streaks current count ───────────────
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ud_streak_state (
+                    id            SERIAL PRIMARY KEY,
+                    current_count INTEGER NOT NULL DEFAULT 0,
+                    last_updated  TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                INSERT INTO ud_streak_state (current_count)
+                SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM ud_streak_state)
+            """)
+        conn.commit()
+        conn.close()
+    except Exception as _sse:
+        logger.warning("[DB] ud_streak_state create failed: %s", _sse)
 
 
 def run_data_hub_tasklet() -> None:
@@ -1580,7 +1605,6 @@ class _BaseAgent:
                 raw_p += 1.0  # home team winning → slightly better RBI/run env
             raw_p += float(prop.get("_streak_adj",  0.0)) * 100.0
             raw_p += float(prop.get("_last10_adj",  0.0)) * 100.0
-            raw_p += float(prop.get("_streak_adj", 0.0)) * 100.0
             # Brier calibration governor
             if _DRIFT_MONITOR_AVAILABLE:
                 try:
@@ -1611,7 +1635,6 @@ class _BaseAgent:
                 _game_env_nudge += 1.0
             _streak_nudge = float(prop.get("_streak_adj",  0.0)) * 100.0
             _last10_nudge = float(prop.get("_last10_adj",  0.0)) * 100.0
-            _streak_nudge = float(prop.get("_streak_adj", 0.0)) * 100.0
             _fb_adjs = [
                 ("bayesian",        float(prop.get("_bayesian_nudge",   0.0)) * 100.0),
                 ("cv_consistency",  float(prop.get("_cv_nudge",         0.0)) * 100.0),
@@ -2568,14 +2591,41 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         enriched_legs.append(lg)
 
     # ── Step 2: decide ONE platform for the whole parlay ─────────────────────
-    # Priority 1 — Underdog Streaks: if ANY leg clears the streaks hurdle,
-    #              the entire parlay goes to Underdog (Streaks mode).
-    has_ud_streak = any(
-        check_streaks_gate(min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)))[0]
-        for lg in enriched_legs
-    )
+    # Priority 1 — Underdog Streaks rules (Phase 112):
+    #   • No active streak (count == 0):  need 2 legs BOTH clearing pick-2 hurdle (0.5774)
+    #   • Active streak (count >= 2):     need 1 leg clearing pick-1 hurdle (0.5336)
+    #   • Max streak: 11 (1000x)
+
+    _ud_streak_count = 0
+    try:
+        _sc = _pg_conn()
+        with _sc.cursor() as _scc:
+            _scc.execute("SELECT current_count FROM ud_streak_state LIMIT 1")
+            _srow = _scc.fetchone()
+            if _srow:
+                _ud_streak_count = int(_srow[0])
+        _sc.close()
+    except Exception:
+        pass
+
+    if _ud_streak_count == 0:
+        _streak_phase       = "pick-2"
+        _streak_legs_needed = 2
+    else:
+        _streak_phase       = "pick-1"
+        _streak_legs_needed = 1
+
+    _qualifying_streak_legs = [
+        lg for lg in enriched_legs
+        if check_streaks_gate(
+            min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)),
+            phase=_streak_phase,
+        )[0]
+    ]
+    has_ud_streak = len(_qualifying_streak_legs) >= _streak_legs_needed
 
     if has_ud_streak:
+        enriched_legs     = _qualifying_streak_legs[:_streak_legs_needed]
         parlay_platform   = "underdog"
         entry_type_forced = "STREAKS"
     else:
@@ -3104,6 +3154,10 @@ def run_agent_tasklet() -> None:
     import datetime as _dt
     props = _enrich_props(props, hub, season=_dt.date.today().year)
 
+    # Phase 112: remove prop types not evaluated (user directive)
+    _EXCLUDED_PROP_TYPES = {"stolen_bases", "home_runs", "sb", "hr"}
+    props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
+
     # ── Step 3: Stamp game_time_utc / game_state / lookahead_safe on each prop ──
     game_times = (hub.get("context") or {}).get("game_times", {})
     if _LOCK_GATE_AVAILABLE and game_times:
@@ -3270,10 +3324,10 @@ def run_agent_tasklet() -> None:
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
-                             units_wagered, mlbam_id)
+                             units_wagered, mlbam_id, entry_type)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s), %s)
+                                ABS(%s), %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -3291,6 +3345,7 @@ def run_agent_tasklet() -> None:
                             _leg.get("_features_json"),
                             _leg.get("kelly_units") or 0.02,
                             _leg.get("mlbam_id") or _leg.get("player_id"),
+                            (_parlay.get("entry_type") or "STANDARD").upper(),
                         ),
                     )
         _conn.commit()
@@ -3714,7 +3769,8 @@ def run_grading_tasklet() -> None:
                 SELECT id, player_name, prop_type, line, side,
                        odds_american, kelly_units, model_prob, ev_pct, agent_name,
                        COALESCE(platform, 'prizepicks') AS platform,
-                       mlbam_id
+                       mlbam_id,
+                       COALESCE(entry_type, 'STANDARD') AS entry_type
                 FROM bet_ledger
                 WHERE status = 'OPEN' AND bet_date = %s AND discord_sent = TRUE
                 """,
@@ -3737,7 +3793,8 @@ def run_grading_tasklet() -> None:
             for row in open_bets:
                 row_data = row
                 bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat = row_data[:11]
-                _grade_mlbam = row_data[11] if len(row_data) > 11 else None
+                _grade_mlbam  = row_data[11] if len(row_data) > 11 else None
+                _entry_type   = row_data[12] if len(row_data) > 12 else "STANDARD"
 
                 # Grade by mlbam_id when available — accent-safe, always unique
                 # mlbam_id must be fetched from bet_ledger (stored at bet time)
@@ -3838,6 +3895,7 @@ def run_grading_tasklet() -> None:
                     "status": status, "profit_loss": round(pl, 4),
                     "clv": round(clv, 2), "agent": agent,
                     "odds_american": int(odds or -110),
+                    "entry_type": _entry_type,
                 })
 
         conn.commit()
@@ -3857,6 +3915,45 @@ def run_grading_tasklet() -> None:
 
     logger.info("[GradingTasklet] Graded %d bets — W:%d L:%d P:%d  Profit: %+.2fu",
                 len(results), wins, losses, pushes, total_profit)
+
+    # ── Update UD streak state based on STREAKS bet outcomes ────────────────
+    try:
+        _streak_bets = [r for r in results if (r.get("entry_type") or "").upper() == "STREAKS"]
+        if _streak_bets:
+            _sconn = _pg_conn()
+            with _sconn.cursor() as _scur:
+                _scur.execute("SELECT current_count FROM ud_streak_state LIMIT 1")
+                _srow2 = _scur.fetchone()
+                _cur_count = int(_srow2[0]) if _srow2 else 0
+
+                _all_won  = all(r["status"] == "WIN"  for r in _streak_bets)
+                _any_loss = any(r["status"] == "LOSS" for r in _streak_bets)
+
+                if _any_loss:
+                    _new_count = 0   # streak broken
+                    logger.info("[Streaks] Streak BROKEN — reset to 0.")
+                elif _all_won:
+                    if _cur_count == 0:
+                        _new_count = 2   # 2-leg entry completed
+                        logger.info("[Streaks] Streak STARTED — count now 2.")
+                    elif _cur_count >= 11:
+                        _new_count = 0   # 11-for-11 complete (1000x!) — reset
+                        logger.info("[Streaks] Streak COMPLETED 11! Resetting to 0.")
+                    else:
+                        _new_count = _cur_count + 1
+                        logger.info("[Streaks] Streak advanced to %d.", _new_count)
+                else:
+                    _new_count = _cur_count  # pushes — no change
+
+                _scur.execute(
+                    "UPDATE ud_streak_state SET current_count = %s, last_updated = NOW()",
+                    (_new_count,),
+                )
+            _sconn.commit()
+            _sconn.close()
+    except Exception as _streak_upd_err:
+        logger.debug("[GradingTasklet] Streak state update error: %s", _streak_upd_err)
+    # ── End streak state update ──────────────────────────────────────────────
 
     # Sync results into propiq_season_record so /propiq/record endpoint has data
     try:
@@ -4167,6 +4264,7 @@ def run_xgboost_tasklet() -> None:
                 WHERE graded_at IS NOT NULL
                   AND features_json IS NOT NULL
                   AND actual_outcome IS NOT NULL
+                  AND discord_sent = TRUE
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                 ORDER BY graded_at DESC
                 LIMIT 20000
