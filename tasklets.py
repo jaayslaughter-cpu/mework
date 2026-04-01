@@ -639,26 +639,60 @@ def _fetch_mlb_standings() -> list[dict]:
         return []
 
 
+def _resilient_get(url: str, headers: dict, params: dict | None = None,
+                   timeout: int = 15) -> "requests.Response":
+    """
+    GET with automatic ScraperAPI fallback on 403/429.
+    If SCRAPERAPI_KEY env var is set and direct call fails, retries via proxy.
+    ScraperAPI free tier: 1,000 calls/month — only used as fallback.
+    """
+    import os as _os
+    resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+    if resp.status_code in (403, 429, 407):
+        scraper_key = _os.getenv("SCRAPERAPI_KEY", "")
+        if scraper_key:
+            proxy_url = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+            proxies = {"http": proxy_url, "https": proxy_url}
+            logger.info("[DataHub] Direct fetch %d — retrying via ScraperAPI proxy", resp.status_code)
+            resp = requests.get(url, headers=headers, params=params,
+                                timeout=30, proxies=proxies, verify=False)
+    return resp
+
+
 def _fetch_prizepicks_direct() -> list[dict]:
-    """Fetch PrizePicks MLB props directly (free, no key required).
-    Railway IPs may get 403 — returns empty list gracefully so agents
-    fall back to sportsbook_reference_layer data.
+    """Fetch PrizePicks MLB props via partner-api (public, no key required).
+    Uses partner-api.prizepicks.com — confirmed public endpoint with no bot block.
+    Falls back to ScraperAPI proxy on 403 if SCRAPERAPI_KEY env var is set.
     """
     _PP_HEADERS = {
         "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 Safari/537.36"
+            "Chrome/122.0.0.0 Safari/537.36"
         ),
         "Accept": "application/json",
-        "Referer": "https://app.prizepicks.com/",
-        "Origin": "https://app.prizepicks.com",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
     }
+    # Dynamically resolve MLB league_id — avoids hardcoded ID being stale
+    league_id = 2  # default
     try:
-        resp = requests.get(
-            "https://api.prizepicks.com/projections",
-            params={"per_page": 250, "single_stat": True, "league_id": 2},
+        leagues_resp = _resilient_get(
+            "https://partner-api.prizepicks.com/leagues",
+            headers=_PP_HEADERS, timeout=10,
+        )
+        if leagues_resp.status_code == 200:
+            for item in leagues_resp.json().get("data", []):
+                if (item.get("attributes", {}).get("name") or "").upper() == "MLB":
+                    league_id = item["id"]
+                    break
+    except Exception:
+        pass
+    try:
+        resp = _resilient_get(
+            "https://partner-api.prizepicks.com/projections",
             headers=_PP_HEADERS,
+            params={"per_page": 1000, "league_id": league_id},
             timeout=15,
         )
         if resp.status_code != 200:
@@ -715,17 +749,18 @@ def _fetch_prizepicks_direct() -> list[dict]:
 
 
 def _fetch_underdog_props_direct() -> list[dict]:
-    """Fetch Underdog Fantasy MLB over/under lines (free, no key required)."""
+    """Fetch Underdog Fantasy MLB over/under lines (free, no key required).
+    Falls back to ScraperAPI proxy on 403 if SCRAPERAPI_KEY env var is set.
+    """
     # Headers confirmed working by aidanhall21/underdog-fantasy-pickem-scraper
-    # No API key needed — standard browser UA with Google Referer is sufficient
     _UD_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.google.com/",
     }
     try:
-        resp = requests.get(
+        resp = _resilient_get(
             "https://api.underdogfantasy.com/beta/v5/over_under_lines",
             headers=_UD_HEADERS,
             timeout=20,
@@ -2466,7 +2501,7 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> list[dict]:
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
 
-    # Wire line_comparator — pick best platform per leg (lower line for OVER, higher for UNDER)
+    # ── Step 1: enrich each leg with the best available line per platform ──────
     try:
         from line_comparator import build_line_lookup, compare_prop  # noqa: PLC0415
         _hub_snap = read_hub()
@@ -2488,7 +2523,6 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
                     lg.get("side", "OVER"),
                     _ud_lkp, _pp_lkp,
                 )
-                # Override platform and line if comparator found a better number
                 if result.get("platform") and result.get("line") is not None:
                     lg = {**lg,
                           "recommended_platform": result["platform"],
@@ -2498,74 +2532,68 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
             except Exception:
                 pass
         enriched_legs.append(lg)
-    legs = enriched_legs
 
-    # Split enriched legs by best platform — build one parlay per platform
-    ud_legs: list[dict] = []
-    pp_legs: list[dict] = []
-    for _l in enriched_legs:
-        plat = _l.get("recommended_platform", "Underdog").lower()
-        if "prize" in plat:
-            pp_legs.append(_l)
-        else:
-            ud_legs.append(_l)
+    # ── Step 2: decide ONE platform for the whole parlay ─────────────────────
+    # Priority 1 — Underdog Streaks: if ANY leg clears the streaks hurdle,
+    #              the entire parlay goes to Underdog (Streaks mode).
+    has_ud_streak = any(
+        check_streaks_gate(min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)))[0]
+        for lg in enriched_legs
+    )
 
-    def _build_platform_parlay(plat_legs: list[dict], platform: str) -> "dict | None":
-        if len(plat_legs) < 2:
-            return None
-        n = len(plat_legs)
-        probs = [min(0.95, max(0.05, l.get("model_prob", 52.0) / 100)) for l in plat_legs]
-        p_conf = round(sum(l.get("confidence", 5) for l in plat_legs) / max(n, 1), 1)
+    if has_ud_streak:
+        parlay_platform   = "underdog"
+        entry_type_forced = "STREAKS"
+    else:
+        # Priority 2 — tiebreaker: PrizePicks wins only when EVERY leg
+        #              independently voted PrizePicks (line_comparator returns
+        #              PrizePicks on tied lines).  Any Underdog vote → Underdog.
+        pp_votes = sum(
+            1 for lg in enriched_legs
+            if "prize" in lg.get("recommended_platform", "Underdog").lower()
+        )
+        parlay_platform   = "prizepicks" if pp_votes == len(enriched_legs) else "underdog"
+        entry_type_forced = None
 
-        if platform == "underdog":
-            entry_type = "STANDARD"
-            combined_ev = 0.0
-            try:
-                from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
-                _engine = UnderdogMathEngine()
-                _eval   = _engine.evaluate_slip(probs)
-                combined_ev = round(_eval.recommended_ev * 100, 2)
-                entry_type  = _eval.recommended_entry_type
-            except Exception:
-                _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 20.0}
-                mult = _UD_MULTS.get(n, 3.5)
-                combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
-        else:  # prizepicks — Power mode
-            entry_type = "POWER"
-            _PP_MULTS = {2: 3.0, 3: 6.0, 4: 10.0}
-            mult = _PP_MULTS.get(n, 3.0)
+    # ── Step 3: build the single parlay ──────────────────────────────────────
+    n      = len(enriched_legs)
+    probs  = [min(0.95, max(0.05, l.get("model_prob", 52.0) / 100)) for l in enriched_legs]
+    p_conf = round(sum(l.get("confidence", 5) for l in enriched_legs) / max(n, 1), 1)
+
+    if parlay_platform == "underdog":
+        entry_type  = entry_type_forced or "STANDARD"
+        combined_ev = 0.0
+        try:
+            from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
+            _engine = UnderdogMathEngine()
+            _eval   = _engine.evaluate_slip(probs)
+            combined_ev = round(_eval.recommended_ev * 100, 2)
+            if not entry_type_forced:
+                entry_type = _eval.recommended_entry_type
+        except Exception:
+            _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 20.0}
+            mult = _UD_MULTS.get(n, 3.5)
             combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
+    else:  # PrizePicks — Power mode
+        entry_type  = "POWER"
+        _PP_MULTS   = {2: 3.0, 3: 6.0, 4: 10.0}
+        mult        = _PP_MULTS.get(n, 3.0)
+        combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
 
-        return {
-            "agent":           agent_name,
-            "agent_name":      agent_name,
-            "legs":            plat_legs,
-            "leg_count":       n,
-            "entry_type":      entry_type,
-            "combined_ev_pct": combined_ev,
-            "ev_pct":          combined_ev,
-            "stake":           10.0,
-            "confidence":      p_conf,
-            "platform":        platform,
-            "season_stats":    {},
-            "ts":              datetime.datetime.utcnow().isoformat(),
-        }
-
-    result_parlays: list[dict] = []
-    ud_parlay = _build_platform_parlay(ud_legs, "underdog")
-    pp_parlay = _build_platform_parlay(pp_legs, "prizepicks")
-    if ud_parlay:
-        result_parlays.append(ud_parlay)
-    if pp_parlay:
-        result_parlays.append(pp_parlay)
-
-    # Fallback: if neither platform had >=2 legs, put all legs on underdog
-    if not result_parlays:
-        fallback = _build_platform_parlay(enriched_legs, "underdog")
-        if fallback:
-            result_parlays.append(fallback)
-
-    return result_parlays
+    return [{
+        "agent":           agent_name,
+        "agent_name":      agent_name,
+        "legs":            enriched_legs,
+        "leg_count":       n,
+        "entry_type":      entry_type,
+        "combined_ev_pct": combined_ev,
+        "ev_pct":          combined_ev,
+        "stake":           10.0,
+        "confidence":      p_conf,
+        "platform":        parlay_platform,
+        "season_stats":    {},
+        "ts":              datetime.datetime.utcnow().isoformat(),
+    }]
 
 
 def _build_agent_parlays(hits: list[dict], agent_name: str,
