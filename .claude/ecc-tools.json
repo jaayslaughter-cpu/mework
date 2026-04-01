@@ -2,6 +2,7 @@
   "version": "1.3",
   "schemaVersion": "1.0",
   "generatedBy": "ecc-tools",
+  "generatedAt": "2026-04-01T03:00:34.184Z",
   "generatedAt": "2026-04-01T03:00:45.490Z",
   "repo": "https://github.com/jaayslaughter-cpu/mework",
   "profiles": {
@@ -140,6 +141,8 @@
     ],
     "workflow-pack": [
       ".claude/commands/feature-development.md",
+      ".claude/commands/feature-phase-development.md",
+      ".claude/commands/bugfix-or-pipeline-fix.md"
       ".claude/commands/mework-ecc-bundle-addition.md",
       ".claude/commands/feature-phase-development-or-bugfix.md"
     ]
@@ -159,6 +162,8 @@
     ],
     "workflow-pack": [
       ".claude/commands/feature-development.md",
+      ".claude/commands/feature-phase-development.md",
+      ".claude/commands/bugfix-or-pipeline-fix.md"
       ".claude/commands/mework-ecc-bundle-addition.md",
       ".claude/commands/feature-phase-development-or-bugfix.md"
     ]
@@ -250,6 +255,8 @@
       "identityPath": ".claude/identity.json",
       "commandPaths": [
         ".claude/commands/feature-development.md",
+        ".claude/commands/feature-phase-development.md",
+        ".claude/commands/bugfix-or-pipeline-fix.md"
         ".claude/commands/mework-ecc-bundle-addition.md",
         ".claude/commands/feature-phase-development-or-bugfix.md"
       ]

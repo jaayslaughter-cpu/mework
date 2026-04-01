@@ -10,7 +10,7 @@ Use this workflow when working on **feature-phase-development** in `mework`.
 
 ## Goal
 
-Implements a new feature or phase in the pipeline, often adding new data sources, signals, or enrichment logic.
+Implements new features or enhancements to the core logic, usually as part of a named 'Phase' (e.g., Phase 105, Phase 110). Typically involves updating multiple core Python files to add new data signals, features, or logic.
 
 ## Common Files
 
@@ -27,9 +27,9 @@ Implements a new feature or phase in the pipeline, often adding new data sources
 
 ## Typical Commit Signals
 
-- Modify or add logic in fangraphs_layer.py, prop_enrichment_layer.py, and/or tasklets.py to implement the feature.
-- Commit changes with a message referencing the phase or feature.
-- Optionally, merge branch or pull request into main.
+- Edit or add logic in fangraphs_layer.py and/or prop_enrichment_layer.py (if feature relates to enrichment or stats)
+- Update tasklets.py to wire up the new feature or support new pipeline steps
+- Commit all related files together, often with a 'Phase' number in the commit message
 
 ## Notes
 

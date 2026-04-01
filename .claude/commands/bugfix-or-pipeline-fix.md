@@ -10,14 +10,13 @@ Use this workflow when working on **bugfix-or-pipeline-fix** in `mework`.
 
 ## Goal
 
-Fixes bugs or issues in the pipeline, such as math errors, logic bugs, or incorrect data handling.
+Fixes bugs or issues in the data pipeline, often related to calculations, data mismatches, or logic errors. May also include hotfixes for production issues.
 
 ## Common Files
 
 - `tasklets.py`
 - `calibration_layer.py`
 - `DiscordAlertService.py`
-- `orchestrator.py`
 
 ## Suggested Sequence
 
@@ -28,9 +27,9 @@ Fixes bugs or issues in the pipeline, such as math errors, logic bugs, or incorr
 
 ## Typical Commit Signals
 
-- Identify and fix the bug in the relevant file(s), commonly tasklets.py, calibration_layer.py, DiscordAlertService.py, or orchestrator.py.
-- Commit the fix, often referencing the bug or issue in the commit message.
-- Optionally, merge branch or pull request into main.
+- Identify and fix the bug in the relevant Python file(s) (commonly tasklets.py, calibration_layer.py, DiscordAlertService.py, etc.)
+- If needed, update related files to ensure consistency (e.g., update both calibration_layer.py and tasklets.py for payout logic)
+- Commit the fix with a descriptive message (often includes 'Fix', 'Hotfix', or 'bug' in the message)
 
 ## Notes
 
