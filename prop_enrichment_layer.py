@@ -890,6 +890,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # ── Team streak adjustment (standings hot/cold) ───────────────────────
         prop["_streak_adj"]  = _get_streak_adj(team, hub)
         prop["_last10_adj"]  = _get_last10_adj(team, hub)
+        prop["_streak_adj"] = _get_streak_adj(team, hub)
 
         # ── Lineup chase (pitcher props only) ─────────────────────────────────
         if is_pitcher_prop and opp_team:

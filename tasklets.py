@@ -1580,6 +1580,7 @@ class _BaseAgent:
                 raw_p += 1.0  # home team winning → slightly better RBI/run env
             raw_p += float(prop.get("_streak_adj",  0.0)) * 100.0
             raw_p += float(prop.get("_last10_adj",  0.0)) * 100.0
+            raw_p += float(prop.get("_streak_adj", 0.0)) * 100.0
             # Brier calibration governor
             if _DRIFT_MONITOR_AVAILABLE:
                 try:
@@ -1610,6 +1611,7 @@ class _BaseAgent:
                 _game_env_nudge += 1.0
             _streak_nudge = float(prop.get("_streak_adj",  0.0)) * 100.0
             _last10_nudge = float(prop.get("_last10_adj",  0.0)) * 100.0
+            _streak_nudge = float(prop.get("_streak_adj", 0.0)) * 100.0
             _fb_adjs = [
                 ("bayesian",        float(prop.get("_bayesian_nudge",   0.0)) * 100.0),
                 ("cv_consistency",  float(prop.get("_cv_nudge",         0.0)) * 100.0),
