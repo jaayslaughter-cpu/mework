@@ -1,417 +1,185 @@
----
-name: mework-conventions
-description: Development conventions and patterns for mework. Python project with conventional commits.
----
+```markdown
+# mework Development Patterns
 
-# Mework Conventions
-
-> Generated from [jaayslaughter-cpu/mework](https://github.com/jaayslaughter-cpu/mework) on 2026-03-20
+> Auto-generated skill from repository analysis
 
 ## Overview
 
-This skill teaches Claude the development patterns and conventions used in mework.
+This skill teaches you the core development patterns, coding conventions, and common workflows for contributing to the `mework` Python codebase. The repository is focused on data pipeline enhancements, bugfixes, database migrations, and robust API integrations, with a strong emphasis on modularity and maintainability. While no specific framework is used, the project is organized around clear layers and tasklets for extensibility.
 
-## Tech Stack
+## Coding Conventions
 
-- **Primary Language**: Python
-- **Architecture**: hybrid module organization
-- **Test Location**: separate
+- **File Naming:**  
+  Use `snake_case` for all Python files and modules.  
+  _Example:_  
+  ```
+  fangraphs_layer.py
+  prop_enrichment_layer.py
+  tasklets.py
+  ```
 
-## When to Use This Skill
+- **Import Style:**  
+  Prefer **relative imports** within the package.  
+  _Example:_  
+  ```python
+  from .fangraphs_layer import FangraphsLayer
+  from . import tasklets
+  ```
 
-Activate this skill when:
-- Making changes to this repository
-- Adding new features following established patterns
-- Writing tests that match project conventions
-- Creating commits with proper message format
+- **Export Style:**  
+  Both explicit and implicit exports are used.  
+  _Example:_  
+  ```python
+  # Explicit
+  def some_function():
+      pass
 
-## Commit Conventions
+  __all__ = ['some_function']
 
-Follow these commit message conventions based on 55 analyzed commits.
+  # Implicit (just defining functions/classes)
+  class Tasklet:
+      ...
+  ```
 
-### Commit Style: Conventional Commits
+- **Commit Message Patterns:**  
+  - Use freeform messages, often prefixed with `fix` or `refactor`.
+  - Reference the phase or area affected.
+  - Keep messages concise but descriptive (average ~82 characters).
+  _Example:_  
+  ```
+  fix: correct grading logic in tasklets.py for edge-case recaps
+  refactor: phase 7 enrichment and add new data source to fangraphs_layer.py
+  ```
 
-### Prefixes Used
+## Workflows
 
-- `feat`
-- `fix`
-- `chore`
+### Feature Phase Development
+**Trigger:** When a new feature phase is planned or a major enhancement is required  
+**Command:** `/new-phase-feature`
 
-### Message Guidelines
+1. Edit or enhance `fangraphs_layer.py` and/or `prop_enrichment_layer.py` to add new features or data sources.
+2. Update `tasklets.py` to wire in new logic or processing steps.
+3. Optionally modify related files (e.g., `calibration_layer.py`, `line_comparator.py`) if the phase requires.
+4. Commit with a message referencing the phase number and a summary of changes.
 
-- Average message length: ~58 characters
-- Keep first line concise and descriptive
-- Use imperative mood ("Add feature" not "Added feature")
+_Example:_
+```python
+# In fangraphs_layer.py
+def enrich_with_new_metric(data):
+    # Add new metric calculation
+    ...
 
+# In tasklets.py
+from .fangraphs_layer import enrich_with_new_metric
 
-*Commit message example*
-
-```text
-feat: PropIQ complete implementation [fix/sync-worker-bugs]
+def run_phase_8():
+    data = fetch_data()
+    enriched = enrich_with_new_metric(data)
+    ...
 ```
-
-*Commit message example*
-
-```text
-fix(docker): Add REDIS_PASSWORD env var to hub service
-```
-
-*Commit message example*
-
-```text
-chore: Tighten CORS origins, remove wildcard
-```
-
-*Commit message example*
-
-```text
-Merge pull request #25 from jaayslaughter-cpu/ticket-6.4-defensive-contrast
-```
-
-*Commit message example*
-
-```text
-Merge branch 'main' into ticket-6.4-defensive-contrast
-```
-
-*Commit message example*
-
-```text
-chore: Remove Streamlit dashboard
-```
-
-*Commit message example*
-
-```text
-feat(scripts): Enhanced training pipeline with multi-source data
-```
-
-*Commit message example*
-
-```text
-feat(api): Defensive Contrast Engine for batted-ball profile mismatches
-```
-
-## Architecture
-
-### Project Structure: Single Package
-
-This project uses **hybrid** module organization.
-
-### Configuration Files
-
-- `.github/workflows/npm-publish-github-packages.yml`
-- `api/Dockerfile`
-- `docker-compose.yml`
-- `hub/Dockerfile`
-- `hub/package.json`
-
-### Guidelines
-
-- This project uses a hybrid organization
-- Follow existing patterns when adding new code
-
-## Code Style
-
-### Language: Python
-
-### Naming Conventions
-
-| Element | Convention |
-|---------|------------|
-| Files | snake_case |
-| Functions | camelCase |
-| Classes | PascalCase |
-| Constants | SCREAMING_SNAKE_CASE |
-
-### Import Style: Mixed Style
-
-### Export Style: Mixed Style
-
-
-## Error Handling
-
-### Error Handling Style: Try-Catch Blocks
-
-
-*Standard error handling pattern*
-
-```typescript
-try {
-  const result = await riskyOperation()
-  return result
-} catch (error) {
-  console.error('Operation failed:', error)
-  throw new Error('User-friendly message')
-}
-```
-
-## Common Workflows
-
-These workflows were detected from analyzing commit patterns.
-
-### Database Migration
-
-Database schema changes with migration files
-
-**Frequency**: ~10 times per month
-
-**Steps**:
-1. Create migration file
-2. Update schema definitions
-3. Generate/update types
-
-**Example commit sequence**:
-```
-fix: CI bot feedback - placeholder files, security, and schema fixes
-Merge pull request #4 from jaayslaughter-cpu/ticket-1.4-bets-log-views-indexes
-fix: change npm ci to npm install, reorder USER before EXPOSE
-```
-
-### Feature Development
-
-Standard feature implementation workflow
-
-**Frequency**: ~17 times per month
-
-**Steps**:
-1. Add feature implementation
-2. Add tests for feature
-3. Update documentation
-
-**Files typically involved**:
-- `**/api/**`
-
-**Example commit sequence**:
-```
-fix: CI bot feedback - placeholder files, security, and schema fixes
-Merge pull request #4 from jaayslaughter-cpu/ticket-1.4-bets-log-views-indexes
-fix: change npm ci to npm install, reorder USER before EXPOSE
-```
-
-### Refactoring
-
-Code refactoring and cleanup workflow
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Ensure tests pass before refactor
-2. Refactor code structure
-3. Verify tests still pass
-
-**Files typically involved**:
-- `src/**/*`
-
-**Example commit sequence**:
-```
-fix: 8 architecture improvements from CI bot review
-fix: 5 architecture refinements from CI bot review
-feat(api): FastAPI bootstrap with async SQLAlchemy
-```
-
-### Add Or Update Database Table Or Schema
-
-Adds or updates a database table, view, or index, often for new features or analytics. Includes SQL migration files and sometimes updates to related backend code.
-
-**Frequency**: ~4 times per month
-
-**Steps**:
-1. Create or update SQL migration file in db/init/*.sql
-2. Sometimes update related backend code (e.g., api/database.py, hub/src/sync.js) to use new/changed tables
-3. Commit migration and related code
-
-**Files typically involved**:
-- `db/init/01_core_reference.sql`
-- `db/init/02_projection_market_layer.sql`
-- `db/init/03_bets_log_views_indexes.sql`
-
-**Example commit sequence**:
-```
-Create or update SQL migration file in db/init/*.sql
-Sometimes update related backend code (e.g., api/database.py, hub/src/sync.js) to use new/changed tables
-Commit migration and related code
-```
-
-### Add Or Enhance Api Endpoint
-
-Adds or updates FastAPI endpoints, including new routers, services, and sometimes model or requirements updates.
-
-**Frequency**: ~3 times per month
-
-**Steps**:
-1. Create or update api/routers/*.py for endpoint logic
-2. Create or update api/services/*.py for business logic
-3. Update api/main.py to register new routers
-4. Update api/requirements.txt if new dependencies are needed
-5. Commit all related files
-
-**Files typically involved**:
-- `api/routers/*.py`
-- `api/services/*.py`
-- `api/main.py`
-- `api/requirements.txt`
-
-**Example commit sequence**:
-```
-Create or update api/routers/*.py for endpoint logic
-Create or update api/services/*.py for business logic
-Update api/main.py to register new routers
-Update api/requirements.txt if new dependencies are needed
-Commit all related files
-```
-
-### Add Or Train Ml Model
-
-Adds new ML models, training scripts, and updates model artifacts for predictions.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Create or update scripts/train_model.py for training logic
-2. Generate or update model artifact files in api/models/*.json
-3. Update api/services/predictor.py to use new models if needed
-4. Update api/requirements.txt if new ML dependencies are needed
-5. Commit all related files
-
-**Files typically involved**:
-- `scripts/train_model.py`
-- `api/models/*.json`
-- `api/services/predictor.py`
-- `api/requirements.txt`
-
-**Example commit sequence**:
-```
-Create or update scripts/train_model.py for training logic
-Generate or update model artifact files in api/models/*.json
-Update api/services/predictor.py to use new models if needed
-Update api/requirements.txt if new ML dependencies are needed
-Commit all related files
-```
-
-### Add Or Enhance Hub Sync Worker
-
-Implements or updates the Node.js hub's background sync worker for polling APIs and syncing betting markets.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Update or create hub/src/sync.js for polling logic
-2. Update related fetchers (hub/src/fetchers/*.js) for new data sources
-3. Update hub/src/server.js to integrate sync worker
-4. Update docker-compose.yml or .env.example if new env vars are needed
-5. Commit all related files
-
-**Files typically involved**:
-- `hub/src/sync.js`
-- `hub/src/fetchers/*.js`
-- `hub/src/server.js`
-- `docker-compose.yml`
-- `.env.example`
-
-**Example commit sequence**:
-```
-Update or create hub/src/sync.js for polling logic
-Update related fetchers (hub/src/fetchers/*.js) for new data sources
-Update hub/src/server.js to integrate sync worker
-Update docker-compose.yml or .env.example if new env vars are needed
-Commit all related files
-```
-
-### Add Or Enhance Dashboard Feature
-
-Adds or updates the Streamlit dashboard, including app logic, requirements, and Dockerfile.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Create or update dashboard/app.py for Streamlit UI
-2. Update dashboard/requirements.txt for new dependencies
-3. Update dashboard/Dockerfile if needed
-4. Update docker-compose.yml if dashboard service changes
-5. Commit all related files
-
-**Files typically involved**:
-- `dashboard/app.py`
-- `dashboard/requirements.txt`
-- `dashboard/Dockerfile`
-- `docker-compose.yml`
-
-**Example commit sequence**:
-```
-Create or update dashboard/app.py for Streamlit UI
-Update dashboard/requirements.txt for new dependencies
-Update dashboard/Dockerfile if needed
-Update docker-compose.yml if dashboard service changes
-Commit all related files
-```
-
-### Add Or Update Docker Orchestration
-
-Updates Docker Compose and service Dockerfiles to orchestrate multi-service deployments, often when adding new services or changing environment variables.
-
-**Frequency**: ~2 times per month
-
-**Steps**:
-1. Update docker-compose.yml with new/changed services or env vars
-2. Update service Dockerfiles as needed (api/Dockerfile, dashboard/Dockerfile, hub/Dockerfile)
-3. Update .env.example for new environment variables
-4. Commit all related files
-
-**Files typically involved**:
-- `docker-compose.yml`
-- `api/Dockerfile`
-- `dashboard/Dockerfile`
-- `hub/Dockerfile`
-- `.env.example`
-
-**Example commit sequence**:
-```
-Update docker-compose.yml with new/changed services or env vars
-Update service Dockerfiles as needed (api/Dockerfile, dashboard/Dockerfile, hub/Dockerfile)
-Update .env.example for new environment variables
-Commit all related files
-```
-
-### Add Or Update Backend Service Logic
-
-Implements or enhances backend service logic, especially in api/services/*.py, often for analytics engines (fatigue, usage vacuums, defensive contrast, etc).
-
-**Frequency**: ~3 times per month
-
-**Steps**:
-1. Create or update api/services/*.py with new logic
-2. Update api/services/predictor.py to integrate new logic
-3. Update or create tests if needed
-4. Commit all related files
-
-**Files typically involved**:
-- `api/services/*.py`
-
-**Example commit sequence**:
-```
-Create or update api/services/*.py with new logic
-Update api/services/predictor.py to integrate new logic
-Update or create tests if needed
-Commit all related files
-```
-
-
-## Best Practices
-
-Based on analysis of the codebase, follow these practices:
-
-### Do
-
-- Use conventional commit format (feat:, fix:, etc.)
-- Use snake_case for file names
-- Prefer mixed exports
-
-### Don't
-
-- Don't write vague commit messages
-- Don't deviate from established patterns without discussion
+_Commit message:_  
+`refactor: phase 8 - add new metric enrichment to fangraphs_layer and tasklets`
 
 ---
 
-*This skill was auto-generated by [ECC Tools](https://ecc.tools). Review and customize as needed for your team.*
+### Bugfix or Pipeline Fix
+**Trigger:** When a bug is reported or an issue is detected in the pipeline's operation or output  
+**Command:** `/bugfix-pipeline`
+
+1. Identify the bug or issue and locate the relevant logic in `tasklets.py` or related files.
+2. Edit `tasklets.py` to fix the bug (e.g., grading, recap, math, query filters).
+3. If the bug affects other modules (e.g., `DiscordAlertService.py`, `calibration_layer.py`), update those as well.
+4. Commit with a message referencing the fix and affected area.
+
+_Example:_
+```python
+# In tasklets.py
+def calculate_grade(score):
+    if score < 0:
+        return 0  # Fix: Prevent negative grades
+    return score
+```
+_Commit message:_  
+`fix: prevent negative grades in tasklets.calculate_grade`
+
+---
+
+### Database Schema or Migration Update
+**Trigger:** When a new database table or cache is needed, or schema changes are required for a new feature  
+**Command:** `/new-db-migration`
+
+1. Create or edit migration SQL files (e.g., `migrations/V27__add_discord_sent.sql`, `migrations/V28__fg_cache.sql`).
+2. Update `fangraphs_layer.py` or other relevant modules to use the new/updated tables.
+3. Optionally update `.env.example` if new environment variables are required.
+4. Commit with a message referencing the migration and affected features.
+
+_Example:_
+```sql
+-- migrations/V28__fg_cache.sql
+CREATE TABLE fg_cache (
+    id SERIAL PRIMARY KEY,
+    data JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+```python
+# In fangraphs_layer.py
+def cache_fg_data(data):
+    # Insert into fg_cache table
+    ...
+```
+_Commit message:_  
+`refactor: add fg_cache table and update fangraphs_layer to use caching`
+
+---
+
+### Proxy or API Fallback Implementation
+**Trigger:** When a new fallback tier is needed for API reliability or to add a new proxy layer  
+**Command:** `/add-api-fallback`
+
+1. Edit `live_dispatcher.py` to add or update proxy/fallback logic.
+2. Update `.env.example` to include new API keys or environment variables.
+3. If caching is involved, update `fangraphs_layer.py` and add relevant migrations.
+4. Commit with a message referencing the fallback/proxy and affected APIs.
+
+_Example:_
+```python
+# In live_dispatcher.py
+def fetch_data_with_fallback():
+    try:
+        return fetch_from_primary_api()
+    except Exception:
+        return fetch_from_secondary_api()
+```
+```env
+# In .env.example
+PRIZEPICKS_API_KEY=your-key-here
+```
+_Commit message:_  
+`fix: add fallback to secondary API in live_dispatcher.py and update .env.example`
+
+---
+
+## Testing Patterns
+
+- **Framework:** Unknown (not detected)
+- **Test File Pattern:** Files are named with `.test.ts` extension, suggesting some TypeScript-based testing (possibly for a frontend or API contract).
+- **Python Testing:** No explicit Python test framework detected. If adding tests, follow the convention of naming test files as `test_*.py` and use standard Python testing tools like `pytest` or `unittest`.
+
+_Example:_
+```python
+# test_tasklets.py
+def test_calculate_grade():
+    assert calculate_grade(-5) == 0
+    assert calculate_grade(10) == 10
+```
+
+## Commands
+
+| Command            | Purpose                                                      |
+|--------------------|--------------------------------------------------------------|
+| /new-phase-feature | Start a new feature phase with enhancements or new data      |
+| /bugfix-pipeline   | Fix bugs or issues in the pipeline or grading logic          |
+| /new-db-migration  | Add or update database schema/migrations for new features    |
+| /add-api-fallback  | Implement or update proxy/fallback logic for external APIs   |
+```

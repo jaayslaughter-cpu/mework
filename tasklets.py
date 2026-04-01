@@ -630,7 +630,11 @@ def _fetch_mlb_standings() -> list[dict]:
                     "pct":        float(team_record.get("winningPercentage", "0.000") or 0),
                     "gb":         team_record.get("gamesBack", "-"),
                     "streak":     team_record.get("streak", {}).get("streakCode", ""),
-                    "last_10":    team_record.get("records", {}).get("splitRecords", [{}])[0].get("wins", 0),
+                    "last_10":    next(
+                        (sr.get("wins", 5) for sr in team_record.get("records", {}).get("splitRecords", [])
+                         if sr.get("type") == "lastTen"),
+                        5  # default neutral if split not found
+                    ),
                 })
         logger.info("[DataHub] Standings: %d teams", len(standings))
         return standings
@@ -1343,7 +1347,7 @@ def run_data_hub_tasklet() -> None:
             "batted_ball":    [],  # no actor yet
             "second_half":    [],  # no actor yet
             "game_predictions": _gp_list,
-            "nsfi":             _fetch_nsfi() if _NSFI_AVAILABLE else [],
+            "nsfi":             [],  # NSFI not consumed downstream — skip fetch
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
 
@@ -1563,6 +1567,20 @@ class _BaseAgent:
             raw_p += float(prop.get("_marcel_adj",       0.0)) * 100.0
             raw_p += float(prop.get("_predict_plus_adj", 0.0)) * 100.0
             raw_p += float(prop.get("_park_factor_adj",  0.0)) * 100.0
+            # Game-level environment nudge (game_over_prob / game_home_win_prob
+            # written to prop by prop_enrichment_layer Step 9)
+            _gop = float(prop.get("game_over_prob",      0.50) or 0.50)
+            _gwp = float(prop.get("game_home_win_prob",  0.50) or 0.50)
+            _pt_lower = str(prop_type).lower()
+            if _pt_lower in ("total_bases", "home_runs", "rbis", "rbi",
+                             "runs", "earned_runs", "hits"):
+                # High-scoring game env → boost over props; low-scoring → suppress
+                raw_p += (_gop - 0.50) * 6.0   # ±3pp max at 100% confidence
+            if _pt_lower in ("rbis", "rbi", "runs") and _gwp > 0.58:
+                raw_p += 1.0  # home team winning → slightly better RBI/run env
+            raw_p += float(prop.get("_streak_adj",  0.0)) * 100.0
+            raw_p += float(prop.get("_last10_adj",  0.0)) * 100.0
+            raw_p += float(prop.get("_streak_adj", 0.0)) * 100.0
             # Brier calibration governor
             if _DRIFT_MONITOR_AVAILABLE:
                 try:
@@ -1582,11 +1600,26 @@ class _BaseAgent:
                 pass
         if prop:
             # Phase 91 Step 4: dampen correlated fallback adjustments
+            _gop2 = float(prop.get("game_over_prob",     0.50) or 0.50)
+            _gwp2 = float(prop.get("game_home_win_prob", 0.50) or 0.50)
+            _pt_lower2 = str(prop_type).lower()
+            _game_env_nudge = 0.0
+            if _pt_lower2 in ("total_bases", "home_runs", "rbis", "rbi",
+                               "runs", "earned_runs", "hits"):
+                _game_env_nudge += (_gop2 - 0.50) * 6.0
+            if _pt_lower2 in ("rbis", "rbi", "runs") and _gwp2 > 0.58:
+                _game_env_nudge += 1.0
+            _streak_nudge = float(prop.get("_streak_adj",  0.0)) * 100.0
+            _last10_nudge = float(prop.get("_last10_adj",  0.0)) * 100.0
+            _streak_nudge = float(prop.get("_streak_adj", 0.0)) * 100.0
             _fb_adjs = [
                 ("bayesian",        float(prop.get("_bayesian_nudge",   0.0)) * 100.0),
                 ("cv_consistency",  float(prop.get("_cv_nudge",         0.0)) * 100.0),
                 ("form_adj",        float(prop.get("_form_adj",         0.0)) * 100.0),
                 ("park_factor",     float(prop.get("_park_factor_adj",  0.0)) * 100.0),
+                ("game_env",        _game_env_nudge),
+                ("streak",          _streak_nudge),
+                ("last_10",         _last10_nudge),
             ]
             _fb_adjs = [(n, d) for n, d in _fb_adjs if abs(d) >= 0.10]
             if _fb_adjs:
@@ -1722,10 +1755,9 @@ class _BaseAgent:
         marcel_adj    = _clamp((float(prop.get("_marcel_adj",          0.0) or 0.0) + 0.02) / 0.04)  # Marcel ±1.8pp
         predict_plus  = _clamp((float(prop.get("_predict_plus_adj",    0.0) or 0.0) + 0.08) / 0.16)  # Predict+ arsenal
         ps_prob       = _clamp(float(prop.get("_player_specific_prob", 0.0) or 0.0))                  # Poisson/binomial rate
-        has_enrich    = float(any([
-            prop.get("_form_adj"), prop.get("_cv_nudge"), prop.get("_bayesian_nudge"),
-            prop.get("_marcel_adj"), prop.get("_predict_plus_adj"), prop.get("_player_specific_prob"),
-        ]))  # 1.0 = enrichment ran; 0.0 = cold start / enrichment unavailable
+        # Batting order position: leadoff=0.111 (1/9), cleanup=0.444 (4/9),
+        # last=1.0 (9/9), unknown=0.0.  More predictive than has_enrich binary.
+        bat_order     = _clamp(float(prop.get("_batting_order_slot", 0) or 0) / 9.0)
 
         vec = [
             k_rate, bb_rate, era, whip,           # 0-3  pitcher/batter stats
@@ -1743,7 +1775,7 @@ class _BaseAgent:
             marcel_adj,                            # 23   Marcel projection adjustment
             predict_plus,                          # 24   Predict+ arsenal adjustment
             ps_prob,                               # 25   player-specific Poisson/binomial prob
-            has_enrich,                            # 26   enrichment completeness flag
+            bat_order,                             # 26   batting order position (normalised)
         ]
         assert len(vec) == 27, f"Feature vector length {len(vec)} != 27"
         return [round(v, 6) for v in vec]

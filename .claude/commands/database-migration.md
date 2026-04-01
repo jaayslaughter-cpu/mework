@@ -14,7 +14,7 @@ Database schema changes with migration files
 
 ## Common Files
 
-- Inspect the files touched by the related commits before editing.
+- `migrations/*`
 
 ## Suggested Sequence
 
