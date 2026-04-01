@@ -4,182 +4,133 @@
 > Auto-generated skill from repository analysis
 
 ## Overview
-
-This skill teaches you the core development patterns, coding conventions, and common workflows for contributing to the `mework` Python codebase. The repository is focused on data pipeline enhancements, bugfixes, database migrations, and robust API integrations, with a strong emphasis on modularity and maintainability. While no specific framework is used, the project is organized around clear layers and tasklets for extensibility.
+This skill teaches the core development and maintenance patterns for the `mework` Python codebase. The repository implements a data pipeline for statistical enrichment, feature engineering, and recap/settlement logic, with a focus on modularity and maintainability. You'll learn the project's coding conventions, commit practices, and the main workflows for adding features, fixing bugs, and enhancing the pipeline.
 
 ## Coding Conventions
 
 - **File Naming:**  
-  Use `snake_case` for all Python files and modules.  
-  _Example:_  
+  All Python files use `snake_case`.  
+  *Example:*  
   ```
-  fangraphs_layer.py
   prop_enrichment_layer.py
-  tasklets.py
+  nightly_recap.py
   ```
 
 - **Import Style:**  
-  Prefer **relative imports** within the package.  
-  _Example:_  
+  Relative imports are preferred within modules.  
+  *Example:*  
   ```python
-  from .fangraphs_layer import FangraphsLayer
-  from . import tasklets
+  from .fangraphs_layer import fetch_fangraphs_data
   ```
 
 - **Export Style:**  
-  Both explicit and implicit exports are used.  
-  _Example:_  
-  ```python
-  # Explicit
-  def some_function():
-      pass
+  Both explicit (`__all__`) and implicit exports are used depending on the file.
 
-  __all__ = ['some_function']
-
-  # Implicit (just defining functions/classes)
-  class Tasklet:
-      ...
+- **Commit Messages:**  
+  - Prefixes: `feat`, `fix`, `refactor`
+  - Freeform descriptive messages, average length ~81 characters  
+  *Example:*  
   ```
-
-- **Commit Message Patterns:**  
-  - Use freeform messages, often prefixed with `fix` or `refactor`.
-  - Reference the phase or area affected.
-  - Keep messages concise but descriptive (average ~82 characters).
-  _Example:_  
-  ```
-  fix: correct grading logic in tasklets.py for edge-case recaps
-  refactor: phase 7 enrichment and add new data source to fangraphs_layer.py
+  feat: add new wOBA enrichment to prop_enrichment_layer and update tasklets
+  fix: correct math error in calibration_layer.py affecting win probability
   ```
 
 ## Workflows
 
 ### Feature Phase Development
-**Trigger:** When a new feature phase is planned or a major enhancement is required  
-**Command:** `/new-phase-feature`
+**Trigger:** When adding a new feature, data signal, or phase to the pipeline  
+**Command:** `/feature-phase-development`
 
-1. Edit or enhance `fangraphs_layer.py` and/or `prop_enrichment_layer.py` to add new features or data sources.
-2. Update `tasklets.py` to wire in new logic or processing steps.
-3. Optionally modify related files (e.g., `calibration_layer.py`, `line_comparator.py`) if the phase requires.
-4. Commit with a message referencing the phase number and a summary of changes.
+1. Modify or add logic in `fangraphs_layer.py`, `prop_enrichment_layer.py`, and/or `tasklets.py` to implement the new feature.
+2. Commit changes with a message referencing the phase or feature.
+3. Optionally, merge the branch or pull request into `main`.
 
-_Example:_
+*Example:*
 ```python
-# In fangraphs_layer.py
-def enrich_with_new_metric(data):
-    # Add new metric calculation
-    ...
-
-# In tasklets.py
-from .fangraphs_layer import enrich_with_new_metric
-
-def run_phase_8():
-    data = fetch_data()
-    enriched = enrich_with_new_metric(data)
-    ...
+# prop_enrichment_layer.py
+def enrich_with_new_stat(df):
+    df['new_stat'] = df['hits'] / df['at_bats']
+    return df
 ```
-_Commit message:_  
-`refactor: phase 8 - add new metric enrichment to fangraphs_layer and tasklets`
+```
+feat: add new_stat enrichment to prop pipeline
+```
 
 ---
 
 ### Bugfix or Pipeline Fix
-**Trigger:** When a bug is reported or an issue is detected in the pipeline's operation or output  
-**Command:** `/bugfix-pipeline`
+**Trigger:** When fixing a bug or correcting pipeline behavior  
+**Command:** `/bugfix-or-pipeline-fix`
 
-1. Identify the bug or issue and locate the relevant logic in `tasklets.py` or related files.
-2. Edit `tasklets.py` to fix the bug (e.g., grading, recap, math, query filters).
-3. If the bug affects other modules (e.g., `DiscordAlertService.py`, `calibration_layer.py`), update those as well.
-4. Commit with a message referencing the fix and affected area.
+1. Identify and fix the bug in the relevant file(s), commonly `tasklets.py`, `calibration_layer.py`, `DiscordAlertService.py`, or `orchestrator.py`.
+2. Commit the fix, referencing the bug or issue in the commit message.
+3. Optionally, merge the branch or pull request into `main`.
 
-_Example:_
+*Example:*
 ```python
-# In tasklets.py
-def calculate_grade(score):
-    if score < 0:
-        return 0  # Fix: Prevent negative grades
-    return score
+# calibration_layer.py
+def calibrate_probabilities(probs):
+    # Fixed division by zero bug
+    return [p / sum(probs) if sum(probs) != 0 else 0 for p in probs]
 ```
-_Commit message:_  
-`fix: prevent negative grades in tasklets.calculate_grade`
+```
+fix: handle division by zero in calibrate_probabilities
+```
 
 ---
 
-### Database Schema or Migration Update
-**Trigger:** When a new database table or cache is needed, or schema changes are required for a new feature  
-**Command:** `/new-db-migration`
+### Add New Prop Feature
+**Trigger:** When adding a new statistical feature or enrichment to the prop pipeline  
+**Command:** `/add-prop-feature`
 
-1. Create or edit migration SQL files (e.g., `migrations/V27__add_discord_sent.sql`, `migrations/V28__fg_cache.sql`).
-2. Update `fangraphs_layer.py` or other relevant modules to use the new/updated tables.
-3. Optionally update `.env.example` if new environment variables are required.
-4. Commit with a message referencing the migration and affected features.
+1. Update `fangraphs_layer.py` and/or `prop_enrichment_layer.py` to calculate or fetch the new feature.
+2. Update `tasklets.py` to ensure the new feature is integrated into the pipeline.
+3. Commit changes with a message referencing the new feature.
 
-_Example:_
-```sql
--- migrations/V28__fg_cache.sql
-CREATE TABLE fg_cache (
-    id SERIAL PRIMARY KEY,
-    data JSONB,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
+*Example:*
 ```python
-# In fangraphs_layer.py
-def cache_fg_data(data):
-    # Insert into fg_cache table
-    ...
+# fangraphs_layer.py
+def fetch_new_metric():
+    # logic to fetch new metric
+    pass
 ```
-_Commit message:_  
-`refactor: add fg_cache table and update fangraphs_layer to use caching`
+```
+feat: integrate new_metric into prop enrichment pipeline
+```
 
 ---
 
-### Proxy or API Fallback Implementation
-**Trigger:** When a new fallback tier is needed for API reliability or to add a new proxy layer  
-**Command:** `/add-api-fallback`
+### Recap or Settlement Fix
+**Trigger:** When correcting or enhancing the recap/settlement process for bets  
+**Command:** `/fix-recap-or-settlement`
 
-1. Edit `live_dispatcher.py` to add or update proxy/fallback logic.
-2. Update `.env.example` to include new API keys or environment variables.
-3. If caching is involved, update `fangraphs_layer.py` and add relevant migrations.
-4. Commit with a message referencing the fallback/proxy and affected APIs.
+1. Modify `tasklets.py`, `nightly_recap.py`, `season_record.py`, and/or `DiscordAlertService.py` to fix or enhance recap/settlement logic.
+2. Commit changes with a message referencing recap, settlement, or grading.
+3. Optionally, merge the branch or pull request into `main`.
 
-_Example:_
+*Example:*
 ```python
-# In live_dispatcher.py
-def fetch_data_with_fallback():
-    try:
-        return fetch_from_primary_api()
-    except Exception:
-        return fetch_from_secondary_api()
+# nightly_recap.py
+def generate_recap(results):
+    # Improved grading logic
+    pass
 ```
-```env
-# In .env.example
-PRIZEPICKS_API_KEY=your-key-here
 ```
-_Commit message:_  
-`fix: add fallback to secondary API in live_dispatcher.py and update .env.example`
-
----
+fix: improve grading logic in nightly recap
+```
 
 ## Testing Patterns
 
-- **Framework:** Unknown (not detected)
-- **Test File Pattern:** Files are named with `.test.ts` extension, suggesting some TypeScript-based testing (possibly for a frontend or API contract).
-- **Python Testing:** No explicit Python test framework detected. If adding tests, follow the convention of naming test files as `test_*.py` and use standard Python testing tools like `pytest` or `unittest`.
-
-_Example:_
-```python
-# test_tasklets.py
-def test_calculate_grade():
-    assert calculate_grade(-5) == 0
-    assert calculate_grade(10) == 10
-```
+- **Framework:** Unknown (no explicit framework detected)
+- **File Pattern:** Test files use the `*.test.ts` pattern, suggesting some TypeScript-based tests may exist, possibly for frontend or integration layers.
+- **Python Testing:** No explicit Python test framework detected. If adding tests, follow the snake_case naming and place them in appropriately named files (e.g., `test_tasklets.py`).
 
 ## Commands
 
-| Command            | Purpose                                                      |
-|--------------------|--------------------------------------------------------------|
-| /new-phase-feature | Start a new feature phase with enhancements or new data      |
-| /bugfix-pipeline   | Fix bugs or issues in the pipeline or grading logic          |
-| /new-db-migration  | Add or update database schema/migrations for new features    |
-| /add-api-fallback  | Implement or update proxy/fallback logic for external APIs   |
+| Command                     | Purpose                                                        |
+|-----------------------------|----------------------------------------------------------------|
+| /feature-phase-development  | Start a new feature or phase in the pipeline                   |
+| /bugfix-or-pipeline-fix     | Fix a bug or pipeline issue                                    |
+| /add-prop-feature           | Add a new statistical or enrichment feature to the prop pipeline|
+| /fix-recap-or-settlement    | Fix or enhance recap/settlement logic                          |
 ```
