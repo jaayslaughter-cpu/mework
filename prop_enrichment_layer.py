@@ -885,6 +885,44 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _slot = 0
         prop["_batting_order_slot"] = _slot
 
+        # ── Park factor adjustment (Step 10) ──────────────────────────────────
+        # Determine home team for this prop from lineups context.
+        # Park factors apply to the home venue regardless of which team
+        # the player is on.
+        try:
+            from fangraphs_layer import park_factor_adjustment as _pf_adj  # noqa: PLC0415
+            _lineups = hub.get("context", {}).get("lineups", [])
+            # Build team → side map from lineups
+            _side_map: dict[str, str] = {
+                lu["team"].lower(): lu.get("side", "")
+                for lu in _lineups
+                if lu.get("team")
+            }
+            _player_team_lower = team.lower() if team else ""
+            _player_side = _side_map.get(_player_team_lower, "")
+            # Find the home team: either this team is home, or find counterpart
+            if _player_side == "home":
+                _home_team = team
+            else:
+                # Find the team with side="home" playing on the same date/game
+                # Use game context: match by finding opp_team's side
+                _home_team = ""
+                _opp_lower = (opp_team or "").lower()
+                if _opp_lower and _side_map.get(_opp_lower) == "home":
+                    _home_team = opp_team or ""
+                else:
+                    # Last resort: scan lineups for any home team
+                    for _lu in _lineups:
+                        if _lu.get("side") == "home":
+                            _home_team = _lu.get("team", "")
+                            break
+            _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team)
+            prop["_park_factor_adj"] = _pf_nudge
+            prop["_park_factor_team"] = _home_team
+        except Exception as _pf_err:
+            prop.setdefault("_park_factor_adj", 0.0)
+            logger.debug("[Enrichment] park_factor_adj skipped: %s", _pf_err)
+
         enriched_count += 1
 
     # ── Statcast batch enrichment (needs mlbam_ids attached above) ─────────────
