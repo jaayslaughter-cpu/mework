@@ -5,181 +5,146 @@
 
 ## Overview
 
-This skill teaches you the core development patterns, coding conventions, and common workflows for contributing to the `mework` Python codebase. The repository is focused on data pipeline enhancements, bugfixes, database migrations, and robust API integrations, with a strong emphasis on modularity and maintainability. While no specific framework is used, the project is organized around clear layers and tasklets for extensibility.
+This skill teaches the core development patterns and workflows for contributing to the **mework** Python codebase. The repository implements a data pipeline with layered logic for enrichment, calibration, and alerting, and features regular enhancements, bugfixes, and documentation updates. The codebase follows clear conventions for file organization, commit structure, and workflow execution, ensuring maintainability and collaboration.
 
 ## Coding Conventions
 
-- **File Naming:**  
-  Use `snake_case` for all Python files and modules.  
-  _Example:_  
-  ```
-  fangraphs_layer.py
-  prop_enrichment_layer.py
-  tasklets.py
-  ```
+### File Naming
 
-- **Import Style:**  
-  Prefer **relative imports** within the package.  
-  _Example:_  
+- **Style:** `snake_case`
+- **Examples:**
+  - `fangraphs_layer.py`
+  - `prop_enrichment_layer.py`
+  - `tasklets.py`
+
+### Import Style
+
+- **Relative imports** are preferred.
+- **Example:**
   ```python
-  from .fangraphs_layer import FangraphsLayer
-  from . import tasklets
+  from .fangraphs_layer import compute_signals
+  from . import calibration_layer
   ```
 
-- **Export Style:**  
-  Both explicit and implicit exports are used.  
-  _Example:_  
+### Export Style
+
+- **Mixed:** Some modules use explicit `__all__`, others rely on implicit exports.
+- **Example:**
   ```python
-  # Explicit
-  def some_function():
-      pass
-
-  __all__ = ['some_function']
-
-  # Implicit (just defining functions/classes)
-  class Tasklet:
-      ...
+  __all__ = ["compute_signals", "enrich_props"]
   ```
 
-- **Commit Message Patterns:**  
-  - Use freeform messages, often prefixed with `fix` or `refactor`.
-  - Reference the phase or area affected.
-  - Keep messages concise but descriptive (average ~82 characters).
-  _Example:_  
-  ```
-  fix: correct grading logic in tasklets.py for edge-case recaps
-  refactor: phase 7 enrichment and add new data source to fangraphs_layer.py
-  ```
+### Commit Patterns
+
+- **Prefixes:** `feat`, `fix`, `refactor` (not strictly enforced)
+- **Average message length:** ~81 characters
+- **Examples:**
+  - `feat(Phase 110): Add new statcast signals to enrichment layer`
+  - `fix: Correct payout calculation in calibration_layer.py`
+  - `refactor: Move alert logic to DiscordAlertService.py`
 
 ## Workflows
 
 ### Feature Phase Development
-**Trigger:** When a new feature phase is planned or a major enhancement is required  
-**Command:** `/new-phase-feature`
+**Trigger:** When adding a new feature, signal, or enhancement to the pipeline  
+**Command:** `/feature-phase-development`
 
-1. Edit or enhance `fangraphs_layer.py` and/or `prop_enrichment_layer.py` to add new features or data sources.
-2. Update `tasklets.py` to wire in new logic or processing steps.
-3. Optionally modify related files (e.g., `calibration_layer.py`, `line_comparator.py`) if the phase requires.
-4. Commit with a message referencing the phase number and a summary of changes.
+1. Edit or add logic in `fangraphs_layer.py` and/or `prop_enrichment_layer.py` if the feature relates to enrichment or stats.
+2. Update `tasklets.py` to wire up the new feature or support new pipeline steps.
+3. Commit all related files together. Include the Phase number in the commit message for traceability.
 
-_Example:_
+**Example:**
 ```python
 # In fangraphs_layer.py
-def enrich_with_new_metric(data):
-    # Add new metric calculation
-    ...
+def compute_new_signal(data):
+    # Add new computation logic here
+    return data["stat"] * 1.05
 
 # In tasklets.py
-from .fangraphs_layer import enrich_with_new_metric
+from .fangraphs_layer import compute_new_signal
 
-def run_phase_8():
-    data = fetch_data()
-    enriched = enrich_with_new_metric(data)
+def run_pipeline():
+    ...
+    data["new_signal"] = compute_new_signal(data)
     ...
 ```
-_Commit message:_  
-`refactor: phase 8 - add new metric enrichment to fangraphs_layer and tasklets`
+**Commit message:**  
+`feat(Phase 112): Add compute_new_signal to fangraphs_layer and pipeline`
 
 ---
 
 ### Bugfix or Pipeline Fix
-**Trigger:** When a bug is reported or an issue is detected in the pipeline's operation or output  
-**Command:** `/bugfix-pipeline`
+**Trigger:** When fixing a bug or correcting a calculation/logic error in the pipeline  
+**Command:** `/bugfix-or-pipeline-fix`
 
-1. Identify the bug or issue and locate the relevant logic in `tasklets.py` or related files.
-2. Edit `tasklets.py` to fix the bug (e.g., grading, recap, math, query filters).
-3. If the bug affects other modules (e.g., `DiscordAlertService.py`, `calibration_layer.py`), update those as well.
-4. Commit with a message referencing the fix and affected area.
+1. Identify and fix the bug in the relevant Python file(s) (commonly `tasklets.py`, `calibration_layer.py`, `DiscordAlertService.py`).
+2. If needed, update related files to ensure consistency (e.g., update both `calibration_layer.py` and `tasklets.py` for payout logic).
+3. Commit the fix with a descriptive message (often includes `Fix`, `Hotfix`, or `bug`).
 
-_Example:_
+**Example:**
 ```python
-# In tasklets.py
-def calculate_grade(score):
-    if score < 0:
-        return 0  # Fix: Prevent negative grades
-    return score
+# In calibration_layer.py
+def calculate_payout(amount, odds):
+    # Fixed division by zero error
+    if odds == 0:
+        return 0
+    return amount * odds
 ```
-_Commit message:_  
-`fix: prevent negative grades in tasklets.calculate_grade`
+**Commit message:**  
+`fix: Prevent division by zero in payout calculation`
 
 ---
 
-### Database Schema or Migration Update
-**Trigger:** When a new database table or cache is needed, or schema changes are required for a new feature  
-**Command:** `/new-db-migration`
+### Documentation and ECC Bundle Update
+**Trigger:** When adding or updating ECC tool bundles, skills, or command documentation  
+**Command:** `/ecc-bundle-update`
 
-1. Create or edit migration SQL files (e.g., `migrations/V27__add_discord_sent.sql`, `migrations/V28__fg_cache.sql`).
-2. Update `fangraphs_layer.py` or other relevant modules to use the new/updated tables.
-3. Optionally update `.env.example` if new environment variables are required.
-4. Commit with a message referencing the migration and affected features.
+1. Edit or add markdown files in `.claude/commands/` (e.g., `bugfix-or-pipeline-fix.md`, `feature-phase-development.md`, `database-migration.md`).
+2. Update or add `SKILL.md` in `.agents/skills/mework/` and/or `.claude/skills/mework/`.
+3. Update configuration files like `.claude/ecc-tools.json` and `.claude/identity.json`.
+4. Commit all related documentation/configuration files together.
 
-_Example:_
-```sql
--- migrations/V28__fg_cache.sql
-CREATE TABLE fg_cache (
-    id SERIAL PRIMARY KEY,
-    data JSONB,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
-```python
-# In fangraphs_layer.py
-def cache_fg_data(data):
-    # Insert into fg_cache table
-    ...
-```
-_Commit message:_  
-`refactor: add fg_cache table and update fangraphs_layer to use caching`
+**Example:**
+- Edit `.claude/commands/feature-phase-development.md` to document a new command.
+- Update `.claude/ecc-tools.json` to register the new command.
+
+**Commit message:**  
+`docs: Update ECC bundle and add new skill documentation for feature-phase-development`
 
 ---
 
-### Proxy or API Fallback Implementation
-**Trigger:** When a new fallback tier is needed for API reliability or to add a new proxy layer  
-**Command:** `/add-api-fallback`
+### Merge Main into Feature Branch
+**Trigger:** When updating a feature/fix branch with the latest changes from main  
+**Command:** `/merge-main`
 
-1. Edit `live_dispatcher.py` to add or update proxy/fallback logic.
-2. Update `.env.example` to include new API keys or environment variables.
-3. If caching is involved, update `fangraphs_layer.py` and add relevant migrations.
-4. Commit with a message referencing the fallback/proxy and affected APIs.
+1. Run a merge from `main` into the current feature or fix branch.
+2. Resolve any merge conflicts, especially in shared files (e.g., `fangraphs_layer.py`, `prop_enrichment_layer.py`, `tasklets.py`).
+3. Commit the merge.
 
-_Example:_
-```python
-# In live_dispatcher.py
-def fetch_data_with_fallback():
-    try:
-        return fetch_from_primary_api()
-    except Exception:
-        return fetch_from_secondary_api()
+**Example:**
+```bash
+git checkout feature/phase-112
+git merge main
+# Resolve conflicts in fangraphs_layer.py if prompted
+git add fangraphs_layer.py
+git commit -m "Merge main into feature/phase-112"
 ```
-```env
-# In .env.example
-PRIZEPICKS_API_KEY=your-key-here
-```
-_Commit message:_  
-`fix: add fallback to secondary API in live_dispatcher.py and update .env.example`
 
 ---
 
 ## Testing Patterns
 
-- **Framework:** Unknown (not detected)
-- **Test File Pattern:** Files are named with `.test.ts` extension, suggesting some TypeScript-based testing (possibly for a frontend or API contract).
-- **Python Testing:** No explicit Python test framework detected. If adding tests, follow the convention of naming test files as `test_*.py` and use standard Python testing tools like `pytest` or `unittest`.
-
-_Example:_
-```python
-# test_tasklets.py
-def test_calculate_grade():
-    assert calculate_grade(-5) == 0
-    assert calculate_grade(10) == 10
-```
+- **Framework:** Unknown (no standard Python test framework detected)
+- **Test File Pattern:** `*.test.ts` (TypeScript-style test files, possibly for frontend or integration)
+- **Note:** Python code may not have automated tests in this repo; consider adding `pytest` or similar for future coverage.
 
 ## Commands
 
-| Command            | Purpose                                                      |
-|--------------------|--------------------------------------------------------------|
-| /new-phase-feature | Start a new feature phase with enhancements or new data      |
-| /bugfix-pipeline   | Fix bugs or issues in the pipeline or grading logic          |
-| /new-db-migration  | Add or update database schema/migrations for new features    |
-| /add-api-fallback  | Implement or update proxy/fallback logic for external APIs   |
+| Command                       | Purpose                                                      |
+|-------------------------------|--------------------------------------------------------------|
+| /feature-phase-development    | Start a new feature or enhancement phase                     |
+| /bugfix-or-pipeline-fix       | Fix bugs or logic errors in the pipeline                     |
+| /ecc-bundle-update            | Update documentation, ECC tools, or skill bundles            |
+| /merge-main                   | Merge latest main branch changes into your feature/fix branch |
+
 ```
