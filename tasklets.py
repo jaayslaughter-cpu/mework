@@ -2463,7 +2463,7 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
     return len(set(combos)) < len(combos)
 
 
-def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> dict:
+def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> list[dict]:
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
 
     # Wire line_comparator — pick best platform per leg (lower line for OVER, higher for UNDER)
@@ -2500,38 +2500,72 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         enriched_legs.append(lg)
     legs = enriched_legs
 
-    platform = legs[0].get("recommended_platform", "Underdog").lower() if legs else "underdog"
+    # Split enriched legs by best platform — build one parlay per platform
+    ud_legs: list[dict] = []
+    pp_legs: list[dict] = []
+    for _l in enriched_legs:
+        plat = _l.get("recommended_platform", "Underdog").lower()
+        if "prize" in plat:
+            pp_legs.append(_l)
+        else:
+            ud_legs.append(_l)
 
-    # Use underdog_math_engine for accurate Flex vs Standard EV with real payout tables
-    entry_type = "STANDARD"
-    combined_ev = 0.0
-    try:
-        from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
-        _engine = UnderdogMathEngine()
-        _probs  = [min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)) for lg in legs]
-        _eval   = _engine.evaluate_slip(_probs)
-        combined_ev = round(_eval.recommended_ev * 100, 2)
-        entry_type  = _eval.recommended_entry_type   # "FLEX" or "STANDARD"
-    except Exception:
-        # Fallback: multiplicative EV
-        combined_ev = round(
-            (math.prod(1 + lg["ev_pct"] / 100 for lg in legs) - 1) * 100, 2
-        ) if legs else 0.0
+    def _build_platform_parlay(plat_legs: list[dict], platform: str) -> "dict | None":
+        if len(plat_legs) < 2:
+            return None
+        n = len(plat_legs)
+        probs = [min(0.95, max(0.05, l.get("model_prob", 52.0) / 100)) for l in plat_legs]
+        p_conf = round(sum(l.get("confidence", 5) for l in plat_legs) / max(n, 1), 1)
 
-    return {
-        "agent":           agent_name,
-        "agent_name":      agent_name,
-        "legs":            legs,
-        "leg_count":       len(legs),
-        "entry_type":      entry_type,
-        "combined_ev_pct": combined_ev,
-        "ev_pct":          combined_ev,
-        "stake":           10.0,
-        "confidence":      avg_conf,
-        "platform":        platform,
-        "season_stats":    {},
-        "ts":              datetime.datetime.utcnow().isoformat(),
-    }
+        if platform == "underdog":
+            entry_type = "STANDARD"
+            combined_ev = 0.0
+            try:
+                from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
+                _engine = UnderdogMathEngine()
+                _eval   = _engine.evaluate_slip(probs)
+                combined_ev = round(_eval.recommended_ev * 100, 2)
+                entry_type  = _eval.recommended_entry_type
+            except Exception:
+                _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 20.0}
+                mult = _UD_MULTS.get(n, 3.5)
+                combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
+        else:  # prizepicks — Power mode
+            entry_type = "POWER"
+            _PP_MULTS = {2: 3.0, 3: 6.0, 4: 10.0}
+            mult = _PP_MULTS.get(n, 3.0)
+            combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
+
+        return {
+            "agent":           agent_name,
+            "agent_name":      agent_name,
+            "legs":            plat_legs,
+            "leg_count":       n,
+            "entry_type":      entry_type,
+            "combined_ev_pct": combined_ev,
+            "ev_pct":          combined_ev,
+            "stake":           10.0,
+            "confidence":      p_conf,
+            "platform":        platform,
+            "season_stats":    {},
+            "ts":              datetime.datetime.utcnow().isoformat(),
+        }
+
+    result_parlays: list[dict] = []
+    ud_parlay = _build_platform_parlay(ud_legs, "underdog")
+    pp_parlay = _build_platform_parlay(pp_legs, "prizepicks")
+    if ud_parlay:
+        result_parlays.append(ud_parlay)
+    if pp_parlay:
+        result_parlays.append(pp_parlay)
+
+    # Fallback: if neither platform had >=2 legs, put all legs on underdog
+    if not result_parlays:
+        fallback = _build_platform_parlay(enriched_legs, "underdog")
+        if fallback:
+            result_parlays.append(fallback)
+
+    return result_parlays
 
 
 def _build_agent_parlays(hits: list[dict], agent_name: str,
@@ -2569,7 +2603,7 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
                         ))
                         if key not in seen:
                             seen.add(key)
-                            parlays.append(_make_parlay(three, agent_name))
+                            parlays.extend(_make_parlay(three, agent_name))
                         break
 
             key2 = "|".join(sorted(
@@ -2578,9 +2612,9 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
             ))
             if key2 not in seen:
                 seen.add(key2)
-                parlays.append(_make_parlay(two, agent_name))
+                parlays.extend(_make_parlay(two, agent_name))
 
-    return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays]
+    return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays * 2]
 
 
 class _CorrelatedParlayAgent(_BaseAgent):
@@ -3741,6 +3775,7 @@ def run_grading_tasklet() -> None:
                     "line": line, "side": side, "actual": actual,
                     "status": status, "profit_loss": round(pl, 4),
                     "clv": round(clv, 2), "agent": agent,
+                    "odds_american": int(odds or -110),
                 })
 
         conn.commit()

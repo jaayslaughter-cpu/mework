@@ -250,27 +250,63 @@ def calculate_brier_score(predictions: list) -> Optional[float]:
 # 2026 Underdog STANDARD payout multipliers
 _UD_MULTIPLIERS: Dict[int, float] = {
     2: 3.5,
-    3: 5.0,   # Underdog 2026 STANDARD 3-leg = 5.0x (corrected from 6.5)
+    3: 6.0,   # Underdog 2026 STANDARD 3-leg = 6.0x (confirmed by user)
     4: 10.0,
     5: 20.0,
 }
+
+# 2026 PrizePicks POWER payout multipliers
+_PP_MULTIPLIERS: Dict[int, float] = {
+    2: 3.0,   # 2-pick Power
+    3: 6.0,   # 3-pick Power
+    4: 10.0,  # 4-pick Power
+}
+
+# PrizePicks FLEX: (all_correct_mult, one_miss_mult) per entry size
+_PP_FLEX_MULTIPLIERS: Dict[int, tuple] = {
+    4: (6.0, 1.5),   # 4-pick Flex: 6x (4/4) or 1.5x (3/4)
+    3: (3.0, 1.0),   # 3-pick Flex: 3x (3/3) or 1.0x (2/3)
+    2: (1.0, 0.0),   # 2-pick Flex: 1x (2/2) or bust
+}
+
+
+def get_payout_multiplier(platform: str, n_legs: int, mode: str = "power") -> float:
+    """Return the correct payout multiplier for a given platform and parlay size.
+
+    Args:
+        platform: ``"underdog"`` or ``"prizepicks"`` (case-insensitive).
+        n_legs:   Number of legs in the parlay.
+        mode:     ``"power"`` (default) or ``"flex"`` (all-correct payout only).
+
+    Returns:
+        Float multiplier. Defaults to 3.0 on unknown platform/size.
+    """
+    p = str(platform).lower()
+    if p == "underdog":
+        return _UD_MULTIPLIERS.get(n_legs, 3.5)
+    if p in ("prizepicks", "prize_picks", "pp"):
+        if mode == "flex":
+            return _PP_FLEX_MULTIPLIERS.get(n_legs, (1.0, 0.0))[0]
+        return _PP_MULTIPLIERS.get(n_legs, 3.0)
+    return 3.0  # safe fallback
 
 
 def is_ev_positive(
     p_final: float,
     n_legs: int = 3,
     ev_floor: float = 0.02,
+    platform: str = "underdog",
 ) -> Tuple[bool, float]:
-    """2026 Underdog EV gate.  Returns ``(is_valid, ev)``.
+    """Platform-aware EV gate.  Returns ``(is_valid, ev)``.
 
     Uses the correct entry-level win probability (p_final^n_legs) vs. the
     platform multiplier.  A strict 2 % edge floor filters marginal picks.
 
-    Break-even per-leg win rates:
+    Break-even per-leg win rates (Underdog):
       2-pick = 53.45 %  |  3-pick = 53.94 %
       4-pick = 56.23 %  |  5-pick = 54.93 %
     """
-    mult = _UD_MULTIPLIERS.get(n_legs, 6.5)
+    mult = get_payout_multiplier(platform, n_legs)
     entry_win_prob = p_final ** n_legs
     ev = (entry_win_prob * mult) - 1.0
     return ev > ev_floor, round(ev, 4)
