@@ -477,6 +477,209 @@ def _load() -> None:
     _loaded = True
 
 
+# ---------------------------------------------------------------------------
+# Park Factors (FanGraphs 2025, 5-year weighted)
+# Source: fangraphs.com/guts.aspx?type=pf — scraped 2025-03-31
+# Scale: 100 = league average.  Already halved for use with full-season stats.
+# Keys: hr, so, basic, 1b, 2b
+# ---------------------------------------------------------------------------
+
+_PARK_FACTORS_2025: dict[str, dict[str, int]] = {
+    # hr=overall, hr_vs_l=vs LHB, hr_vs_r=vs RHB, so=strikeouts, basic=runs, 1b, 2b
+    "angels":        {"hr": 105, "hr_vs_l": 103, "hr_vs_r": 107, "so": 102, "basic": 101, "1b": 100, "2b": 97},
+    "orioles":       {"hr": 99,  "hr_vs_l": 101, "hr_vs_r":  97, "so":  99, "basic":  99, "1b": 103, "2b": 96},
+    "red sox":       {"hr": 98,  "hr_vs_l":  96, "hr_vs_r": 100, "so":  98, "basic": 104, "1b": 104, "2b": 109},
+    "white sox":     {"hr": 105, "hr_vs_l": 106, "hr_vs_r": 104, "so":  99, "basic": 100, "1b": 100, "2b": 96},
+    "guardians":     {"hr": 98,  "hr_vs_l":  96, "hr_vs_r": 101, "so": 101, "basic":  99, "1b": 100, "2b": 100},
+    "tigers":        {"hr": 96,  "hr_vs_l":  94, "hr_vs_r":  97, "so":  98, "basic": 100, "1b": 100, "2b": 100},
+    "royals":        {"hr": 95,  "hr_vs_l":  93, "hr_vs_r":  97, "so":  97, "basic": 103, "1b": 103, "2b": 108},
+    "twins":         {"hr": 99,  "hr_vs_l":  98, "hr_vs_r": 100, "so": 100, "basic": 101, "1b": 101, "2b": 105},
+    # Yankee Stadium: iconic short RF porch → big LHB advantage
+    "yankees":       {"hr": 104, "hr_vs_l": 118, "hr_vs_r":  92, "so": 100, "basic":  99, "1b":  97, "2b": 95},
+    "athletics":     {"hr": 103, "hr_vs_l": 104, "hr_vs_r": 102, "so": 101, "basic": 103, "1b": 102, "2b": 107},
+    # T-Mobile: marine air, deep gaps → LHB disadvantage
+    "mariners":      {"hr": 96,  "hr_vs_l":  93, "hr_vs_r":  98, "so": 104, "basic":  94, "1b":  95, "2b": 93},
+    "rays":          {"hr": 104, "hr_vs_l": 105, "hr_vs_r": 103, "so": 100, "basic": 101, "1b": 103, "2b": 96},
+    "rangers":       {"hr": 102, "hr_vs_l": 103, "hr_vs_r": 101, "so": 101, "basic":  99, "1b":  98, "2b": 100},
+    "blue jays":     {"hr": 103, "hr_vs_l": 105, "hr_vs_r": 101, "so": 100, "basic":  99, "1b":  98, "2b": 102},
+    # Chase Field: AZ heat but pitcher-friendly dimensions — both hands suppressed
+    "diamondbacks":  {"hr": 91,  "hr_vs_l":  90, "hr_vs_r":  92, "so":  99, "basic": 101, "1b": 103, "2b": 105},
+    "braves":        {"hr": 99,  "hr_vs_l": 100, "hr_vs_r":  98, "so": 102, "basic": 100, "1b": 101, "2b": 99},
+    "cubs":          {"hr": 98,  "hr_vs_l":  99, "hr_vs_r":  97, "so": 101, "basic":  98, "1b": 100, "2b": 94},
+    # GABP: known extreme HR park, both hands benefit
+    "reds":          {"hr": 114, "hr_vs_l": 117, "hr_vs_r": 111, "so": 101, "basic": 105, "1b": 101, "2b": 101},
+    # Coors: altitude lifts all; thin-air effect slightly larger for pull hitters
+    "rockies":       {"hr": 107, "hr_vs_l": 106, "hr_vs_r": 108, "so":  96, "basic": 113, "1b": 108, "2b": 111},
+    "marlins":       {"hr": 97,  "hr_vs_l":  96, "hr_vs_r":  98, "so": 100, "basic": 101, "1b": 102, "2b": 101},
+    # Minute Maid: Crawford Boxes in LF → RHB pull to LF is easier
+    "astros":        {"hr": 102, "hr_vs_l":  98, "hr_vs_r": 106, "so": 102, "basic":  99, "1b":  99, "2b": 100},
+    # Dodger Stadium: power alleys, LHB slight edge
+    "dodgers":       {"hr": 110, "hr_vs_l": 113, "hr_vs_r": 107, "so": 100, "basic":  99, "1b":  96, "2b": 98},
+    "brewers":       {"hr": 104, "hr_vs_l": 106, "hr_vs_r": 102, "so": 104, "basic":  99, "1b":  96, "2b": 97},
+    "nationals":     {"hr": 100, "hr_vs_l": 101, "hr_vs_r":  99, "so":  98, "basic": 100, "1b": 100, "2b": 99},
+    # Citi Field: pitcher-friendly, deep CF/LC; RHB pulls to short RF
+    "mets":          {"hr": 99,  "hr_vs_l":  96, "hr_vs_r": 102, "so": 101, "basic":  96, "1b":  97, "2b": 94},
+    "phillies":      {"hr": 105, "hr_vs_l": 107, "hr_vs_r": 103, "so": 101, "basic": 101, "1b":  99, "2b": 97},
+    # PNC Park: deep RF → LHBs disadvantaged
+    "pirates":       {"hr": 93,  "hr_vs_l":  90, "hr_vs_r":  96, "so":  97, "basic": 102, "1b": 103, "2b": 105},
+    "cardinals":     {"hr": 94,  "hr_vs_l":  92, "hr_vs_r":  95, "so":  97, "basic":  98, "1b": 101, "2b": 99},
+    # Petco: pitcher-friendly, LHB especially hurt by deep LCF/CF
+    "padres":        {"hr": 101, "hr_vs_l":  98, "hr_vs_r": 103, "so": 102, "basic":  96, "1b":  97, "2b": 95},
+    # Oracle Park: McCovey Cove, strong marine wind in from CF/LCF — LHB hit into wind
+    "giants":        {"hr": 91,  "hr_vs_l":  82, "hr_vs_r":  98, "so":  98, "basic":  97, "1b": 102, "2b": 102},
+}
+
+# Full name → canonical key (covers full names, city+name combos, abbreviations)
+_TEAM_PF_ALIASES: dict[str, str] = {
+    # Angels
+    "angels": "angels", "los angeles angels": "angels", "la angels": "angels",
+    "anaheim angels": "angels", "california angels": "angels",
+    # Orioles
+    "orioles": "orioles", "baltimore orioles": "orioles",
+    # Red Sox
+    "red sox": "red sox", "boston red sox": "red sox",
+    # White Sox
+    "white sox": "white sox", "chicago white sox": "white sox",
+    # Guardians
+    "guardians": "guardians", "cleveland guardians": "guardians",
+    # Tigers
+    "tigers": "tigers", "detroit tigers": "tigers",
+    # Royals
+    "royals": "royals", "kansas city royals": "royals",
+    # Twins
+    "twins": "twins", "minnesota twins": "twins",
+    # Yankees
+    "yankees": "yankees", "new york yankees": "yankees",
+    # Athletics
+    "athletics": "athletics", "oakland athletics": "athletics",
+    "a's": "athletics", "as": "athletics", "las vegas athletics": "athletics",
+    # Mariners
+    "mariners": "mariners", "seattle mariners": "mariners",
+    # Rays
+    "rays": "rays", "tampa bay rays": "rays",
+    # Rangers
+    "rangers": "rangers", "texas rangers": "rangers",
+    # Blue Jays
+    "blue jays": "blue jays", "toronto blue jays": "blue jays", "bluejays": "blue jays",
+    # Diamondbacks
+    "diamondbacks": "diamondbacks", "arizona diamondbacks": "diamondbacks",
+    "d-backs": "diamondbacks", "dbacks": "diamondbacks",
+    # Braves
+    "braves": "braves", "atlanta braves": "braves",
+    # Cubs
+    "cubs": "cubs", "chicago cubs": "cubs",
+    # Reds
+    "reds": "reds", "cincinnati reds": "reds",
+    # Rockies
+    "rockies": "rockies", "colorado rockies": "rockies",
+    # Marlins
+    "marlins": "marlins", "miami marlins": "marlins",
+    # Astros
+    "astros": "astros", "houston astros": "astros",
+    # Dodgers
+    "dodgers": "dodgers", "los angeles dodgers": "dodgers", "la dodgers": "dodgers",
+    # Brewers
+    "brewers": "brewers", "milwaukee brewers": "brewers",
+    # Nationals
+    "nationals": "nationals", "washington nationals": "nationals",
+    # Mets
+    "mets": "mets", "new york mets": "mets",
+    # Phillies
+    "phillies": "phillies", "philadelphia phillies": "phillies",
+    # Pirates
+    "pirates": "pirates", "pittsburgh pirates": "pirates",
+    # Cardinals
+    "cardinals": "cardinals", "st. louis cardinals": "cardinals",
+    "st louis cardinals": "cardinals", "saint louis cardinals": "cardinals",
+    # Padres
+    "padres": "padres", "san diego padres": "padres",
+    # Giants
+    "giants": "giants", "san francisco giants": "giants", "sf giants": "giants",
+}
+
+_PF_CAP = 0.025   # hard cap: park nudge never exceeds ±2.5 percentage points
+
+
+def _resolve_team(team: str) -> str:
+    """Normalise a team name to its park factors key.  Returns '' if not found."""
+    key = re.sub(r"[^a-z ']", "", team.lower()).strip()
+    return _TEAM_PF_ALIASES.get(key, "")
+
+
+def get_park_factors(team: str) -> dict[str, int]:
+    """Return the park factor dict for a team.  Empty dict if unknown."""
+    resolved = _resolve_team(team)
+    return _PARK_FACTORS_2025.get(resolved, {})
+
+
+def park_factor_adjustment(
+    prop_type: str,
+    direction: str,       # "Over" or "Under"
+    home_team: str,
+    batter_hand: str = "", # "L", "R", or "" (unknown → use overall hr)
+) -> float:
+    """
+    Probability nudge from park factors for the given prop type and direction.
+
+    Returns float in [-0.025, +0.025].
+    0.0 returned when home_team is unknown or prop type is unaffected.
+
+    Prop-type routing:
+      home_runs          → HR factor  (weight 0.20)
+      total_bases        → blended HR/2B/1B factors (weight 0.15)
+      strikeouts (SP)    → SO factor  (weight 0.10)
+      hits/singles/2B    → 1B/2B/basic blend (weight 0.12)
+      earned_runs/runs   → basic factor (weight 0.10)
+      rbis               → basic factor (weight 0.10)
+    """
+    pf = get_park_factors(home_team)
+    if not pf:
+        return 0.0
+
+    is_over = direction.lower() == "over"
+    flip    = 1.0 if is_over else -1.0
+
+    # Convert factor (100-scale) to fractional deviation from neutral
+    # Use platoon split when batter handedness is known
+    _hand = (batter_hand or "").upper().strip()
+    if _hand == "L" and "hr_vs_l" in pf:
+        hr_dev = (pf["hr_vs_l"] - 100) / 100.0
+    elif _hand == "R" and "hr_vs_r" in pf:
+        hr_dev = (pf["hr_vs_r"] - 100) / 100.0
+    else:
+        hr_dev = (pf.get("hr", 100) - 100) / 100.0
+    so_dev    = (pf.get("so",    100) - 100) / 100.0
+    basic_dev = (pf.get("basic", 100) - 100) / 100.0
+    b1_dev    = (pf.get("1b",    100) - 100) / 100.0
+    b2_dev    = (pf.get("2b",    100) - 100) / 100.0
+
+    adj = 0.0
+    pt  = prop_type.lower()
+
+    if pt in ("home_runs",):
+        adj = flip * hr_dev * 0.20
+
+    elif pt in ("total_bases",):
+        tb_dev = hr_dev * 0.40 + b2_dev * 0.35 + b1_dev * 0.25
+        adj = flip * tb_dev * 0.15
+
+    elif pt in ("strikeouts", "pitcher_strikeouts"):
+        adj = flip * so_dev * 0.10
+
+    elif pt in ("hits", "singles", "doubles"):
+        hit_dev = b1_dev * 0.50 + b2_dev * 0.30 + basic_dev * 0.20
+        adj = flip * hit_dev * 0.12
+
+    elif pt in ("earned_runs", "earned_runs_allowed"):
+        # Hitter-friendly park → more earned runs → positive for pitcher ER Over
+        adj = flip * basic_dev * 0.10
+
+    elif pt in ("rbis", "rbi", "runs"):
+        adj = flip * basic_dev * 0.10
+
+    return max(-_PF_CAP, min(_PF_CAP, adj))
+
+
 # ─── Public getters ───────────────────────────────────────────────────────────
 
 def get_batter(name: str) -> dict[str, float]:
