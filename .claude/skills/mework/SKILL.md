@@ -102,7 +102,9 @@ def compare_lines(line1, line2):
 git commit -am "fix: handle NoneType in line comparator"
 ```
 
-## Testing Patterns
+### Recap or Settlement Fix
+**Trigger:** When correcting or enhancing the recap/settlement process for bets  
+**Command:** `/fix-recap-or-settlement`
 
 - **Framework:** Unknown (not detected)
 - **File Pattern:** Test files use the `*.test.ts` pattern, suggesting some JavaScript/TypeScript tests may exist alongside Python code.
@@ -112,6 +114,14 @@ git commit -am "fix: handle NoneType in line comparator"
 ```
 line_comparator.test.ts
 ```
+fix: improve grading logic in nightly recap
+```
+
+## Testing Patterns
+
+- **Framework:** Unknown (no explicit framework detected)
+- **File Pattern:** Test files use the `*.test.ts` pattern, suggesting some TypeScript-based tests may exist, possibly for frontend or integration layers.
+- **Python Testing:** No explicit Python test framework detected. If adding tests, follow the snake_case naming and place them in appropriately named files (e.g., `test_tasklets.py`).
 
 ## Commands
 

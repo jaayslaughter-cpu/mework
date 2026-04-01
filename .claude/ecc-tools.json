@@ -122,6 +122,8 @@
     ".claude/commands/feature-development.md",
     ".claude/commands/mework-ecc-bundle-addition.md",
     ".claude/commands/feature-phase-development-or-bugfix.md"
+    ".claude/commands/feature-phase-development.md",
+    ".claude/commands/bugfix-or-pipeline-fix.md"
   ],
   "packageFiles": {
     "runtime-core": [
