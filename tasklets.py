@@ -630,7 +630,11 @@ def _fetch_mlb_standings() -> list[dict]:
                     "pct":        float(team_record.get("winningPercentage", "0.000") or 0),
                     "gb":         team_record.get("gamesBack", "-"),
                     "streak":     team_record.get("streak", {}).get("streakCode", ""),
-                    "last_10":    team_record.get("records", {}).get("splitRecords", [{}])[0].get("wins", 0),
+                    "last_10":    next(
+                        (sr.get("wins", 5) for sr in team_record.get("records", {}).get("splitRecords", [])
+                         if sr.get("type") == "lastTen"),
+                        5  # default neutral if split not found
+                    ),
                 })
         logger.info("[DataHub] Standings: %d teams", len(standings))
         return standings
@@ -1574,6 +1578,8 @@ class _BaseAgent:
                 raw_p += (_gop - 0.50) * 6.0   # ±3pp max at 100% confidence
             if _pt_lower in ("rbis", "rbi", "runs") and _gwp > 0.58:
                 raw_p += 1.0  # home team winning → slightly better RBI/run env
+            raw_p += float(prop.get("_streak_adj",  0.0)) * 100.0
+            raw_p += float(prop.get("_last10_adj",  0.0)) * 100.0
             raw_p += float(prop.get("_streak_adj", 0.0)) * 100.0
             # Brier calibration governor
             if _DRIFT_MONITOR_AVAILABLE:
@@ -1603,6 +1609,8 @@ class _BaseAgent:
                 _game_env_nudge += (_gop2 - 0.50) * 6.0
             if _pt_lower2 in ("rbis", "rbi", "runs") and _gwp2 > 0.58:
                 _game_env_nudge += 1.0
+            _streak_nudge = float(prop.get("_streak_adj",  0.0)) * 100.0
+            _last10_nudge = float(prop.get("_last10_adj",  0.0)) * 100.0
             _streak_nudge = float(prop.get("_streak_adj", 0.0)) * 100.0
             _fb_adjs = [
                 ("bayesian",        float(prop.get("_bayesian_nudge",   0.0)) * 100.0),
@@ -1611,6 +1619,7 @@ class _BaseAgent:
                 ("park_factor",     float(prop.get("_park_factor_adj",  0.0)) * 100.0),
                 ("game_env",        _game_env_nudge),
                 ("streak",          _streak_nudge),
+                ("last_10",         _last10_nudge),
             ]
             _fb_adjs = [(n, d) for n, d in _fb_adjs if abs(d) >= 0.10]
             if _fb_adjs:

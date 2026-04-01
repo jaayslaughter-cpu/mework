@@ -347,6 +347,32 @@ def _get_streak_adj(team: str, hub: dict) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Step 5b — Team last-10 win rate adjustment
+# ---------------------------------------------------------------------------
+
+def _get_last10_adj(team: str, hub: dict) -> float:
+    """
+    Nudge based on team's wins in their last 10 games vs .500 baseline.
+    Returns a probability nudge in [-0.010, +0.010].
+
+    Logic:
+      - 5 wins in last 10 → neutral (0.0)
+      - Each win above/below 5 → ±0.002 (2-10 wins → ±0.010 max)
+      - Complements streak signal: streak catches direction, last-10 catches depth.
+      - Applied to run/RBI/total props; neutral for K/hits props.
+    """
+    standings = hub.get("context", {}).get("standings", [])
+    if not standings or not team:
+        return 0.0
+    team_lower = team.lower()
+    for s in standings:
+        if team_lower in (s.get("team_name") or "").lower():
+            last10 = int(s.get("last_10", 5) or 5)
+            deviation = last10 - 5  # -5 to +5
+            return round(max(-0.010, min(0.010, deviation * 0.002)), 4)
+    return 0.0
+
+
 # Step 5 — MLB form (hot/cold streak) adjustment
 # ---------------------------------------------------------------------------
 
@@ -862,6 +888,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         prop.update(_get_game_context(team, hub))
 
         # ── Team streak adjustment (standings hot/cold) ───────────────────────
+        prop["_streak_adj"]  = _get_streak_adj(team, hub)
+        prop["_last10_adj"]  = _get_last10_adj(team, hub)
         prop["_streak_adj"] = _get_streak_adj(team, hub)
 
         # ── Lineup chase (pitcher props only) ─────────────────────────────────
