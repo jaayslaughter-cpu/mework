@@ -485,6 +485,36 @@ def _load() -> None:
 # ---------------------------------------------------------------------------
 
 _PARK_FACTORS_2025: dict[str, dict[str, int]] = {
+    "angels":        {"hr": 105, "so": 102, "basic": 101, "1b": 100, "2b": 97},
+    "orioles":       {"hr": 99,  "so": 99,  "basic": 99,  "1b": 103, "2b": 96},
+    "red sox":       {"hr": 98,  "so": 98,  "basic": 104, "1b": 104, "2b": 109},
+    "white sox":     {"hr": 105, "so": 99,  "basic": 100, "1b": 100, "2b": 96},
+    "guardians":     {"hr": 98,  "so": 101, "basic": 99,  "1b": 100, "2b": 100},
+    "tigers":        {"hr": 96,  "so": 98,  "basic": 100, "1b": 100, "2b": 100},
+    "royals":        {"hr": 95,  "so": 97,  "basic": 103, "1b": 103, "2b": 108},
+    "twins":         {"hr": 99,  "so": 100, "basic": 101, "1b": 101, "2b": 105},
+    "yankees":       {"hr": 104, "so": 100, "basic": 99,  "1b": 97,  "2b": 95},
+    "athletics":     {"hr": 103, "so": 101, "basic": 103, "1b": 102, "2b": 107},
+    "mariners":      {"hr": 96,  "so": 104, "basic": 94,  "1b": 95,  "2b": 93},
+    "rays":          {"hr": 104, "so": 100, "basic": 101, "1b": 103, "2b": 96},
+    "rangers":       {"hr": 102, "so": 101, "basic": 99,  "1b": 98,  "2b": 100},
+    "blue jays":     {"hr": 103, "so": 100, "basic": 99,  "1b": 98,  "2b": 102},
+    "diamondbacks":  {"hr": 91,  "so": 99,  "basic": 101, "1b": 103, "2b": 105},
+    "braves":        {"hr": 99,  "so": 102, "basic": 100, "1b": 101, "2b": 99},
+    "cubs":          {"hr": 98,  "so": 101, "basic": 98,  "1b": 100, "2b": 94},
+    "reds":          {"hr": 114, "so": 101, "basic": 105, "1b": 101, "2b": 101},
+    "rockies":       {"hr": 107, "so": 96,  "basic": 113, "1b": 108, "2b": 111},
+    "marlins":       {"hr": 97,  "so": 100, "basic": 101, "1b": 102, "2b": 101},
+    "astros":        {"hr": 102, "so": 102, "basic": 99,  "1b": 99,  "2b": 100},
+    "dodgers":       {"hr": 110, "so": 100, "basic": 99,  "1b": 96,  "2b": 98},
+    "brewers":       {"hr": 104, "so": 104, "basic": 99,  "1b": 96,  "2b": 97},
+    "nationals":     {"hr": 100, "so": 98,  "basic": 100, "1b": 100, "2b": 99},
+    "mets":          {"hr": 99,  "so": 101, "basic": 96,  "1b": 97,  "2b": 94},
+    "phillies":      {"hr": 105, "so": 101, "basic": 101, "1b": 99,  "2b": 97},
+    "pirates":       {"hr": 93,  "so": 97,  "basic": 102, "1b": 103, "2b": 105},
+    "cardinals":     {"hr": 94,  "so": 97,  "basic": 98,  "1b": 101, "2b": 99},
+    "padres":        {"hr": 101, "so": 102, "basic": 96,  "1b": 97,  "2b": 95},
+    "giants":        {"hr": 91,  "so": 98,  "basic": 97,  "1b": 102, "2b": 102},
     # hr=overall, hr_vs_l=vs LHB, hr_vs_r=vs RHB, so=strikeouts, basic=runs, 1b, 2b
     "angels":        {"hr": 105, "hr_vs_l": 103, "hr_vs_r": 107, "so": 102, "basic": 101, "1b": 100, "2b": 97},
     "orioles":       {"hr": 99,  "hr_vs_l": 101, "hr_vs_r":  97, "so":  99, "basic":  99, "1b": 103, "2b": 96},
@@ -614,6 +644,8 @@ def get_park_factors(team: str) -> dict[str, int]:
 
 def park_factor_adjustment(
     prop_type: str,
+    direction: str,   # "Over" or "Under"
+    home_team: str,
     direction: str,       # "Over" or "Under"
     home_team: str,
     batter_hand: str = "", # "L", "R", or "" (unknown → use overall hr)
@@ -640,6 +672,7 @@ def park_factor_adjustment(
     flip    = 1.0 if is_over else -1.0
 
     # Convert factor (100-scale) to fractional deviation from neutral
+    hr_dev    = (pf.get("hr",    100) - 100) / 100.0
     # Use platoon split when batter handedness is known
     _hand = (batter_hand or "").upper().strip()
     if _hand == "L" and "hr_vs_l" in pf:
