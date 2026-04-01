@@ -308,16 +308,73 @@ async def lifespan(_app: FastAPI):
 
     scheduler.start()
 
-    # Discord startup ping
+    # Discord startup ping — fire at most once per calendar day (PT).
+    # Guards against Railway restart spam where the ping fires on every crash loop.
     try:
-        discord_alert.send_startup_ping()
+        import psycopg2 as _pg
+        from datetime import datetime as _dt, timezone as _tz
+        import os as _os
+        from zoneinfo import ZoneInfo as _ZI
+        _ping_date = _dt.now(_ZI("America/Los_Angeles")).date()
+        _db_url = _os.getenv("DATABASE_URL", "")
+        _should_ping = True
+        if _db_url:
+            try:
+                _pc = _pg.connect(_db_url, sslmode="require")
+                _pcu = _pc.cursor()
+                _pcu.execute("""
+                    CREATE TABLE IF NOT EXISTS startup_ping_log (
+                        ping_date DATE PRIMARY KEY,
+                        sent_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                _pcu.execute(
+                    "SELECT 1 FROM startup_ping_log WHERE ping_date = %s",
+                    (_ping_date,),
+                )
+                if _pcu.fetchone():
+                    _should_ping = False
+                    logger.info("Startup ping already sent today (%s) — suppressed.", _ping_date)
+                else:
+                    _pcu.execute(
+                        "INSERT INTO startup_ping_log (ping_date) VALUES (%s) ON CONFLICT DO NOTHING",
+                        (_ping_date,),
+                    )
+                    _pc.commit()
+                _pcu.close()
+                _pc.close()
+            except Exception as _pg_err:
+                logger.warning("Startup ping DB guard failed: %s — sending ping.", _pg_err)
+        if _should_ping:
+            discord_alert.send_startup_ping()
     except Exception as _disc_err:
         logger.warning("Discord startup ping failed: %s", _disc_err)
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
-    # Fire dispatch once DataHub is ready (handles post-8AM redeploys)
-    asyncio.create_task(_startup_dispatch_if_ready())
+    # Fire dispatch once DataHub is ready — ONLY within the 8:00–9:30 AM PT
+    # window.  Outside that window (e.g. Railway restarts at 5 PM) this is
+    # suppressed so stale parlays are never re-sent mid-afternoon.
+    try:
+        from zoneinfo import ZoneInfo as _ZI2
+        from datetime import datetime as _dt2
+        _now_pt = _dt2.now(_ZI2("America/Los_Angeles"))
+        _dispatch_hour   = _now_pt.hour
+        _dispatch_minute = _now_pt.minute
+        _in_dispatch_window = (
+            (_dispatch_hour == 8) or
+            (_dispatch_hour == 9 and _dispatch_minute <= 30)
+        )
+    except Exception:
+        _in_dispatch_window = True  # safe fallback
+    if _in_dispatch_window:
+        asyncio.create_task(_startup_dispatch_if_ready())
+    else:
+        logger.info(
+            "[orchestrator] Startup dispatch suppressed — outside 8:00–9:30 AM PT window "
+            "(current PT: %02d:%02d)",
+            _dispatch_hour, _dispatch_minute,
+        )
 
     logger.info(
         "All jobs scheduled: dispatch@8AM PT, settle@11PM PT, "
