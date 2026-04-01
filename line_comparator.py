@@ -1,23 +1,20 @@
 """
-line_comparator.py — PropIQ Phase 92
+line_comparator.py — PropIQ Phase 109
 =====================================
 Compare Underdog Fantasy vs PrizePicks lines for the same player+stat.
 Returns the platform with the more favorable line for the model's recommended
 direction so Discord alerts always direct to the best available number.
 
+Platform priority (Phase 109):
+  1. Underdog Streaks — checked upstream in _make_parlay(); always wins
+  2. Underdog — default when UD line is strictly better OR only UD has the prop
+  3. PrizePicks — tiebreaker only: chosen when lines are exactly equal on both
+                  platforms, OR when prop only exists on PrizePicks
+
 Better line logic:
   - OVER bet:  LOWER line number is better (easier to exceed)
   - UNDER bet: HIGHER line number is better (easier to go under)
-  - Equal lines → prefer Underdog (supports Streaks, has real vig-priced odds)
-
-Typical usage (called once per DataHub cycle):
-  from line_comparator import build_line_lookup, compare_prop
-
-  ud_lookup = build_line_lookup(hub["dfs"]["underdog"])
-  pp_lookup = build_line_lookup(hub["dfs"]["prizepicks"])
-  result = compare_prop("Luis Arraez", "hits", "OVER", ud_lookup, pp_lookup)
-  # → {"platform": "PrizePicks", "line": 1.5,
-  #    "note": "PrizePicks 1.5 vs Underdog 2.0 (PP -0.5 ✅ OVER)"}
+  - Equal lines → PrizePicks (tiebreaker; UD Streaks eligibility checked upstream)
 """
 from __future__ import annotations
 
@@ -121,6 +118,12 @@ def compare_prop(
     """
     Compare Underdog vs PrizePicks for a given player+stat+direction.
 
+    Platform priority (Phase 109):
+      - Underdog Streaks eligibility is checked upstream in _make_parlay().
+      - Here: Underdog wins when it has the strictly better line.
+      - PrizePicks wins on a true tie (same line on both platforms) — tiebreaker.
+      - Only platform available wins by default.
+
     Returns:
       {
         "platform":  "Underdog" | "PrizePicks",   # better platform
@@ -158,8 +161,9 @@ def compare_prop(
                 return _res("Underdog", ud_line,
                             f"Underdog {ud_line} vs PrizePicks {pp_line} (UD -{diff} ✅ OVER)")
             else:
-                return _res("Underdog", ud_line,
-                            f"Same line {ud_line} on both → Underdog (streak eligible)")
+                # True tie — PrizePicks is tiebreaker (UD Streaks checked upstream)
+                return _res("PrizePicks", ud_line,
+                            f"Same line {ud_line} on both → PrizePicks (tiebreaker)")
         else:  # UNDER
             if ud_line > pp_line:
                 diff = round(ud_line - pp_line, 1)
@@ -170,8 +174,9 @@ def compare_prop(
                 return _res("PrizePicks", pp_line,
                             f"PrizePicks {pp_line} vs Underdog {ud_line} (PP +{diff} ✅ UNDER)")
             else:
-                return _res("Underdog", ud_line,
-                            f"Same line {ud_line} on both → Underdog (streak eligible)")
+                # True tie — PrizePicks is tiebreaker (UD Streaks checked upstream)
+                return _res("PrizePicks", ud_line,
+                            f"Same line {ud_line} on both → PrizePicks (tiebreaker)")
 
     # ── Only one platform has the prop ───────────────────────────────────────
     if ud_line is not None:
