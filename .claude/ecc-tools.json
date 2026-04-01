@@ -2,7 +2,7 @@
   "version": "1.3",
   "schemaVersion": "1.0",
   "generatedBy": "ecc-tools",
-  "generatedAt": "2026-03-20T03:03:49.551Z",
+  "generatedAt": "2026-04-01T02:42:34.002Z",
   "repo": "https://github.com/jaayslaughter-cpu/mework",
   "profiles": {
     "requested": "full",
@@ -120,8 +120,8 @@
     ".codex/agents/docs-researcher.toml",
     ".claude/homunculus/instincts/inherited/mework-instincts.yaml",
     ".claude/commands/database-migration.md",
-    ".claude/commands/feature-development.md",
-    ".claude/commands/refactoring.md"
+    ".claude/commands/feature-phase-release.md",
+    ".claude/commands/bugfix-or-hotfix-core-pipeline.md"
   ],
   "packageFiles": {
     "runtime-core": [
@@ -138,8 +138,8 @@
     ],
     "workflow-pack": [
       ".claude/commands/database-migration.md",
-      ".claude/commands/feature-development.md",
-      ".claude/commands/refactoring.md"
+      ".claude/commands/feature-phase-release.md",
+      ".claude/commands/bugfix-or-hotfix-core-pipeline.md"
     ]
   },
   "moduleFiles": {
@@ -157,8 +157,8 @@
     ],
     "workflow-pack": [
       ".claude/commands/database-migration.md",
-      ".claude/commands/feature-development.md",
-      ".claude/commands/refactoring.md"
+      ".claude/commands/feature-phase-release.md",
+      ".claude/commands/bugfix-or-hotfix-core-pipeline.md"
     ]
   },
   "files": [
@@ -219,13 +219,13 @@
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/feature-development.md",
-      "description": "Workflow command scaffold for feature-development."
+      "path": ".claude/commands/feature-phase-release.md",
+      "description": "Workflow command scaffold for feature-phase-release."
     },
     {
       "moduleId": "workflow-pack",
-      "path": ".claude/commands/refactoring.md",
-      "description": "Workflow command scaffold for refactoring."
+      "path": ".claude/commands/bugfix-or-hotfix-core-pipeline.md",
+      "description": "Workflow command scaffold for bugfix-or-hotfix-core-pipeline."
     }
   ],
   "workflows": [
@@ -234,12 +234,12 @@
       "path": ".claude/commands/database-migration.md"
     },
     {
-      "command": "feature-development",
-      "path": ".claude/commands/feature-development.md"
+      "command": "feature-phase-release",
+      "path": ".claude/commands/feature-phase-release.md"
     },
     {
-      "command": "refactoring",
-      "path": ".claude/commands/refactoring.md"
+      "command": "bugfix-or-hotfix-core-pipeline",
+      "path": ".claude/commands/bugfix-or-hotfix-core-pipeline.md"
     }
   ],
   "adapters": {
@@ -248,8 +248,8 @@
       "identityPath": ".claude/identity.json",
       "commandPaths": [
         ".claude/commands/database-migration.md",
-        ".claude/commands/feature-development.md",
-        ".claude/commands/refactoring.md"
+        ".claude/commands/feature-phase-release.md",
+        ".claude/commands/bugfix-or-hotfix-core-pipeline.md"
       ]
     },
     "codex": {
