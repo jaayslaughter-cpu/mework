@@ -420,11 +420,9 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
 PROP_CONFIG: dict[str, dict] = {
     # Hitter props
     "hits":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
-    "home_runs":      {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
     "rbis":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
     "runs":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
     "total_bases":    {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
-    "stolen_bases":   {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
     "hits_runs_rbis": {"player_type": "hitter", "min_prob": 0.54, "sides": ["Over", "Under"]},
     "fantasy_hitter": {"player_type": "hitter", "min_prob": 0.54, "sides": ["Over", "Under"]},
     # Pitcher props
@@ -440,7 +438,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "EVHunter",
         "emoji": "🎯",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.implied_prob >= 0.54,
         "note": "Top-EV generalist -- all prop types",
     },
@@ -448,7 +446,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "UnderMachine",
         "emoji": "🔽",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.side == "Under" and r.implied_prob >= 0.55,
         "note": "Strictly Unders -- exploiting public Over bias",
     },
@@ -456,7 +454,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "MLEdgeAgent",
         "emoji": "🧠",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.implied_prob >= 0.56,
         "note": "Pure model probability -- highest confidence only",
     },
@@ -470,7 +468,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "F5Agent",
         "emoji": "5️⃣",
         "max_legs": 3,
-        "entry_type": "STANDARD",
+        "entry_type": "PowerPlay",
         "filter": lambda r: r.prop_type in (
             "strikeouts", "earned_runs", "hits_runs_rbis", "runs"
         ) and r.implied_prob >= 0.55,
@@ -480,7 +478,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "UmpireAgent",
         "emoji": "⚖️",
         "max_legs": 3,
-        "entry_type": "STANDARD",
+        "entry_type": "PowerPlay",
         "filter": lambda r: r.prop_type in ("strikeouts", "runs", "earned_runs")
                             and r.implied_prob >= 0.54,
         "note": "K rate & run environment -- home-plate umpire tendencies",
@@ -489,7 +487,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "FadeAgent",
         "emoji": "👻",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         # Phase 27: prefer real SBD fade signal; fall back to implied_prob gate
         "filter": lambda r: (
             getattr(r, "is_fade_signal", False) or r.implied_prob >= 0.53
@@ -500,7 +498,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "LineValueAgent",
         "emoji": "📐",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         # Phase 39: sportsbook reference upgrade.
         # Qualifies if our model is confident (>= 0.55) OR if the sharp sportsbook
         # market ALSO shows >= 0.55 implied while our model clears the base gate (>= 0.53).
@@ -515,7 +513,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "BullpenAgent",
         "emoji": "🔥",
         "max_legs": 3,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         # Enhanced: earned_runs weighted heavier (clearest bullpen fatigue signal),
         # runs second, hits only when prob is elevated (>=0.56) to filter noise.
         # Decay logic: props that represent late-inning exposure (ER, Runs) get a
@@ -531,7 +529,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "WeatherAgent",
         "emoji": "🌬️",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.prop_type in ("home_runs", "total_bases",
                                              "hits", "runs", "hits_runs_rbis")
                             and r.implied_prob >= 0.54,
@@ -542,7 +540,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "ArsenalAgent",
         "emoji": "⚾",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.prop_type in ("strikeouts", "total_bases")
                             and r.implied_prob >= 0.54,
         "note": "Pitch-type matchup -- K & total bases",
@@ -551,7 +549,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "PlatoonAgent",
         "emoji": "🤜",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.prop_type in ("hits", "home_runs", "rbis",
                                              "total_bases", "hits_runs_rbis")
                             and r.implied_prob >= 0.53,
@@ -561,7 +559,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "CatcherAgent",
         "emoji": "🧤",
         "max_legs": 3,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.prop_type in ("strikeouts", "stolen_bases")
                             and r.implied_prob >= 0.54,
         "note": "Catcher framing & battery chemistry",
@@ -570,7 +568,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "LineupAgent",
         "emoji": "📋",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         # Phase 37: batting order awareness
         #   - Confirmed top-6 hitters (1-6) get a lower prob gate (more PA -> more opportunities)
         #   - Confirmed bottom-3 (7-9) need higher prob to justify the reduced PA exposure
@@ -588,7 +586,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "GetawayAgent",
         "emoji": "✈️",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         # Enhanced: Travel fatigue scoring -- time-zone crossing degrades
         # batter performance (most reliable on hits_runs_rbis composite).
         # hits_runs_rbis: lowest threshold (broadest fatigue signal).
@@ -607,7 +605,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "FantasyPtsAgent",
         "emoji": "💫",
         "max_legs": 4,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.prop_type in ("fantasy_hitter", "fantasy_pitcher")
                             and r.implied_prob >= 0.54,
         "note": "Fantasy-score lines -- best scoring format per platform",
@@ -627,7 +625,7 @@ AGENT_CONFIGS: list[dict] = [
         "name": "VultureStack",
         "emoji": "🦅",
         "max_legs": 3,
-        "entry_type": "FLEX",
+        "entry_type": "FlexPlay",
         "filter": lambda r: r.side == "Under" and r.prop_type in (
             "runs", "earned_runs", "hits_runs_rbis"
         ) and r.implied_prob >= 0.57,
@@ -908,6 +906,9 @@ def _fetch_underdog_via_apify_proxy() -> list[dict]:
         for line in data.get("over_under_lines", []):
             if line.get("status") != "active":
                 continue
+            # Classic Pick'em only — skip alternate/boosted lines
+            if line.get("line_type") != "balanced":
+                continue
             stable_id = line.get("stable_id", line.get("id", ""))
             if stable_id in seen:
                 continue
@@ -931,7 +932,10 @@ def _fetch_underdog_via_apify_proxy() -> list[dict]:
             position = player.get("position_name", "")
             opts = line.get("options", [])
             higher_opt = next((o for o in opts if o.get("choice") == "higher"), {})
-            entry_type = "FLEX" if higher_opt.get("payout_multiplier") else "STANDARD"
+            # All Pick'em entries have payout_multiplier; use PowerPlay for
+            # 2-3 leg entries and FlexPlay for 4-5 leg entries (set at build time).
+            # Per-line, default to FlexPlay (most UD lines are flex-eligible).
+            entry_type = "FlexPlay"
             seen.add(stable_id)
             props.append({
                 "source":      "underdog",
@@ -1136,6 +1140,9 @@ def fetch_underdog_props() -> list[dict]:
             # Active only
             if line.get("status") != "active":
                 continue
+            # Classic Pick'em only — skip alternate/boosted lines
+            if line.get("line_type") != "balanced":
+                continue
 
             # Deduplicate on stable_id
             stable_id = line.get("stable_id", line.get("id", ""))
@@ -1170,13 +1177,9 @@ def fetch_underdog_props() -> list[dict]:
 
             line_val   = float(line.get("stat_value") or 0)
             position   = player.get("position_name", "")
-            entry_type = "FLEX"   # Underdog default; STANDARD for limited markets
-
-            # Check options for entry type indicator
-            opts = line.get("options", [])
-            higher_opt = next((o for o in opts if o.get("choice") == "higher"), {})
-            if not higher_opt.get("payout_multiplier"):
-                entry_type = "STANDARD"
+            # All Pick'em lines are FlexPlay-eligible; entry_type resolved
+            # at parlay build time based on leg count.
+            entry_type = "FlexPlay"
 
             seen.add(stable_id)
             props.append({
@@ -1411,7 +1414,7 @@ def build_parlay(
 
     # Dominant entry type
     etypes     = [l.entry_type for l in selected if l.entry_type]
-    entry_type = max(set(etypes), key=etypes.count) if etypes else agent.get("entry_type", "FLEX")
+    entry_type = max(set(etypes), key=etypes.count) if etypes else agent.get("entry_type", "FlexPlay")
 
     return {
         "agent_name":  agent["name"],
