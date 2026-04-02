@@ -147,6 +147,13 @@ def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
         out["doubles"]        = 0.0           # will be set by MLB Stats API supplement
         out["triples"]        = 0.0           # will be set by MLB Stats API supplement
         out["hits_runs_rbis"] = h + out.get("runs", 0.0) + out.get("rbi", 0.0)
+    else:
+        # Derive pitching_outs from innings_pitched.
+        # ESPN format: 6.2 = 6 full innings + 2 outs = 20 outs total.
+        ip = out.get("innings_pitched", 0.0)
+        ip_whole   = int(ip)
+        ip_partial = round((ip % 1) * 10)   # .1 → 1 out, .2 → 2 outs
+        out["pitching_outs"] = float(ip_whole * 3 + ip_partial)
 
     return out
 

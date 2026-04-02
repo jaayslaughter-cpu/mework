@@ -80,17 +80,19 @@ def _name_match(a: str, b: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PROP_STAT_KEY: dict[str, str | None] = {
-    "hits":           "hits",
-    "rbis":           "rbis",
-    "runs":           "runs",
-    "total_bases":    "total_bases",
-    "hits_runs_rbis": "hits_runs_rbis",
-    "strikeouts":     "strikeouts",
-    "earned_runs":    "earned_runs",
-    "pitching_outs":  "outs_pitched",
-    "hits_allowed":   "hits_allowed",
-    "fantasy_hitter": None,     # fantasy points — push (no single stat key)
-    "fantasy_pitcher": None,
+    # Batter props
+    "hits":             "hits",
+    "rbis":             "rbis",
+    "runs":             "runs",
+    "total_bases":      "total_bases",
+    "hits_runs_rbis":   "hits_runs_rbis",
+    "fantasy_hitter":   None,   # fantasy points — push (no single stat key)
+    # Pitcher props
+    "strikeouts":       "strikeouts",
+    "earned_runs":      "earned_runs",
+    "hits_allowed":     "hits_allowed",
+    "pitching_outs":    "pitching_outs",  # derived from innings_pitched in espn_scraper.py
+    "fantasy_pitcher":  None,
 }
 
 
@@ -171,6 +173,7 @@ def settle_parlay(
     stake:        float,
     legs_data:    list[dict],
     player_stats: dict[str, dict],
+    date:         str = "",
 ) -> ParlayResult:
     """
     Settle a complete parlay.
