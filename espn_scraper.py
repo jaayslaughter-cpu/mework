@@ -148,8 +148,10 @@ def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
         out["triples"]        = 0.0           # will be set by MLB Stats API supplement
         out["hits_runs_rbis"] = h + out.get("runs", 0.0) + out.get("rbi", 0.0)
     else:
-        # Derive pitching_outs from innings_pitched.
+        # Provisional pitching_outs derived from ESPN innings_pitched.
         # ESPN format: 6.2 = 6 full innings + 2 outs = 20 outs total.
+        # This is overwritten by the authoritative MLB Stats API outs field
+        # in _fetch_mlb_gamelog_stats() below.
         ip = out.get("innings_pitched", 0.0)
         ip_whole   = int(ip)
         ip_partial = round((ip % 1) * 10)   # .1 → 1 out, .2 → 2 outs
@@ -167,7 +169,10 @@ def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
 def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
     """
     Supplement ESPN box scores with MLB Stats API game log data.
-    Provides doubles, triples, stolen_bases — missing from ESPN standard box.
+
+    Batter fields: doubles, triples, stolen_bases, total_bases (exact)
+    Pitcher fields: pitching_outs (authoritative — MLB Stats API `outs` integer,
+                    no derivation from innings_pitched string needed)
 
     date_str: 'YYYYMMDD'
     Returns: dict keyed by lowercase player full name → extra stat fields
@@ -201,15 +206,28 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                         if not name:
                             continue
                         stats = entry.get("stats", {})
-                        bat   = stats.get("batting", {})
-                        if not bat:
-                            continue
-                        extra[name] = {
-                            "doubles":      float(bat.get("doubles",      0) or 0),
-                            "triples":      float(bat.get("triples",      0) or 0),
-                            "stolen_bases": float(bat.get("stolenBases",  0) or 0),
-                            "total_bases":  float(bat.get("totalBases",   0) or 0),
-                        }
+
+                        # ── Batter supplement ──────────────────────────────
+                        bat = stats.get("batting", {})
+                        if bat:
+                            extra.setdefault(name, {})
+                            extra[name].update({
+                                "doubles":      float(bat.get("doubles",      0) or 0),
+                                "triples":      float(bat.get("triples",      0) or 0),
+                                "stolen_bases": float(bat.get("stolenBases",  0) or 0),
+                                "total_bases":  float(bat.get("totalBases",   0) or 0),
+                            })
+
+                        # ── Pitcher supplement — authoritative outs field ──
+                        pit = stats.get("pitching", {})
+                        if pit:
+                            # MLB Stats API returns `outs` as a plain integer
+                            # (e.g. 20 for 6.2 IP). Use it directly.
+                            outs_val = pit.get("outs")
+                            if outs_val is not None:
+                                extra.setdefault(name, {})
+                                extra[name]["pitching_outs"] = float(outs_val)
+
     except Exception as exc:
         logger.warning("[ESPN] MLB gamelog supplement failed: %s", exc)
     return extra
@@ -285,18 +303,28 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
 
     logger.info("[ESPN] Parsed box-score stats for %d players", len(all_stats))
 
-    # Supplement with MLB Stats API for missing stats (2B, 3B, SB, exact TB)
+    # Supplement with MLB Stats API:
+    # Batters  → exact 2B, 3B, SB, TB
+    # Pitchers → authoritative pitching_outs (stats.pitching.outs integer)
     mlb_extra = _fetch_mlb_gamelog_stats(date_str)
     supplemented = 0
     for name_lower, extra in mlb_extra.items():
         if name_lower in all_stats:
             p = all_stats[name_lower]
-            p["doubles"]      = extra.get("doubles",      0.0)
-            p["triples"]      = extra.get("triples",      0.0)
-            p["stolen_bases"] = extra.get("stolen_bases", 0.0)
-            if extra.get("total_bases", 0) > 0:
-                p["total_bases"] = extra["total_bases"]
+            # Batter fields
+            if "doubles" in extra:
+                p["doubles"]      = extra["doubles"]
+                p["triples"]      = extra["triples"]
+                p["stolen_bases"] = extra["stolen_bases"]
+                if extra.get("total_bases", 0) > 0:
+                    p["total_bases"] = extra["total_bases"]
+            # Pitcher field — overwrites ESPN-derived provisional value
+            if "pitching_outs" in extra:
+                p["pitching_outs"] = extra["pitching_outs"]
             supplemented += 1
-    logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/SB/TB",
-                supplemented, len(all_stats))
+    logger.info(
+        "[ESPN] MLB Stats API supplement: %d/%d players enriched "
+        "(2B/3B/SB/TB for batters; authoritative outs for pitchers)",
+        supplemented, len(all_stats),
+    )
     return all_stats
