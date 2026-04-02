@@ -286,6 +286,9 @@ class DiscordAlertService:
             leg_plat  = leg.get("platform", platform)
             lp_lower  = str(leg_plat).lower()
             lp_emoji  = _PLATFORM_EMOJI.get(lp_lower, "🎯")
+            # Underdog uses Pick'em terminology: Higher / Lower
+            if "underdog" in lp_lower:
+                side = "Higher" if side in ("Over", "Higher") else "Lower"
 
             line_note = leg.get("line_comparison_note", "")
             note_str  = f"\n📌 {line_note}" if line_note and "Not found" not in line_note else ""
@@ -355,6 +358,8 @@ class DiscordAlertService:
             side      = leg.get("side", "?")
             line      = leg.get("line", "?")
             streak_n  = leg.get("streak_length", leg.get("streak", "?"))
+            # Underdog Streaks uses Higher / Lower
+            side = "Higher" if side in ("Over", "Higher") else "Lower"
             fields.append({
                 "name": f"Leg {i} — {player}",
                 "value": (

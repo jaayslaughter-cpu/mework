@@ -86,8 +86,8 @@ def record_parlay(
             """
             INSERT INTO propiq_season_record
                 (date, agent_name, parlay_legs, platform, stake,
-                 payout, confidence, status, legs_json, created_at)
-            VALUES (%s, %s, %s, %s, %s, 0.00, %s, 'PENDING', %s, %s)
+                 payout, confidence, status, legs_json, created_at, discord_sent)
+            VALUES (%s, %s, %s, %s, %s, 0.00, %s, 'PENDING', %s, %s, TRUE)
             """,
             (
                 date, agent, num_legs, platform, stake,
