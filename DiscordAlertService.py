@@ -273,7 +273,12 @@ class DiscordAlertService:
         platform   = parlay.get("platform", "underdog")
         plat_lower = str(platform).lower()
         plat_emoji = _PLATFORM_EMOJI.get(plat_lower, "🎯")
-        plat_label = "PrizePicks" if "prize" in plat_lower else "Underdog Fantasy"
+        if "prize" in plat_lower:
+            plat_label = "PrizePicks"
+        else:
+            et = parlay.get("entry_type", "FlexPlay")
+            entry_label = "PowerPlay" if et in ("STANDARD", "PowerPlay") else "FlexPlay"
+            plat_label = f"Underdog Fantasy — {entry_label}"
 
         # --- Season record footer ---
         season = parlay.get("season_stats", {})
@@ -288,7 +293,13 @@ class DiscordAlertService:
         for i, leg in enumerate(legs, 1):
             player    = (leg.get("player_name") or leg.get("player", "?")).title()
             prop_type = leg.get("prop_type", "?").replace("_", " ").title()
-            side      = leg.get("side", "?")
+            side_raw  = leg.get("side", "?")
+            leg_plat  = leg.get("platform", platform)
+            # Underdog uses Higher/Lower; translate for display
+            if "underdog" in str(leg_plat).lower():
+                side = side_raw.replace("Over", "Higher").replace("Under", "Lower")
+            else:
+                side = side_raw
             line      = leg.get("line", "?")
             leg_ev    = leg.get("ev_pct", 0.0)
             model_p   = leg.get("model_prob", 0.0)
