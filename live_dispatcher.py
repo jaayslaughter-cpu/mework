@@ -369,9 +369,6 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "hits": [
         (0.5, 0.72), (1.5, 0.38), (2.5, 0.13), (3.5, 0.03),
     ],
-    "home_runs": [
-        (0.5, 0.09), (1.5, 0.005),
-    ],
     "rbis": [
         (0.5, 0.42), (1.5, 0.20), (2.5, 0.08), (3.5, 0.025),
     ],
@@ -380,9 +377,6 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     ],
     "total_bases": [
         (0.5, 0.85), (1.5, 0.55), (2.5, 0.28), (3.5, 0.12), (4.5, 0.04),
-    ],
-    "stolen_bases": [
-        (0.5, 0.06), (1.5, 0.008),
     ],
     "hits_runs_rbis": [
         (0.5, 0.95), (1.5, 0.72), (2.5, 0.48), (3.5, 0.28),
@@ -420,11 +414,9 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
 PROP_CONFIG: dict[str, dict] = {
     # Hitter props
     "hits":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
-    "home_runs":      {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
     "rbis":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
     "runs":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
     "total_bases":    {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
-    "stolen_bases":   {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
     "hits_runs_rbis": {"player_type": "hitter", "min_prob": 0.54, "sides": ["Over", "Under"]},
     "fantasy_hitter": {"player_type": "hitter", "min_prob": 0.54, "sides": ["Over", "Under"]},
     # Pitcher props
@@ -532,7 +524,7 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "🌬️",
         "max_legs": 4,
         "entry_type": "FLEX",
-        "filter": lambda r: r.prop_type in ("home_runs", "total_bases",
+        "filter": lambda r: r.prop_type in ("total_bases",
                                              "hits", "runs", "hits_runs_rbis")
                             and r.implied_prob >= 0.54,
         "note": "Wind & park-factor adjustments via Open-Meteo",
@@ -552,7 +544,7 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "🤜",
         "max_legs": 4,
         "entry_type": "FLEX",
-        "filter": lambda r: r.prop_type in ("hits", "home_runs", "rbis",
+        "filter": lambda r: r.prop_type in ("hits", "rbis",
                                              "total_bases", "hits_runs_rbis")
                             and r.implied_prob >= 0.53,
         "note": "Handedness splits -- L vs R matchups",
@@ -562,7 +554,7 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "🧤",
         "max_legs": 3,
         "entry_type": "FLEX",
-        "filter": lambda r: r.prop_type in ("strikeouts", "stolen_bases")
+        "filter": lambda r: r.prop_type == "strikeouts"
                             and r.implied_prob >= 0.54,
         "note": "Catcher framing & battery chemistry",
     },
@@ -840,8 +832,6 @@ _UD_STAT_MAP: dict[str, str] = {
     "total_bases":   "total_bases",
     "rbis":          "rbis",
     "runs":          "runs",
-    "stolen_bases":  "stolen_bases",
-    "home_runs":     "home_runs",
     "hits_runs_rbis":"hits_runs_rbis",
     "earned_runs":   "earned_runs",
     "runs_allowed":  "earned_runs",
@@ -1208,8 +1198,6 @@ _STAT_TYPE_MAP: dict[str, str] = {
     # Hits
     "hits":                 "hits",
     # Home runs
-    "home runs":            "home_runs",
-    "home_runs":            "home_runs",
     # RBIs
     "rbis":                 "rbis",
     "rbi":                  "rbis",
@@ -1219,8 +1207,6 @@ _STAT_TYPE_MAP: dict[str, str] = {
     "total bases":          "total_bases",
     "total_bases":          "total_bases",
     # Stolen bases
-    "stolen bases":         "stolen_bases",
-    "stolen_bases":         "stolen_bases",
     # Combo
     "hits+runs+rbis":       "hits_runs_rbis",
     "hits + runs + rbis":   "hits_runs_rbis",
@@ -2193,11 +2179,9 @@ class LiveDispatcher:
         # We ONLY bet per-game props. These are realistic MLB per-game ranges.
         _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
             "hits":           (0.5, 4.5),
-            "home_runs":      (0.5, 2.5),
             "rbis":           (0.5, 4.5),
             "runs":           (0.5, 3.5),
             "total_bases":    (0.5, 5.5),
-            "stolen_bases":   (0.5, 2.5),
             "hits_runs_rbis": (0.5, 8.5),
             "strikeouts":     (1.5, 12.5),
             "earned_runs":    (0.5, 6.5),
@@ -2398,8 +2382,6 @@ class LiveDispatcher:
                     """Map prop_type + side to the relevant DraftEdge probability."""
                     _over_map = {
                         "hits":         "de_hit_pct",
-                        "home_runs":    "de_hr_pct",
-                        "stolen_bases": "de_sb_pct",
                         "runs":         "de_run_pct",
                         "rbis":         "de_rbi_pct",
                         "strikeouts":   "de_k_pct",
@@ -2427,7 +2409,7 @@ class LiveDispatcher:
                     if sc_whiff > 0:
                         # whiff_rate 0.20-0.35 typical -> adds 3-5% to K prob
                         prob = min(0.80, prob + sc_whiff * 0.15)
-                elif prop_type in ("home_runs", "total_bases") and side == "Over":
+                elif prop_type == "total_bases" and side == "Over":
                     sc_hh = float(chosen_entry.get("sc_hard_hit_rate", 0.0) or 0.0)
                     if sc_hh > 0:
                         prob = min(0.80, prob + sc_hh * 0.10)
