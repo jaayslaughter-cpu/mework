@@ -422,6 +422,8 @@ PROP_CONFIG: dict[str, dict] = {
     # Pitcher props
     "strikeouts":     {"player_type": "pitcher", "min_prob": 0.54, "sides": ["Over", "Under"]},
     "earned_runs":    {"player_type": "pitcher", "min_prob": 0.54, "sides": ["Under"]},
+    "pitching_outs":  {"player_type": "pitcher", "min_prob": 0.54, "sides": ["Over", "Under"]},
+    "hits_allowed":   {"player_type": "pitcher", "min_prob": 0.54, "sides": ["Under"]},
     "fantasy_pitcher":{"player_type": "pitcher", "min_prob": 0.54, "sides": ["Over", "Under"]},
 }
 
@@ -1677,7 +1679,11 @@ class LiveDispatcher:
         self._agent_units_cache = {}
 
     def run(self, date_str: str | None = None) -> None:
-        date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if date_str:
+            date = date_str
+        else:
+            from zoneinfo import ZoneInfo as _RunZI
+            date = datetime.now(_RunZI("America/Los_Angeles")).strftime("%Y-%m-%d")
         # Phase 47: load per-agent temperature scalars (single bulk query at startup)
         _all_agent_names = [a["name"] for a in AGENT_CONFIGS] + [
             "OmegaStack", "StreakAgent"

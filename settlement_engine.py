@@ -81,17 +81,16 @@ def _name_match(a: str, b: str) -> bool:
 
 _PROP_STAT_KEY: dict[str, str | None] = {
     "hits":           "hits",
-    "home_runs":      "home_runs",
     "rbis":           "rbis",
     "runs":           "runs",
     "total_bases":    "total_bases",
-    "stolen_bases":   "stolen_bases",
     "hits_runs_rbis": "hits_runs_rbis",
     "strikeouts":     "strikeouts",
     "earned_runs":    "earned_runs",
+    "pitching_outs":  "outs_pitched",
+    "hits_allowed":   "hits_allowed",
     "fantasy_hitter": None,     # fantasy points — push (no single stat key)
     "fantasy_pitcher": None,
-    "walks":          "base_on_balls",
 }
 
 
