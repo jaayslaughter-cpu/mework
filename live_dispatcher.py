@@ -523,10 +523,8 @@ AGENT_CONFIGS: list[dict] = [
         "name": "WeatherAgent",
         "emoji": "🌬️",
         "max_legs": 4,
-        "entry_type": "FLEX",
-        "filter": lambda r: r.prop_type in ("total_bases",
         "entry_type": "FlexPlay",
-        "filter": lambda r: r.prop_type in ("home_runs", "total_bases",
+        "filter": lambda r: r.prop_type in ("total_bases",
                                              "hits", "runs", "hits_runs_rbis")
                             and r.implied_prob >= 0.54,
         "note": "Wind & park-factor adjustments via Open-Meteo",
@@ -545,10 +543,8 @@ AGENT_CONFIGS: list[dict] = [
         "name": "PlatoonAgent",
         "emoji": "🤜",
         "max_legs": 4,
-        "entry_type": "FLEX",
-        "filter": lambda r: r.prop_type in ("hits", "rbis",
         "entry_type": "FlexPlay",
-        "filter": lambda r: r.prop_type in ("hits", "home_runs", "rbis",
+        "filter": lambda r: r.prop_type in ("hits", "rbis",
                                              "total_bases", "hits_runs_rbis")
                             and r.implied_prob >= 0.53,
         "note": "Handedness splits -- L vs R matchups",
@@ -557,10 +553,8 @@ AGENT_CONFIGS: list[dict] = [
         "name": "CatcherAgent",
         "emoji": "🧤",
         "max_legs": 3,
-        "entry_type": "FLEX",
-        "filter": lambda r: r.prop_type == "strikeouts"
         "entry_type": "FlexPlay",
-        "filter": lambda r: r.prop_type in ("strikeouts", "stolen_bases")
+        "filter": lambda r: r.prop_type == "strikeouts"
                             and r.implied_prob >= 0.54,
         "note": "Catcher framing & battery chemistry",
     },
@@ -2439,7 +2433,7 @@ class LiveDispatcher:
 
                 # Phase 37: barrel rate boost for HR/TB props
                 # Barrel% > 8% (above avg) = elite hard contact -> +power prop prob
-                if prop_type in ("home_runs", "total_bases") and side == "Over":
+                if prop_type == "total_bases" and side == "Over":
                     sc_barrel = float(chosen_entry.get("sc_barrel_rate", 0.0) or 0.0)
                     if sc_barrel > 0.08:
                         prob = min(0.80, prob + (sc_barrel - 0.08) * 0.10)
