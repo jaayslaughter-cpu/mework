@@ -684,7 +684,11 @@ def _get_pp_session() -> requests.Session:
 
 def fetch_today_schedule(date_str: str | None = None) -> list[dict]:
     """Fetch today's MLB schedule. Returns list of game dicts."""
-    date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if date_str:
+        date = date_str
+    else:
+        import zoneinfo as _zi
+        date = datetime.now(_zi.ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
     try:
         resp = requests.get(
             f"{_MLBAPI_BASE}/schedule",
@@ -720,7 +724,11 @@ def fetch_today_lineups(date_str: str | None = None) -> dict[int, int]:
     Returns empty dict if lineups not yet posted or on any error.
     Players not in a confirmed lineup get batting_order_pos = 0 (unconfirmed).
     """
-    date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if date_str:
+        date = date_str
+    else:
+        import zoneinfo as _zi
+        date = datetime.now(_zi.ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
     try:
         resp = requests.get(
             f"{_MLBAPI_BASE}/schedule",
@@ -810,16 +818,15 @@ def fetch_player_season_stats(player_id: int) -> dict[str, float]:
 #   "hits allowed" and "walks allowed" added for pitcher props
 #   "pitching outs" added (outs recorded prop)
 _PP_MLB_STAT_TYPES = {
-    "hits", "home runs", "rbis", "rbi", "runs",
-    "total bases", "stolen bases",
+    "hits", "rbis", "rbi", "runs",
+    "total bases",
     "hits+runs+rbis", "hits + runs + rbis",
     "hitter fantasy score", "pitcher fantasy score",
     "doubles", "triples",
     # Pitcher props (actual PP label as of 2026)
     "pitcher strikeouts", "strikeouts",   # keep bare form as fallback
     "earned runs allowed", "earned runs",  # keep old form as fallback
-    "hits allowed", "walks allowed", "pitching outs",
-    "walks",
+    "hits allowed", "pitching outs",
     "singles",
     "hitter strikeouts",
 }
@@ -827,7 +834,7 @@ _PP_MLB_STAT_TYPES = {
 # Underdog stat -> our internal prop_type
 _UD_STAT_MAP: dict[str, str] = {
     "strikeouts":    "strikeouts",
-    "pitch_outs":    "strikeouts",   # alternate UD label for pitcher Ks
+    "pitch_outs":    "pitching_outs",  # UD label for outs recorded (NOT Ks)
     "hits":          "hits",
     "total_bases":   "total_bases",
     "rbis":          "rbis",
@@ -835,8 +842,6 @@ _UD_STAT_MAP: dict[str, str] = {
     "hits_runs_rbis":"hits_runs_rbis",
     "earned_runs":   "earned_runs",
     "runs_allowed":  "earned_runs",
-    "walks":         "walks",
-    "walks_allowed": "walks",
     "fantasy_points_hitter":  "fantasy_hitter",
     "fantasy_points_pitcher": "fantasy_pitcher",
 }

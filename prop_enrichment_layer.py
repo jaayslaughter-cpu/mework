@@ -58,13 +58,13 @@ logger = logging.getLogger("propiq.enrichment")
 
 _PITCHER_PROP_TYPES = {
     "strikeouts", "pitcher_strikeouts", "pitching_outs",
-    "earned_runs", "hits_allowed", "walks_allowed",
+    "earned_runs", "hits_allowed",
     "hitter_strikeouts",   # batter K — still lookup pitcher's K stats
 }
 
 _BATTER_PROP_TYPES = {
-    "hits", "home_runs", "total_bases", "rbis", "rbi", "runs",
-    "stolen_bases", "doubles", "singles", "walks",
+    "hits", "total_bases", "rbis", "rbi", "runs",
+    "doubles", "singles",
     "hits_runs_rbis", "fantasy_hitter",
 }
 
@@ -588,7 +588,8 @@ def _get_sportsbook_ref(props: list[dict]) -> list[dict]:
             enrich_props_with_sportsbook,
         )
         import datetime as _dt
-        date_str = _dt.date.today().isoformat()
+        import zoneinfo as _zi
+        date_str = _dt.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date().isoformat()
         return enrich_props_with_sportsbook(props, date=date_str)
     except Exception as exc:
         logger.debug("[Enrichment] Sportsbook reference skipped: %s", exc)
@@ -650,26 +651,7 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
             return round(p, 4)
         return None
 
-    # ── Batter HR Over ─────────────────────────────────────────────────────
-    if prop_type == "home_runs" and line <= 0.5:
-        hr_fb   = float(prop.get("hr_fb_pct", 0.0) or 0.0)
-        barrel  = float(prop.get("sc_barrel_rate", 0.0) or 0.0)
-        iso     = float(prop.get("iso", 0.0) or 0.0)
-        if hr_fb < 0.01 and barrel < 0.01:
-            return None
-        # HR rate per PA: elite hr_fb (~18%) with 30% FB rate = ~5.4% HR/PA
-        # Avg hr_fb (~10.5%) with 35% FB = ~3.7% HR/PA
-        # League avg HR/game ≈ 9% (0.09)
-        hr_per_pa = (hr_fb if hr_fb > 0.01 else 0.105) * 0.33   # ~33% fly ball rate
-        if barrel > 0.10:
-            hr_per_pa *= (1.0 + (barrel - 0.08) * 2.0)
-        # Typical 4 PA per game
-        p_no_hr = (1.0 - hr_per_pa) ** 4
-        p_over  = 1.0 - p_no_hr
-        p = p_over if is_over else p_no_hr
-        if hr_fb > 0.01 or barrel > 0.01:
-            return round(p, 4)
-        return None
+
 
     # ── Batter Total Bases ─────────────────────────────────────────────────
     if prop_type == "total_bases" and line <= 1.5:
@@ -765,8 +747,9 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         Same list, each prop enriched with additional fields in-place.
     """
     import datetime
+    import zoneinfo as _zi
     if season is None:
-        season = datetime.date.today().year
+        season = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).year
 
     if not props:
         return props
