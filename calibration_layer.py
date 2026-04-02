@@ -33,9 +33,6 @@ _STAT_MAP: Dict[str, str] = {
     # Hitter stats
     "h":              "hits",
     "hits":           "hits",
-    "hr":             "home_runs",
-    "home_run":       "home_runs",
-    "home_runs":      "home_runs",
     "rbi":            "rbis",
     "rbis":           "rbis",
     "runs_batted_in": "rbis",
@@ -43,14 +40,9 @@ _STAT_MAP: Dict[str, str] = {
     "runs":           "runs",
     "tb":             "total_bases",
     "total_bases":    "total_bases",
-    "sb":             "stolen_bases",
-    "stolen_bases":   "stolen_bases",
     "h+r+rbi":        "hits_runs_rbis",
     "hits_runs_rbis": "hits_runs_rbis",
     "singles":        "singles",
-    "walks":          "walks",
-    "bb":             "walks",
-    "bases_on_balls": "walks",
     # Pitcher stats
     "k":                   "strikeouts",
     "ks":                  "strikeouts",
@@ -68,7 +60,6 @@ _STAT_MAP: Dict[str, str] = {
     "pitching_wins":       "pitching_wins",
     "hits_allowed":        "hits_allowed",
     "ha":                  "hits_allowed",
-    "walks_allowed":       "walks_allowed",
     "batter_strikeouts":   "strikeouts",  # Underdog variation
     # Platform-specific prop names (PrizePicks + Underdog)
     "outs_recorded":           "outs_recorded",

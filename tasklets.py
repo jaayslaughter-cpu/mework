@@ -376,7 +376,9 @@ def _kafka_producer():
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _is_spring_training() -> bool:
-    return datetime.date.today() < OPENING_DAY
+    import zoneinfo as _zi
+    today_pt = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date()
+    return today_pt < OPENING_DAY
 
 
 def _american_to_implied(american: int) -> float:
@@ -1676,7 +1678,7 @@ class _BaseAgent:
 
         # ── Player stats — pitcher OR batter signals depending on prop type ──
         _PITCHER_PT = {"strikeouts","pitching_outs","earned_runs","hits_allowed",
-                       "walks_allowed","fantasy_pitcher"}
+                       "fantasy_pitcher"}
         _pt_raw     = str(prop.get("prop_type","") or bet.get("prop_type","") if bet else "").lower()
         _is_pitcher = _pt_raw in _PITCHER_PT
 
@@ -2082,8 +2084,8 @@ class _UmpireAgent(_BaseAgent):
     name = "UmpireAgent"
     # Canonical pitcher stat set — populated via _norm_stat() at ingestion
     _PITCHER_STATS = {"strikeouts", "earned_runs", "pitching_outs", "innings_pitched",
-                        "outs_recorded", "fantasy_score", "hits_allowed", "walks_allowed",
-                      "pitching_wins", "hits_allowed", "walks_allowed"}
+                      "outs_recorded", "fantasy_score", "hits_allowed",
+                      "pitching_wins"}
     # ABS 2026: catcher framing weight reduced 80 % per ABS Challenge System
     _FRAMING_WEIGHT = ABS_FRAMING_WEIGHT  # 0.20
 
@@ -2147,7 +2149,7 @@ class _F5Agent(_BaseAgent):
         """
         prop_type = _norm_stat(prop.get("prop_type", ""))
         _PITCHER_TARGETS = {"strikeouts", "pitching_outs", "earned_runs",
-                            "hits_allowed", "walks_allowed", "fantasy_pitcher"}
+                            "hits_allowed", "fantasy_pitcher"}
         if prop_type not in _PITCHER_TARGETS:
             return None
 
@@ -3155,7 +3157,11 @@ def run_agent_tasklet() -> None:
     props = _enrich_props(props, hub, season=_dt.date.today().year)
 
     # Phase 112: remove prop types not evaluated (user directive)
-    _EXCLUDED_PROP_TYPES = {"stolen_bases", "home_runs", "sb", "hr"}
+    _EXCLUDED_PROP_TYPES = {
+        "stolen_bases", "home_runs", "sb", "hr",
+        "walks", "bb", "bases_on_balls",
+        "walks_allowed",
+    }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 
     # ── Step 3: Stamp game_time_utc / game_state / lookahead_safe on each prop ──
