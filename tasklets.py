@@ -95,6 +95,13 @@ except ImportError:
     _MARKET_VALIDATOR_AVAILABLE = False
 
 try:
+    from bullpen_scorer import build_bullpen_scorer as _build_bullpen_scorer
+    _BULLPEN_SCORER_AVAILABLE = True
+except ImportError:
+    _BULLPEN_SCORER_AVAILABLE = False
+    def _build_bullpen_scorer(games): return None  # noqa: E704
+
+try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
     _NSFI_AVAILABLE = True
 except ImportError:
@@ -1276,18 +1283,18 @@ def _ensure_bet_ledger() -> None:
                     created_at      TIMESTAMP    DEFAULT NOW()
                 )
             """)
-        # Add units_wagered if it didn't exist in earlier schema versions
-        try:
-            cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS units_wagered FLOAT")
             conn.commit()
-        except Exception:
-            conn.rollback()
-        try:
-            cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20)")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-        conn.commit()
+            # Add units_wagered if it didn't exist in earlier schema versions
+            try:
+                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS units_wagered FLOAT")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20)")
+                conn.commit()
+            except Exception:
+                conn.rollback()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
     except Exception as exc:
