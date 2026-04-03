@@ -541,7 +541,7 @@ def enrich_props_with_sportsbook(
         prop["sb_line_gap"]           = 0.0
         prop["sb_bookmakers"]         = []
 
-        raw_stat  = prop.get("stat_type", "")
+        raw_stat  = prop.get("stat_type") or prop.get("prop_type", "")
         player    = prop.get("player_name", "")
         dfs_line  = float(prop.get("line") or 0)
         prop_type = _RAW_STAT_TO_PROP.get(raw_stat.strip().lower())
