@@ -1330,6 +1330,7 @@ def run_data_hub_tasklet() -> None:
     _ensure_bet_ledger()       # ensure table exists on every startup
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
     r = _redis()
+    hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
 
     # ── Pre-match gate: fetch today's game states ──────────────────────────
     game_states: dict[str, str] = {}
