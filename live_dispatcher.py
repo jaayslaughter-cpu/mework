@@ -328,7 +328,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 MIN_EV_PCT   = 3.0     # minimum EV gate
-MIN_PROB     = 0.52    # minimum implied win probability per leg
+MIN_PROB     = 0.57  # raised from 0.52 — higher floor = higher win rate    # minimum implied win probability per leg
 MAX_LEGS     = 4       # hard cap -- no parlay may exceed 4 legs
 MIN_LEGS     = 2       # min legs to send alert
 HALF_KELLY   = 0.5     # Kelly fraction multiplier
@@ -370,11 +370,11 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
         (0.5, 0.72), (1.5, 0.38), (2.5, 0.13), (3.5, 0.03),
     ],
     "rbis": [
-        (0.5, 0.42), (1.5, 0.20), (2.5, 0.08), (3.5, 0.025),
-    ],
+        (0.5, 0.38), (1.5, 0.18), (2.5, 0.07), (3.5, 0.020),
+    ],  # corrected: MLB avg ~38% batters get 1+ RBI per game
     "runs": [
-        (0.5, 0.45), (1.5, 0.18), (2.5, 0.06), (3.5, 0.015),
-    ],
+        (0.5, 0.47), (1.5, 0.19), (2.5, 0.07), (3.5, 0.018),
+    ],  # corrected: ~47% batters score 1+ run per game
     "total_bases": [
         (0.5, 0.85), (1.5, 0.55), (2.5, 0.28), (3.5, 0.12), (4.5, 0.04),
     ],
@@ -383,9 +383,9 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
         (4.5, 0.14), (5.5, 0.06), (6.5, 0.02),
     ],
     "strikeouts": [
-        (1.5, 0.72), (3.5, 0.55), (5.5, 0.38), (7.5, 0.22),
-        (9.5, 0.10), (11.5, 0.03),
-    ],
+        (1.5, 0.68), (3.5, 0.52), (5.5, 0.36), (7.5, 0.20),
+        (9.5, 0.09), (11.5, 0.03),
+    ],  # corrected: ~68% SP record 2+ Ks (was slightly inflated at 0.72)
     "earned_runs": [
         (0.5, 0.55), (1.5, 0.38), (2.5, 0.22), (3.5, 0.12), (4.5, 0.05),
     ],
@@ -401,8 +401,8 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
         (35.0, 0.15), (40.0, 0.08), (50.0, 0.02),
     ],
     "hits_allowed": [
-        (1.5, 0.85), (3.5, 0.58), (5.5, 0.30), (7.5, 0.11),
-    ],
+        (1.5, 0.78), (3.5, 0.55), (5.5, 0.28), (7.5, 0.10),
+    ],  # corrected: ~78% SP allow 2+ hits (was inflated at 0.85)
     "walks_allowed": [
         (0.5, 0.55), (1.5, 0.28), (2.5, 0.09), (3.5, 0.02),
     ],
@@ -413,10 +413,10 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
 
 PROP_CONFIG: dict[str, dict] = {
     # Hitter props
-    "hits":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over"]},
-    "rbis":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
-    "runs":           {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
-    "total_bases":    {"player_type": "hitter", "min_prob": 0.52, "sides": ["Over", "Under"]},
+    "hits":           {"player_type": "hitter", "min_prob": 0.57, "sides": ["Over", "Under"]},
+    "rbis":           {"player_type": "hitter", "min_prob": 0.57, "sides": ["Over", "Under"]},
+    "runs":           {"player_type": "hitter", "min_prob": 0.57, "sides": ["Over", "Under"]},
+    "total_bases":    {"player_type": "hitter", "min_prob": 0.57, "sides": ["Over", "Under"]},
     "hits_runs_rbis": {"player_type": "hitter", "min_prob": 0.54, "sides": ["Over", "Under"]},
     "fantasy_hitter": {"player_type": "hitter", "min_prob": 0.54, "sides": ["Over", "Under"]},
     # Pitcher props
@@ -435,7 +435,7 @@ AGENT_CONFIGS: list[dict] = [
         "emoji": "🎯",
         "max_legs": 4,
         "entry_type": "FlexPlay",
-        "filter": lambda r: r.implied_prob >= 0.54,
+        "filter": lambda r: r.implied_prob >= 0.57,
         "note": "Top-EV generalist -- all prop types",
     },
     {
@@ -548,7 +548,7 @@ AGENT_CONFIGS: list[dict] = [
         "entry_type": "FlexPlay",
         "filter": lambda r: r.prop_type in ("hits", "rbis",
                                              "total_bases", "hits_runs_rbis")
-                            and r.implied_prob >= 0.53,
+                            and r.implied_prob >= 0.57,
         "note": "Handedness splits -- L vs R matchups",
     },
     {
@@ -824,13 +824,12 @@ _PP_MLB_STAT_TYPES = {
     "total bases",
     "hits+runs+rbis", "hits + runs + rbis",
     "hitter fantasy score", "pitcher fantasy score",
-    "doubles", "triples",
     # Pitcher props (actual PP label as of 2026)
-    "pitcher strikeouts", "strikeouts",   # keep bare form as fallback
-    "earned runs allowed", "earned runs",  # keep old form as fallback
+    "pitcher strikeouts", "strikeouts",
+    "earned runs allowed", "earned runs",
     "hits allowed", "pitching outs",
-    "singles",
-    "hitter strikeouts",
+    # NOTE: "singles", "hitter strikeouts", "doubles", "triples" removed —
+    # no _STAT_TYPE_MAP entry or PROP_CONFIG entry, would be silently dropped
 }
 
 # Underdog stat -> our internal prop_type
@@ -1079,11 +1078,18 @@ def fetch_prizepicks_props() -> list[dict]:
             if not pname:
                 continue
 
+            # Infer position from stat type so Statcast routes pitcher vs batter
+            _PITCHER_STAT_KEYS = {
+                "pitcher strikeouts", "strikeouts", "earned runs allowed",
+                "earned runs", "hits allowed", "pitching outs", "walks allowed",
+            }
+            _pp_position = "SP" if stat_raw.strip().lower() in _PITCHER_STAT_KEYS else "OF"
             props.append({
                 "source":      "prizepicks",
                 "player_name": pname,
                 "stat_type":   stat_raw,
                 "line":        float(line_val),
+                "position":    _pp_position,
             })
 
         logger.info("[PP] Fetched %d MLB props", len(props))
@@ -2022,9 +2028,9 @@ class LiveDispatcher:
             if ev < MIN_EV_PCT:
                 logger.info("[%s] EV %.1f%% below gate -- skipped.", agent["name"], ev)
                 continue
-            if conf < 7.0:
+            if conf < 6.0:
                 logger.info(
-                    "[%s] Confidence %.1f/10 below 7.0 gate -- skipped.",
+                    "[%s] Confidence %.1f/10 below 6.0 gate -- skipped.",
                     agent["name"], conf,
                 )
                 continue
@@ -2037,12 +2043,12 @@ class LiveDispatcher:
         if omega:
             ev_o   = omega.get("ev_pct", 0)
             conf_o = omega.get("confidence", 0)
-            if ev_o >= MIN_EV_PCT and conf_o >= 7.0:
+            if ev_o >= MIN_EV_PCT and conf_o >= 6.0:
                 omega["_agent_meta"] = None
                 candidate_parlays.append(omega)
             else:
                 logger.info(
-                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 -- below 7.0 gate, skipped.",
+                    "[OmegaStack] EV=%.1f%% conf=%.1f/10 -- below 6.0 gate, skipped.",
                     ev_o, conf_o,
                 )
         else:
