@@ -1873,7 +1873,7 @@ class _BaseAgent:
                 _n_samples = _get_sample_count(_prop_type)
                 _shrunk, _conf = _shrink_toward_market(
                     model_prob_pct=model_prob,
-                    market_implied_pct=implied_prob,  # implied_prob is already percentage-scale (0-100)
+                    market_implied_pct=implied_prob,
                     n_samples=_n_samples,
                 )
                 prop["_shrinkage_n"]     = _n_samples
@@ -1893,7 +1893,7 @@ class _BaseAgent:
         # Divergence 12-20pp → WIDE flag (monitor).  Logs + stamps prop for audit.
         if _MARKET_VALIDATOR_AVAILABLE:
             try:
-                _market_implied_pct = implied_prob  # implied_prob is already percentage-scale (0-100)
+                _market_implied_pct = implied_prob
                 model_prob, _mv_valid = _stamp_market_validation(
                     prop,
                     model_prob_pct=model_prob,
@@ -3432,6 +3432,53 @@ def run_agent_tasklet() -> None:
     skipped = len(all_parlays) - len(best_per_agent)
     if skipped:
         logger.info("[AgentTasklet] Skipped %d parlay(s) — agents already sent today or lower-EV duplicate.", skipped)
+
+    # ── Cross-agent direction dedup ─────────────────────────────────────────
+    # Highest-EV agent locks direction for each (player, stat) pair this cycle.
+    # Any other agent wanting the opposite direction is dropped — prevents two
+    # agents sending contradictory picks (e.g. one UNDER and one OVER on the
+    # same prop) to Discord in the same cycle.
+    _cycle_dir:    dict = {}   # (player_key, stat_key) → side string
+    _cycle_locker: dict = {}   # (player_key, stat_key) → agent_name that locked it
+    _deduped:      dict = {}   # filtered best_per_agent
+
+    for _ag, (_ev_d, _parlay_d, _rk_d) in sorted(
+        best_per_agent.items(), key=lambda x: -x[1][0]
+    ):
+        _legs_d   = _parlay_d.get("legs", [])
+        _conflict = None
+        for _leg in _legs_d:
+            _pkey = (_leg.get("player") or _leg.get("player_name", "")).strip().lower()
+            _skey = _norm_stat(_leg.get("stat_type", _leg.get("prop_type", "")))
+            _side = (_leg.get("direction") or _leg.get("side", "")).upper()
+            _dk   = (_pkey, _skey)
+            if _dk in _cycle_dir and _cycle_dir[_dk] != _side and _side:
+                _conflict = (_pkey, _skey, _cycle_dir[_dk], _side, _cycle_locker[_dk])
+                break
+        if _conflict:
+            _cp, _cs, _clocked, _cwant, _clocker = _conflict
+            logger.info(
+                "[AgentTasklet] %s dropped — direction conflict on '%s %s' "                "(%s already locked %s, this agent wants %s)",
+                _ag, _cp, _cs, _clocker, _clocked, _cwant
+            )
+        else:
+            for _leg in _legs_d:
+                _pkey = (_leg.get("player") or _leg.get("player_name", "")).strip().lower()
+                _skey = _norm_stat(_leg.get("stat_type", _leg.get("prop_type", "")))
+                _side = (_leg.get("direction") or _leg.get("side", "")).upper()
+                _dk   = (_pkey, _skey)
+                if _dk not in _cycle_dir and _pkey and _skey and _side:
+                    _cycle_dir[_dk]    = _side
+                    _cycle_locker[_dk] = _ag
+            _deduped[_ag] = (_ev_d, _parlay_d, _rk_d)
+
+    dropped_conflicts = len(best_per_agent) - len(_deduped)
+    if dropped_conflicts:
+        logger.info(
+            "[AgentTasklet] Dropped %d agent(s) for contradicting a higher-EV agent's direction.",
+            dropped_conflicts
+        )
+    best_per_agent = _deduped
 
     for agent_name, (_ev, parlay, r_daily_key) in best_per_agent.items():
         # Claim BEFORE sending — prevents double-send if Discord call is slow
