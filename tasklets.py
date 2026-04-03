@@ -1295,6 +1295,11 @@ def _ensure_bet_ledger() -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
+            try:
+                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS mlbam_id INTEGER")
+                conn.commit()
+            except Exception:
+                conn.rollback()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
     except Exception as exc:
