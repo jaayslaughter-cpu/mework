@@ -760,7 +760,7 @@ def fetch_player_season_stats(player_id: int) -> dict[str, float]:
     try:
         resp = requests.get(
             f"{_MLBAPI_BASE}/people/{player_id}/stats",
-            params={"stats": "season", "group": "hitting,pitching", "season": str(datetime.now(timezone.utc).year)},
+            params={"stats": "season", "group": "hitting,pitching", "season": str(datetime.now(__import__('zoneinfo').ZoneInfo("America/Los_Angeles")).year)},
             headers=_HEADERS, timeout=10,
         )
         if resp.status_code != 200:
@@ -1523,7 +1523,7 @@ def build_omega_parlay(
     return {
         "agent_name":  "OmegaStack",
         "agent_emoji": "🔱",
-        "entry_type":  "STANDARD",
+        "entry_type":  "PowerPlay",
         "ev_pct":      round(ev_pct, 2),
         "confidence":  conf,
         "notes":       "VultureStack×0.60 + UmpireAgent×0.25 + FadeAgent×0.15 -- triple confirm >= 0.65 stacked",
@@ -1560,7 +1560,8 @@ def _build_mlbam_lookup() -> dict:
     """
     try:
         import datetime as _dt
-        season = _dt.datetime.now(_dt.timezone.utc).year
+        import zoneinfo as _zi
+        season = _dt.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).year
         resp = requests.get(
             "https://statsapi.mlb.com/api/v1/sports/1/players",
             params={"season": season, "gameType": "R"},
@@ -1598,7 +1599,8 @@ def _build_player_venue_map() -> dict:
     try:
         from altitude_adjustment import TEAM_TO_VENUE as _TEAM_TO_VENUE
         import datetime as _dt
-        season = _dt.datetime.now(_dt.timezone.utc).year
+        import zoneinfo as _zi
+        season = _dt.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).year
         resp = requests.get(
             "https://statsapi.mlb.com/api/v1/sports/1/players",
             params={"season": season, "gameType": "R"},
@@ -1643,7 +1645,8 @@ def _build_player_team_map() -> dict:
     """
     try:
         import datetime as _dt
-        season = _dt.datetime.now(_dt.timezone.utc).year
+        import zoneinfo as _zi
+        season = _dt.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).year
         resp = requests.get(
             "https://statsapi.mlb.com/api/v1/sports/1/players",
             params={"season": season, "gameType": "R"},
@@ -1947,7 +1950,8 @@ class LiveDispatcher:
         try:
             from cv_consistency_layer import apply_cv_consistency_layer
             import datetime as _cv_dt
-            _cv_season = _cv_dt.datetime.now(_cv_dt.timezone.utc).year
+            import zoneinfo as _cv_zi
+            _cv_season = _cv_dt.datetime.now(_cv_zi.ZoneInfo("America/Los_Angeles")).year
             _cv_props = [
                 {
                     "player_id": l.mlbam_id,
@@ -1999,16 +2003,13 @@ class LiveDispatcher:
                 logger.info("[RISK] %s -- skipped (disabled or in cool-down)", agent["name"])
                 continue
             _agent_T = self._agent_temperatures.get(agent["name"], _T_DEFAULT)
-            # Best-of-two: run agent against PP pool and UD pool separately,
-            # pick whichever scores higher. PrizePicks wins on tie.
+            # Platform directive (Phase 109): Underdog is always the default.
+            # PrizePicks is tiebreaker only when all leg lines are exactly equal.
+            # In practice: always prefer UD if it has a qualifying parlay.
             _pp_play = build_parlay(pp_leg_pool, agent, agent_T=_agent_T)
             _ud_play = build_parlay(ud_leg_pool, agent, agent_T=_agent_T)
-            if _pp_play and _ud_play:
-                parlay = (_ud_play
-                          if _ud_play["confidence"] > _pp_play["confidence"]
-                          else _pp_play)  # PP wins tie
-            else:
-                parlay = _pp_play or _ud_play
+            # UD default: pick UD unless UD has no qualifying parlay
+            parlay = _ud_play or _pp_play
             if not parlay:
                 logger.info("[%s] No qualifying parlay today.", agent["name"])
                 continue
@@ -2043,31 +2044,57 @@ class LiveDispatcher:
         else:
             logger.info("[OmegaStack] No triple-confirmation legs today.")
 
-        # ── Dedup pass: drop 100% identical parlays only ─────────────────
-        # Agents are independent bets — they MAY share individual legs.
-        # Only suppress a parlay if its full leg fingerprint is an exact
-        # duplicate of one already queued (same player+prop+side set).
-        candidate_parlays.sort(key=lambda p: -p.get("confidence", 0))
+        # ── Phase 226: Cross-agent direction dedup ────────────────────
+        # Sort highest-EV first. First agent to claim a (player, prop_type)
+        # pair locks the direction for that cycle. Any later agent wanting
+        # the OPPOSITE side on the same prop is dropped entirely.
+        # Also deduplicate 100% identical parlays (same full leg set).
+        candidate_parlays.sort(key=lambda p: -p.get("ev_pct", 0))
+        direction_lock: dict[tuple, str] = {}   # (player_lower, prop_type) -> side
         seen_fingerprints: set[frozenset] = set()
         final_parlays: list[dict] = []
 
         for parlay in candidate_parlays:
+            # Full-fingerprint dedup (identical parlays)
             fp = frozenset(
                 (leg["player_name"].lower(), leg["prop_type"], leg["side"])
                 for leg in parlay["legs"]
             )
             if fp in seen_fingerprints:
                 logger.info(
-                    "[%s] Dropped — exact duplicate of a higher-confidence parlay.",
+                    "[%s] Dropped — exact duplicate of a higher-EV parlay.",
                     parlay["agent_name"],
                 )
                 continue
+
+            # Direction lock: check each leg against already-locked directions
+            conflict = False
+            for leg in parlay["legs"]:
+                dk = (leg["player_name"].lower(), leg["prop_type"])
+                locked_side = direction_lock.get(dk)
+                if locked_side is not None and locked_side != leg["side"]:
+                    logger.info(
+                        "[%s] Dropped — direction conflict on %s %s: locked=%s, this=%s",
+                        parlay["agent_name"],
+                        leg["player_name"], leg["prop_type"],
+                        locked_side, leg["side"],
+                    )
+                    conflict = True
+                    break
+            if conflict:
+                continue
+
+            # Parlay survives — lock all its directions
+            for leg in parlay["legs"]:
+                dk = (leg["player_name"].lower(), leg["prop_type"])
+                direction_lock.setdefault(dk, leg["side"])
+
             seen_fingerprints.add(fp)
             final_parlays.append(parlay)
 
         logger.info(
-            "Dedup pass: %d/%d parlays queued to send",
-            len(final_parlays), len(candidate_parlays),
+            "Dedup+direction pass: %d/%d parlays queued to send (%d direction locks held)",
+            len(final_parlays), len(candidate_parlays), len(direction_lock),
         )
 
         # ── Send all surviving parlays ─────────────────────────────────────
