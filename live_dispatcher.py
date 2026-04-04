@@ -389,9 +389,6 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "earned_runs": [
         (0.5, 0.55), (1.5, 0.38), (2.5, 0.22), (3.5, 0.12), (4.5, 0.05),
     ],
-    "walks": [
-        (0.5, 0.25), (1.5, 0.06), (2.5, 0.01),
-    ],
     "fantasy_hitter": [
         (5.0, 0.88), (10.0, 0.68), (15.0, 0.46), (20.0, 0.28),
         (25.0, 0.15), (30.0, 0.07), (40.0, 0.02),
@@ -403,9 +400,6 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "hits_allowed": [
         (1.5, 0.78), (3.5, 0.55), (5.5, 0.28), (7.5, 0.10),
     ],  # corrected: ~78% SP allow 2+ hits (was inflated at 0.85)
-    "walks_allowed": [
-        (0.5, 0.55), (1.5, 0.28), (2.5, 0.09), (3.5, 0.02),
-    ],
     "pitching_outs": [
         (8.5, 0.62), (11.5, 0.46), (14.5, 0.30), (17.5, 0.17), (20.5, 0.06),
     ],
@@ -1239,13 +1233,8 @@ _STAT_TYPE_MAP: dict[str, str] = {
     "earned runs allowed":  "earned_runs",
     # Pitcher hits / walks allowed (PP labels as of 2026)
     "hits allowed":         "hits_allowed",
-    "walks allowed":        "walks_allowed",
     "pitching outs":        "pitching_outs",
-    # Walks (batter)
-    "walks":                "walks",
-    # Doubles / triples
-    "doubles":              "doubles",
-    "triples":              "triples",
+    # walks (batter), doubles, triples, stolen_bases, home_runs removed — not approved prop types
 }
 
 
@@ -2207,7 +2196,6 @@ class LiveDispatcher:
             "hits_runs_rbis": (0.5, 8.5),
             "strikeouts":     (1.5, 12.5),
             "earned_runs":    (0.5, 6.5),
-            "walks":          (0.5, 5.5),
             "fantasy_hitter": (5.0, 60.0),
             "fantasy_pitcher":(15.0, 70.0),
         }

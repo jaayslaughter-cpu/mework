@@ -58,13 +58,13 @@ logger = logging.getLogger("propiq.enrichment")
 
 _PITCHER_PROP_TYPES = {
     "strikeouts", "pitcher_strikeouts", "pitching_outs",
-    "earned_runs", "hits_allowed",
+    "earned_runs", "hits_allowed", "walks_allowed",
     "hitter_strikeouts",   # batter K — still lookup pitcher's K stats
 }
 
 _BATTER_PROP_TYPES = {
-    "hits", "total_bases", "rbis", "rbi", "runs",
-    "doubles", "singles",
+    "hits", "home_runs", "total_bases", "rbis", "rbi", "runs",
+    "stolen_bases", "doubles", "singles", "walks",
     "hits_runs_rbis", "fantasy_hitter",
 }
 
@@ -103,31 +103,20 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
         if pid:
             p2mlbam[name] = int(pid)
 
-    # From projected starters (adds opposing_team for pitchers)
-    # Also builds a team→opponent map for wiring batters to their opponents
-    team_to_opp: dict[str, str] = {}
+    # From projected starters (adds opposing_team)
     for s in ctx.get("projected_starters", []):
         name = _norm(s.get("full_name", ""))
+        if not name:
+            continue
         team = s.get("team", "")
         opp  = s.get("opponent", "")
         pid  = s.get("player_id")
-        if name:
-            if team:
-                p2team[name] = team
-            if opp:
-                p2opp[name] = opp
-            if pid:
-                try: p2mlbam[name] = int(pid)
-                except (ValueError, TypeError): pass
-        # Build bidirectional team→opponent map from any game we see
-        if team and opp:
-            team_to_opp[team] = opp
-            team_to_opp[opp]  = team
-
-    # Wire batters to their opponents using the team→opponent map
-    for batter_name, batter_team in list(p2team.items()):
-        if batter_name not in p2opp and batter_team in team_to_opp:
-            p2opp[batter_name] = team_to_opp[batter_team]
+        if team:
+            p2team[name] = team
+        if opp:
+            p2opp[name] = opp
+        if pid:
+            p2mlbam[name] = int(pid)
 
     return p2team, p2opp, p2mlbam
 
@@ -160,17 +149,15 @@ def _get_fg_batter(name: str) -> dict:
         from fangraphs_layer import get_batter  # noqa: PLC0415
         stats = get_batter(name) or {}
         return {
-            "wrc_plus":     stats.get("wrc_plus",     100.0),
-            "woba":         stats.get("woba",          0.310),
-            "iso":          stats.get("iso",           0.155),
-            "babip":        stats.get("babip",         0.300),
-            "o_swing":      stats.get("o_swing",       0.310),
-            "z_contact":    stats.get("z_contact",     0.850),
-            "hr_fb_pct":    stats.get("hr_fb_pct",     0.105),
-            "k_pct":        stats.get("k_pct",         0.224),
-            "bb_pct":       stats.get("bb_pct",        0.085),
-            "slg":          stats.get("slg",           0.405),  # SLG — #3 TB feature (16%)
-            "xbh_per_game": stats.get("xbh_per_game",  0.50),   # XBH/G — #1 TB feature (45%)
+            "wrc_plus":   stats.get("wrc_plus",  100.0),
+            "woba":       stats.get("woba",       0.310),
+            "iso":        stats.get("iso",        0.155),
+            "babip":      stats.get("babip",      0.300),
+            "o_swing":    stats.get("o_swing",    0.310),
+            "z_contact":  stats.get("z_contact",  0.850),
+            "hr_fb_pct":  stats.get("hr_fb_pct",  0.105),
+            "k_pct":      stats.get("k_pct",      0.224),
+            "bb_pct":     stats.get("bb_pct",     0.085),
         }
     except Exception:
         return {}
@@ -180,90 +167,6 @@ def _get_fg_batter(name: str) -> dict:
 # Step 3 — Bayesian nudge
 # ---------------------------------------------------------------------------
 
-def _get_pitch_whiff_vs_hand(pitcher_name: str, batter_hand: str, fg_cache: dict) -> float:
-    """Return pitcher's whiff rate vs specific batter handedness.
-    Uses FanGraphs platoon splits (csw_pct_vs_rhh / csw_pct_vs_lhh) if available.
-    Falls back to overall csw_pct, then league average 0.275.
-    batter_hand: 'R', 'L', or '' (unknown).
-    """
-    fg = fg_cache.get(pitcher_name.lower().replace(" ", "_"), {}) if fg_cache else {}
-    hand = (batter_hand or "").upper()
-    if hand == "R":
-        return float(fg.get("csw_pct_vs_rhh", fg.get("csw_pct", 0.275)) or 0.275)
-    if hand == "L":
-        return float(fg.get("csw_pct_vs_lhh", fg.get("csw_pct", 0.275)) or 0.275)
-    return float(fg.get("csw_pct", 0.275) or 0.275)
-
-
-def _get_bullpen_era(team: str, hub: dict) -> float:
-    """Return opposing team's bullpen ERA for last 7 days.
-    Reads hub.bullpen_fatigue[team] if populated (DataHub 30s refresh).
-    Falls back to MLB Stats API bullpen ERA endpoint, then league avg 4.50.
-    """
-    if not team:
-        return 4.50
-    # Try hub bullpen_fatigue map (populated by DataHub)
-    fatigue_map = hub.get("bullpen_fatigue", {})
-    if team in fatigue_map:
-        entry = fatigue_map[team]
-        if isinstance(entry, dict):
-            era = entry.get("era_last7") or entry.get("era") or entry.get("fatigue_score")
-            if era is not None:
-                try:
-                    return float(era)
-                except (TypeError, ValueError):
-                    pass
-    # Try MLB Stats API free bullpen endpoint
-    try:
-        import urllib.request as _ul, json as _json  # noqa: PLC0415
-        _TEAM_IDS = {
-            "NYY": 147, "BOS": 111, "LAD": 119, "SF": 137, "CHC": 112,
-            "STL": 138, "ATL": 144, "MIA": 146, "PHI": 143, "WSN": 120,
-            "NYM": 121, "CIN": 113, "MIL": 158, "PIT": 134, "ARI": 109,
-            "COL": 115, "SD": 135, "LAA": 108, "OAK": 133, "SEA": 136,
-            "TEX": 140, "HOU": 117, "MIN": 142, "KC": 118, "CLE": 114,
-            "DET": 116, "CWS": 145, "TOR": 141, "BAL": 110, "TB": 139,
-        }
-        tid = _TEAM_IDS.get(team.upper())
-        if tid:
-            url = f"https://statsapi.mlb.com/api/v1/teams/{tid}/stats?stats=season&group=pitching&season=2026"
-            with _ul.urlopen(url, timeout=3) as resp:
-                data = _json.loads(resp.read())
-            splits = data.get("stats", [{}])[0].get("splits", [])
-            for s in splits:
-                era = s.get("stat", {}).get("era")
-                if era is not None:
-                    return float(era)
-    except Exception:
-        pass
-    return 4.50
-
-
-def _get_batting_order_slot(player_name: str, lineups: list) -> int:
-    """Return batter's lineup slot (1-9) from confirmed lineups.
-    Returns 0 if not found (unknown position).
-    """
-    if not player_name or not lineups:
-        return 0
-    pn_lower = player_name.lower().strip()
-    for game_lineup in lineups:
-        if not isinstance(game_lineup, dict):
-            continue
-        for side in ("home", "away"):
-            batters = game_lineup.get(side, {}).get("batters", []) or game_lineup.get(side, [])
-            if not isinstance(batters, list):
-                continue
-            for i, batter in enumerate(batters, start=1):
-                bname = ""
-                if isinstance(batter, dict):
-                    bname = batter.get("fullName", batter.get("name", "")).lower()
-                elif isinstance(batter, str):
-                    bname = batter.lower()
-                if pn_lower in bname or bname in pn_lower:
-                    return i
-    return 0
-
-
 def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
     try:
         from bayesian_layer import bayesian_adjustment  # noqa: PLC0415
@@ -271,18 +174,9 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
         side       = prop.get("side", "OVER")
         player     = prop.get("player", "")
         line       = float(prop.get("line", 1.5) or 1.5)
-        # Use appropriate player rate for prop type — k_rate for pitchers, batting metrics for hitters
-        _is_pitcher_pt = prop_type in {"strikeouts","pitching_outs","earned_runs",
-                                        "hits_allowed","walks_allowed","fantasy_pitcher"}
-        if _is_pitcher_pt:
-            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.224)) or 0.224)
-            player_pa   = 27
-        else:
-            # Batter props: use wRC+ normalized, BABIP, or hit rate proxy
-            _wrc = float(prop.get("wrc_plus", 100.0) or 100.0) / 100.0
-            _h_per_ab = float(prop.get("babip", 0.300) or 0.300)
-            player_rate = min(0.400, max(0.180, (_wrc * 0.275 + _h_per_ab) / 2))
-            player_pa   = 4
+        # Use k_rate as player_rate proxy for all prop types (best we have)
+        player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.224)) or 0.224)
+        player_pa   = 27 if "strikeout" in prop_type else 4
         return bayesian_adjustment(
             prop_type=prop_type,
             side=side,
@@ -311,68 +205,6 @@ def _get_cv_nudge(player_id: int | None, prop_type: str, season: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Step 5a — Team standings streak adjustment
-# ---------------------------------------------------------------------------
-
-def _get_streak_adj(team: str, hub: dict) -> float:
-    """
-    Parse the team's current W/L streak from standings (hub context group).
-    Returns a probability nudge in [-0.015, +0.015].
-
-    Logic:
-      - Only meaningful streaks (≥3 games) produce a nudge.
-      - Win streak → positive nudge (team hot → scoring environment better).
-      - Loss streak → negative nudge (team cold → worse run env).
-      - Capped at 5-game streak magnitude (±1.5pp max).
-      - Applied to run/RBI/total props in _model_prob; neutral for K props.
-    """
-    standings = hub.get("context", {}).get("standings", [])
-    if not standings or not team:
-        return 0.0
-    team_lower = team.lower()
-    for s in standings:
-        if team_lower in (s.get("team_name") or "").lower():
-            streak = (s.get("streak") or "").strip()
-            if not streak or len(streak) < 2:
-                return 0.0
-            try:
-                direction = 1.0 if streak[0].upper() == "W" else -1.0
-                magnitude = int(streak[1:])
-                if magnitude < 3:
-                    return 0.0
-                return round(max(-0.015, min(0.015, direction * min(magnitude, 5) * 0.003)), 4)
-            except (ValueError, IndexError):
-                return 0.0
-    return 0.0
-
-
-# ---------------------------------------------------------------------------
-# Step 5b — Team last-10 win rate adjustment
-# ---------------------------------------------------------------------------
-
-def _get_last10_adj(team: str, hub: dict) -> float:
-    """
-    Nudge based on team's wins in their last 10 games vs .500 baseline.
-    Returns a probability nudge in [-0.010, +0.010].
-
-    Logic:
-      - 5 wins in last 10 → neutral (0.0)
-      - Each win above/below 5 → ±0.002 (2-10 wins → ±0.010 max)
-      - Complements streak signal: streak catches direction, last-10 catches depth.
-      - Applied to run/RBI/total props; neutral for K/hits props.
-    """
-    standings = hub.get("context", {}).get("standings", [])
-    if not standings or not team:
-        return 0.0
-    team_lower = team.lower()
-    for s in standings:
-        if team_lower in (s.get("team_name") or "").lower():
-            last10 = int(s.get("last_10", 5) or 5)
-            deviation = last10 - 5  # -5 to +5
-            return round(max(-0.010, min(0.010, deviation * 0.002)), 4)
-    return 0.0
-
-
 # Step 5 — MLB form (hot/cold streak) adjustment
 # ---------------------------------------------------------------------------
 
@@ -490,245 +322,6 @@ def _get_game_context(team: str, hub: dict) -> dict:
 # Main public function — call this once per cycle before agents
 # ---------------------------------------------------------------------------
 
-
-# ---------------------------------------------------------------------------
-# Step 8 — Statcast features (xwOBA, barrel%, whiff%, hard-hit%)
-# ---------------------------------------------------------------------------
-_STATCAST_LAYER: object = None   # module-level singleton to avoid re-init
-
-def _get_statcast(props: list[dict]) -> list[dict]:
-    """Enrich props with Baseball Savant Statcast features.
-    Requires mlbam_id on each prop. Falls back silently.
-    Adds: sc_xwoba, sc_xba, sc_xslg, sc_barrel_rate, sc_hard_hit_rate (batters)
-          sc_whiff_rate, sc_shadow_whiff_rate (pitchers)
-    """
-    global _STATCAST_LAYER
-    try:
-        from statcast_feature_layer import (  # noqa: PLC0415
-            StatcastFeatureLayer,
-            enrich_props_with_statcast as _sc_enrich,
-        )
-        if _STATCAST_LAYER is None:
-            _STATCAST_LAYER = StatcastFeatureLayer()
-        _PITCHER_PT = {"strikeouts", "pitching_outs", "earned_runs",
-                       "hits_allowed", "walks_allowed", "fantasy_pitcher"}
-        pitchers = [p for p in props if p.get("prop_type", "") in _PITCHER_PT]
-        batters  = [p for p in props if p.get("prop_type", "") not in _PITCHER_PT]
-        if pitchers:
-            pitchers = _sc_enrich(pitchers, "pitcher", layer=_STATCAST_LAYER)
-        if batters:
-            batters  = _sc_enrich(batters,  "batter",  layer=_STATCAST_LAYER)
-        return pitchers + batters
-    except Exception as exc:
-        logger.debug("[Enrichment] Statcast skipped: %s", exc)
-        return props
-
-
-# ---------------------------------------------------------------------------
-# Step 9 — Marcel projections (3-year weighted prior + current season blend)
-# ---------------------------------------------------------------------------
-_MARCEL_LAYER: object = None
-
-def _get_marcel_adj(player: str, prop_type: str, is_pitcher: bool) -> float:
-    """Return Marcel probability adjustment (max ±0.018).
-    Blends 3 years of FanGraphs data weighted by PA — stabilises early season.
-    """
-    global _MARCEL_LAYER
-    try:
-        from marcel_layer import MarcelLayer, marcel_adjustment  # noqa: PLC0415
-        if _MARCEL_LAYER is None:
-            _MARCEL_LAYER = MarcelLayer()
-        side = "Over"   # Marcel adjustment is symmetric; caller applies sign
-        player_type = "pitcher" if is_pitcher else "batter"
-        data = (_MARCEL_LAYER.get_pitcher(player)
-                if is_pitcher else _MARCEL_LAYER.get_batter(player))
-        return float(marcel_adjustment(prop_type, side, player_type, data) or 0.0)
-    except Exception:
-        return 0.0
-
-
-# ---------------------------------------------------------------------------
-# Step 10 — Predict+ score (pitcher K-prop unpredictability)
-# ---------------------------------------------------------------------------
-_PP_LAYER: object = None
-
-def _get_predict_plus_adj(player: str, prop_type: str,
-                          side: str, mlbam_id: int | None) -> float:
-    """Return Predict+ probability adjustment for K props only (max ±0.020)."""
-    if not mlbam_id or prop_type != "strikeouts":
-        return 0.0
-    global _PP_LAYER
-    try:
-        from predict_plus_layer import (  # noqa: PLC0415
-            PredictPlusLayer, predict_plus_adjustment,
-        )
-        if _PP_LAYER is None:
-            _PP_LAYER = PredictPlusLayer()
-        score = float(_PP_LAYER.get_score(int(mlbam_id), player) or 0.0)
-        if score <= 0:
-            return 0.0
-        return float(predict_plus_adjustment(prop_type, side, score) or 0.0)
-    except Exception:
-        return 0.0
-
-
-# ---------------------------------------------------------------------------
-# Step 11 — Sportsbook reference (sharp book vig-stripped implied probability)
-# ---------------------------------------------------------------------------
-_SB_CACHE: list | None = None    # enriched once per DataHub cycle
-
-def _get_sportsbook_ref(props: list[dict]) -> list[dict]:
-    """Enrich props with sharp-book vig-stripped implied probability.
-    Adds: sb_implied_prob, sb_implied_prob_over, sb_implied_prob_under,
-          sb_line, sb_line_gap
-    These replace Underdog's flat -115 as the market_implied in generate_pick.
-    """
-    try:
-        from sportsbook_reference_layer import (  # noqa: PLC0415
-            enrich_props_with_sportsbook,
-        )
-        import datetime as _dt
-        import zoneinfo as _zi
-        date_str = _dt.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date().isoformat()
-        return enrich_props_with_sportsbook(props, date=date_str)
-    except Exception as exc:
-        logger.debug("[Enrichment] Sportsbook reference skipped: %s", exc)
-        return props
-
-
-# ---------------------------------------------------------------------------
-# Step 12 — Player-specific base rate override
-# ---------------------------------------------------------------------------
-# Replaces population base rates for K and HR props when we have
-# enough player-specific signal (FanGraphs + Statcast).
-# This is what fixes "Cole K Over 7.5 = 22%" — for elite pitchers
-# the real rate is 40-55%.
-
-def _player_specific_rate(prop: dict, side: str) -> float | None:
-    """
-    Return player-specific win probability overriding population base rate.
-    Returns None if insufficient data to override (caller uses base rate).
-
-    For K Over: use pitcher k_rate (FG) + csw_pct + sc_whiff_rate
-    For K Under: mirror of Over
-    For HR Over: use batter hr_fb_pct + sc_barrel_rate + iso
-    For TB Over: use batter wRC+ + sc_xslg + sc_xwoba
-    """
-    prop_type = prop.get("prop_type", "")
-    line      = float(prop.get("line", 1.5) or 1.5)
-    is_over   = side.upper() == "OVER"
-
-    # ── Pitcher K props ────────────────────────────────────────────────────
-    if prop_type == "strikeouts":
-        k_rate   = float(prop.get("k_rate",   prop.get("k_pct",   0.0)) or 0.0)
-        csw_pct  = float(prop.get("csw_pct",  0.0) or 0.0)
-        whiff    = float(prop.get("sc_whiff_rate", prop.get("swstr_pct", 0.0)) or 0.0)
-        # Need at least one strong signal
-        if k_rate < 0.01 and csw_pct < 0.01:
-            return None
-        # Estimate K/9 and convert to K-count probability
-        # k_rate = K per plate appearance → K per 9 innings ≈ k_rate * 27
-        # For 6 IP (18 outs ≈ 18 PA), expected Ks = k_rate * 18
-        expected_k = k_rate * 18.0   # expected Ks over typical start
-        # CSW boost: elite CSW (>32%) means more Ks per PA
-        if csw_pct > 0.30:
-            expected_k *= (1.0 + (csw_pct - 0.28) * 2.0)
-        if whiff > 0.12:
-            expected_k *= (1.0 + (whiff - 0.11) * 1.5)
-        # Poisson approximation: P(K >= line) = 1 - CDF(line-1, lambda=expected_k)
-        import math
-        lam = max(0.01, expected_k)
-        # P(K < line) = sum_{k=0}^{line-1} e^{-lam} * lam^k / k!
-        p_under = sum(
-            math.exp(-lam) * (lam ** k) / math.factorial(int(k))
-            for k in range(int(line))
-        )
-        p_over = 1.0 - min(0.99, p_under)
-        p = p_over if is_over else (1.0 - p_over)
-        # Only override if it differs meaningfully from population avg
-        # (prevents overriding when we have bad/default data)
-        if k_rate > 0.20 or csw_pct > 0.27:   # real signal, not defaults
-            return round(p, 4)
-        return None
-
-
-
-    # ── Batter Total Bases ─────────────────────────────────────────────────
-    if prop_type == "total_bases" and line <= 1.5:
-        wrc     = float(prop.get("wrc_plus", 0.0) or 0.0)
-        xslg    = float(prop.get("sc_xslg",  0.0) or 0.0)
-        xwoba   = float(prop.get("sc_xwoba", 0.0) or 0.0)
-        if wrc < 1.0 and xslg < 0.01:
-            return None
-        # wRC+ 140 → ~40% above avg in TB production
-        # League avg TB Over 1.5 ≈ 55%
-        base = 0.55
-        if wrc > 80:
-            wrc_adj = (wrc - 100.0) / 100.0 * 0.10   # ±10pp for ±100 wRC+
-            base += wrc_adj
-        if xslg > 0.01:
-            xslg_adj = (xslg - 0.420) / 0.100 * 0.05  # ±5pp per .100 xSLG
-            base += xslg_adj
-        if xwoba > 0.01:
-            xwoba_adj = (xwoba - 0.310) / 0.060 * 0.04
-            base += xwoba_adj
-        base = max(0.35, min(0.80, base))
-        p = base if is_over else (1.0 - base)
-        if wrc > 80 or xslg > 0.01:
-            return round(p, 4)
-        return None
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Step 13 — DraftEdge projections (hit_pct, hr_pct, sb_pct, rbi_pct per player)
-# Already fetched into hub["market"]["prop_projections"] by DataHub.
-# Adds: de_hit_pct, de_hr_pct, de_sb_pct, de_rbi_pct, de_run_pct,
-#       de_k_pct, de_dfs_proj, de_batting_order
-# ---------------------------------------------------------------------------
-
-def _get_draftedge(props: list[dict], hub: dict) -> list[dict]:
-    """Enrich props with DraftEdge projections from hub market data.
-    Falls back to calling enrich_props_with_draftedge() directly if hub empty.
-    """
-    # Try hub first (already fetched by DataHub every 15min)
-    proj = hub.get("market", {}).get("prop_projections", {})
-    batter_rows  = proj.get("batters",  []) if isinstance(proj, dict) else []
-    pitcher_rows = proj.get("pitchers", []) if isinstance(proj, dict) else []
-
-    if batter_rows or pitcher_rows:
-        # Build lookup from hub data
-        import unicodedata as _ud
-        def _norm(n):
-            s = _ud.normalize("NFD", (n or "").lower())
-            return "".join(c for c in s if _ud.category(c) != "Mn")
-
-        bat_lkp = {_norm(r.get("player_name","")): r for r in batter_rows if r.get("player_name")}
-        pit_lkp = {_norm(r.get("player_name","")): r for r in pitcher_rows if r.get("player_name")}
-
-        for prop in props:
-            key = _norm(prop.get("player", prop.get("player_name", "")))
-            row = bat_lkp.get(key) or pit_lkp.get(key) or {}
-            prop["de_hit_pct"]      = float(row.get("hit_pct",      0.0) or 0.0)
-            prop["de_hr_pct"]       = float(row.get("hr_pct",       0.0) or 0.0)
-            prop["de_sb_pct"]       = float(row.get("sb_pct",       0.0) or 0.0)
-            prop["de_rbi_pct"]      = float(row.get("rbi_pct",      0.0) or 0.0)
-            prop["de_run_pct"]      = float(row.get("run_pct",      0.0) or 0.0)
-            prop["de_k_pct"]        = float(row.get("k_pct",        0.0) or 0.0)
-            prop["de_dfs_proj"]     = float(row.get("dfs_proj",     0.0) or 0.0)
-            prop["de_batting_order"] = str(row.get("batting_order", "") or "")
-        return props
-
-    # Fallback: call scraper directly
-    try:
-        from draftedge_scraper import enrich_props_with_draftedge  # noqa: PLC0415
-        return enrich_props_with_draftedge(props)
-    except Exception as exc:
-        logger.debug("[Enrichment] DraftEdge skipped: %s", exc)
-        return props
-
-
 def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> list[dict]:
     """
     Enrich a list of raw Underdog/PrizePicks prop dicts with all analytics
@@ -747,23 +340,11 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         Same list, each prop enriched with additional fields in-place.
     """
     import datetime
-    import zoneinfo as _zi
     if season is None:
-        season = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).year
+        season = datetime.date.today().year
 
     if not props:
         return props
-
-    # ── Batch enrichment (whole prop list, single API call each) ─────────────
-    # Run sportsbook reference first — provides sharp-book market_implied
-    # which replaces Underdog's flat -115 and fixes OVER-bet bias
-    props = _get_sportsbook_ref(props)
-    # DraftEdge projections — hit_pct, hr_pct, rbi_pct, batting_order per player
-    props = _get_draftedge(props, hub)
-
-    # Run Statcast enrichment — provides player-specific barrel/whiff/xwOBA
-    # Requires mlbam_id which gets attached per-prop in the loop below
-    # so we defer to after the lookup maps are built.
 
     # ── Build lookup maps once for all props ──────────────────────────────────
     p2team, p2opp, p2mlbam = _build_lookup_maps(hub)
@@ -794,14 +375,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         if not prop.get("player_id") and pn in p2mlbam:
             prop["player_id"] = p2mlbam[pn]
             prop["mlbam_id"]  = p2mlbam[pn]
-
-        # ── Player-specific base rate override ────────────────────────────────
-        # Override population base rate for K/HR/TB when we have real signal
-        # Set on prop so generate_pick and _model_prob can use it
-        _side_hint = prop.get("side", "OVER")
-        _ps_rate = _player_specific_rate(prop, _side_hint)
-        if _ps_rate is not None:
-            prop["_player_specific_prob"] = _ps_rate
 
         team     = prop.get("team", "")
         opp_team = prop.get("opposing_team", "")
@@ -870,11 +443,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # ── Game prediction context ───────────────────────────────────────────
         prop.update(_get_game_context(team, hub))
 
-        # ── Team streak adjustment (standings hot/cold) ───────────────────────
-        prop["_streak_adj"]  = _get_streak_adj(team, hub)
-        prop["_last10_adj"]  = _get_last10_adj(team, hub)
-        prop["_streak_adj"] = _get_streak_adj(team, hub)
-
         # ── Lineup chase (pitcher props only) ─────────────────────────────────
         if is_pitcher_prop and opp_team:
             if opp_team not in _chase_cache:
@@ -891,102 +459,16 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # ── MLB form adjustment ───────────────────────────────────────────────
         prop["_form_adj"] = _get_form_adj(player, prop_type, hub)
 
-        # ── Marcel projection adjustment (weighted 3-year prior) ────────────
-        _is_pitcher_prop = prop_type in _PITCHER_PROP_TYPES
-        _side_for_adj = prop.get("side", "OVER")
-        _marcel_adj = _get_marcel_adj(player, prop_type, _is_pitcher_prop)
-        prop["_marcel_adj"] = _marcel_adj
-
-        # ── Predict+ score (pitcher K unpredictability, K props only) ─────────
-        _pp_adj = _get_predict_plus_adj(
-            player, prop_type, _side_for_adj,
-            prop.get("mlbam_id") or prop.get("player_id"),
-        )
-        prop["_predict_plus_adj"] = _pp_adj
-
         # ── Bayesian nudge (uses implied_prob if set, else 52.4% default) ────
         base_prob = float(prop.get("implied_prob", 52.4))
         prop["_bayesian_nudge"] = _get_bayesian_nudge(prop, base_prob)
 
-        # ── Pitch type whiff vs batter handedness (slot 20) ──────────────────
-        if is_pitcher_prop:
-            batter_hand = prop.get("_batter_hand", "")   # set upstream if known
-            prop["_pitch_whiff_vs_hand"] = _get_pitch_whiff_vs_hand(
-                player, batter_hand, _fg_pitcher_cache
-            )
-        else:
-            prop.setdefault("_pitch_whiff_vs_hand", 0.275)
-
-        # ── Bullpen ERA for opposing team (slot 21) ───────────────────────────
-        if opp_team not in _weather_cache:  # reuse weather_cache key pattern, new dict
-            pass
-        prop["_bullpen_era"] = _get_bullpen_era(opp_team, hub)
-
-        # ── Batting order slot (slot 22) ──────────────────────────────────────
-        _slot = _get_batting_order_slot(
-            player, hub.get("context", {}).get("lineups", [])
-        )
-        # Fallback: use DraftEdge batting_order if confirmed lineups not yet posted
-        if _slot == 0:
-            _de_order = prop.get("de_batting_order", "")
-            try:
-                _slot = int(_de_order) if _de_order else 0
-            except (ValueError, TypeError):
-                _slot = 0
-        prop["_batting_order_slot"] = _slot
-
-        # ── Park factor adjustment (Step 10) ──────────────────────────────────
-        # Determine home team for this prop from lineups context.
-        # Park factors apply to the home venue regardless of which team
-        # the player is on.
-        try:
-            from fangraphs_layer import park_factor_adjustment as _pf_adj  # noqa: PLC0415
-            _lineups = hub.get("context", {}).get("lineups", [])
-            # Build team → side map from lineups
-            _side_map: dict[str, str] = {
-                lu["team"].lower(): lu.get("side", "")
-                for lu in _lineups
-                if lu.get("team")
-            }
-            _player_team_lower = team.lower() if team else ""
-            _player_side = _side_map.get(_player_team_lower, "")
-            # Find the home team: either this team is home, or find counterpart
-            if _player_side == "home":
-                _home_team = team
-            else:
-                # Find the team with side="home" playing on the same date/game
-                # Use game context: match by finding opp_team's side
-                _home_team = ""
-                _opp_lower = (opp_team or "").lower()
-                if _opp_lower and _side_map.get(_opp_lower) == "home":
-                    _home_team = opp_team or ""
-                else:
-                    # Last resort: scan lineups for any home team
-                    for _lu in _lineups:
-                        if _lu.get("side") == "home":
-                            _home_team = _lu.get("team", "")
-                            break
-            _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team)
-            _batter_hand = prop.get("batter_hand") or prop.get("_batter_hand") or ""
-            _pf_nudge = _pf_adj(prop_type, prop.get("side", "Over"), _home_team,
-                                batter_hand=_batter_hand)
-            prop["_park_factor_adj"] = _pf_nudge
-            prop["_park_factor_team"] = _home_team
-        except Exception as _pf_err:
-            prop.setdefault("_park_factor_adj", 0.0)
-            logger.debug("[Enrichment] park_factor_adj skipped: %s", _pf_err)
-
         enriched_count += 1
 
-    # ── Statcast batch enrichment (needs mlbam_ids attached above) ─────────────
-    props = _get_statcast(props)
-    sc_hits = sum(1 for p in props if p.get("sc_xwoba") or p.get("sc_whiff_rate"))
-
     logger.info(
-        "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | "
-        "Marcel/PP wired | SB reference wired | "
-        "chase: %d teams | weather: %d stadiums",
-        enriched_count, fg_hits, sc_hits,
+        "[Enrichment] %d props enriched | FanGraphs hits: %d/%d | "
+        "chase scores: %d teams | weather: %d stadiums",
+        enriched_count, fg_hits, len(props),
         len(_chase_cache), len(_weather_cache),
     )
     return props

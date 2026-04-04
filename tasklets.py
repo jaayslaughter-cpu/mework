@@ -124,17 +124,23 @@ except ImportError:
     _CAL_LAYER_AVAILABLE = False
     def _norm_stat(s):
         if not s: return ""
-        m = {"hr":"home_runs","h":"hits","k":"strikeouts","ks":"strikeouts",
-             "tb":"total_bases","sb":"stolen_bases","rbi":"rbis","bb":"walks",
+        # stolen_bases, home_runs, walks removed — not approved prop types
+        m = {"h":"hits","k":"strikeouts","ks":"strikeouts",
+             "tb":"total_bases","rbi":"rbis",
              "er":"earned_runs","p_outs":"pitching_outs","h+r+rbi":"hits_runs_rbis",
              "outs_recorded":"outs_recorded","outs recorded":"outs_recorded",
              "fantasy_score":"fantasy_score","fantasy score":"fantasy_score",
              "pitcher fantasy score":"fantasy_score","hitter fantasy score":"fantasy_score",
              "fantasy pts":"fantasy_score","fantasy_pts":"fantasy_score",
              "hits + runs + rbis":"hits_runs_rbis","hits+runs+rbis":"hits_runs_rbis",
-             "hits + runs + rbi":"hits_runs_rbis","h+r+rbi+":"hits_runs_rbis"}
+             "hits + runs + rbi":"hits_runs_rbis","h+r+rbi+":"hits_runs_rbis",
+             "hits allowed":"hits_allowed","pitching outs":"pitching_outs",
+             "earned runs":"earned_runs","earned runs allowed":"earned_runs"}
         s2 = str(s).lower().replace(" ","_").replace("-","_").strip()
-        return m.get(s2, s2)
+        result = m.get(s2, s2)
+        # Block removed prop types even if they slip through via raw string match
+        _BLOCKED = {"stolen_bases","home_runs","walks","walks_allowed","doubles","triples","singles"}
+        return result if result not in _BLOCKED else ""
     ABS_FRAMING_WEIGHT = 0.20
     class SteamMonitor:
         def detect_steam(self, *a, **kw): return False, 0.0

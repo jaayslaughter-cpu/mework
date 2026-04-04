@@ -56,12 +56,11 @@ SPORT         = "baseball_mlb"
 
 # The Odds API market keys → our internal prop_type
 _MARKET_MAP: dict[str, str] = {
+    # batter_home_runs and batter_stolen_bases removed — not approved prop types
     "pitcher_strikeouts":  "strikeouts",
     "batter_hits":         "hits",
     "batter_total_bases":  "total_bases",
-    "batter_home_runs":    "home_runs",
     "batter_rbis":         "rbis",
-    "batter_stolen_bases": "stolen_bases",
     "batter_runs_scored":  "runs",
 }
 
@@ -276,8 +275,6 @@ def _build_reference_from_draftedge() -> dict[tuple, dict]:
                     continue
                 for prop_type, pct_col, line_default in [
                     ("batter_hits",          "hit_pct",  1.5),
-                    ("batter_home_runs",      "hr_pct",   0.5),
-                    ("batter_stolen_bases",   "sb_pct",   0.5),
                     ("batter_runs_scored",    "run_pct",  0.5),
                     ("batter_rbis",           "rbi_pct",  0.5),
                 ]:
@@ -465,17 +462,14 @@ def build_sportsbook_reference(date: str | None = None) -> dict[tuple, dict]:
 # ---------------------------------------------------------------------------
 
 _RAW_STAT_TO_PROP: dict[str, str] = {
+    # home_runs and stolen_bases removed — not approved prop types
     "strikeouts":           "strikeouts",
     "pitcher strikeouts":   "strikeouts",
     "hits":                 "hits",
-    "home runs":            "home_runs",
-    "home_runs":            "home_runs",
     "rbis":                 "rbis",
     "rbi":                  "rbis",
     "total bases":          "total_bases",
     "total_bases":          "total_bases",
-    "stolen bases":         "stolen_bases",
-    "stolen_bases":         "stolen_bases",
     "runs":                 "runs",
     "hits+runs+rbis":       "hits_runs_rbis",
     "hits + runs + rbis":   "hits_runs_rbis",
