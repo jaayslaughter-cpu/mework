@@ -250,7 +250,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 7          # plays below 7/10 are never sent to Discord
+MIN_CONFIDENCE    = 6          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -945,6 +945,11 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                 if data:
                     remaining = resp.headers.get("x-requests-remaining", "?")
                     logger.info("[OddsAPI] %d games fetched. Quota remaining: %s", len(data), remaining)
+                    # Cache quota to Redis so bug_checker can read it without a live API call
+                    try:
+                        _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
+                    except Exception:
+                        pass
                     return data
             elif resp.status_code in (401, 403, 422, 429):
                 logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
