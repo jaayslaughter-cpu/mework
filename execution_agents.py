@@ -36,6 +36,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pika
 import pika.exceptions
@@ -84,6 +85,7 @@ class PropEdge:
     source: str
     is_f5: bool = False
     kelly_fraction: float = 0.0
+    game_id: str = ""
 
     # --- Sportsbook odds (required for true no-vig EV calculation) ---
     # Defaults to standard -110/-110 juice when live odds are unavailable.
@@ -487,7 +489,10 @@ class BaseSlipBuilder(ABC):
             # Human-readable verdict from the math engine
             # e.g. "🛡️ INSURED (FLEX) — 3-leg +6.2% EV"
             "slip_type": slip_eval.verdict,
-            "recommended_entry_type": slip_eval.recommended_entry_type,
+            "recommended_entry_type": (
+                "PowerPlay" if slip_eval.recommended_entry_type in ("STANDARD", "PowerPlay")
+                else "FlexPlay"
+            ),
             "recommended_multiplier": slip_eval.recommended_multiplier,
             "legs": [
                 {
@@ -517,7 +522,7 @@ class BaseSlipBuilder(ABC):
             "p_two_loss": slip_eval.p_two_loss,
             # ½ Kelly, capped at 10 % — sourced from the math engine
             "recommended_unit_size": slip_eval.recommended_unit_size,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat(),
         }
 
 
@@ -794,10 +799,10 @@ class UmpireAgent(BaseSlipBuilder):
     """
 
     UMPIRE_PROP_TYPES: frozenset = frozenset({
-        "strikeouts", "ks", "walks", "bb", "earned_runs", "er",
+        "strikeouts", "ks", "earned_runs", "er",
     })
     PITCHER_ZONE_PROPS: frozenset = frozenset({"strikeouts", "ks"})
-    HITTER_ZONE_PROPS: frozenset = frozenset({"walks", "bb"})
+    HITTER_ZONE_PROPS: frozenset = frozenset()
     TOTAL_PROPS: frozenset = frozenset({"earned_runs", "er", "total", "runs_scored"})
     MIN_PROB: float = 0.54
     #: League average called-strike rate (~2024 MLB season).
@@ -1007,7 +1012,7 @@ class BullpenAgent(BaseSlipBuilder):
     """
 
     BULLPEN_SENSITIVE_PROPS: frozenset = frozenset({
-        "total_bases", "rbi", "runs_scored", "hits", "home_runs",
+        "total_bases", "rbi", "runs_scored", "hits",
         "earned_runs", "hits_allowed",
     })
     MIN_PROB: float = 0.54
@@ -1086,10 +1091,10 @@ class WeatherAgent(BaseSlipBuilder):
     """
 
     WEATHER_SENSITIVE_PROPS: frozenset = frozenset({
-        "home_runs", "total_bases", "hits", "runs_scored",
+        "total_bases", "hits", "runs_scored",
         "singles", "doubles", "xbh",
     })
-    POWER_PROPS: frozenset = frozenset({"home_runs", "total_bases", "xbh", "doubles"})
+    POWER_PROPS: frozenset = frozenset({"total_bases", "xbh", "doubles"})
     MIN_PROB: float = 0.54
     #: Wind speed (MPH) that triggers strong wind adjustments.
     STRONG_WIND_MPH: float = 15.0
@@ -1447,23 +1452,17 @@ class PlatoonAgent(BaseSlipBuilder):
 # ---------------------------------------------------------------------------
 
 class CatcherAgent(BaseSlipBuilder):
-    """Identifies K and stolen-base edges from catcher + pitcher battery metrics.
+    """Identifies K edges from catcher + pitcher battery framing metrics.
 
-    Two distinct signals:
+    Signal:
 
     1. **Framing upgrade** — An elite framing catcher (``catcher_framing_runs``
        > 2.0) paired with a wide umpire zone (``umpire_cs_pct`` > 0.345) creates
        a "double upgrade" on Pitcher Strikeout Overs.  The framer converts
        borderline pitches; the wide-zone umpire cooperates.
 
-    2. **Stolen-base window** — A slow-to-plate pitcher (``pitcher_time_to_plate``
-       > 1.4 s) combined with a weak-armed catcher (``catcher_pop_time`` > 2.0 s)
-       maximises the stolen-base window for fast runners.  Flags Over Stolen
-       Bases for any baserunner in the opposing lineup with a known SB threat.
-
     Target props:
         - ``strikeouts`` (Over — pitcher prop, framing signal)
-        - ``stolen_bases`` (Over — batter prop, battery speed signal)
 
     Probability gate:
         ``true_prob >= 0.54``
@@ -1479,13 +1478,13 @@ class CatcherAgent(BaseSlipBuilder):
         return "CatcherAgent"
 
     def filter_props(self, props: List[PropEdge]) -> List[PropEdge]:
-        """Apply battery-level framing and stolen-base signal logic.
+        """Apply battery-level framing signal logic.
 
         Args:
             props: Full incoming prop pool.
 
         Returns:
-            K-Over and SB-Over props confirmed by catcher/pitcher battery
+            K-Over props confirmed by catcher framing battery
             metrics, with probability >= 0.54.
         """
         eligible: List[PropEdge] = []
@@ -1507,23 +1506,6 @@ class CatcherAgent(BaseSlipBuilder):
                     )
                     eligible.append(prop)
                     continue
-
-            # ── Signal 2: Battery speed window → Over Stolen Bases ──────────
-            if (
-                prop.prop_type.lower() in ("stolen_bases", "sb", "stolen_base")
-                and prop.side == "Over"
-            ):
-                slow_pitcher = prop.pitcher_time_to_plate > self.SLOW_PITCHER_THRESHOLD
-                weak_arm = prop.catcher_pop_time > self.WEAK_ARM_POP_TIME
-                if slow_pitcher and weak_arm:
-                    logger.debug(
-                        "CatcherAgent: SB-Over battery window for %s "
-                        "(pitcher_ttp=%.2fs, catcher_pop=%.2fs)",
-                        prop.player_name,
-                        prop.pitcher_time_to_plate,
-                        prop.catcher_pop_time,
-                    )
-                    eligible.append(prop)
 
         eligible.sort(key=lambda p: p.edge_pct, reverse=True)
         return eligible
@@ -1978,4 +1960,5 @@ class ExecutionSquad:
             hours_rest=float(merged.get("hours_rest", 24.0)),
             time_zone_change=int(merged.get("time_zone_change", 0)),
             previous_game_innings=int(merged.get("previous_game_innings", 9)),
+            game_id=str(merged.get("game_id", "")),
         )
