@@ -46,11 +46,22 @@ That's the only change needed.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("propiq.enrichment")
+
+# ---------------------------------------------------------------------------
+# Banned prop types — must NEVER be enriched or evaluated (Phase 112+118)
+# ---------------------------------------------------------------------------
+
+_BANNED_PROP_TYPES = {
+    "home_runs", "stolen_bases", "walks", "walks_allowed",
+    "home_run", "stolen_base", "walk", "bb",
+}
 
 # ---------------------------------------------------------------------------
 # Pitcher prop types — used to decide whether to look up pitcher vs batter
@@ -58,12 +69,12 @@ logger = logging.getLogger("propiq.enrichment")
 
 _PITCHER_PROP_TYPES = {
     "strikeouts", "pitcher_strikeouts", "pitching_outs",
-    "earned_runs", "hits_allowed", "walks_allowed",
+    "earned_runs", "hits_allowed",
     "hitter_strikeouts",   # batter K — still lookup pitcher's K stats
 }
 
 _BATTER_PROP_TYPES = {
-    # home_runs, stolen_bases, doubles, singles, walks removed — not approved prop types
+    # home_runs, stolen_bases, doubles, singles, walks removed — banned prop types
     "hits", "total_bases", "rbis", "rbi", "runs",
     "hits_runs_rbis", "fantasy_hitter",
 }
@@ -72,6 +83,25 @@ _BATTER_PROP_TYPES = {
 def _norm(name: str) -> str:
     """Lowercase, strip, collapse whitespace."""
     return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+# ---------------------------------------------------------------------------
+# Module-level MLBFormLayer singleton — bug 40 fix: was re-instantiated
+# per prop per cycle (one new object every 15 seconds per prop)
+# ---------------------------------------------------------------------------
+
+_FORM_LAYER: Any = None
+
+
+def _get_form_layer() -> Any:
+    global _FORM_LAYER
+    if _FORM_LAYER is None:
+        try:
+            from mlb_form_layer import MLBFormLayer  # noqa: PLC0415
+            _FORM_LAYER = MLBFormLayer()
+        except Exception:
+            pass
+    return _FORM_LAYER
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +195,9 @@ def _get_fg_batter(name: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # Step 3 — Bayesian nudge
+# Bug 41 fix: was using k_rate (pitcher strikeout %) as player_rate proxy
+# for ALL prop types including batter hits/RBIs/runs — now uses woba for
+# batter props and k_rate for pitcher props.
 # ---------------------------------------------------------------------------
 
 def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
@@ -174,9 +207,14 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
         side       = prop.get("side", "OVER")
         player     = prop.get("player", "")
         line       = float(prop.get("line", 1.5) or 1.5)
-        # Use k_rate as player_rate proxy for all prop types (best we have)
-        player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.224)) or 0.224)
-        player_pa   = 27 if "strikeout" in prop_type else 4
+        # Bug 41 fix: use appropriate rate for prop type
+        if prop_type in _PITCHER_PROP_TYPES:
+            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.224)) or 0.224)
+            player_pa   = 27
+        else:
+            # Batter props — use wOBA as base rate proxy (range 0.0–0.5+)
+            player_rate = float(prop.get("woba", 0.310) or 0.310)
+            player_pa   = 4
         return bayesian_adjustment(
             prop_type=prop_type,
             side=side,
@@ -206,12 +244,14 @@ def _get_cv_nudge(player_id: int | None, prop_type: str, season: int) -> float:
 
 # ---------------------------------------------------------------------------
 # Step 5 — MLB form (hot/cold streak) adjustment
+# Bug 40 fix: MLBFormLayer() now pulled from module-level singleton
 # ---------------------------------------------------------------------------
 
 def _get_form_adj(player_name: str, prop_type: str, hub: dict) -> float:
     try:
-        from mlb_form_layer import MLBFormLayer  # noqa: PLC0415
-        layer = MLBFormLayer()
+        layer = _get_form_layer()
+        if layer is None:
+            return 0.0
         ctx   = hub.get("context", {})
         lineups = ctx.get("lineups", [])
         # Find player_id from lineups
@@ -334,14 +374,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     Args:
         props:  Raw prop list from _get_props(hub).
         hub:    Current DataHub snapshot from read_hub().
-        season: MLB season year (defaults to current year).
+        season: MLB season year (defaults to current PT year).
 
     Returns:
         Same list, each prop enriched with additional fields in-place.
+        Banned prop types are skipped (returned unchanged).
     """
-    import datetime
+    # Bug 38 fix: was datetime.date.today().year (UTC) — use PT
     if season is None:
-        season = datetime.date.today().year
+        season = datetime.datetime.now(ZoneInfo("America/Los_Angeles")).year
 
     if not props:
         return props
@@ -359,13 +400,20 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     _park_cache:    dict[str, dict] = {}
 
     enriched_count = 0
+    skipped_banned = 0
     fg_hits        = 0
 
     for prop in props:
         player    = prop.get("player", "")
         prop_type = prop.get("prop_type", "")
-        line      = float(prop.get("line", 1.5) or 1.5)
         pn        = _norm(player)
+
+        # Bug 39 fix: skip banned prop types entirely — never enrich or evaluate
+        if prop_type in _BANNED_PROP_TYPES:
+            skipped_banned += 1
+            continue
+
+        line = float(prop.get("line", 1.5) or 1.5)
 
         # ── Fix missing team / opponent from DataHub ──────────────────────────
         if not prop.get("team") and pn in p2team:
@@ -456,19 +504,19 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         pid = prop.get("player_id") or prop.get("mlbam_id")
         prop["_cv_nudge"] = _get_cv_nudge(pid, prop_type, season)
 
-        # ── MLB form adjustment ───────────────────────────────────────────────
+        # ── MLB form adjustment (uses module-level singleton — bug 40 fix) ────
         prop["_form_adj"] = _get_form_adj(player, prop_type, hub)
 
-        # ── Bayesian nudge (uses implied_prob if set, else 52.4% default) ────
+        # ── Bayesian nudge (uses prop-appropriate rate — bug 41 fix) ─────────
         base_prob = float(prop.get("implied_prob", 52.4))
         prop["_bayesian_nudge"] = _get_bayesian_nudge(prop, base_prob)
 
         enriched_count += 1
 
     logger.info(
-        "[Enrichment] %d props enriched | FanGraphs hits: %d/%d | "
+        "[Enrichment] %d props enriched | %d banned skipped | FanGraphs hits: %d/%d | "
         "chase scores: %d teams | weather: %d stadiums",
-        enriched_count, fg_hits, len(props),
+        enriched_count, skipped_banned, fg_hits, len(props),
         len(_chase_cache), len(_weather_cache),
     )
     return props
