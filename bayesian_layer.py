@@ -23,7 +23,8 @@ import numpy as np
 import json
 import os
 import warnings
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 warnings.filterwarnings("ignore")
 
@@ -38,19 +39,20 @@ MAX_NUDGE = 0.025
 _CACHE_DIR = "/tmp"
 ARCHETYPE_CACHE = os.path.join(_CACHE_DIR, "pitch_archetypes.json")
 
+_PT = ZoneInfo("America/Los_Angeles")
+
 # League-level Beta priors calibrated from 2021–2025 Statcast aggregates.
+# Bug 44: Removed hr_rate (home_runs banned) and bb_rate (walks banned).
 LEAGUE_PRIORS = {
     "k_rate":  {"alpha": 22.1, "beta": 77.9},   # ~22.1% K rate per PA
     "h_rate":  {"alpha": 24.2, "beta": 75.8},   # ~24.2% H rate per PA
-    "hr_rate": {"alpha":  3.1, "beta": 96.9},   # ~3.1%  HR rate per PA
     "tb_rate": {"alpha": 38.5, "beta": 61.5},   # ~38.5% TB rate per PA
-    "bb_rate": {"alpha":  8.5, "beta": 91.5},   # ~8.5%  BB rate per PA
 }
 
 PROP_TO_RATE = {
     "strikeouts":       "k_rate",
     "hits":             "h_rate",
-    # home_runs removed — not approved prop type
+    # home_runs removed — banned prop (Phase 112+118)
     "total_bases":      "tb_rate",
     "hits+runs+rbi":    "h_rate",
     "runs":             "h_rate",
@@ -73,12 +75,13 @@ ARCHETYPE_K_MODIFIER = {}
 
 def _fetch_pitch_archetypes() -> dict:
     """Cluster Baseball Savant pitch arsenal data into N_ARCHETYPES shapes."""
-    today = date.today()
+    # Bug 42: Use PT timezone, not UTC date.today()
+    today = datetime.now(_PT).date()
     if os.path.exists(ARCHETYPE_CACHE):
         try:
             with open(ARCHETYPE_CACHE) as f:
                 cached = json.load(f)
-            cache_date = date.fromisoformat(cached.get("date", "2000-01-01"))
+            cache_date = datetime.fromisoformat(cached.get("date", "2000-01-01")).date()
             if (today - cache_date).days < ARCHETYPE_CACHE_DAYS:
                 return cached.get("archetypes", {})
         except Exception:
@@ -117,7 +120,8 @@ def _monte_carlo_prop_prob(
     variance = posterior_rate * (1 - posterior_rate) / max(pa_estimate, 1)
     alpha = max(posterior_rate ** 2 * (1 - posterior_rate) / variance - posterior_rate, 0.1)
     beta_param = max(alpha * (1 - posterior_rate) / posterior_rate, 0.1)
-    rng = np.random.default_rng(42)
+    # Bug 45: No hardcoded seed — draws reflect true probability uncertainty
+    rng = np.random.default_rng()
     rate_samples = rng.beta(alpha, beta_param, size=n_draws)
     outcomes = rng.binomial(pa_estimate, rate_samples)
     return float(np.mean(outcomes > line))
@@ -147,7 +151,8 @@ def bayesian_adjustment(
     shrunk_rate = empirical_bayes_shrinkage(player_rate, player_pa, rate_key)
     bayes_prob = _monte_carlo_prop_prob(shrunk_rate, pa_est, line)
 
-    if side.lower() == "under":
+    # Bug 43: UD uses Higher/Lower mechanic — check both "lower" and "under"
+    if side.lower() in ("under", "lower"):
         bayes_prob = 1.0 - bayes_prob
 
     blended = BLEND_WEIGHT_BAYES * bayes_prob + (1 - BLEND_WEIGHT_BAYES) * existing_prob
