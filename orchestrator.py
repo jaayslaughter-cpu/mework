@@ -21,6 +21,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -75,8 +76,76 @@ _last_hub_run: str | None = None
 _last_agent_run: str | None = None
 _last_leaderboard_run: str | None = None
 
-# Dispatch guard — prevents double/triple firing (Problem 7 & 15)
+# Dispatch guard — prevents double/triple firing within the same process
 _dispatch_running: bool = False
+
+
+# ── Cross-process dispatch dedup ──────────────────────────────────────────────
+# Uses Postgres so a Railway redeploy (new process) still sees today's dispatch.
+
+def _get_db_conn():
+    """Return a psycopg2 connection or None if DATABASE_URL is unset."""
+    try:
+        import psycopg2
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            return None
+        return psycopg2.connect(db_url)
+    except Exception as exc:
+        logger.warning("[orchestrator] DB connect failed: %s", exc)
+        return None
+
+
+def _dispatch_already_ran_today() -> bool:
+    """Return True if dispatch_date_log already has today's PT date."""
+    pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    try:
+        conn = _get_db_conn()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dispatch_date_log (
+                dispatch_date DATE PRIMARY KEY
+            )
+        """)
+        conn.commit()
+        cur.execute(
+            "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s",
+            (pt_today,)
+        )
+        found = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return found
+    except Exception as exc:
+        logger.warning("[orchestrator] _dispatch_already_ran_today failed: %s — proceeding", exc)
+        return False
+
+
+def _record_dispatch_ran_today() -> None:
+    """Insert today's PT date into dispatch_date_log (no-op if already there)."""
+    pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    try:
+        conn = _get_db_conn()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dispatch_date_log (
+                dispatch_date DATE PRIMARY KEY
+            )
+        """)
+        cur.execute(
+            "INSERT INTO dispatch_date_log (dispatch_date) VALUES (%s) ON CONFLICT DO NOTHING",
+            (pt_today,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("[orchestrator] Dispatch date recorded: %s", pt_today)
+    except Exception as exc:
+        logger.warning("[orchestrator] _record_dispatch_ran_today failed: %s", exc)
 
 
 async def _safe_run(name: str, fn, *args, **kwargs):
@@ -124,7 +193,7 @@ async def job_data_hub():
         await loop.run_in_executor(None, run_data_hub_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] DataHubTasklet done in %.2fs", elapsed)
-        _last_hub_run = datetime.utcnow().isoformat()
+        _last_hub_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
     except Exception as exc:
         logger.error("[orchestrator] DataHubTasklet FAILED: %s", exc, exc_info=True)
 
@@ -139,7 +208,7 @@ async def job_agents():
         await loop.run_in_executor(None, run_agent_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
-        _last_agent_run = datetime.utcnow().isoformat()
+        _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
@@ -150,7 +219,7 @@ async def job_leaderboard():
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, run_leaderboard_tasklet)
-        _last_leaderboard_run = datetime.utcnow().isoformat()
+        _last_leaderboard_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
     except Exception as exc:
         logger.error("[orchestrator] LeaderboardTasklet FAILED: %s", exc, exc_info=True)
 
@@ -183,21 +252,28 @@ async def job_monthly_leaderboard():
         logger.warning("[orchestrator] monthly_leaderboard not available — skipping")
 
 
-
 async def _startup_dispatch_if_ready() -> None:
     """
     On startup, poll until DataHub is populated, then fire dispatch once.
     Ensures plays go out even when Railway redeploys after 8 AM PT.
-    Reads in-memory cache directly — does not depend on Redis being up.
+
+    Cross-process dedup: checks dispatch_date_log in Postgres before firing.
+    If dispatch already ran today (PT), exits immediately — no duplicate parlays.
+
     Max wait: 3 minutes (6 x 30s attempts).
     """
+    # Cross-process same-day dedup — survives Railway redeploys
+    if _dispatch_already_ran_today():
+        logger.info(
+            "[orchestrator] Startup dispatch skipped — already dispatched today (PT %s)",
+            datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat(),
+        )
+        return
+
     await asyncio.sleep(30)  # give DataHub one full cycle to populate
     for attempt in range(1, 7):
-        # Read hub directly from in-memory fallback (_mem_get) — avoids
-        # Redis dependency that caused "waiting" loops in prior deployments
         hub = read_hub()
 
-        # DataHub is ready when game_states is populated (ESPN always works)
         game_states = hub.get("game_states", {})
         has_context = bool(hub.get("context"))
         has_games = bool(hub.get("context", {}).get("projected_starters"))
@@ -222,8 +298,9 @@ async def _startup_dispatch_if_ready() -> None:
 
 
 async def job_dispatch():
-    """9:00 AM PT (12:00 PM ET) daily — build parlays and post to Discord.
+    """9:00 AM PT daily — build parlays and post to Discord.
     Guard prevents double/triple firing from APScheduler + startup dispatch racing.
+    Records today's PT date in dispatch_date_log so redeploys skip duplicate runs.
     """
     global _dispatch_running
     if _dispatch_running:
@@ -233,6 +310,7 @@ async def job_dispatch():
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_dispatcher.py")
     try:
         await _run_subprocess("LiveDispatch", script)
+        _record_dispatch_ran_today()
     finally:
         _dispatch_running = False
 
@@ -250,7 +328,7 @@ async def job_bug_checker():
     await _safe_run("BugChecker", run_bug_checker)
 
 async def job_streak():
-    """Streak pick — runs at 8:30 AM PT, after the main dispatch window."""
+    """Streak pick — runs at 9:30 AM PT, after the main dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
@@ -287,7 +365,7 @@ async def lifespan(_app: FastAPI):
         id="monthly_leaderboard",
     )
 
-    # ── Daily parlay dispatch — 9:00 AM PT (12:00 PM ET) ─────────────────────
+    # ── Daily parlay dispatch — 9:00 AM PT ───────────────────────────────────
     scheduler.add_job(
         job_dispatch,
         CronTrigger(hour=9, minute=0, timezone="America/Los_Angeles"),
@@ -308,7 +386,7 @@ async def lifespan(_app: FastAPI):
         id="streak",
     )
 
-    # ── Nightly settlement — 11:00 PM PT (2:00 AM ET) ────────────────────────
+    # ── Nightly settlement — 11:00 PM PT ─────────────────────────────────────
     scheduler.add_job(
         job_settle,
         CronTrigger(hour=23, minute=0, timezone="America/Los_Angeles"),
@@ -326,10 +404,11 @@ async def lifespan(_app: FastAPI):
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
     # Fire dispatch once DataHub is ready (handles post-8AM redeploys)
+    # Cross-process dedup ensures this never duplicates a same-day 9AM run
     asyncio.create_task(_startup_dispatch_if_ready())
 
     logger.info(
-        "All jobs scheduled: dispatch@8AM PT, settle@11PM PT, "
+        "All jobs scheduled: dispatch@9AM PT, settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
         "backtest@12:01AM, grading@1:05AM, xgboost@Sun2AM"
     )
@@ -359,7 +438,7 @@ async def root():
     return {
         "service": "PropIQ Agent Army",
         "version": "2.1.0",
-        "date": date.today().isoformat(),
+        "date": datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat(),
         "status": "running",
         "endpoints": [
             "/props", "/insights", "/leaderboard", "/backtest/latest",
@@ -447,9 +526,6 @@ async def trigger_xgboost():
 
 @app.get("/health")
 async def health():
-    # Return immediately — do not call read_hub() or read_leaderboard()
-    # as both attempt Redis connections which timeout in ~10s when Redis is unavailable.
-    # Railway health check must get a fast 200 or the deployment is killed.
     return JSONResponse({
         "status": "healthy",
         "scheduler_running": scheduler.running,
@@ -459,7 +535,7 @@ async def health():
     })
 
 
-# ── PropIQ HTTP endpoints (also callable via Tasklet HTTP triggers) ────────────
+# ── PropIQ HTTP endpoints ──────────────────────────────────────────────────────
 
 @app.post("/propiq/dispatch")
 async def trigger_dispatch():
@@ -499,7 +575,7 @@ async def trigger_leaderboard():
 
 @app.get("/propiq/status")
 async def get_propiq_status():
-    """Full system status — polled by Spring Boot health checks."""
+    """Full system status."""
     hub = read_hub()
     lb = read_leaderboard()
     return JSONResponse({
@@ -518,7 +594,7 @@ async def get_propiq_status():
 
 @app.get("/propiq/record")
 async def get_season_record():
-    """Season W/L record from Postgres — queried by Spring Boot."""
+    """Season W/L record from Postgres."""
     import psycopg2  # noqa: PLC0415
 
     db_url = os.environ.get("DATABASE_URL")
