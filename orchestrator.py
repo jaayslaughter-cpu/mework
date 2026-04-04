@@ -25,6 +25,7 @@ from datetime import datetime, date
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from bug_checker import run_bug_checker
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -194,16 +195,12 @@ async def _startup_dispatch_if_ready() -> None:
     for attempt in range(1, 7):
         # Read hub directly from in-memory fallback (_mem_get) — avoids
         # Redis dependency that caused "waiting" loops in prior deployments
-        try:
-            # _mem_get removed — read_hub() used instead  # noqa: PLC0415
-            hub = _mem_get("mlb_hub") or {}
-        except Exception:
-            hub = read_hub()
+        hub = read_hub()
 
         # DataHub is ready when game_states is populated (ESPN always works)
         game_states = hub.get("game_states", {})
         has_context = bool(hub.get("context"))
-        has_games = bool(game_states)
+        has_games = bool(hub.get("context", {}).get("projected_starters"))
         has_props = bool(hub.get("dfs", {}).get("underdog"))
 
         if has_games or has_context or has_props:
@@ -248,6 +245,11 @@ async def job_settle():
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
+
+async def job_bug_checker():
+    await _safe_run("BugChecker", run_bug_checker)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
@@ -283,20 +285,11 @@ async def lifespan(_app: FastAPI):
         id="live_dispatch",
     )
 
-    # ── Streak Agent — 8:30 AM PT (after main dispatch, before first pitch) ──
-    async def job_streak():
-        try:
-            from streak_agent import run_streak_pick, ensure_streak_tables  # noqa: PLC0415
-            ensure_streak_tables()
-            await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
-            logger.info("[StreakAgent] Pick posted.")
-        except Exception as exc:
-            logger.warning("[StreakAgent] Failed: %s", exc)
-
+    # ── Daily health check — 10:00 AM PT ─────────────────────────────────────
     scheduler.add_job(
-        job_streak,
-        CronTrigger(hour=8, minute=30, timezone="America/Los_Angeles"),
-        id="streak_agent",
+        job_bug_checker,
+        CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
+        id="bug_checker",
     )
 
     # ── Nightly settlement — 11:00 PM PT (2:00 AM ET) ────────────────────────
@@ -308,73 +301,16 @@ async def lifespan(_app: FastAPI):
 
     scheduler.start()
 
-    # Discord startup ping — fire at most once per calendar day (PT).
-    # Guards against Railway restart spam where the ping fires on every crash loop.
+    # Discord startup ping
     try:
-        import psycopg2 as _pg
-        from datetime import datetime as _dt, timezone as _tz
-        import os as _os
-        from zoneinfo import ZoneInfo as _ZI
-        _ping_date = _dt.now(_ZI("America/Los_Angeles")).date()
-        _db_url = _os.getenv("DATABASE_URL", "")
-        _should_ping = True
-        if _db_url:
-            try:
-                _pc = _pg.connect(_db_url, sslmode="require")
-                _pcu = _pc.cursor()
-                _pcu.execute("""
-                    CREATE TABLE IF NOT EXISTS startup_ping_log (
-                        ping_date DATE PRIMARY KEY,
-                        sent_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                """)
-                _pcu.execute(
-                    "SELECT 1 FROM startup_ping_log WHERE ping_date = %s",
-                    (_ping_date,),
-                )
-                if _pcu.fetchone():
-                    _should_ping = False
-                    logger.info("Startup ping already sent today (%s) — suppressed.", _ping_date)
-                else:
-                    _pcu.execute(
-                        "INSERT INTO startup_ping_log (ping_date) VALUES (%s) ON CONFLICT DO NOTHING",
-                        (_ping_date,),
-                    )
-                    _pc.commit()
-                _pcu.close()
-                _pc.close()
-            except Exception as _pg_err:
-                logger.warning("Startup ping DB guard failed: %s — sending ping.", _pg_err)
-        if _should_ping:
-            discord_alert.send_startup_ping()
+        discord_alert.send_startup_ping()
     except Exception as _disc_err:
         logger.warning("Discord startup ping failed: %s", _disc_err)
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
-    # Fire dispatch once DataHub is ready — ONLY within the 8:00–9:30 AM PT
-    # window.  Outside that window (e.g. Railway restarts at 5 PM) this is
-    # suppressed so stale parlays are never re-sent mid-afternoon.
-    try:
-        from zoneinfo import ZoneInfo as _ZI2
-        from datetime import datetime as _dt2
-        _now_pt = _dt2.now(_ZI2("America/Los_Angeles"))
-        _dispatch_hour   = _now_pt.hour
-        _dispatch_minute = _now_pt.minute
-        _in_dispatch_window = (
-            (_dispatch_hour == 8) or
-            (_dispatch_hour == 9 and _dispatch_minute <= 30)
-        )
-    except Exception:
-        _in_dispatch_window = True  # safe fallback
-    if _in_dispatch_window:
-        asyncio.create_task(_startup_dispatch_if_ready())
-    else:
-        logger.info(
-            "[orchestrator] Startup dispatch suppressed — outside 8:00–9:30 AM PT window "
-            "(current PT: %02d:%02d)",
-            _dispatch_hour, _dispatch_minute,
-        )
+    # Fire dispatch once DataHub is ready (handles post-8AM redeploys)
+    asyncio.create_task(_startup_dispatch_if_ready())
 
     logger.info(
         "All jobs scheduled: dispatch@8AM PT, settle@11PM PT, "
@@ -419,30 +355,23 @@ async def root():
 
 @app.get("/props")
 async def get_props():
-    """Live player props from Underdog + PrizePicks."""
+    """Live player props."""
     hub = read_hub()
-    ud_props = hub.get("dfs", {}).get("underdog", [])
-    pp_props = hub.get("dfs", {}).get("prizepicks", [])
-    all_raw  = ud_props + pp_props
+    props = hub.get("player_props", [])
     formatted = []
-    for p in all_raw[:100]:
-        over_odds  = p.get("over_american",  p.get("over_odds",  -115))
-        under_odds = p.get("under_american", p.get("under_odds", -115))
+    for p in props[:60]:
+        over_odds = p.get("over_odds")
+        under_odds = p.get("under_odds")
         formatted.append({
-            "player":    p.get("player", p.get("player_name", "")),
-            "prop_type": p.get("stat_type", p.get("prop_type", "")),
-            "line":      p.get("line", p.get("stat_value", 0)),
-            "platform":  p.get("platform", "underdog"),
-            "over":  f"+{over_odds}"  if isinstance(over_odds,  int) and over_odds  > 0 else str(over_odds  or "-"),
-            "under": f"+{under_odds}" if isinstance(under_odds, int) and under_odds > 0 else str(under_odds or "-"),
+            "player": p.get("player_name", ""),
+            "prop_type": p.get("prop_type", ""),
+            "line": p.get("line", 0),
+            "book": p.get("bookmaker", ""),
+            "over": f"+{over_odds}" if over_odds and int(over_odds) > 0 else str(over_odds or "-"),
+            "under": f"+{under_odds}" if under_odds and int(under_odds) > 0 else str(under_odds or "-"),
         })
-    return JSONResponse({
-        "props": formatted,
-        "count": len(formatted),
-        "underdog": len(ud_props),
-        "prizepicks": len(pp_props),
-        "timestamp": datetime.utcnow().isoformat(),
-    })
+    return JSONResponse({"props": formatted, "count": len(formatted), "timestamp": hub.get("timestamp")})
+
 
 @app.get("/insights")
 async def get_insights():
@@ -450,14 +379,9 @@ async def get_insights():
     lb = read_leaderboard()
     hub = read_hub()
     agents = get_agents()
-    agent_status = {}
-    for name, agent in agents.items():
-        stats = agent.stats
-        pending = len(agent.db.get_pending_bets(name))
-        agent_status[name] = {**stats, "pending_bets": pending}
     return JSONResponse({
-        "leaderboard": lb.get("leaderboard", []),
-        "agent_status": agent_status,
+        "leaderboard": lb,
+        "agents": agents,
         "games_today": len(hub.get("games_today", [])),
         "timestamp": lb.get("timestamp"),
     })
@@ -470,7 +394,8 @@ async def get_leaderboard():
 
 @app.get("/leaderboard/live")
 async def get_leaderboard_live():
-    return JSONResponse(run_leaderboard_tasklet())
+    run_leaderboard_tasklet()
+    return JSONResponse({"leaderboard": read_leaderboard()})
 
 
 @app.get("/backtest/latest")
@@ -487,16 +412,15 @@ async def get_backtest():
 
 @app.post("/backtest/run")
 async def trigger_backtest(start_date: str = None, end_date: str = None):
-    """Trigger backtest in background. Optional start_date/end_date params (YYYY-MM-DD)."""
-    asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet, start_date, end_date))
+    asyncio.create_task(_safe_run("BacktestTasklet", run_backtest_tasklet))
     return JSONResponse({"status": "started", "message": "Backtest running in background"})
 
 
 @app.post("/grade")
 async def trigger_grading_endpoint(game_date: str = None):
-    # run_grading_tasklet is a sync void function — run in background thread
-    asyncio.create_task(_safe_run("GradingTasklet", run_grading_tasklet))
-    return JSONResponse({"status": "started", "message": "Grading running in background"})
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_grading_tasklet)
+    return JSONResponse({"status": "ok", "message": "Grading complete — check Discord for recap"})
 
 
 @app.post("/xgboost/retrain")
@@ -567,8 +491,8 @@ async def get_propiq_status():
         "version": "2.1.0",
         "status": "healthy",
         "scheduler_running": scheduler.running,
-        "hub_ud_props": len(hub.get("dfs", {}).get("underdog", [])),
-        "hub_starters": len(hub.get("context", {}).get("projected_starters", [])),
+        "hub_props": len(hub.get("player_props", [])),
+        "hub_games": len(hub.get("games_today", [])),
         "leaderboard_agents": len(lb.get("leaderboard", [])),
         "last_hub_run": _last_hub_run,
         "last_agent_run": _last_agent_run,
@@ -585,7 +509,7 @@ async def get_season_record():
     if not db_url:
         return JSONResponse({"error": "DATABASE_URL not set"}, status_code=503)
     try:
-        conn = psycopg2.connect(db_url, sslmode="require")
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
         cur.execute(
             """

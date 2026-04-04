@@ -173,48 +173,45 @@ class StreakCandidate:
 # ---------------------------------------------------------------------------
 
 _BASE_RATES: dict[str, list[tuple[float, float]]] = {
+    # Only high-quality, reliable MLB DFS prop types
+    # stolen_bases, walks, home_runs removed — low base rates / unreliable for streaks
     "hits":           [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
-    "home_runs":      [(0.5, 0.22), (1.5, 0.04)],
-    "rbis":           [(0.5, 0.42), (1.5, 0.18), (2.5, 0.07)],
-    "runs":           [(0.5, 0.55), (1.5, 0.23), (2.5, 0.09)],
+    "rbis":           [(0.5, 0.38), (1.5, 0.18), (2.5, 0.07)],
+    "runs":           [(0.5, 0.47), (1.5, 0.23), (2.5, 0.09)],
     "total_bases":    [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
-    "stolen_bases":   [(0.5, 0.14), (1.5, 0.03)],
     "hits_runs_rbis": [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
     "strikeouts":     [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
     "earned_runs":    [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
     "fantasy_hitter": [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
     "fantasy_pitcher":[(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
-    "walks":          [(0.5, 0.68), (1.5, 0.42), (2.5, 0.22)],
+    "pitching_outs":  [(14.5, 0.62), (17.5, 0.46), (20.5, 0.30)],
+    "hits_allowed":   [(3.5, 0.55), (4.5, 0.40), (5.5, 0.28)],
 }
 
 _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
     "hits":           (0.5, 4.5),
-    "home_runs":      (0.5, 2.5),
     "rbis":           (0.5, 4.5),
     "runs":           (0.5, 3.5),
     "total_bases":    (0.5, 5.5),
-    "stolen_bases":   (0.5, 2.5),
     "hits_runs_rbis": (0.5, 8.5),
     "strikeouts":     (1.5, 12.5),
     "earned_runs":    (0.5, 6.5),
-    "walks":          (0.5, 5.5),
     "fantasy_hitter": (5.0, 60.0),
     "fantasy_pitcher":(15.0, 70.0),
 }
 
 _STAT_TYPE_MAP: dict[str, str] = {
+    # stolen_bases, home_runs, walks removed — not approved prop types
     "strikeouts": "strikeouts", "pitcher strikeouts": "strikeouts", "ks": "strikeouts",
     "hits": "hits",
-    "home runs": "home_runs", "home_runs": "home_runs",
     "rbis": "rbis", "rbi": "rbis",
     "runs": "runs",
     "total bases": "total_bases", "total_bases": "total_bases",
-    "stolen bases": "stolen_bases", "stolen_bases": "stolen_bases",
     "hits+runs+rbis": "hits_runs_rbis", "hits + runs + rbis": "hits_runs_rbis",
     "hitter fantasy score": "fantasy_hitter", "fantasy_points_hitter": "fantasy_hitter",
     "pitcher fantasy score": "fantasy_pitcher", "fantasy_points_pitcher": "fantasy_pitcher",
-    "earned runs": "earned_runs", "earned_runs": "earned_runs",
-    "walks": "walks",
+    "earned runs": "earned_runs", "earned runs allowed": "earned_runs", "earned_runs": "earned_runs",
+    "hits allowed": "hits_allowed", "pitching outs": "pitching_outs",
 }
 
 
@@ -574,7 +571,13 @@ def select_start_picks(
         )
         pick2 = qualified[1]
 
-    return [pick1, pick2] if pick2 else [pick1]
+    if not pick2:
+        logger.info(
+            "[Streak] Fresh start requires 2 qualifying picks — only 1 found today. "
+            "Streak will not start until 2 are available."
+        )
+        return []
+    return [pick1, pick2]
 
 
 # ---------------------------------------------------------------------------
@@ -793,17 +796,16 @@ _PRIZE_EMOJI = {1: "🥉", 5: "🥈", 10: "🥇"}
 
 _PROP_LABELS: dict[str, str] = {
     "hits":           "Hits",
-    "home_runs":      "Home Runs",
     "rbis":           "RBIs",
     "runs":           "Runs Scored",
     "total_bases":    "Total Bases",
-    "stolen_bases":   "Stolen Bases",
     "hits_runs_rbis": "H+R+RBI",
     "strikeouts":     "Pitcher Ks",
     "earned_runs":    "Earned Runs",
+    "pitching_outs":  "Pitching Outs",
+    "hits_allowed":   "Hits Allowed",
     "fantasy_hitter": "Hitter Fantasy Pts",
     "fantasy_pitcher":"Pitcher Fantasy Pts",
-    "walks":          "Walks",
 }
 
 
@@ -1086,15 +1088,12 @@ def post_milestone_alert(pick_number: int, wins_in_row: int, entry_amount: int) 
 
 _PROP_TO_ESPN_STAT: dict[str, str] = {
     "hits":           "hits",
-    "home_runs":      "homeRuns",
     "rbis":           "RBIs",
     "runs":           "runs",
     "total_bases":    "totalBases",
-    "stolen_bases":   "stolenBases",
     "hits_runs_rbis": "hits",        # composite: H+R+RBI computed manually
     "strikeouts":     "strikeouts",  # pitcher Ks
     "earned_runs":    "earnedRuns",
-    "walks":          "baseOnBalls",
 }
 
 
