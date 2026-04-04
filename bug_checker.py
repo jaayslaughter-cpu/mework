@@ -189,39 +189,44 @@ def _check_draftedge() -> tuple[str, str, str]:
 
 
 def _check_odds_api_quota() -> tuple[str, str, str]:
-    try:
-        import urllib.request
-        key = os.getenv("ODDS_API_KEY_2", "")
-        if not key:
-            return "Odds API", "warn", "ODDS_API_KEY_2 not set"
-        url = f"https://api.the-odds-api.com/v4/sports?apiKey={key}&all=false"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            remaining = resp.headers.get("x-requests-remaining", "?")
-            used = resp.headers.get("x-requests-used", "?")
-        remaining_int = int(remaining) if remaining != "?" else None
-        if remaining_int is not None and remaining_int < 50:
-            return "Odds API", "warn", f"Low quota: {remaining} remaining ({used} used)"
-        return "Odds API", "ok", f"{remaining} requests remaining ({used} used)"
-    except Exception as exc:
-        return "Odds API", "warn", f"Could not check: {exc}"
-
-
-def _check_sbref_cache() -> tuple[str, str, str]:
-    """Check sportsbook reference cache size in Redis."""
+    """Read Odds API quota from Redis (cached by _odds_api_get after each DataHub cycle).
+    Does NOT make a live API call — zero quota cost."""
     try:
         import redis  # type: ignore
         url = os.getenv("REDIS_URL", os.getenv("REDIS_PRIVATE_URL", ""))
         if not url:
-            return "SB Reference", "warn", "Redis unavailable"
+            return "Odds API", "warn", "REDIS_URL not set — cannot read quota"
         r = redis.from_url(url, socket_timeout=3)
-        count = 0
-        for key in r.scan_iter("sbref:*"):
-            count += 1
-        if count == 0:
-            return "SB Reference", "warn", "Cache empty — sharp-line enrichment degraded"
-        return "SB Reference", "ok", f"{count} cached entries"
+        raw = r.get("odds_api_quota_remaining")
+        if raw is None:
+            return "Odds API", "warn", "Quota not yet cached — will appear after first DataHub cycle"
+        remaining = int(raw)
+        if remaining < 50:
+            return "Odds API", "fail", f"Critically low: {remaining} requests remaining"
+        if remaining < 200:
+            return "Odds API", "warn", f"Low: {remaining} requests remaining"
+        return "Odds API", "ok", f"{remaining} requests remaining"
     except Exception as exc:
-        return "SB Reference", "warn", str(exc)
+        return "Odds API", "warn", f"Could not read quota from Redis: {exc}"
+
+
+def _check_sbref_cache() -> tuple[str, str, str]:
+    """Check sportsbook reference disk cache (/tmp/sb_ref_YYYY-MM-DD.json).
+    sportsbook_reference_layer._CACHE_DIR = '/tmp' — this matches that path."""
+    try:
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        cache_path = f"/tmp/sb_ref_{today}.json"
+        if not os.path.exists(cache_path):
+            return "SB Reference", "warn", f"Cache file not found for {today} — fetch may not have run"
+        size_kb = os.path.getsize(cache_path) // 1024
+        with open(cache_path) as f:
+            data = json.load(f)
+        count = len(data)
+        if count == 0:
+            return "SB Reference", "warn", "Cache exists but is empty — Odds API returned no prop markets"
+        return "SB Reference", "ok", f"{count} entries cached ({size_kb}KB)"
+    except Exception as exc:
+        return "SB Reference", "warn", f"Cache check failed: {exc}"
 
 
 def _check_streak_state() -> tuple[str, str, str]:

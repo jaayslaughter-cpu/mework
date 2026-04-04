@@ -63,8 +63,8 @@ _PITCHER_PROP_TYPES = {
 }
 
 _BATTER_PROP_TYPES = {
-    "hits", "home_runs", "total_bases", "rbis", "rbi", "runs",
-    "stolen_bases", "doubles", "singles", "walks",
+    # home_runs, stolen_bases, doubles, singles, walks removed — not approved prop types
+    "hits", "total_bases", "rbis", "rbi", "runs",
     "hits_runs_rbis", "fantasy_hitter",
 }
 

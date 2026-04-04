@@ -8,7 +8,7 @@ Runs 8 tasklets on their defined schedules:
   - BacktestTasklet:     daily  12:01AM PT
   - GradingTasklet:      daily   1:05AM PT
   - XGBoostTasklet:      weekly Sunday 2:00AM PT
-  - LiveDispatch:        daily   8:00AM PT (11:00AM ET) → Discord parlays
+  - LiveDispatch:        daily   9:00AM PT (12:00PM ET) → Discord parlays
   - NightlyRecap:        daily  11:00PM PT ( 2:00AM ET) → Discord settlement
 
 Also exposes a FastAPI dashboard on $PORT.
@@ -222,7 +222,7 @@ async def _startup_dispatch_if_ready() -> None:
 
 
 async def job_dispatch():
-    """8:00 AM PT (11:00 AM ET) daily — build parlays and post to Discord.
+    """9:00 AM PT (12:00 PM ET) daily — build parlays and post to Discord.
     Guard prevents double/triple firing from APScheduler + startup dispatch racing.
     """
     global _dispatch_running
@@ -248,6 +248,15 @@ async def job_settle():
 
 async def job_bug_checker():
     await _safe_run("BugChecker", run_bug_checker)
+
+async def job_streak():
+    """Streak pick — runs at 8:30 AM PT, after the main dispatch window."""
+    try:
+        from streak_agent import run_streak_pick  # noqa: PLC0415
+        await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
+        logger.info("[StreakAgent] Pick posted.")
+    except Exception as exc:
+        logger.warning("[StreakAgent] Failed: %s", exc)
 
 
 @asynccontextmanager
@@ -278,10 +287,10 @@ async def lifespan(_app: FastAPI):
         id="monthly_leaderboard",
     )
 
-    # ── Daily parlay dispatch — 8:00 AM PT (11:00 AM ET) ─────────────────────
+    # ── Daily parlay dispatch — 9:00 AM PT (12:00 PM ET) ─────────────────────
     scheduler.add_job(
         job_dispatch,
-        CronTrigger(hour=8, minute=0, timezone="America/Los_Angeles"),
+        CronTrigger(hour=9, minute=0, timezone="America/Los_Angeles"),
         id="live_dispatch",
     )
 
@@ -290,6 +299,13 @@ async def lifespan(_app: FastAPI):
         job_bug_checker,
         CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
         id="bug_checker",
+    )
+
+    # ── Streak pick — 9:30 AM PT (after 9AM dispatch completes) ─────────────
+    scheduler.add_job(
+        job_streak,
+        CronTrigger(hour=9, minute=30, timezone="America/Los_Angeles"),
+        id="streak",
     )
 
     # ── Nightly settlement — 11:00 PM PT (2:00 AM ET) ────────────────────────

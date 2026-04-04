@@ -50,64 +50,6 @@ import requests
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Postgres cache helpers (Phase 100 — survives Railway container restarts)
-# ---------------------------------------------------------------------------
-
-def _pg_load_cache(season: int) -> tuple[dict, dict] | None:
-    """Try loading batter/pitcher cache from Postgres fg_cache table.
-    Returns (batter_dict, pitcher_dict) or None if unavailable.
-    """
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return None
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT data_type, data FROM fg_cache WHERE season = %s AND data_type IN ('batting','pitching')",
-            (season,)
-        )
-        rows = {row[0]: row[1] for row in cur.fetchall()}
-        cur.close()
-        conn.close()
-        if "batting" in rows and "pitching" in rows:
-            logger.info("[FG] Postgres cache hit — season=%d", season)
-            return rows["batting"], rows["pitching"]
-        return None
-    except Exception as exc:
-        logger.debug("[FG] Postgres cache read skipped: %s", exc)
-        return None
-
-
-def _pg_write_cache(season: int, batters: dict, pitchers: dict) -> None:
-    """Upsert batter/pitcher cache to Postgres fg_cache table."""
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return
-    try:
-        import psycopg2
-        import psycopg2.extras
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
-        for data_type, data in (("batting", batters), ("pitching", pitchers)):
-            cur.execute(
-                """
-                INSERT INTO fg_cache (season, data_type, data, cached_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (season, data_type) DO UPDATE
-                    SET data = EXCLUDED.data, cached_at = NOW()
-                """,
-                (season, data_type, psycopg2.extras.Json(data))
-            )
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("[FG] Postgres cache written — season=%d", season)
-    except Exception as exc:
-        logger.warning("[FG] Postgres cache write failed: %s", exc)
-
-# ---------------------------------------------------------------------------
 # Inline helpers
 # ---------------------------------------------------------------------------
 
@@ -378,22 +320,7 @@ def _load() -> None:
         except Exception as exc:
             logger.warning("[FG] Disk cache read failed (%s) — checking Postgres", exc)
 
-    # ── Disk miss: try Postgres cache (survives Railway container restarts) ──
-    pg_result = _pg_load_cache(season)
-    if pg_result:
-        _BATTER_CACHE, _PITCHER_CACHE = pg_result
-        _data_year = season
-        # Restore disk cache from Postgres for next access
-        try:
-            with open(cache_path, "w") as fh:
-                json.dump({"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE, "season": season}, fh)
-            logger.info("[FG] Disk cache restored from Postgres")
-        except Exception as exc:
-            logger.debug("[FG] Disk restore failed (non-critical): %s", exc)
-        _loaded = True
-        return
-
-    # ── Postgres cache (survives Railway restarts, checked after /tmp miss) ────
+    # ── Disk miss: try Postgres cache (survives Railway restarts) ─────────────
     pg_batters, pg_pitchers = _pg_load_cache(season)
     if pg_batters or pg_pitchers:
         _BATTER_CACHE  = pg_batters
@@ -645,8 +572,6 @@ def get_park_factors(team: str) -> dict[str, int]:
 def park_factor_adjustment(
     prop_type: str,
     direction: str,   # "Over" or "Under"
-    home_team: str,
-    direction: str,       # "Over" or "Under"
     home_team: str,
     batter_hand: str = "", # "L", "R", or "" (unknown → use overall hr)
 ) -> float:
