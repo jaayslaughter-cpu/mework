@@ -646,8 +646,6 @@ def park_factor_adjustment(
     prop_type: str,
     direction: str,   # "Over" or "Under"
     home_team: str,
-    direction: str,       # "Over" or "Under"
-    home_team: str,
     batter_hand: str = "", # "L", "R", or "" (unknown → use overall hr)
 ) -> float:
     """

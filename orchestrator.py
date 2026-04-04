@@ -222,7 +222,7 @@ async def _startup_dispatch_if_ready() -> None:
 
 
 async def job_dispatch():
-    """8:00 AM PT (11:00 AM ET) daily — build parlays and post to Discord.
+    """9:00 AM PT (12:00 PM ET) daily — build parlays and post to Discord.
     Guard prevents double/triple firing from APScheduler + startup dispatch racing.
     """
     global _dispatch_running

@@ -50,10 +50,9 @@ LEAGUE_PRIORS = {
 PROP_TO_RATE = {
     "strikeouts":       "k_rate",
     "hits":             "h_rate",
-    "home_runs":        "hr_rate",
+    # home_runs removed — not approved prop type
     "total_bases":      "tb_rate",
     "hits+runs+rbi":    "h_rate",
-    "walks":            "bb_rate",
     "runs":             "h_rate",
     "rbis":             "h_rate",
 }
@@ -61,10 +60,8 @@ PROP_TO_RATE = {
 PA_ESTIMATE = {
     "strikeouts":    27,
     "hits":           4,
-    "home_runs":      4,
     "total_bases":    4,
     "hits+runs+rbi":  4,
-    "walks":          4,
     "runs":           4,
     "rbis":           4,
 }

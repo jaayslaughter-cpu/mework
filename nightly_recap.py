@@ -345,7 +345,7 @@ def run(settle_date: Optional[str] = None) -> None:
                         _cur.execute(
                             """
                             INSERT INTO bet_ledger
-                                (date, agent, player_name, prop_type, direction, line,
+                                (bet_date, agent_name, player_name, prop_type, side, line,
                                  actual_outcome, profit_loss, status, created_at)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                             ON CONFLICT DO NOTHING
