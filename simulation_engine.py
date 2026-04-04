@@ -34,11 +34,9 @@ logger = logging.getLogger(__name__)
 _LG_HIT_RATE      = 0.237   # H/PA  (singles+doubles+triples+HR / PA)
 _LG_HR_RATE       = 0.034   # HR/PA
 _LG_K_RATE        = 0.226   # K/PA (batter strikeout rate)
-_LG_BB_RATE       = 0.085   # BB/PA
 _LG_PITCHER_K9    = 8.7     # average K/9 for starters
 _LG_STARTER_IP    = 5.5     # average innings before bullpen
 _LG_BULLPEN_ERA   = 4.10    # league average bullpen ERA
-_LG_STARTER_ERA   = 4.45    # league average starter ERA
 _LG_TEAM_TOTAL    = 4.5     # average runs per team per game (implied)
 
 # Empirical PA-per-game by lineup slot (2021-2024 MLB)
@@ -297,28 +295,6 @@ def _simulate_pitcher_strikeouts(prop: dict, line: float, n_sims: int) -> SimRes
     return _build_result(k_counts, line, prop=prop)
 
 
-def _simulate_hitter_hr(prop: dict, line: float, n_sims: int) -> SimResult:
-    """Monte Carlo simulation for HR props."""
-    mean_pa    = _get_pa_mean(prop)
-    starter_pa = _get_starter_pa_fraction(prop, mean_pa)
-
-    p_hr_start = _hr_prob_per_pa(prop, "starter")
-    p_hr_bull  = _hr_prob_per_pa(prop, "bullpen")
-
-    hr_counts = []
-    for _ in range(n_sims):
-        total_pa = _sample_pa(mean_pa)
-        s_pa     = min(round(starter_pa + random.gauss(0, 0.5)), total_pa)
-        s_pa     = max(0, s_pa)
-        b_pa     = total_pa - s_pa
-
-        hrs = sum(1 for _ in range(s_pa) if random.random() < p_hr_start)
-        hrs += sum(1 for _ in range(b_pa) if random.random() < p_hr_bull)
-        hr_counts.append(hrs)
-
-    return _build_result(hr_counts, line, prop=prop)
-
-
 def _simulate_hitter_total_bases(prop: dict, line: float, n_sims: int) -> SimResult:
     """Monte Carlo simulation for total bases props.
     Separates HR (4 TB) from singles (1), doubles (2), triples (3).
@@ -487,9 +463,6 @@ def simulate_prop(prop: dict, n_sims: int = 10_000) -> SimResult:
         if prop_type in ("hits", "hit", "h"):
             return _simulate_hitter_hits(prop, line, n_sims)
 
-        if prop_type in ("home_runs", "hr", "home_run"):
-            return _simulate_hitter_hr(prop, line, n_sims)
-
         if prop_type in ("total_bases", "tb", "total_base"):
             return _simulate_hitter_total_bases(prop, line, n_sims)
 
@@ -568,7 +541,11 @@ def inject_team_total(prop: dict, hub: dict) -> None:
         away_ml = game.get("away_moneyline")
         if home_ml and away_ml:
             try:
-                home_win = (100 / (100 + abs(int(home_ml)))) if int(home_ml) < 0 else (abs(int(home_ml)) / (abs(int(home_ml)) + 100))
+                hml = int(home_ml)
+                # Correct implied probability:
+                # Negative ML (favourite): abs(ml) / (abs(ml) + 100)
+                # Positive ML (underdog):  100 / (ml + 100)
+                home_win = (abs(hml) / (abs(hml) + 100)) if hml < 0 else (100 / (hml + 100))
                 away_win = 1.0 - home_win
                 home_share = _clamp(home_win * 0.55 + 0.225)  # favourite scores more
                 away_share = 1.0 - home_share
