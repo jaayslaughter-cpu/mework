@@ -51,8 +51,15 @@ def _ensure_table(conn) -> None:
                     confidence  NUMERIC(5,2) NOT NULL DEFAULT 0.00,
                     status      TEXT NOT NULL DEFAULT 'PENDING',
                     legs_json   TEXT,
-                    created_at  TEXT NOT NULL
+                    created_at  TEXT NOT NULL,
+                    discord_sent BOOLEAN NOT NULL DEFAULT TRUE
                 )
+            """)
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE propiq_season_record
+                ADD COLUMN IF NOT EXISTS discord_sent BOOLEAN NOT NULL DEFAULT TRUE
             """)
         conn.commit()
     except Exception as exc:
