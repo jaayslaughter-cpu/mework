@@ -68,11 +68,9 @@ _MIN_GAME_THRESHOLD = 3
 # "keys" are camelCase MLB Stats API field names from the game log stat dict.
 _PROP_STAT_MAP: dict[str, dict] = {
     "hits":            {"group": "hitting",  "keys": ["hits"]},
-    "home_runs":       {"group": "hitting",  "keys": ["homeRuns"]},
     "rbis":            {"group": "hitting",  "keys": ["rbi"]},
     "runs":            {"group": "hitting",  "keys": ["runs"]},
     "total_bases":     {"group": "hitting",  "keys": ["totalBases"]},
-    "stolen_bases":    {"group": "hitting",  "keys": ["stolenBases"]},
     "hits_runs_rbis":  {"group": "hitting",  "keys": ["hits", "runs", "rbi"]},
     "fantasy_hitter":  {"group": "hitting",  "keys": ["hits", "totalBases", "rbi", "runs"]},
     "strikeouts":      {"group": "pitching", "keys": ["strikeOuts"]},

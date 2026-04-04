@@ -206,10 +206,15 @@ def _build_recap_embed(
             })
 
     # Season stats footer
-    season_record = season_stats.get("record", "0W-0L-0P")
-    season_units  = season_stats.get("units_profit", 0.0)
-    season_roi    = season_stats.get("roi_pct", 0.0)
-    pending_count = season_stats.get("pending", 0)
+    _sw = season_stats.get("wins",         0)
+    _sl = season_stats.get("losses",       0)
+    _sp = season_stats.get("pushes",       0)
+    season_record = f"{_sw}W-{_sl}L-{_sp}P"
+    season_units  = round(
+        season_stats.get("total_payout", 0.0) - season_stats.get("total_staked", 0.0), 1
+    )
+    season_roi    = season_stats.get("roi_pct",  0.0)
+    pending_count = season_stats.get("pending",  0)
 
     embed = {
         "embeds": [{
@@ -345,7 +350,7 @@ def run(settle_date: Optional[str] = None) -> None:
                         _cur.execute(
                             """
                             INSERT INTO bet_ledger
-                                (date, agent, player_name, prop_type, direction, line,
+                                (bet_date, agent_name, player_name, prop_type, side, line,
                                  actual_outcome, profit_loss, status, created_at)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                             ON CONFLICT DO NOTHING

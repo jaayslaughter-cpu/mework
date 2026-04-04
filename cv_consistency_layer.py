@@ -22,7 +22,7 @@ import time
 import logging
 import statistics
 import requests
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,14 @@ logger = logging.getLogger(__name__)
 MLBSTATS_BASE = "https://statsapi.mlb.com/api/v1"
 GAME_LOG_COUNT = 10          # L10 games for CV calculation
 CACHE_DIR = "/tmp"
-CACHE_FILE = f"{CACHE_DIR}/cv_cache_{date.today().isoformat()}.json"
+try:
+    import pytz as _cv_pytz
+    _cv_pt = _cv_pytz.timezone("America/Los_Angeles")
+    _cv_today = datetime.now(_cv_pt).strftime("%Y-%m-%d")
+except ImportError:
+    from datetime import timezone, timedelta as _cv_td
+    _cv_today = (datetime.now(timezone.utc) - _cv_td(hours=8)).strftime("%Y-%m-%d")
+CACHE_FILE = f"{CACHE_DIR}/cv_cache_{_cv_today}.json"
 
 # CV tier boundaries → nudge values
 CV_TIERS = [
@@ -50,18 +57,14 @@ PROP_STAT_MAP = {
     # Hitting props
     "hits":          ("hitting", "hits",        None),
     "total_bases":   ("hitting", None,           "calc_total_bases"),
-    "home_runs":     ("hitting", "homeRuns",     None),
     "rbis":          ("hitting", "rbi",          None),
     "runs":          ("hitting", "runs",         None),
-    "stolen_bases":  ("hitting", "stolenBases",  None),
     "singles":       ("hitting", "hits",         None),  # approximate
     "doubles":       ("hitting", "doubles",      None),
-    "walks":         ("hitting", "baseOnBalls",  None),
     "strikeouts":    ("hitting", "strikeOuts",   None),  # batter Ks
     # Pitching props
     "pitcher_strikeouts": ("pitching", "strikeOuts", None),
     "pitcher_hits":       ("pitching", "hits",        None),
-    "pitcher_walks":      ("pitching", "baseOnBalls", None),
     "pitcher_er":         ("pitching", "earnedRuns",  None),
     "pitcher_outs":       ("pitching", "outs",        None),
 }

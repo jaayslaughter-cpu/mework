@@ -250,7 +250,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 7          # plays below 7/10 are never sent to Discord
+MIN_CONFIDENCE    = 6          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -392,6 +392,12 @@ def _is_spring_training() -> bool:
     import zoneinfo as _zi
     today_pt = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date()
     return today_pt < OPENING_DAY
+
+
+def _today_pt() -> "datetime.date":
+    """Return today's date in America/Los_Angeles (Pacific Time). Never use date.today()."""
+    import zoneinfo as _zi
+    return datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date()
 
 
 def _american_to_implied(american: int) -> float:
@@ -549,7 +555,7 @@ def _fetch_espn_games() -> dict:
 def _fetch_mlb_lineups_today() -> list[dict]:
     """Fetch today's confirmed batting order lineups from MLB Stats API (free, no key)."""
     import datetime as _dt  # noqa: PLC0415
-    today = _dt.date.today().strftime("%Y-%m-%d")
+    today = _today_pt().strftime("%Y-%m-%d")
     try:
         resp = requests.get(
             "https://statsapi.mlb.com/api/v1/schedule",
@@ -581,7 +587,7 @@ def _fetch_mlb_lineups_today() -> list[dict]:
 def _fetch_mlb_probable_starters() -> list[dict]:
     """Fetch today's probable starting pitchers from MLB Stats API (free, no key)."""
     import datetime as _dt  # noqa: PLC0415
-    today = _dt.date.today().strftime("%Y-%m-%d")
+    today = _today_pt().strftime("%Y-%m-%d")
     try:
         resp = requests.get(
             "https://statsapi.mlb.com/api/v1/schedule",
@@ -623,7 +629,7 @@ def _fetch_mlb_standings() -> list[dict]:
     Replaces Apify actor ToDC6ydulO79igDoX.
     """
     import datetime as _dt  # noqa: PLC0415
-    season = _dt.date.today().year
+    season = _today_pt().year
     try:
         resp = requests.get(
             "https://statsapi.mlb.com/api/v1/standings",
@@ -797,6 +803,9 @@ def _fetch_underdog_props_direct() -> list[dict]:
                 continue
             # Enforce STANDARD only — skip FLEX / alt / goblin / demon lines
             ou_check = line.get("over_under") or {}
+            # Phase 116: only balanced Pick'em lines — boosted/alt lines excluded
+            if line.get("line_type", "balanced") != "balanced":
+                continue
             entry_type = (
                 line.get("entry_type")
                 or ou_check.get("entry_type")
@@ -945,6 +954,11 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                 if data:
                     remaining = resp.headers.get("x-requests-remaining", "?")
                     logger.info("[OddsAPI] %d games fetched. Quota remaining: %s", len(data), remaining)
+                    # Cache quota to Redis so bug_checker can read it without a live API call
+                    try:
+                        _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
+                    except Exception:
+                        pass
                     return data
             elif resp.status_code in (401, 403, 422, 429):
                 logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
@@ -975,8 +989,7 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     _rundown_key = os.getenv("RUNDOWN_API_KEY", "a455831fa40a562b43d7f7830f6ab467fa38074d46d078e0d47de324b46bea79")
     if _rundown_key:
         try:
-            import datetime as _dt
-            _rd_date = _dt.date.today().strftime("%Y-%m-%d")
+            _rd_date = _today_pt().strftime("%Y-%m-%d")
             _rd_resp = requests.get(
                 f"https://therundown.io/api/v2/sports/3/events/{_rd_date}",
                 headers={"X-TheRundown-Key": _rundown_key, "Accept": "application/json"},
@@ -1062,10 +1075,18 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     return []
 
 
+# Module-level XGBoost model cache — loaded once, reused every 30s cycle
+_XGB_MODEL_CACHE = None
+
+
 def _load_xgb_model():
-    """Lazy-load trained XGBoost model from disk.
+    """Lazy-load trained XGBoost model from disk. Cached at module level — never reloads
+    from disk on every cycle. Cleared by run_xgboost_tasklet() on retrain.
     Supports both .json (XGBoost native) and .pkl (legacy pickle) formats.
     """
+    global _XGB_MODEL_CACHE
+    if _XGB_MODEL_CACHE is not None:
+        return _XGB_MODEL_CACHE
     path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
     if not os.path.exists(path):
         logger.warning("[XGB] Model not found at %s — agents using flat 50%% probability", path)
@@ -1075,12 +1096,14 @@ def _load_xgb_model():
             import xgboost as xgb  # noqa: PLC0415
             booster = xgb.Booster()
             booster.load_model(path)
-            logger.info("[XGB] Loaded XGBoost model from %s", path)
+            logger.info("[XGB] Loaded XGBoost model from %s (cached)", path)
+            _XGB_MODEL_CACHE = booster
             return booster
         else:
             with open(path, "rb") as f:
                 model = pickle.load(f)
-            logger.info("[XGB] Loaded pickle model from %s", path)
+            logger.info("[XGB] Loaded pickle model from %s (cached)", path)
+            _XGB_MODEL_CACHE = model
             return model
     except Exception as exc:
         logger.warning("[XGB] Model load failed (%s): %s — using flat 50%%", path, exc)
@@ -1346,7 +1369,7 @@ def run_data_hub_tasklet() -> None:
     # ── Pre-match gate: fetch today's game states ──────────────────────────
     game_states: dict[str, str] = {}
     try:
-        today = datetime.date.today().strftime("%Y-%m-%d")
+        today = _today_pt().strftime("%Y-%m-%d")
         games_raw = _fetch_espn_games()
         game_states.update({gid: g["Status"] for gid, g in games_raw.items()})
         logger.info("[DataHub] %d games today. States: %s",
@@ -1401,16 +1424,23 @@ def run_data_hub_tasklet() -> None:
     context_key = "hub:context"
     if not _hub_exists(r, context_key):
         logger.info("[DataHub] Scraping context / environment data…")
-        context = {
-            "weather":            _fetch_weather_today(),    # Open-Meteo free
-            "umpires":            [],  # no source yet
-            "injuries":           [],  # no source yet
-            "lineups":            _fetch_mlb_lineups_today(),
-            "projected_starters": _fetch_mlb_probable_starters(),
-            "standings":          _fetch_mlb_standings(),
-            "game_times":         _fetch_game_times_today(),  # Step 3: first-pitch UTC + status
-        }
-        _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
+        try:
+            context = {
+                "weather":            _fetch_weather_today(),    # Open-Meteo free
+                "umpires":            [],  # no source yet
+                "injuries":           [],  # no source yet
+                "lineups":            _fetch_mlb_lineups_today(),
+                "projected_starters": _fetch_mlb_probable_starters(),
+                "standings":          _fetch_mlb_standings(),
+                "game_times":         _fetch_game_times_today(),  # Step 3: first-pitch UTC + status
+            }
+            _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
+        except Exception as _ctx_err:
+            logger.warning("[DataHub] Context group build failed: %s — storing empty fallback", _ctx_err)
+            _hub_setex(r, context_key, TTL_CONTEXT, json.dumps({
+                "weather": [], "umpires": [], "injuries": [],
+                "lineups": [], "projected_starters": [], "standings": [], "game_times": {},
+            }))
 
     # ── Group 3: Market / Sharp steam (TTL 5 min) ─────────────────────────
     market_key = "hub:market"
@@ -2113,8 +2143,7 @@ class _UmpireAgent(_BaseAgent):
         umpires = self.hub.get("context", {}).get("umpires", [])
         if not umpires:
             try:
-                import datetime as _dt, requests as _req
-                _d = _dt.date.today().strftime("%Y-%m-%d")
+                _d = _today_pt().strftime("%Y-%m-%d")
                 _sched = _req.get(
                     "https://statsapi.mlb.com/api/v1/schedule",
                     params={"sportId":1,"date":_d,"hydrate":"officials","gameType":"R"},
@@ -3173,7 +3202,7 @@ def run_agent_tasklet() -> None:
     # Enrich all props with FanGraphs, weather, Bayesian, CV, form, park context
     # This populates the fields _build_feature_vector() reads (k_rate, shadow_whiff, etc.)
     import datetime as _dt
-    props = _enrich_props(props, hub, season=_dt.date.today().year)
+    props = _enrich_props(props, hub, season=_today_pt().year)
 
     # Phase 112: remove prop types not evaluated (user directive)
     _EXCLUDED_PROP_TYPES = {
@@ -3340,7 +3369,7 @@ def run_agent_tasklet() -> None:
     try:
         _conn = _pg_conn()
         with _conn.cursor() as _cur:
-            _today = datetime.date.today()
+            _today = _today_pt()
             for _parlay in all_parlays:
                 for _leg in _parlay.get("legs", []):
                     _cur.execute(
@@ -3384,7 +3413,7 @@ def run_agent_tasklet() -> None:
     # Uses in-memory dict _AGENT_SENT_TODAY (agent → "YYYY-MM-DD") as primary
     # gate so it works with or without Redis.  Redis is also written as a
     # cross-process backup (e.g. multiple Railway replicas).
-    today_str  = datetime.date.today().isoformat()   # "2026-03-29"
+    today_str  = _today_pt().isoformat()   # Pacific Time date
     r_dedup    = _redis()
 
     # ── DB-backed dedup preload — survives crash + Redis cold restart ──────────
@@ -3787,7 +3816,7 @@ def run_grading_tasklet() -> None:
     SportsData.io replaced — was returning 403 on all calls.
     """
     # GradingTasklet runs at 1:05 AM — must grade YESTERDAY's bets (not today's)
-    _yesterday = (datetime.date.today() - datetime.timedelta(days=1))
+    _yesterday = (_today_pt() - datetime.timedelta(days=1))
     today      = _yesterday.strftime("%Y-%m-%d")   # used as grade_date throughout
     espn_date  = _yesterday.strftime("%Y%m%d")     # ESPN format
 
@@ -4458,6 +4487,8 @@ def run_xgboost_tasklet() -> None:
         new_booster = xgb.Booster()
         new_booster.load_model(model_path)
         _BaseAgent._shared_model = new_booster
+        global _XGB_MODEL_CACHE
+        _XGB_MODEL_CACHE = new_booster   # sync module-level cache with retrained model
         logger.info("[XGBoostTasklet] ✅ Hot-reloaded model into all agents.")
     except Exception as _hrl_err:
         logger.warning("[XGBoostTasklet] Hot-reload failed (%s) — agents pick up on next restart.", _hrl_err)

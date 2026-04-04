@@ -23,7 +23,15 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PAYOUT_MULTIPLIER = 2.0   # 2× on winning FLEX parlay
+# Payout multipliers by number of legs — Underdog PowerPlay defaults.
+# These are the confirmed multipliers from the Dual-Platform Directive.
+_UD_POWERPLAY_MULT: dict[int, float] = {
+    2: 3.5,
+    3: 6.0,
+    4: 10.0,
+    5: 10.0,
+}
+_DEFAULT_PAYOUT_MULTIPLIER = 3.5   # fallback if leg count not in table
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +190,7 @@ def settle_parlay(
       - Any LOSS = parlay LOSS, units_profit = -stake
       - All PUSH = parlay PUSH, units_profit = 0
       - All non-push legs WIN = parlay WIN,
-            units_profit = stake × _DEFAULT_PAYOUT_MULTIPLIER - stake
+            units_profit = stake × multiplier - stake (per-leg lookup)
       - Mixed WIN/PUSH (no losses) = parlay WIN on the winning legs
     """
     if not legs_data:
@@ -205,8 +213,10 @@ def settle_parlay(
         units_profit = 0.0
     else:
         # At least one WIN, no losses
-        outcome      = "WIN"
-        units_profit = stake * _DEFAULT_PAYOUT_MULTIPLIER - stake
+        outcome    = "WIN"
+        num_legs   = len(legs_data)
+        multiplier = _UD_POWERPLAY_MULT.get(num_legs, _DEFAULT_PAYOUT_MULTIPLIER)
+        units_profit = stake * multiplier - stake
 
     return ParlayResult(
         parlay_id=parlay_id,
