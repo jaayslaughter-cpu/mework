@@ -245,7 +245,7 @@ def get_overall_season_stats() -> dict:
                     COUNT(*) FILTER (WHERE status = 'PUSH')    AS pushes,
                     COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
                     COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
-                    COALESCE(SUM(stake), 0) AS total_staked
+                    COALESCE(SUM(stake) FILTER (WHERE status != 'PENDING'), 0) AS total_staked
                 FROM propiq_season_record
             """)
             row = cur.fetchone()
@@ -285,7 +285,7 @@ def get_agent_season_stats(agent_name: str) -> dict:
                     COUNT(*) FILTER (WHERE status = 'LOSS') AS losses,
                     COUNT(*) FILTER (WHERE status = 'PUSH') AS pushes,
                     COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
-                    COALESCE(SUM(stake), 0) AS total_staked
+                    COALESCE(SUM(stake) FILTER (WHERE status != 'PENDING'), 0) AS total_staked
                 FROM propiq_season_record
                 WHERE agent_name = %s
             """, (agent_name,))

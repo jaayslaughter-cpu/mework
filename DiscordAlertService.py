@@ -296,7 +296,7 @@ class DiscordAlertService:
             side_raw  = leg.get("side", "?")
             leg_plat  = leg.get("platform", platform)
             # Underdog uses Higher/Lower; translate for display
-            if "underdog" in str(leg_plat).lower():
+            if "underdog" in str(leg_plat).lower() or "underdog" in plat_lower:
                 side = side_raw.replace("Over", "Higher").replace("Under", "Lower")
             else:
                 side = side_raw

@@ -611,7 +611,7 @@ async def get_season_record():
                 COUNT(*) FILTER (WHERE status = 'PUSH')    AS pushes,
                 COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
                 COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
-                COALESCE(SUM(stake),  0)                   AS total_staked
+                COALESCE(SUM(stake) FILTER (WHERE status != 'PENDING'),  0)  AS total_staked
             FROM propiq_season_record
             """
         )
