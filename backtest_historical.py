@@ -27,7 +27,7 @@ Usage
 
 Environment variables required
 --------------------------------
-    SPORTSDATA_API_KEY   (c2abf26f55714d228c7c311290f956d7)
+    SPORTSDATA_API_KEY   (set in Railway — do not hardcode)
 
 PEP 8 compliant. No external API keys beyond SportsData.io.
 """
@@ -65,24 +65,30 @@ logger = logging.getLogger("backtest")
 # Constants
 # ---------------------------------------------------------------------------
 SEASONS = list(range(2016, 2026))          # 2016 – 2025 inclusive
-SPORTSDATA_KEY = os.getenv(
-    "SPORTSDATA_API_KEY", "c2abf26f55714d228c7c311290f956d7"
-)
+
+# Bug 37 fix: never hardcode the key — must come from environment only
+SPORTSDATA_KEY = os.getenv("SPORTSDATA_API_KEY", "")
+if not SPORTSDATA_KEY:
+    logger.error(
+        "SPORTSDATA_API_KEY environment variable not set. "
+        "Set it in Railway before running the backtest."
+    )
+    sys.exit(1)
+
 SPORTSDATA_BASE = "https://api.sportsdata.io/v3/mlb/stats/json"
 
-# Prop types we simulate (maps SportsData field → prop label)
+# Bug 34 fix: removed banned props (home_runs, stolen_bases, walks).
+# Prop types we simulate (maps SportsData field → prop label).
+# Must match production active prop types exactly (Phase 112 + 118 directives).
 PROP_MAP: dict[str, str] = {
     "Hits": "hits",
-    "HomeRuns": "home_runs",
     "RBIs": "rbis",
     "Runs": "runs",
     "StrikeoutsAsBatter": "batter_k",
     "TotalBases": "total_bases",
-    "StolenBases": "stolen_bases",
     "PitchingStrikeouts": "pitcher_k",
     "EarnedRunsAllowed": "era_line",
     "InningsPitchedDecimal": "innings",
-    "Walks": "walks",
     "Singles": "singles",
     "Doubles": "doubles",
     "PitchingHitsAllowed": "hits_allowed",
@@ -96,6 +102,10 @@ L30 = 30
 # EV gate (mirrors production odds_math.py)
 EV_GATE = 0.03            # 3 %
 HALF_KELLY_CAP = 0.10     # 10 % of bankroll per bet
+
+# Bug 36 fix: production MIN_PROB = 0.57 (Phase 121 Confidence Gate).
+# Applied uniformly across all agents to match production gating exactly.
+MIN_PROB = 0.57
 
 # Simulated implied probability for the "book" (typical DFS -115 both sides)
 BOOK_ODDS = -115          # American odds
@@ -272,40 +282,25 @@ AGENTS = [
     "GetawayAgent",
 ]
 
-# Minimum probability threshold per agent (mirrors prod)
-AGENT_MIN_PROB: dict[str, float] = {
-    "EVHunter": 0.53,
-    "UnderMachine": 0.53,
-    "F5Agent": 0.53,
-    "MLEdgeAgent": 0.55,
-    "UmpireAgent": 0.54,
-    "FadeAgent": 0.52,
-    "LineValueAgent": 0.53,
-    "BullpenAgent": 0.54,
-    "WeatherAgent": 0.54,
-    "SteamAgent": 0.56,
-    "ArsenalAgent": 0.54,
-    "PlatoonAgent": 0.52,
-    "CatcherAgent": 0.54,
-    "LineupAgent": 0.52,
-    "GetawayAgent": 0.52,
-}
+# Bug 36 fix: all agents use production MIN_PROB = 0.57 (Phase 121).
+# Previous values (0.52–0.56) caused backtest to accept bets production drops.
+AGENT_MIN_PROB: dict[str, float] = {agent: MIN_PROB for agent in AGENTS}
 
-# Prop type affinity per agent
+# Bug 35 fix: removed banned props (home_runs, stolen_bases, walks) from all agent filters.
 AGENT_PROP_FILTER: dict[str, set[str]] = {
-    "EVHunter": set(PROP_MAP.values()),           # all props
+    "EVHunter": set(PROP_MAP.values()),           # all active props
     "UnderMachine": set(PROP_MAP.values()),        # unders only (direction filter)
-    "F5Agent": {"pitcher_k", "hits_allowed", "walks", "era_line", "innings"},
+    "F5Agent": {"pitcher_k", "hits_allowed", "era_line", "innings"},
     "MLEdgeAgent": set(PROP_MAP.values()),
-    "UmpireAgent": {"pitcher_k", "batter_k", "walks", "era_line"},
+    "UmpireAgent": {"pitcher_k", "batter_k", "era_line"},
     "FadeAgent": set(PROP_MAP.values()),
     "LineValueAgent": set(PROP_MAP.values()),
-    "BullpenAgent": {"era_line", "hits_allowed", "walks", "innings"},
-    "WeatherAgent": {"home_runs", "total_bases", "hits"},
+    "BullpenAgent": {"era_line", "hits_allowed", "innings"},
+    "WeatherAgent": {"total_bases", "hits"},
     "SteamAgent": set(PROP_MAP.values()),
     "ArsenalAgent": {"pitcher_k", "total_bases"},
-    "PlatoonAgent": {"hits", "home_runs", "rbis", "total_bases"},
-    "CatcherAgent": {"pitcher_k", "stolen_bases"},
+    "PlatoonAgent": {"hits", "rbis", "total_bases"},
+    "CatcherAgent": {"pitcher_k"},
     "LineupAgent": {"hits", "runs", "rbis", "total_bases"},
     "GetawayAgent": {"hits", "runs", "rbis", "total_bases", "singles"},
 }
@@ -327,7 +322,7 @@ def passes_agent_filter(
     """Return True if this bet passes the agent's logic gates."""
     if ev_pct < EV_GATE:
         return False
-    if model_prob < AGENT_MIN_PROB.get(agent, 0.53):
+    if model_prob < AGENT_MIN_PROB.get(agent, MIN_PROB):
         return False
     if prop_type not in AGENT_PROP_FILTER.get(agent, set()):
         return False
@@ -458,7 +453,7 @@ def run_backtest(
 
                 # Push this game's stats into the rolling windows FIRST
                 # (we peek at them BEFORE pushing for look-ahead-bias prevention)
-                pre_push_windows: dict[str, float | None] = {}
+                pre_push_windows: dict[str, tuple] = {}
                 for sd_field, prop_label in PROP_MAP.items():
                     raw_val = record.get(sd_field)
                     if raw_val is None:
