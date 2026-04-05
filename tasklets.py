@@ -3934,6 +3934,13 @@ def run_grading_tasklet() -> None:
         stat_lookup[name_lower]   = mapped   # lowercase index
         stat_lookup[_ascii_name]  = mapped   # accent-stripped index (Acuña → Acuna)
         stat_lookup[_ascii_name.lower()] = mapped   # accent-stripped lowercase
+        # Hyphen-normalized keys (ESPN uses "Crow-Armstrong"; PP/UD may store "Crow Armstrong")
+        _dn_nohyphen = display_name.replace("-", " ")
+        stat_lookup[_dn_nohyphen]         = mapped
+        stat_lookup[_dn_nohyphen.lower()]  = mapped
+        _ascii_nohyphen = _ascii_name.replace("-", " ")
+        stat_lookup[_ascii_nohyphen]          = mapped
+        stat_lookup[_ascii_nohyphen.lower()]  = mapped
 
     open_bets: list[tuple] = []
     try:
@@ -4006,12 +4013,28 @@ def run_grading_tasklet() -> None:
                         )
                     except Exception:
                         pass
-                stats = (_stats_by_id
-                         or stat_lookup.get(player)
-                         or stat_lookup.get(_pn_norm)
-                         or stat_lookup.get(player.lower())
-                         or stat_lookup.get(_pn_norm.lower())
-                         or {})
+                _pn_nohyphen = player.replace("-", " ")
+                _pn_norm_nohyphen = _pn_norm.replace("-", " ")
+                # Last-name-only fallback: "Crow-Armstrong" → "Armstrong"
+                _pn_lastname = player.strip().split()[-1] if player.strip() else ""
+                _pn_lastname_lower = _pn_lastname.lower()
+                stats = (
+                    _stats_by_id
+                    or stat_lookup.get(player)
+                    or stat_lookup.get(_pn_norm)
+                    or stat_lookup.get(player.lower())
+                    or stat_lookup.get(_pn_norm.lower())
+                    or stat_lookup.get(_pn_nohyphen)
+                    or stat_lookup.get(_pn_nohyphen.lower())
+                    or stat_lookup.get(_pn_norm_nohyphen)
+                    or stat_lookup.get(_pn_norm_nohyphen.lower())
+                    # Last-name-only: last resort to catch spacing/suffix variants
+                    or next(
+                        (v for k, v in stat_lookup.items()
+                         if _pn_lastname_lower and k.split()[-1].lower() == _pn_lastname_lower),
+                        {}
+                    )
+                )
                 actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:
