@@ -62,10 +62,11 @@ logging.basicConfig(
 # Config
 # ---------------------------------------------------------------------------
 
-DISCORD_WEBHOOK = (
+_WEBHOOK_FALLBACK = (
     "https://discordapp.com/api/webhooks/1484795164961800374/"
     "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
 )
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", _WEBHOOK_FALLBACK)
 
 _DB_PATH = Path(os.getenv("LINE_STREAM_DB_PATH", "/tmp/line_stream.db"))
 _STEAM_THRESHOLD = 0.5   # minimum line movement (units) to fire a steam alert
