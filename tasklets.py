@@ -441,16 +441,28 @@ def _get_sample_count(prop_type: str) -> int:
     """Return the number of settled ledger rows for this prop-type.
     Used by thin-data shrinkage in _build_bet().
     Populated by run_xgboost_tasklet() under key 'xgb_sample_counts'.
-    Returns 0 on any Redis miss/error (triggers max shrinkage for unknown types).
+
+    Cold-start behaviour (key absent from Redis):
+      Returns _COLD_START_SAMPLES (100) so shrinkage doesn't collapse ALL
+      agent confidence to 4/10 on day 1 before the first XGBoost retrain.
+      100 samples ≈ 'thin but seen' — applies moderate shrinkage rather than
+      maximum shrinkage, keeping confidence scores above MIN_CONFIDENCE=6.
+
+    Once xgb_sample_counts is written by run_xgboost_tasklet() (Sunday 2 AM)
+    or by run_data_hub_tasklet() via _refresh_sample_counts(), the real per-
+    prop-type counts take over.
     """
+    _COLD_START_SAMPLES = 100   # floor when Redis key absent entirely
     try:
         raw = _redis().get("xgb_sample_counts")
         if raw:
             counts: dict = json.loads(raw)
+            # Key exists — use real count (may be 0 for unseen prop types)
             return int(counts.get(str(prop_type).lower(), 0))
+        # Key absent — cold start, return floor so shrinkage is moderate not maximal
+        return _COLD_START_SAMPLES
     except Exception:
-        pass
-    return 0
+        return _COLD_START_SAMPLES
 
 
 def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:

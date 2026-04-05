@@ -18,7 +18,7 @@ from calendar import month_name
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DISCORD_WEBHOOK = os.environ.get(
-    "DISCORD_WEBHOOK",
+    "DISCORD_WEBHOOK_URL",   # matches Railway env var set for all other senders
     "https://discordapp.com/api/webhooks/1484795164961800374/jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM",
 )
 
