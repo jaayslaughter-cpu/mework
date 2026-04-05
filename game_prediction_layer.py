@@ -52,6 +52,7 @@ _LEAGUE_AVG = {
     "win_pct":   0.500,
     "rs_per_g":  4.50,
     "ra_per_g":  4.50,
+    "rd_per_g":  0.0,   # run differential — league average is always zero by definition
     "era":       4.20,
     "whip":      1.28,
     "k9":        8.80,
