@@ -257,7 +257,8 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 6          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
+MIN_CONFIDENCE    = 6
+MIN_PROB          = 0.57   # Phase 121: minimum XGBoost model probability (57%)          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -1299,6 +1300,51 @@ def _fetch_weather_today() -> list[dict]:
     logger.info("[DataHub] Weather fetched for %d stadiums", len(results))
     return results
 
+def _refresh_sample_counts() -> None:
+    """Seed xgb_sample_counts in Redis from bet_ledger settled rows.
+
+    Called once per DataHub refresh cycle so sample counts grow from day 1
+    rather than staying at 0 until the first Sunday XGBoost retrain.
+
+    Counts only rows with discord_sent=TRUE AND result IS NOT NULL so the
+    floor matches exactly what XGBoost trains on.  The Sunday retrain will
+    overwrite with richer per-prop-type stats; this is just a daily warm-up.
+    """
+    try:
+        conn_str = os.getenv("DATABASE_URL", "")
+        if not conn_str:
+            return
+        import psycopg2  # noqa: PLC0415
+        with psycopg2.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT prop_type, COUNT(*) AS n
+                    FROM bet_ledger
+                    WHERE discord_sent = TRUE
+                      AND result IS NOT NULL
+                    GROUP BY prop_type
+                    """
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return
+        counts = {r[0].lower(): int(r[1]) for r in rows if r[0]}
+        r = _redis()
+        existing_raw = r.get("xgb_sample_counts")
+        if existing_raw:
+            existing = json.loads(existing_raw)
+            # Merge: only update keys where we have new data; don't overwrite
+            # XGBoost-written counts that may be higher (retrain uses more rows)
+            for k, v in counts.items():
+                existing[k] = max(existing.get(k, 0), v)
+            counts = existing
+        r.setex("xgb_sample_counts", 604800, json.dumps(counts))
+        logger.info("[DataHub] xgb_sample_counts seeded from bet_ledger: %s", counts)
+    except Exception as exc:
+        logger.debug("[DataHub] _refresh_sample_counts skipped: %s", exc)
+
+
 # 1. DataHubTasklet
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1457,7 +1503,7 @@ def run_data_hub_tasklet() -> None:
             "batted_ball":    [],  # no actor yet
             "second_half":    [],  # no actor yet
             "game_predictions": _gp_list,
-            "nsfi":             [],  # NSFI not consumed downstream — skip fetch
+            "nsfi":             _fetch_nsfi(),  # No-Strikeout First Inning predictions
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
 
@@ -1557,6 +1603,8 @@ def run_data_hub_tasklet() -> None:
         if data:
             hub[key.replace("hub:", "")] = data
 
+    # Seed sample counts from bet_ledger so shrinkage uses real data before retrain
+    _refresh_sample_counts()
     _hub_setex(r, "mlb_hub", TTL_HUB, json.dumps(hub))
     logger.info("[DataHub] Hub refreshed. Groups: physics=%s context=%s market=%s dfs=%s",
                 _hub_exists(r, physics_key), _hub_exists(r, context_key),
@@ -2693,6 +2741,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
 
     enriched_legs = []
     for lg in legs:
+        _orig_conf = lg.get("confidence", 5)   # capture before any mutation
         if _lc_ok:
             try:
                 result = compare_prop(
@@ -2709,6 +2758,11 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
                     }
             except Exception:
                 pass
+        # Defensive: always restore original confidence so compare_prop cannot
+        # silently drop it, preventing p_conf from defaulting to 5 and blocking
+        # the MIN_CONFIDENCE=6 gate for non-EVHunter agents (Bug #15b).
+        if "confidence" not in lg:
+            lg = {**lg, "confidence": _orig_conf}
         enriched_legs.append(lg)
 
     # ── Step 2: decide ONE platform for the whole parlay ─────────────────────
@@ -3087,6 +3141,8 @@ _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _MLEdgeAgent,  # SteamAgent: internal-only, not in Discord picks
+    _PropCycleAgent,    # mean-reversion on form_adj + cv_nudge (no new deps)
+    _LineupChaseAgent,  # K-props only, fires on confirmed lineups + high chase difficulty
 ]
 
 
@@ -3255,6 +3311,13 @@ def run_agent_tasklet() -> None:
     """
     hub   = read_hub()
     model = _load_xgb_model()
+
+    # ── Send-window clock gate — only dispatch picks 9:00–10:00 AM PT ──────────
+    import zoneinfo as _zi
+    _pt_now = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles"))
+    if not (9 <= _pt_now.hour < 10):
+        logger.debug("[AgentTasklet] Outside 9–10 AM PT send window (%02d:%02d) — skipping.", _pt_now.hour, _pt_now.minute)
+        return
 
     # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
     # Avoids burning API quota, writing empty bet_ledger rows, and spamming logs
@@ -3430,23 +3493,11 @@ def run_agent_tasklet() -> None:
     if not all_parlays:
         return
 
-    producer = _kafka_producer()
     r        = _redis()
     for parlay in all_parlays:
         payload = json.dumps(parlay)
-        if producer:
-            try:
-                producer.produce("bet_queue", value=payload.encode())
-            except Exception as e:
-                logger.warning("[AgentTasklet] Kafka error: %s — Redis fallback", e)
-                r.lpush("bet_queue", payload)
-                r.ltrim("bet_queue", 0, 499)
-        else:
-            r.lpush("bet_queue", payload)
-            r.ltrim("bet_queue", 0, 499)
-
-    if producer:
-        producer.flush(timeout=5)
+        r.lpush("bet_queue", payload)
+        r.ltrim("bet_queue", 0, 499)
 
     # ── Persist each leg to bet_ledger for grading ───────────────────────────
     try:
@@ -3508,7 +3559,8 @@ def run_agent_tasklet() -> None:
             with _pg.cursor() as _c:
                 _c.execute(
                     "SELECT DISTINCT agent_name FROM bet_ledger "
-                    "WHERE bet_date = %s AND discord_sent = TRUE",
+                    "WHERE bet_date = %s AND discord_sent = TRUE "
+                    "AND created_at >= NOW() - INTERVAL '18 hours'",
                     (today_str,)
                 )
                 _preloaded: list = []
@@ -3712,7 +3764,7 @@ def run_leaderboard_tasklet() -> None:
     Read 14-day settled bets from Postgres, compute per-agent ROI,
     update capital multipliers (0.5x – 2.0x), store in Redis.
     """
-    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=14)).isoformat()
+    cutoff = (datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")) - datetime.timedelta(days=14)).isoformat()
     rows: list[tuple] = []
 
     try:

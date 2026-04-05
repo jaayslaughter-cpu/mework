@@ -21,6 +21,7 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from espn_scraper import get_all_player_stats, get_game_states
@@ -104,9 +105,9 @@ def _yesterday_pt() -> str:
         return yesterday_pt.strftime("%Y-%m-%d")
     except ImportError:
         pass
-    # Fallback: UTC-8 (PST). During PDT (UTC-7) this is 1h conservative,
-    # which still returns the correct calendar day.
-    now_pt_approx = datetime.now(timezone.utc) - timedelta(hours=8)
+    # Fallback: ZoneInfo (stdlib, always DST-correct).
+    from zoneinfo import ZoneInfo as _ZI  # noqa: PLC0415
+    now_pt_approx = datetime.now(_ZI("America/Los_Angeles"))
     yesterday_approx = now_pt_approx - timedelta(days=1)
     return yesterday_approx.strftime("%Y-%m-%d")
 
@@ -286,7 +287,7 @@ def run(settle_date: Optional[str] = None) -> None:
         # If ESPN returned data and NO games are FINAL at all → skip
         all_final = all(g["status"] == "FINAL" for g in parlay_games) if parlay_games else True
         # Force-settle after 2 days to prevent permanent hangs
-        today_et = datetime.now(timezone.utc).date()
+        today_et = datetime.now(ZoneInfo("America/Los_Angeles")).date()
         parlay_dt = datetime.strptime(parlay_date, "%Y-%m-%d").date() if isinstance(parlay_date, str) else today_et
         days_old = (today_et - parlay_dt).days
         if not all_final and days_old < 2:

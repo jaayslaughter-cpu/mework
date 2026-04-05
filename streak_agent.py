@@ -1267,7 +1267,14 @@ def settle_streak_picks(game_date: str) -> None:
 
                 # Update streak state
                 if outcome == "WIN":
-                    new_wins = pick["wins_in_row"] + 1
+                    # Re-read wins_in_row to avoid stale batch reads
+                    # (both fresh-start picks graded same cycle both see wins_in_row=0)
+                    cur.execute(
+                        "SELECT wins_in_row FROM streak_state WHERE id=%s FOR UPDATE",
+                        (streak_id,),
+                    )
+                    _fresh = cur.fetchone()
+                    new_wins = (_fresh[0] if _fresh else pick["wins_in_row"]) + 1
                     streak_status = "WON" if new_wins >= STREAK_TOTAL_WINS else "ACTIVE"
                     cur.execute(
                         "UPDATE streak_state SET wins_in_row=%s, status=%s WHERE id=%s",
@@ -1359,7 +1366,7 @@ def get_streak_season_stats() -> tuple[int, int]:
     try:
         conn = _pg_conn()
         with conn.cursor() as cur:
-            year = datetime.now(timezone.utc).year
+            year = datetime.now(ZoneInfo("America/Los_Angeles")).year
             cur.execute(
                 """
                 SELECT COUNT(*) as total,
@@ -1394,7 +1401,7 @@ def run_streak_pick(
     Fetches props → scores → selects best pick → persists → alerts Discord.
     Returns the pick dict, or None if no qualifying pick exists today.
     """
-    date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = date_str or datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
     logger.info("[Streak] === StreakAgent run for %s ===", date)
 
     # Ensure DB tables exist
@@ -1700,7 +1707,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.settle:
-        date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date = args.date or datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
         logger.info("[Streak] Running settlement for %s", date)
         settle_streak_picks(date)
     else:
