@@ -1806,7 +1806,7 @@ class _BaseAgent:
         # ── Bet signals (from bet dict if available, else from prop) ──
         b           = bet or {}
         model_prob  = _clamp((b.get("model_prob")  or prop.get("model_prob",  50.0)) / 100.0)
-        ev_pct      = _clamp((b.get("ev_pct")      or prop.get("ev_pct",       3.0) + 20) / 40.0)
+        ev_pct      = _clamp(((b.get("ev_pct")     or prop.get("ev_pct",       3.0)) + 20) / 40.0)
         kelly       = _clamp((b.get("kelly_units")  or prop.get("kelly_units",  0.5)) / 3.0)
         line_val    = _clamp((b.get("line")         or prop.get("line",         1.5)) / 10.0)
         # Use sharp-book vig-stripped probability when available (more accurate than -115 flat)
@@ -1814,15 +1814,17 @@ class _BaseAgent:
         _ud_implied = b.get("implied_prob") or prop.get("implied_prob", 52.4)
         impl_prob   = _clamp((_sb_implied if _sb_implied > 0.30 else _ud_implied) / 100.0)
         # Also encode sharp-book line gap as a feature (negative = DFS line favorable for Over)
-        sb_line_gap = _clamp((prop.get("sb_line_gap", 0.0) or 0.0 + 2.0) / 4.0)  # -2 to +2 range
+        sb_line_gap = _clamp(((prop.get("sb_line_gap", 0.0) or 0.0) + 2.0) / 4.0)  # -2 to +2 range
 
         # ── Prop type encoding ────────────────────────────────────────
         _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0,
                    "home_runs": 1, "hr": 1,
                    "hits": 2, "hits_allowed": 2,
                    "rbis": 3, "rbi": 3,
-                   "fantasy_score": 4}
-        pt_enc = _pt_map.get(str(b.get("prop_type") or prop.get("prop_type", "")).lower(), 5) / 5.0
+                   "hits_runs_rbis": 4,                   # most common prop — needs unique code
+                   "total_bases": 5, "fantasy_score": 5,  # power/fantasy bucket
+                  }
+        pt_enc = _pt_map.get(str(b.get("prop_type") or prop.get("prop_type", "")).lower(), 6) / 6.0
 
         side_enc    = 0.0 if str(b.get("side") or prop.get("side", "OVER")).upper() == "OVER" else 1.0
 
