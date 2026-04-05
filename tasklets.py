@@ -3310,6 +3310,13 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
+    # ── Send-window clock gate — only dispatch picks 9:00–10:00 AM PT ──────────
+    import zoneinfo as _zi
+    _pt_now = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles"))
+    if not (9 <= _pt_now.hour < 10):
+        logger.debug("[AgentTasklet] Outside 9–10 AM PT send window (%02d:%02d) — skipping.", _pt_now.hour, _pt_now.minute)
+        return
+
     # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
     # Avoids burning API quota, writing empty bet_ledger rows, and spamming logs
     # at 3 AM when there are no games. Uses hub game_states (set by DataHubTasklet)

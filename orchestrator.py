@@ -271,7 +271,7 @@ async def lifespan(_app: FastAPI):
     # ── Streak pick — 9:30 AM PT (after 9AM dispatch completes) ─────────────
     scheduler.add_job(
         job_streak,
-        CronTrigger(hour=9, minute=30, timezone="America/Los_Angeles"),
+        CronTrigger(hour=8, minute=0, timezone="America/Los_Angeles"),
         id="streak",
     )
 
