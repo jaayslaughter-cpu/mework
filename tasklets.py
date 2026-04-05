@@ -2715,13 +2715,45 @@ def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _are_legs_correlated(legs: list[dict]) -> bool:
-    """Return True if any two legs share the same player or same player+prop_type."""
+    """Return True if the slip would be rejected by PrizePicks/Underdog correlated parlay rules.
+
+    Rules enforced:
+    1. Same player in two legs → blocked.
+    2. Same player+prop combo → blocked.
+    3. Platform same-team rule: a slip where EVERY leg is from the same team is
+       blocked (pure same-team stack). Two teammates are fine IF at least one
+       leg from a different team is also in the slip.
+       - LAD+LAD (2-leg)         → blocked (pure stack, no break)
+       - LAD+LAD+NYY (3-leg)     → allowed (NYY breaks it)
+       - STL+DET+STL (3-leg)     → allowed (DET breaks it)
+       - LAD+LAD+LAD (3-leg)     → blocked (pure stack)
+       - all different teams      → always allowed
+    """
+    from collections import Counter  # noqa: PLC0415
+
+    # Rule 1 — duplicate player
     players = [lg.get("player", "") for lg in legs]
     if len(set(players)) < len(players):
-        return True  # same player in two legs
-    # Also block same player+prop combo (e.g. Aaron Judge hits Over AND Under)
+        return True
+
+    # Rule 2 — same player+prop combo (e.g. Judge Over AND Under strikeouts)
     combos = [(lg.get("player", ""), lg.get("prop_type", "")) for lg in legs]
-    return len(set(combos)) < len(combos)
+    if len(set(combos)) < len(combos):
+        return True
+
+    # Rule 3 — pure same-team stack
+    teams = [
+        lg.get("team", lg.get("team_abbrev", "")).strip().upper()
+        for lg in legs
+    ]
+    teams_known = [t for t in teams if t]          # drop legs with no team field
+    if len(teams_known) >= 2:
+        counts = Counter(teams_known)
+        # blocked only when EVERY known leg is on the same team
+        if len(counts) == 1 and max(counts.values()) >= 2:
+            return True
+
+    return False
 
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> list[dict]:
