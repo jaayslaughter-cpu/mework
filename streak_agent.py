@@ -524,7 +524,7 @@ def select_streak_pick(
         if c.confidence >= STREAK_CONF_MIN
         and c.implied_prob >= STREAK_PROB_MIN
         and c.ev_pct >= STREAK_EV_MIN
-        and c.signal_count >= STREAK_MIN_SIGNALS   # require at least 2 agent signals
+        and (_DISPATCHER_AVAILABLE is False or c.signal_count >= STREAK_MIN_SIGNALS)  # bypass gate if dispatcher unavailable
     ]
 
     if not qualified:
@@ -561,7 +561,7 @@ def select_start_picks(
         if c.confidence >= STREAK_CONF_MIN
         and c.implied_prob >= STREAK_PROB_MIN
         and c.ev_pct >= STREAK_EV_MIN
-        and c.signal_count >= STREAK_MIN_SIGNALS   # require at least 2 agent signals
+        and (_DISPATCHER_AVAILABLE is False or c.signal_count >= STREAK_MIN_SIGNALS)  # bypass gate if dispatcher unavailable
     ]
     if not qualified:
         return []

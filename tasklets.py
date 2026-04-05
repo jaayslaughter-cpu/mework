@@ -1209,6 +1209,27 @@ _TEAM_TO_STADIUM: dict[str, str] = {
     "Atlanta Braves":        "Truist Park",
 }
 
+# ESPN HomeTeam field returns abbreviations (e.g. "NYY", "LAD") but _TEAM_TO_STADIUM
+# keys are full names.  This map translates before the stadium lookup.
+_ABBREV_TO_FULL: dict[str, str] = {
+    "ARI": "Arizona Diamondbacks",  "ATL": "Atlanta Braves",
+    "BAL": "Baltimore Orioles",     "BOS": "Boston Red Sox",
+    "CHC": "Chicago Cubs",          "CWS": "Chicago White Sox",
+    "CIN": "Cincinnati Reds",       "CLE": "Cleveland Guardians",
+    "COL": "Colorado Rockies",      "DET": "Detroit Tigers",
+    "HOU": "Houston Astros",        "KC":  "Kansas City Royals",
+    "LAA": "Los Angeles Angels",    "LAD": "Los Angeles Dodgers",
+    "MIA": "Miami Marlins",         "MIL": "Milwaukee Brewers",
+    "MIN": "Minnesota Twins",       "NYM": "New York Mets",
+    "NYY": "New York Yankees",      "OAK": "Oakland Athletics",
+    "PHI": "Philadelphia Phillies", "PIT": "Pittsburgh Pirates",
+    "SD":  "San Diego Padres",      "SF":  "San Francisco Giants",
+    "SEA": "Seattle Mariners",      "STL": "St. Louis Cardinals",
+    "TB":  "Tampa Bay Rays",        "TEX": "Texas Rangers",
+    "TOR": "Toronto Blue Jays",     "WSH": "Washington Nationals",
+    "ATH": "Sacramento Athletics",  # relocated Oakland A's
+}
+
 
 def _fetch_weather_today() -> list[dict]:
     """
@@ -1225,7 +1246,8 @@ def _fetch_weather_today() -> list[dict]:
     for g in games.values():
         ht = g.get("HomeTeam", "")
         if ht:
-            home_teams.add(ht)
+            # ESPN returns abbreviations — translate to full name for _TEAM_TO_STADIUM
+            home_teams.add(_ABBREV_TO_FULL.get(ht, ht))
 
     results = []
     for team in home_teams:
@@ -1806,7 +1828,8 @@ class _BaseAgent:
         # ── Bet signals (from bet dict if available, else from prop) ──
         b           = bet or {}
         model_prob  = _clamp((b.get("model_prob")  or prop.get("model_prob",  50.0)) / 100.0)
-        ev_pct      = _clamp(((b.get("ev_pct")     or prop.get("ev_pct",       3.0)) + 20) / 40.0)
+        _ev_raw     = b.get("ev_pct")
+        ev_pct      = _clamp((((_ev_raw if _ev_raw is not None else prop.get("ev_pct", 3.0)) + 20) / 40.0))
         kelly       = _clamp((b.get("kelly_units")  or prop.get("kelly_units",  0.5)) / 3.0)
         line_val    = _clamp((b.get("line")         or prop.get("line",         1.5)) / 10.0)
         # Use sharp-book vig-stripped probability when available (more accurate than -115 flat)
@@ -2610,8 +2633,11 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
             .replace("  ", " ")
         )
 
-        # Direct full-name lookup (Over side — consensus for DFS is almost always Over)
-        ref = reference.get((player_norm, prop_type, "Over"))
+        # Direct full-name lookup — try both "Over" (Odds API) and "over" (DraftEdge)
+        ref = (
+            reference.get((player_norm, prop_type, "Over"))
+            or reference.get((player_norm, prop_type, "over"))
+        )
         if ref:
             return round(ref["sb_implied_prob"] * 100.0, 2)
 
@@ -2619,7 +2645,8 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
         parts = player_norm.split()
         last = parts[-1] if parts else ""
         for (pn, pt, side), data in reference.items():
-            if side == "Over" and pt == prop_type and pn.split()[-1:] == [last]:
+            # Accept both "Over" (Odds API) and "over" (DraftEdge) casing
+            if side.lower() == "over" and pt == prop_type and pn.split()[-1:] == [last]:
                 return round(data["sb_implied_prob"] * 100.0, 2)
 
         return None
