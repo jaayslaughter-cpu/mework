@@ -102,6 +102,13 @@ except ImportError:
     def _build_bullpen_scorer(): return None  # noqa: E704
 
 try:
+    from sportsbook_reference_layer import build_sportsbook_reference as _build_sb_reference
+    _SB_REFERENCE_AVAILABLE = True
+except ImportError:
+    _SB_REFERENCE_AVAILABLE = False
+    def _build_sb_reference() -> dict: return {}  # noqa: E704
+
+try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
     _NSFI_AVAILABLE = True
 except ImportError:
@@ -2572,31 +2579,50 @@ _SHARP_BOOKS = {"draftkings", "fanduel", "pinnacle", "circa", "betmgm", "pointsb
 
 def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None:
     """
-    Extract sharp-book consensus implied probability for a player/prop
-    from The Odds API data in hub.market.odds.
-    Returns probability as a percentage (0-100), or None if no data found.
+    Extract sharp-book consensus implied probability for a player/prop.
+
+    Routes through sportsbook_reference_layer (The Odds API /events/{id}/odds
+    with player-prop markets: pitcher_strikeouts, batter_hits, batter_total_bases,
+    batter_rbis, batter_runs_scored). Fetches DK/FD/BetMGM, strips vig, caches
+    daily to /tmp/sb_ref_{date}.json — subsequent calls in the same day are free.
+
+    Returns probability as a percentage (0–100), or None if no match found.
+
+    NOTE: hub["market"]["odds"] contains game-level odds (moneylines/totals),
+    NOT player props — the old implementation always returned None for props.
     """
-    odds_list = hub.get("market", {}).get("odds", [])
-    probs: list[float] = []
-    player_lower = player.lower()
-    for game in odds_list:
-        if not isinstance(game, dict):
-            continue
-        for bookmaker in game.get("bookmakers", []):
-            if bookmaker.get("key", "").lower() not in _SHARP_BOOKS:
-                continue
-            for market in bookmaker.get("markets", []):
-                for outcome in market.get("outcomes", []):
-                    desc = str(outcome.get("description", "")).lower()
-                    name = str(outcome.get("name", "")).lower()
-                    if player_lower in desc or player_lower in name:
-                        price = outcome.get("price")
-                        if price is not None:
-                            try:
-                                probs.append(_american_to_implied(int(price)))
-                            except (TypeError, ValueError):
-                                pass
-    return (sum(probs) / len(probs)) if probs else None
+    if not _SB_REFERENCE_AVAILABLE:
+        return None
+    try:
+        reference = _build_sb_reference()
+        if not reference:
+            return None
+
+        # Normalize to match sportsbook_reference_layer._normalize_name() format
+        player_norm = (
+            player.lower()
+            .strip()
+            .replace(".", "")
+            .replace("'", "")
+            .replace("-", " ")
+            .replace("  ", " ")
+        )
+
+        # Direct full-name lookup (Over side — consensus for DFS is almost always Over)
+        ref = reference.get((player_norm, prop_type, "Over"))
+        if ref:
+            return round(ref["sb_implied_prob"] * 100.0, 2)
+
+        # Last-name fallback: scan for any entry where last token matches
+        parts = player_norm.split()
+        last = parts[-1] if parts else ""
+        for (pn, pt, side), data in reference.items():
+            if side == "Over" and pt == prop_type and pn.split()[-1:] == [last]:
+                return round(data["sb_implied_prob"] * 100.0, 2)
+
+        return None
+    except Exception:
+        return None
 
 
 def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
