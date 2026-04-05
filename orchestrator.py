@@ -8,7 +8,6 @@ Runs 8 tasklets on their defined schedules:
   - BacktestTasklet:     daily  12:01AM PT
   - GradingTasklet:      daily   1:05AM PT
   - XGBoostTasklet:      weekly Sunday 2:00AM PT
-  - LiveDispatch:        daily   9:00AM PT (12:00PM ET) → Discord parlays
   - NightlyRecap:        daily  11:00PM PT ( 2:00AM ET) → Discord settlement
 
 Also exposes a FastAPI dashboard on $PORT.
@@ -76,51 +75,10 @@ _last_hub_run: str | None = None
 _last_agent_run: str | None = None
 _last_leaderboard_run: str | None = None
 
-# Dispatch guard — prevents double/triple firing within the same process
-_dispatch_running: bool = False
-
 
 # ── Cross-process dispatch dedup ──────────────────────────────────────────────
 # Uses Postgres so a Railway redeploy (new process) still sees today's dispatch.
 
-def _get_db_conn():
-    """Return a psycopg2 connection or None if DATABASE_URL is unset."""
-    try:
-        import psycopg2
-        db_url = os.environ.get("DATABASE_URL")
-        if not db_url:
-            return None
-        return psycopg2.connect(db_url)
-    except Exception as exc:
-        logger.warning("[orchestrator] DB connect failed: %s", exc)
-        return None
-
-
-def _dispatch_already_ran_today() -> bool:
-    """Return True if dispatch_date_log already has today's PT date."""
-    pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
-    try:
-        conn = _get_db_conn()
-        if not conn:
-            return False
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS dispatch_date_log (
-                dispatch_date DATE PRIMARY KEY
-            )
-        """)
-        conn.commit()
-        cur.execute(
-            "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s",
-            (pt_today,)
-        )
-        found = cur.fetchone() is not None
-        cur.close()
-        conn.close()
-        return found
-    except Exception as exc:
-        logger.warning("[orchestrator] _dispatch_already_ran_today failed: %s — proceeding", exc)
-        return False
 
 
 def _record_dispatch_ran_today() -> None:
@@ -252,68 +210,6 @@ async def job_monthly_leaderboard():
         logger.warning("[orchestrator] monthly_leaderboard not available — skipping")
 
 
-async def _startup_dispatch_if_ready() -> None:
-    """
-    On startup, poll until DataHub is populated, then fire dispatch once.
-    Ensures plays go out even when Railway redeploys after 8 AM PT.
-
-    Cross-process dedup: checks dispatch_date_log in Postgres before firing.
-    If dispatch already ran today (PT), exits immediately — no duplicate parlays.
-
-    Max wait: 3 minutes (6 x 30s attempts).
-    """
-    # Cross-process same-day dedup — survives Railway redeploys
-    if _dispatch_already_ran_today():
-        logger.info(
-            "[orchestrator] Startup dispatch skipped — already dispatched today (PT %s)",
-            datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat(),
-        )
-        return
-
-    await asyncio.sleep(30)  # give DataHub one full cycle to populate
-    for attempt in range(1, 7):
-        hub = read_hub()
-
-        game_states = hub.get("game_states", {})
-        has_context = bool(hub.get("context"))
-        has_games = bool(hub.get("context", {}).get("projected_starters"))
-        has_props = bool(hub.get("dfs", {}).get("underdog"))
-
-        if has_games or has_context or has_props:
-            logger.info(
-                "[orchestrator] DataHub ready — firing startup dispatch (attempt %d) "
-                "games=%d context=%s props=%s",
-                attempt, len(game_states), has_context, has_props,
-            )
-            await job_dispatch()
-            return
-
-        logger.info(
-            "[orchestrator] Startup dispatch waiting for DataHub... attempt %d/6 "
-            "(games=%d context=%s)",
-            attempt, len(game_states), has_context,
-        )
-        await asyncio.sleep(30)
-    logger.warning("[orchestrator] Startup dispatch skipped — DataHub not ready after 3 min")
-
-
-async def job_dispatch():
-    """9:00 AM PT daily — build parlays and post to Discord.
-    Guard prevents double/triple firing from APScheduler + startup dispatch racing.
-    Records today's PT date in dispatch_date_log so redeploys skip duplicate runs.
-    """
-    global _dispatch_running
-    if _dispatch_running:
-        logger.warning("[orchestrator] Dispatch already running — skipping duplicate trigger")
-        return
-    _dispatch_running = True
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_dispatcher.py")
-    try:
-        await _run_subprocess("LiveDispatch", script)
-        _record_dispatch_ran_today()
-    finally:
-        _dispatch_running = False
-
 
 async def job_settle():
     """11:00 PM PT (2:00 AM ET) daily — settle bets and post recap to Discord."""
@@ -365,13 +261,6 @@ async def lifespan(_app: FastAPI):
         id="monthly_leaderboard",
     )
 
-    # ── Daily parlay dispatch — 9:00 AM PT ───────────────────────────────────
-    scheduler.add_job(
-        job_dispatch,
-        CronTrigger(hour=9, minute=0, timezone="America/Los_Angeles"),
-        id="live_dispatch",
-    )
-
     # ── Daily health check — 10:00 AM PT ─────────────────────────────────────
     scheduler.add_job(
         job_bug_checker,
@@ -403,12 +292,9 @@ async def lifespan(_app: FastAPI):
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
-    # Fire dispatch once DataHub is ready (handles post-8AM redeploys)
-    # Cross-process dedup ensures this never duplicates a same-day 9AM run
-    asyncio.create_task(_startup_dispatch_if_ready())
 
     logger.info(
-        "All jobs scheduled: dispatch@9AM PT, settle@11PM PT, "
+        "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
         "backtest@12:01AM, grading@1:05AM, xgboost@Sun2AM"
     )
@@ -421,7 +307,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="PropIQ Agent Army",
     description="17-agent MLB DFS betting system with auto-schedule",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -437,7 +323,7 @@ app.add_middleware(
 async def root():
     return {
         "service": "PropIQ Agent Army",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "date": datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat(),
         "status": "running",
         "endpoints": [
@@ -539,9 +425,9 @@ async def health():
 
 @app.post("/propiq/dispatch")
 async def trigger_dispatch():
-    """Manual or Tasklet-triggered parlay dispatch."""
-    await job_dispatch()
-    return JSONResponse({"status": "started", "message": "Live dispatcher triggered in background"})
+    """live_dispatcher.py removed — AgentTasklet is the canonical dispatch system.
+    Parlays are sent continuously by AgentTasklet (every 30s) with full dedup."""
+    return JSONResponse({"status": "disabled", "message": "job_dispatch removed. AgentTasklet (every 30s) is the canonical parlay sender."})
 
 
 @app.post("/propiq/settle")
@@ -553,9 +439,8 @@ async def trigger_settle():
 
 @app.post("/trigger/dispatch")
 async def trigger_dispatch_alt():
-    """Alias for /propiq/dispatch — matches Tasklet schedule trigger path."""
-    await job_dispatch()
-    return JSONResponse({"status": "started", "message": "Live dispatcher triggered"})
+    """Alias for /propiq/dispatch — both removed. AgentTasklet is canonical."""
+    return JSONResponse({"status": "disabled", "message": "job_dispatch removed. AgentTasklet (every 30s) is the canonical parlay sender."})
 
 
 @app.post("/trigger/settle")
@@ -580,7 +465,7 @@ async def get_propiq_status():
     lb = read_leaderboard()
     return JSONResponse({
         "service": "PropIQ Agent Army",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "status": "healthy",
         "scheduler_running": scheduler.running,
         "hub_props": len(hub.get("player_props", [])),
