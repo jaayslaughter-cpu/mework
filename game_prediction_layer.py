@@ -52,7 +52,6 @@ _LEAGUE_AVG = {
     "win_pct":   0.500,
     "rs_per_g":  4.50,
     "ra_per_g":  4.50,
-    "rd_per_g":  0.0,   # run differential — league average is always zero by definition
     "era":       4.20,
     "whip":      1.28,
     "k9":        8.80,
@@ -226,8 +225,8 @@ def _build_game_features(game: dict, team_stats: dict[int, dict], season: int) -
     h["home_ra_per_g"]   = _ts(home_id, "ra_per_g", "ra_per_g")
     h["away_rs_per_g"]   = _ts(away_id, "rs_per_g", "rs_per_g")
     h["away_ra_per_g"]   = _ts(away_id, "ra_per_g", "ra_per_g")
-    h["home_rd_per_g"]   = _ts(home_id, "rd_per_g", "rs_per_g")
-    h["away_rd_per_g"]   = _ts(away_id, "rd_per_g", "ra_per_g")
+    h["home_rd_per_g"]   = _ts(home_id, "rd_per_g", "rd_per_g")
+    h["away_rd_per_g"]   = _ts(away_id, "rd_per_g", "rd_per_g")
 
     # Expected total (sum of both teams' run-scoring rates)
     h["exp_total"]       = h["home_rs_per_g"] + h["away_rs_per_g"]
@@ -314,7 +313,7 @@ def _predict_game(features: dict) -> dict:
         + 1.85 * h["win_pct_diff"]         # win% advantage
         + 0.08 * h["era_diff"]             # lower ERA = better
         + 0.15 * h["sp_era_gap"]           # opponent SP worse = good
-        + 0.12 * h["home_rd_per_g"]       # home run differential
+        + 0.12 * h["rd_per_g"]            # home run differential
         - 0.08 * h["away_rd_per_g"]       # away run differential
         + 0.30                             # home field advantage ~0.54
     )
@@ -343,7 +342,7 @@ def _predict_game(features: dict) -> dict:
           0.00
         + 1.20 * h["win_pct_diff"]
         + 0.18 * h["sp_era_gap"]
-        + 0.10 * h["home_rd_per_g"]
+        + 0.10 * h["rd_per_g"]
         - 0.30                             # harder to cover -1.5 than ML
     )
     cover_prob = 1.0 / (1.0 + (2.718281828 ** -logit_cover))

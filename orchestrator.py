@@ -223,6 +223,15 @@ async def job_settle():
 async def job_bug_checker():
     await _safe_run("BugChecker", run_bug_checker)
 
+async def job_log_watcher():
+    """8:10 AM PT daily — hits Railway log API, emails/SMSs dispatch summary."""
+    try:
+        from log_watcher import main as _log_watcher_main  # noqa: PLC0415
+        await asyncio.get_event_loop().run_in_executor(None, _log_watcher_main)
+        logger.info("[LogWatcher] Daily summary dispatched.")
+    except Exception as exc:
+        logger.warning("[LogWatcher] Failed: %s", exc)
+
 async def job_streak():
     """Streak pick — runs at 9:30 AM PT, after the main dispatch window."""
     try:
@@ -268,11 +277,18 @@ async def lifespan(_app: FastAPI):
         id="bug_checker",
     )
 
-    # ── Streak pick — 9:30 AM PT (after 9AM dispatch completes) ─────────────
+    # ── Streak pick — 8:00 AM PT (before main dispatch window) ─────────────
     scheduler.add_job(
         job_streak,
         CronTrigger(hour=8, minute=0, timezone="America/Los_Angeles"),
         id="streak",
+    )
+
+    # ── Log watcher summary — 8:10 AM PT (after dispatch window opens) ───────
+    scheduler.add_job(
+        job_log_watcher,
+        CronTrigger(hour=8, minute=10, timezone="America/Los_Angeles"),
+        id="log_watcher",
     )
 
     # ── Nightly settlement — 11:00 PM PT ─────────────────────────────────────

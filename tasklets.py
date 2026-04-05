@@ -1503,7 +1503,7 @@ def run_data_hub_tasklet() -> None:
             "batted_ball":    [],  # no actor yet
             "second_half":    [],  # no actor yet
             "game_predictions": _gp_list,
-            "nsfi":             [],  # NSFI not consumed downstream — skip fetch
+            "nsfi":             _fetch_nsfi(),  # No-Strikeout First Inning predictions
         }
         _hub_setex(r, physics_key, TTL_PHYSICS, json.dumps(physics))
 
@@ -3141,6 +3141,8 @@ _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _MLEdgeAgent,  # SteamAgent: internal-only, not in Discord picks
+    _PropCycleAgent,    # mean-reversion on form_adj + cv_nudge (no new deps)
+    _LineupChaseAgent,  # K-props only, fires on confirmed lineups + high chase difficulty
 ]
 
 
@@ -3491,23 +3493,11 @@ def run_agent_tasklet() -> None:
     if not all_parlays:
         return
 
-    producer = _kafka_producer()
     r        = _redis()
     for parlay in all_parlays:
         payload = json.dumps(parlay)
-        if producer:
-            try:
-                producer.produce("bet_queue", value=payload.encode())
-            except Exception as e:
-                logger.warning("[AgentTasklet] Kafka error: %s — Redis fallback", e)
-                r.lpush("bet_queue", payload)
-                r.ltrim("bet_queue", 0, 499)
-        else:
-            r.lpush("bet_queue", payload)
-            r.ltrim("bet_queue", 0, 499)
-
-    if producer:
-        producer.flush(timeout=5)
+        r.lpush("bet_queue", payload)
+        r.ltrim("bet_queue", 0, 499)
 
     # ── Persist each leg to bet_ledger for grading ───────────────────────────
     try:
@@ -3569,7 +3559,8 @@ def run_agent_tasklet() -> None:
             with _pg.cursor() as _c:
                 _c.execute(
                     "SELECT DISTINCT agent_name FROM bet_ledger "
-                    "WHERE bet_date = %s AND discord_sent = TRUE",
+                    "WHERE bet_date = %s AND discord_sent = TRUE "
+                    "AND created_at >= NOW() - INTERVAL '18 hours'",
                     (today_str,)
                 )
                 _preloaded: list = []
