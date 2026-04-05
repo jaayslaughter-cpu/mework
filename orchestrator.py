@@ -243,9 +243,9 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(job_leaderboard, IntervalTrigger(seconds=60), id="leaderboard")
 
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
-    scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1),  id="backtest")
-    scheduler.add_job(job_grading,  CronTrigger(hour=1,  minute=5),  id="grading")
-    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2), id="xgboost")
+    scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
+    scheduler.add_job(job_grading,  CronTrigger(hour=1,  minute=5,  timezone="America/Los_Angeles"), id="grading")
+    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, timezone="America/Los_Angeles"), id="xgboost")
 
     # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(

@@ -118,6 +118,7 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
     p2team:  dict[str, str] = {}
     p2opp:   dict[str, str] = {}
     p2mlbam: dict[str, int] = {}
+    p2bat:   dict[str, int] = {}   # player → batting order position (1-9)
 
     ctx = hub.get("context", {})
 
@@ -128,10 +129,13 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
             continue
         team = entry.get("team", "")
         pid  = entry.get("player_id")
+        pos  = entry.get("batting_pos")
         if team:
             p2team[name] = team
         if pid:
             p2mlbam[name] = int(pid)
+        if pos:
+            p2bat[name] = int(pos)
 
     # From projected starters (adds opposing_team)
     for s in ctx.get("projected_starters", []):
@@ -148,7 +152,7 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
         if pid:
             p2mlbam[name] = int(pid)
 
-    return p2team, p2opp, p2mlbam
+    return p2team, p2opp, p2mlbam, p2bat
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +392,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         return props
 
     # ── Build lookup maps once for all props ──────────────────────────────────
-    p2team, p2opp, p2mlbam = _build_lookup_maps(hub)
+    p2team, p2opp, p2mlbam, p2bat = _build_lookup_maps(hub)
 
     # ── Per-player FanGraphs cache (avoid re-fetching same player) ────────────
     _fg_pitcher_cache: dict[str, dict] = {}
@@ -423,6 +427,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         if not prop.get("player_id") and pn in p2mlbam:
             prop["player_id"] = p2mlbam[pn]
             prop["mlbam_id"]  = p2mlbam[pn]
+        if pn in p2bat:
+            prop["_batting_order_slot"] = p2bat[pn]   # 1=leadoff … 9=last
 
         team     = prop.get("team", "")
         opp_team = prop.get("opposing_team", "")

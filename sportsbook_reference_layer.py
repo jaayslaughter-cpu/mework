@@ -159,7 +159,7 @@ def _log_quota(response: requests.Response) -> None:
 # API calls
 # ---------------------------------------------------------------------------
 
-def _fetch_events(date: str) -> list[dict]:
+def _fetch_events(date: str, api_key: str = "") -> list[dict]:
     """
     Fetch today's MLB game event IDs from The Odds API.
     Consumes 1 API request.
@@ -168,7 +168,7 @@ def _fetch_events(date: str) -> list[dict]:
         resp = requests.get(
             f"{ODDS_API_BASE}/sports/{SPORT}/events",
             params={
-                "apiKey":     ODDS_API_KEY,
+                "apiKey":     api_key or ODDS_API_KEY,
                 "dateFormat": "iso",
             },
             headers=_REQUEST_HEADERS,
@@ -208,7 +208,7 @@ def _fetch_events(date: str) -> list[dict]:
         return []
 
 
-def _fetch_event_odds(event_id: str) -> list[dict]:
+def _fetch_event_odds(event_id: str, api_key: str = "") -> list[dict]:
     """
     Fetch player prop odds for a single game event.
     Consumes 1 API request. Returns list of bookmaker dicts.
@@ -217,7 +217,7 @@ def _fetch_event_odds(event_id: str) -> list[dict]:
         resp = requests.get(
             f"{ODDS_API_BASE}/sports/{SPORT}/events/{event_id}/odds",
             params={
-                "apiKey":     ODDS_API_KEY,
+                "apiKey":     api_key or ODDS_API_KEY,
                 "regions":    "us",
                 "markets":    _MARKETS_PARAM,
                 "oddsFormat": "decimal",
@@ -344,11 +344,13 @@ def build_sportsbook_reference(date: str | None = None) -> dict[tuple, dict]:
         return {tuple(json.loads(k)): v for k, v in cached.items()}
 
     # ── Step 2: The Odds API (only if key is available) ────────────────────
-    if not ODDS_API_KEY:
-        logger.info("[SB_REF] No ODDS_API_KEY — using DraftEdge fallback")
+    _active_keys = [k for k in _ODDS_KEY_FALLBACKS if k]
+    if not _active_keys:
+        logger.info("[SB_REF] No API keys available — using DraftEdge fallback")
         return _build_reference_from_draftedge()
+    _working_key = _active_keys[0]
 
-    events = _fetch_events(date)
+    events = _fetch_events(date, api_key=_working_key)
     if not events:
         logger.info("[SB_REF] No Odds API events — using DraftEdge fallback")
         return _build_reference_from_draftedge()
@@ -362,7 +364,7 @@ def build_sportsbook_reference(date: str | None = None) -> dict[tuple, dict]:
         if not event_id:
             continue
 
-        bookmakers = _fetch_event_odds(event_id)
+        bookmakers = _fetch_event_odds(event_id, api_key=_working_key)
         time.sleep(_CALL_JITTER)
 
         for bm in bookmakers:
