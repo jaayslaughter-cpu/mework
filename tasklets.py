@@ -2970,7 +2970,20 @@ class _ChalkBusterAgent(_BaseAgent):
         pub        = market.get("public_betting", {})
         player     = prop.get("player", "")
         prop_type  = prop.get("prop_type", "").lower()
-        pub_over   = float(pub.get(player, {}).get("over_pct", 50) if isinstance(pub.get(player), dict) else 50)
+
+        # SBD returns {"game_df": [...], "prop_df": [...]} — scan prop_df rows
+        # for a player match rather than expecting a player-keyed dict.
+        pub_over   = 50.0
+        _prop_records = pub.get("prop_df", []) if isinstance(pub, dict) else []
+        _player_lc    = player.lower()
+        for _rec in _prop_records:
+            _rec_player = str(_rec.get("player_name", _rec.get("player", ""))).lower()
+            if _rec_player and (_rec_player in _player_lc or _player_lc in _rec_player):
+                _pct = float(_rec.get("over_pct", _rec.get("ticket_pct", 0)) or 0)
+                if _pct > 0:
+                    pub_over = _pct
+                    break
+
         # Fade if public is piling on overs (>68%) — contrarian under edge
         if pub_over > 68:
             model_prob = self._model_prob(player, prop_type, prop=prop)
@@ -3141,6 +3154,9 @@ _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _MLEdgeAgent,  # SteamAgent: internal-only, not in Discord picks
+    _UnderDogAgent,     # Underdog-specific line value — hub.dfs already populated, no new deps
+    _StackSmithAgent,   # bullpen fatigue map + pitcher ERA/k_rate already in hub
+    _ChalkBusterAgent,  # fades heavy public chalk — prop_df lookup fixed (see evaluate())
     _PropCycleAgent,    # mean-reversion on form_adj + cv_nudge (no new deps)
     _LineupChaseAgent,  # K-props only, fires on confirmed lineups + high chase difficulty
 ]
