@@ -1190,25 +1190,6 @@ _TEAM_TO_STADIUM: dict[str, str] = {
     "Atlanta Braves":        "Truist Park",
 }
 
-_ABBREV_TO_STADIUM: dict[str, str] = {
-    "LAA": "Angels Stadium",          "ARI": "Chase Field",
-    "BAL": "Camden Yards",            "BOS": "Fenway Park",
-    "CHC": "Wrigley Field",           "CWS": "Guaranteed Rate Field",
-    "CIN": "Great American Ball Park","CLE": "Progressive Field",
-    "COL": "Coors Field",             "DET": "Comerica Park",
-    "HOU": "Minute Maid Park",        "KC":  "Kauffman Stadium",
-    "LAD": "Dodger Stadium",          "MIA": "LoanDepot Park",
-    "MIL": "American Family Field",   "MIN": "Target Field",
-    "NYM": "Citi Field",              "NYY": "Yankee Stadium",
-    "OAK": "Oakland Coliseum",        "SAC": "Oakland Coliseum",
-    "PHI": "Citizens Bank Park",      "PIT": "PNC Park",
-    "SD":  "Petco Park",              "SF":  "Oracle Park",
-    "SEA": "T-Mobile Park",           "STL": "Busch Stadium",
-    "TB":  "Tropicana Field",         "TEX": "Globe Life Field",
-    "TOR": "Rogers Centre",           "WSH": "Nationals Park",
-    "ATL": "Truist Park",
-}
-
 
 def _fetch_weather_today() -> list[dict]:
     """
@@ -1229,7 +1210,7 @@ def _fetch_weather_today() -> list[dict]:
 
     results = []
     for team in home_teams:
-        stadium = _TEAM_TO_STADIUM.get(team, "") or _ABBREV_TO_STADIUM.get(team, "")
+        stadium = _TEAM_TO_STADIUM.get(team, "")
         if not stadium:
             continue
         coords = _STADIUM_COORDS.get(stadium)
@@ -1345,14 +1326,6 @@ def _ensure_bet_ledger() -> None:
                 conn.rollback()
             try:
                 cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS mlbam_id INTEGER")
-                conn.commit()
-            except Exception:
-                conn.rollback()
-            try:
-                cur.execute(
-                    "ALTER TABLE bet_ledger ADD CONSTRAINT IF NOT EXISTS "
-                    "bet_ledger_dedup_key UNIQUE (player_name, prop_type, line, side, agent_name, bet_date)"
-                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -3108,37 +3081,20 @@ def _build_pitcher_enrich_map(hub: dict) -> dict[str, dict]:
 
 
 def _get_props(hub: dict) -> list[dict]:
-    """Return real props from hub — always combines UD + PP (both platforms)."""
-    props: list[dict] = []
-    seen: set[tuple] = set()
-
-    # 1. Underdog Fantasy — load first (richer lines, real market odds)
-    ud_props = _extract_underdog_props(hub)
-    for p in ud_props:
-        key = ((p.get("player") or "").lower(), p.get("prop_type", ""))
-        if key not in seen:
-            seen.add(key)
-            props.append(p)
-    if ud_props:
-        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
-
-    # 2. PrizePicks — add any props not already covered by UD (deduped by player+stat)
+    """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
+    # 1. Try PrizePicks from hub (6,500+ real MLB props)
     pp_picks = hub.get("dfs", {}).get("prizepicks", [])
-    pp_added = 0
     if pp_picks and isinstance(pp_picks, list):
-        _pp_enrich = _build_pitcher_enrich_map(hub)
+        props = []
         for pick in pp_picks:
             if not isinstance(pick, dict):
                 continue
-            player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
+            player = pick.get("player_name", pick.get("player", pick.get("name", "")))
             prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", "H"))))
-            line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
+            line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue
-            key = (player.lower(), prop_type)
-            if key in seen:
-                continue
-            seen.add(key)
+            _pp_enrich = _build_pitcher_enrich_map(hub)
             _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
             _fg_pitcher = {}
             try:
@@ -3164,18 +3120,52 @@ def _get_props(hub: dict) -> list[dict]:
                 "era":              _fg_pitcher.get("era",    4.0),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
-            pp_added += 1
-        if pp_added:
-            logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
-        elif pp_picks:
-            logger.info("[AgentTasklet] PrizePicks: all %d props already covered by UD", len(pp_picks))
+        if props:
+            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
+            return props
 
-    if not props:
-        return []  # No real props — skip cycle entirely (no synthetic)
+    # 2. Underdog from hub — combined with PrizePicks if both available
+    ud_props = _extract_underdog_props(hub)
+    if ud_props:
+        props = []
+        props.extend(ud_props)
+        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
 
-    logger.info("[AgentTasklet] Combined props: %d (UD=%d PP=%d)",
-                len(props), len(ud_props), pp_added)
-    return props
+        # Add PrizePicks on top (deduped)
+        pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+        if pp_picks and isinstance(pp_picks, list):
+            seen = {(p["player"].lower(), p["prop_type"]) for p in props}
+            pp_added = 0
+            for pick in pp_picks:
+                if not isinstance(pick, dict):
+                    continue
+                player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
+                prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", ""))))
+                line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
+                if not player or not prop_type:
+                    continue
+                key = (player.lower(), prop_type)
+                if key in seen:
+                    continue
+                seen.add(key)
+                props.append({
+                    "player":         player,
+                    "player_name":    player,
+                    "prop_type":      prop_type,
+                    "line":           float(line or 1.5),
+                    "over_american":  -115,
+                    "under_american": -115,
+                    "team":           pick.get("player_team", pick.get("team", "")),
+                    "venue":          "",
+                    "platform":       "prizepicks",
+                })
+                pp_added += 1
+            if pp_added:
+                logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
+        return props
+
+    # No real props available — skip cycle entirely (no synthetic)
+    return []
 
 
 def run_agent_tasklet() -> None:
@@ -3392,7 +3382,7 @@ def run_agent_tasklet() -> None:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
                                 ABS(%s), %s, %s)
-                        ON CONFLICT ON CONSTRAINT bet_ledger_dedup_key DO NOTHING
+                        ON CONFLICT DO NOTHING
                         """,
                         (
                             _leg.get("player") or _leg.get("player_name"),
@@ -3438,9 +3428,16 @@ def run_agent_tasklet() -> None:
                     "WHERE bet_date = %s AND discord_sent = TRUE",
                     (today_str,)
                 )
+                _preloaded: list = []
                 for (_ag,) in _c.fetchall():
                     _AGENT_SENT_TODAY.setdefault(_ag, today_str)
+                    _preloaded.append(_ag)
             _pg.commit()
+            if _preloaded:
+                logger.info(
+                    "[AgentTasklet] Dedup preload — these agents already sent today"
+                    " and will be blocked this cycle: %s", _preloaded
+                )
     except Exception as _dbe:
         logger.debug("[AgentTasklet] dedup preload skipped: %s", _dbe)
     _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
@@ -3450,12 +3447,14 @@ def run_agent_tasklet() -> None:
     # the same agent in a single 30-second cycle cannot all slip through before
     # any lock is written.  Only the highest-EV parlay per agent advances.
     best_per_agent: dict = {}   # agent_name -> (ev, parlay, r_daily_key)
+    _blocked_sent_today: list = []   # tracks which agents hit the daily gate (for split logging)
     for parlay in all_parlays:
         agent_name = parlay.get("agent", "unknown")
 
         # In-memory gate (primary — works without Redis)
         if _AGENT_SENT_TODAY.get(agent_name) == today_str:
-            logger.debug("[AgentTasklet] %s already sent today — skipping.", agent_name)
+            logger.info("[AgentTasklet] %s already sent today (in-memory) — skipping.", agent_name)
+            _blocked_sent_today.append(agent_name)
             continue
 
         # Redis gate (secondary — cross-process guard)
@@ -3463,15 +3462,17 @@ def run_agent_tasklet() -> None:
         try:
             if r_dedup.exists(r_daily_key):
                 _AGENT_SENT_TODAY[agent_name] = today_str   # sync in-memory
-                logger.debug("[AgentTasklet] %s already sent today (Redis) — skipping.", agent_name)
+                logger.info("[AgentTasklet] %s already sent today (Redis) — skipping.", agent_name)
+                _blocked_sent_today.append(agent_name)
                 continue
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
 
-        # Confidence gate — 7/10 minimum, nothing lower reaches Discord
+        # Confidence gate — MIN_CONFIDENCE minimum, nothing lower reaches Discord
         play_conf = parlay.get("confidence", 0)
         if play_conf < MIN_CONFIDENCE:
-            logger.debug("[AgentTasklet] %s confidence %.1f < 7 — skipping.", agent_name, play_conf)
+            logger.debug("[AgentTasklet] %s confidence %.1f < %d — skipping.",
+                         agent_name, play_conf, MIN_CONFIDENCE)
             continue
 
         # Keep only the single highest-EV parlay per agent this cycle
@@ -3479,10 +3480,12 @@ def run_agent_tasklet() -> None:
         if agent_name not in best_per_agent or ev > best_per_agent[agent_name][0]:
             best_per_agent[agent_name] = (ev, parlay, r_daily_key)
 
-    skipped = len(all_parlays) - len(best_per_agent)
-    if skipped:
-        logger.info("[AgentTasklet] Skipped %d parlay(s) — agents already sent today or lower-EV duplicate.", skipped)
-
+    _ev_dupes = len(all_parlays) - len(best_per_agent) - len(_blocked_sent_today)
+    if _blocked_sent_today:
+        logger.info("[AgentTasklet] Blocked %d parlay(s) — agent already sent today: %s",
+                    len(_blocked_sent_today), list(dict.fromkeys(_blocked_sent_today)))
+    if _ev_dupes > 0:
+        logger.info("[AgentTasklet] Dropped %d parlay(s) — lower-EV duplicate within cycle.", _ev_dupes)
     # ── Cross-agent direction dedup ─────────────────────────────────────────
     # Highest-EV agent locks direction for each (player, stat) pair this cycle.
     # Any other agent wanting the opposite direction is dropped — prevents two
@@ -3531,27 +3534,34 @@ def run_agent_tasklet() -> None:
     best_per_agent = _deduped
 
     for agent_name, (_ev, parlay, r_daily_key) in best_per_agent.items():
-        # Claim BEFORE sending — prevents double-send if Discord call is slow
-        _AGENT_SENT_TODAY[agent_name] = today_str
+        # ── Claim all three dedup stores BEFORE sending ──────────────────────
+        # Order matters: in-memory → Redis → DB → Discord.
+        # If the process crashes after the DB commit but before Discord fires,
+        # the next restart's dedup preload will find discord_sent=TRUE and block
+        # the re-send. This is intentional — a missed send is better than a
+        # duplicate send spamming subscribers every restart.
+        _AGENT_SENT_TODAY[agent_name] = today_str        # 1. in-memory (instant)
         try:
-            r_dedup.setex(r_daily_key, _DAY_TTL, "1")
+            r_dedup.setex(r_daily_key, _DAY_TTL, "1")   # 2. Redis (cross-process)
         except Exception:
             pass
+        try:                                              # 3. DB commit (crash-safe)
+            _pg2 = _get_pg()
+            if _pg2:
+                with _pg2.cursor() as _c2:
+                    _c2.execute(
+                        "UPDATE bet_ledger SET discord_sent = TRUE "
+                        "WHERE agent_name = %s AND bet_date = %s",
+                        (agent_name, today_str)
+                    )
+                _pg2.commit()
+                logger.info("[AgentTasklet] discord_sent=TRUE committed for %s before send.", agent_name)
+        except Exception as _dbe2:
+            logger.warning("[AgentTasklet] discord_sent pre-commit failed for %s: %s — "
+                           "duplicate send on restart is possible.", agent_name, _dbe2)
+
         try:
-            discord_alert.send_parlay_alert(parlay)
-            # Mark as sent in DB — crash-safe dedup
-            try:
-                _pg2 = _get_pg()
-                if _pg2:
-                    with _pg2.cursor() as _c2:
-                        _c2.execute(
-                            "UPDATE bet_ledger SET discord_sent = TRUE "
-                            "WHERE agent_name = %s AND bet_date = %s",
-                            (agent_name, today_str)
-                        )
-                    _pg2.commit()
-            except Exception as _dbe2:
-                logger.debug("[AgentTasklet] discord_sent update skipped: %s", _dbe2)
+            discord_alert.send_parlay_alert(parlay)      # 4. Discord (fires last)
 
             # Record parlay in propiq_season_record so nightly_recap.py can settle it
             # Without this, recap always shows "No parlays sent today" even when plays fire
