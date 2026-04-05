@@ -257,7 +257,8 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 6          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
+MIN_CONFIDENCE    = 6
+MIN_PROB          = 0.57   # Phase 121: minimum XGBoost model probability (57%)          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -3765,7 +3766,7 @@ def run_leaderboard_tasklet() -> None:
     Read 14-day settled bets from Postgres, compute per-agent ROI,
     update capital multipliers (0.5x – 2.0x), store in Redis.
     """
-    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=14)).isoformat()
+    cutoff = (datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")) - datetime.timedelta(days=14)).isoformat()
     rows: list[tuple] = []
 
     try:

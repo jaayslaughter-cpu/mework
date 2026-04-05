@@ -1267,7 +1267,14 @@ def settle_streak_picks(game_date: str) -> None:
 
                 # Update streak state
                 if outcome == "WIN":
-                    new_wins = pick["wins_in_row"] + 1
+                    # Re-read wins_in_row to avoid stale batch reads
+                    # (both fresh-start picks graded same cycle both see wins_in_row=0)
+                    cur.execute(
+                        "SELECT wins_in_row FROM streak_state WHERE id=%s FOR UPDATE",
+                        (streak_id,),
+                    )
+                    _fresh = cur.fetchone()
+                    new_wins = (_fresh[0] if _fresh else pick["wins_in_row"]) + 1
                     streak_status = "WON" if new_wins >= STREAK_TOTAL_WINS else "ACTIVE"
                     cur.execute(
                         "UPDATE streak_state SET wins_in_row=%s, status=%s WHERE id=%s",

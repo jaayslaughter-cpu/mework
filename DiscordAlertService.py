@@ -277,7 +277,7 @@ class DiscordAlertService:
             plat_label = "PrizePicks"
         else:
             et = parlay.get("entry_type", "FlexPlay")
-            entry_label = "PowerPlay" if et in ("STANDARD", "PowerPlay") else "FlexPlay"
+            entry_label = "PowerPlay" if et.upper() in ("STANDARD", "POWERPLAY", "POWER") else "FlexPlay"
             plat_label = f"Underdog Fantasy — {entry_label}"
 
         # --- Season record footer ---
@@ -297,7 +297,8 @@ class DiscordAlertService:
             leg_plat  = leg.get("platform", platform)
             # Underdog uses Higher/Lower; translate for display
             if "underdog" in str(leg_plat).lower() or "underdog" in plat_lower:
-                side = side_raw.replace("Over", "Higher").replace("Under", "Lower")
+                _s_map = {"over": "Higher", "under": "Lower"}
+                side = _s_map.get(side_raw.lower(), side_raw)
             else:
                 side = side_raw
             line      = leg.get("line", "?")
@@ -372,7 +373,9 @@ class DiscordAlertService:
         for i, leg in enumerate(legs, 1):
             player    = (leg.get("player_name") or leg.get("player", "?")).title()
             prop_type = leg.get("prop_type", "?").replace("_", " ").title()
-            side      = leg.get("side", "?")
+            _side_raw = leg.get("side", "?")
+            _s_map    = {"over": "Higher", "under": "Lower"}
+            side      = _s_map.get(_side_raw.lower(), _side_raw)
             line      = leg.get("line", "?")
             streak_n  = leg.get("streak_length", leg.get("streak", "?"))
             fields.append({
