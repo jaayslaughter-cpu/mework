@@ -1190,6 +1190,25 @@ _TEAM_TO_STADIUM: dict[str, str] = {
     "Atlanta Braves":        "Truist Park",
 }
 
+_ABBREV_TO_STADIUM: dict[str, str] = {
+    "LAA": "Angels Stadium",          "ARI": "Chase Field",
+    "BAL": "Camden Yards",            "BOS": "Fenway Park",
+    "CHC": "Wrigley Field",           "CWS": "Guaranteed Rate Field",
+    "CIN": "Great American Ball Park","CLE": "Progressive Field",
+    "COL": "Coors Field",             "DET": "Comerica Park",
+    "HOU": "Minute Maid Park",        "KC":  "Kauffman Stadium",
+    "LAD": "Dodger Stadium",          "MIA": "LoanDepot Park",
+    "MIL": "American Family Field",   "MIN": "Target Field",
+    "NYM": "Citi Field",              "NYY": "Yankee Stadium",
+    "OAK": "Oakland Coliseum",        "SAC": "Oakland Coliseum",
+    "PHI": "Citizens Bank Park",      "PIT": "PNC Park",
+    "SD":  "Petco Park",              "SF":  "Oracle Park",
+    "SEA": "T-Mobile Park",           "STL": "Busch Stadium",
+    "TB":  "Tropicana Field",         "TEX": "Globe Life Field",
+    "TOR": "Rogers Centre",           "WSH": "Nationals Park",
+    "ATL": "Truist Park",
+}
+
 
 def _fetch_weather_today() -> list[dict]:
     """
@@ -1210,7 +1229,7 @@ def _fetch_weather_today() -> list[dict]:
 
     results = []
     for team in home_teams:
-        stadium = _TEAM_TO_STADIUM.get(team, "")
+        stadium = _TEAM_TO_STADIUM.get(team, "") or _ABBREV_TO_STADIUM.get(team, "")
         if not stadium:
             continue
         coords = _STADIUM_COORDS.get(stadium)
@@ -1326,6 +1345,14 @@ def _ensure_bet_ledger() -> None:
                 conn.rollback()
             try:
                 cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS mlbam_id INTEGER")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute(
+                    "ALTER TABLE bet_ledger ADD CONSTRAINT IF NOT EXISTS "
+                    "bet_ledger_dedup_key UNIQUE (player_name, prop_type, line, side, agent_name, bet_date)"
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -3081,20 +3108,37 @@ def _build_pitcher_enrich_map(hub: dict) -> dict[str, dict]:
 
 
 def _get_props(hub: dict) -> list[dict]:
-    """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
-    # 1. Try PrizePicks from hub (6,500+ real MLB props)
+    """Return real props from hub — always combines UD + PP (both platforms)."""
+    props: list[dict] = []
+    seen: set[tuple] = set()
+
+    # 1. Underdog Fantasy — load first (richer lines, real market odds)
+    ud_props = _extract_underdog_props(hub)
+    for p in ud_props:
+        key = ((p.get("player") or "").lower(), p.get("prop_type", ""))
+        if key not in seen:
+            seen.add(key)
+            props.append(p)
+    if ud_props:
+        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
+
+    # 2. PrizePicks — add any props not already covered by UD (deduped by player+stat)
     pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+    pp_added = 0
     if pp_picks and isinstance(pp_picks, list):
-        props = []
+        _pp_enrich = _build_pitcher_enrich_map(hub)
         for pick in pp_picks:
             if not isinstance(pick, dict):
                 continue
-            player = pick.get("player_name", pick.get("player", pick.get("name", "")))
+            player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
             prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", "H"))))
-            line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
+            line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue
-            _pp_enrich = _build_pitcher_enrich_map(hub)
+            key = (player.lower(), prop_type)
+            if key in seen:
+                continue
+            seen.add(key)
             _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
             _fg_pitcher = {}
             try:
@@ -3120,52 +3164,18 @@ def _get_props(hub: dict) -> list[dict]:
                 "era":              _fg_pitcher.get("era",    4.0),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
-        if props:
-            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
-            return props
+            pp_added += 1
+        if pp_added:
+            logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
+        elif pp_picks:
+            logger.info("[AgentTasklet] PrizePicks: all %d props already covered by UD", len(pp_picks))
 
-    # 2. Underdog from hub — combined with PrizePicks if both available
-    ud_props = _extract_underdog_props(hub)
-    if ud_props:
-        props = []
-        props.extend(ud_props)
-        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
+    if not props:
+        return []  # No real props — skip cycle entirely (no synthetic)
 
-        # Add PrizePicks on top (deduped)
-        pp_picks = hub.get("dfs", {}).get("prizepicks", [])
-        if pp_picks and isinstance(pp_picks, list):
-            seen = {(p["player"].lower(), p["prop_type"]) for p in props}
-            pp_added = 0
-            for pick in pp_picks:
-                if not isinstance(pick, dict):
-                    continue
-                player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
-                prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", ""))))
-                line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
-                if not player or not prop_type:
-                    continue
-                key = (player.lower(), prop_type)
-                if key in seen:
-                    continue
-                seen.add(key)
-                props.append({
-                    "player":         player,
-                    "player_name":    player,
-                    "prop_type":      prop_type,
-                    "line":           float(line or 1.5),
-                    "over_american":  -115,
-                    "under_american": -115,
-                    "team":           pick.get("player_team", pick.get("team", "")),
-                    "venue":          "",
-                    "platform":       "prizepicks",
-                })
-                pp_added += 1
-            if pp_added:
-                logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
-        return props
-
-    # No real props available — skip cycle entirely (no synthetic)
-    return []
+    logger.info("[AgentTasklet] Combined props: %d (UD=%d PP=%d)",
+                len(props), len(ud_props), pp_added)
+    return props
 
 
 def run_agent_tasklet() -> None:
@@ -3382,7 +3392,7 @@ def run_agent_tasklet() -> None:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
                                 ABS(%s), %s, %s)
-                        ON CONFLICT DO NOTHING
+                        ON CONFLICT ON CONSTRAINT bet_ledger_dedup_key DO NOTHING
                         """,
                         (
                             _leg.get("player") or _leg.get("player_name"),
