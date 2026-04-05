@@ -287,7 +287,7 @@ class DiscordAlertService:
             lp_lower  = str(leg_plat).lower()
             lp_emoji  = _PLATFORM_EMOJI.get(lp_lower, "🎯")
             # Underdog uses Pick'em terminology: Higher / Lower
-            if "underdog" in lp_lower:
+            if "underdog" in lp_lower or "underdog" in plat_lower:
                 side = "Higher" if side in ("Over", "Higher") else "Lower"
 
             line_note = leg.get("line_comparison_note", "")

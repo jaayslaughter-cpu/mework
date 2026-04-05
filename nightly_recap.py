@@ -221,7 +221,7 @@ def _build_recap_embed(
             "title": f"\U0001f4ca PropIQ Nightly Recap \u2014 {date_str}",
             "description": (
                 f"**Today:** {day_record} \u00b7 {day_units} \u00b7 {total} parlays settled\n"
-                f"{'No parlays sent today.' if total == 0 else ''}"
+                f"{'⏳ Parlays pending — games still in progress.' if total == 0 and pending_count > 0 else ('No parlays sent today.' if total == 0 else '')}"
             ),
             "color": color,
             "fields": fields,
