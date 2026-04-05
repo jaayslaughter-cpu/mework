@@ -1299,6 +1299,51 @@ def _fetch_weather_today() -> list[dict]:
     logger.info("[DataHub] Weather fetched for %d stadiums", len(results))
     return results
 
+def _refresh_sample_counts() -> None:
+    """Seed xgb_sample_counts in Redis from bet_ledger settled rows.
+
+    Called once per DataHub refresh cycle so sample counts grow from day 1
+    rather than staying at 0 until the first Sunday XGBoost retrain.
+
+    Counts only rows with discord_sent=TRUE AND result IS NOT NULL so the
+    floor matches exactly what XGBoost trains on.  The Sunday retrain will
+    overwrite with richer per-prop-type stats; this is just a daily warm-up.
+    """
+    try:
+        conn_str = os.getenv("DATABASE_URL", "")
+        if not conn_str:
+            return
+        import psycopg2  # noqa: PLC0415
+        with psycopg2.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT prop_type, COUNT(*) AS n
+                    FROM bet_ledger
+                    WHERE discord_sent = TRUE
+                      AND result IS NOT NULL
+                    GROUP BY prop_type
+                    """
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return
+        counts = {r[0].lower(): int(r[1]) for r in rows if r[0]}
+        r = _redis()
+        existing_raw = r.get("xgb_sample_counts")
+        if existing_raw:
+            existing = json.loads(existing_raw)
+            # Merge: only update keys where we have new data; don't overwrite
+            # XGBoost-written counts that may be higher (retrain uses more rows)
+            for k, v in counts.items():
+                existing[k] = max(existing.get(k, 0), v)
+            counts = existing
+        r.setex("xgb_sample_counts", 604800, json.dumps(counts))
+        logger.info("[DataHub] xgb_sample_counts seeded from bet_ledger: %s", counts)
+    except Exception as exc:
+        logger.debug("[DataHub] _refresh_sample_counts skipped: %s", exc)
+
+
 # 1. DataHubTasklet
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1557,6 +1602,8 @@ def run_data_hub_tasklet() -> None:
         if data:
             hub[key.replace("hub:", "")] = data
 
+    # Seed sample counts from bet_ledger so shrinkage uses real data before retrain
+    _refresh_sample_counts()
     _hub_setex(r, "mlb_hub", TTL_HUB, json.dumps(hub))
     logger.info("[DataHub] Hub refreshed. Groups: physics=%s context=%s market=%s dfs=%s",
                 _hub_exists(r, physics_key), _hub_exists(r, context_key),
@@ -2693,6 +2740,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
 
     enriched_legs = []
     for lg in legs:
+        _orig_conf = lg.get("confidence", 5)   # capture before any mutation
         if _lc_ok:
             try:
                 result = compare_prop(
@@ -2709,6 +2757,11 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
                     }
             except Exception:
                 pass
+        # Defensive: always restore original confidence so compare_prop cannot
+        # silently drop it, preventing p_conf from defaulting to 5 and blocking
+        # the MIN_CONFIDENCE=6 gate for non-EVHunter agents (Bug #15b).
+        if "confidence" not in lg:
+            lg = {**lg, "confidence": _orig_conf}
         enriched_legs.append(lg)
 
     # ── Step 2: decide ONE platform for the whole parlay ─────────────────────
