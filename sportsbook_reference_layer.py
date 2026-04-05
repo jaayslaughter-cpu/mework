@@ -42,14 +42,12 @@ logger = logging.getLogger("propiq.sb_ref")
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Single live key — dead keys removed
-ODDS_API_KEY = (
-    os.getenv("ODDS_API_KEY")
-    or "673bf195062e60e666399be40f763545"
-)
+# Keys loaded from env vars only — no hardcoded fallbacks in repo
+# Set ODDS_API_KEY and ODDS_API_KEY_2 in Railway environment variables
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 _ODDS_KEY_FALLBACKS = [
-    os.getenv("ODDS_API_KEY",   "673bf195062e60e666399be40f763545"),  # primary key
-    os.getenv("ODDS_API_KEY_2", "adb0c9efeec40b3aff7b6843d449ef93"),  # secondary key — second free account
+    os.getenv("ODDS_API_KEY",   ""),   # primary key — set in Railway env vars
+    os.getenv("ODDS_API_KEY_2", ""),   # secondary key — set in Railway env vars
 ]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT         = "baseball_mlb"

@@ -112,9 +112,12 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN   = 8.0    # confidence gate (vs. 7.0 for standard parlays)
-STREAK_PROB_MIN   = 0.62   # implied win probability floor
-STREAK_EV_MIN     = 5.0    # EV % floor
+STREAK_CONF_MIN    = 7.0    # confidence gate — lowered from 8.0; formula rebalanced so
+                            # trivially-easy 0.5 lines are blocked by STREAK_MIN_LINE instead
+STREAK_PROB_MIN    = 0.62   # implied win probability floor
+STREAK_EV_MIN      = 8.0    # EV % floor — raised from 5.0; requires genuine mispricing vs market
+STREAK_MIN_LINE    = 1.0    # NEW: block all 0.5 stat lines — too trivial, near-certain base rate
+STREAK_MIN_SIGNALS = 2      # NEW: at least 2/18 agents must agree before a pick qualifies
 STREAK_TOTAL_WINS = 11     # picks needed to win
 STREAK_WINDOW_DAYS = 10    # calendar days to complete the streak
 
@@ -266,9 +269,11 @@ def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
       prob ≥ 0.76 + ev_pct ≥ 7.5%  (e.g. hits_runs_rbis Over 0.5 = 82%)
       prob ≥ 0.80 + any ev            (dominant Over lines)
     """
-    prob_score   = (prob - 0.50) / 0.30 * 7.0
-    ev_bonus     = min(ev_pct / 15.0 * 2.0, 2.0)
-    signal_bonus = min(signal_count * 0.1, 1.0)
+    # Prob contribution capped at 5 — prevents high base-rate props (82% hits_runs_rbis 0.5)
+    # from dominating the score. Genuine edge (EV + agent signals) carries more weight.
+    prob_score   = min((prob - 0.50) / 0.35 * 5.0, 5.0)   # was 0.30/7.0, uncapped
+    ev_bonus     = min(ev_pct / 10.0 * 3.0, 3.0)           # was /15 × 2; more EV weight
+    signal_bonus = min(signal_count * 0.2, 2.0)             # was × 0.1 cap 1.0; more signal weight
     return round(min(10.0, max(1.0, prob_score + ev_bonus + signal_bonus)), 1)
 
 
@@ -439,6 +444,8 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
             continue
         if line_val <= 0:
             continue
+        if line_val < STREAK_MIN_LINE:          # block trivial 0.5 lines (near-certain base rates)
+            continue
         if not _is_game_prop(prop_type, line_val):
             continue
 
@@ -517,6 +524,7 @@ def select_streak_pick(
         if c.confidence >= STREAK_CONF_MIN
         and c.implied_prob >= STREAK_PROB_MIN
         and c.ev_pct >= STREAK_EV_MIN
+        and c.signal_count >= STREAK_MIN_SIGNALS   # require at least 2 agent signals
     ]
 
     if not qualified:
@@ -553,6 +561,7 @@ def select_start_picks(
         if c.confidence >= STREAK_CONF_MIN
         and c.implied_prob >= STREAK_PROB_MIN
         and c.ev_pct >= STREAK_EV_MIN
+        and c.signal_count >= STREAK_MIN_SIGNALS   # require at least 2 agent signals
     ]
     if not qualified:
         return []
