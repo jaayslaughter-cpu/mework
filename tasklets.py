@@ -95,11 +95,11 @@ except ImportError:
     _MARKET_VALIDATOR_AVAILABLE = False
 
 try:
-    from bullpen_scorer import build_bullpen_scorer as _build_bullpen_scorer
+    from bullpen_fatigue_scorer import build_bullpen_fatigue_scorer as _build_bullpen_scorer
     _BULLPEN_SCORER_AVAILABLE = True
 except ImportError:
     _BULLPEN_SCORER_AVAILABLE = False
-    def _build_bullpen_scorer(games): return None  # noqa: E704
+    def _build_bullpen_scorer(): return None  # noqa: E704
 
 try:
     from nsfi_layer import fetch_nsfi_predictions_today as _fetch_nsfi
@@ -1459,8 +1459,7 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, bullpen_key):
         if _BULLPEN_SCORER_AVAILABLE:
             try:
-                _games_for_bp = hub.get("physics", {}).get("schedule", [])
-                _bp_scorer = _build_bullpen_scorer(_games_for_bp)
+                _bp_scorer = _build_bullpen_scorer()  # fetches its own pitching logs internally
                 if _bp_scorer is not None:
                     _bp_map = {}
                     for _team in [
@@ -2334,9 +2333,14 @@ class _BullpenAgent(_BaseAgent):
         if _norm_stat(prop_type) not in self._HITTER_STATS:
             return None
 
-        # Get fatigue for opposing team (batter faces opponent's bullpen)
-        opp_team = prop.get("opposing_team", "")
-        fatigue  = fatigue_map.get(opp_team, fatigue_map.get(team, -1))
+        # Get fatigue for opposing team (batter faces opponent's bullpen).
+        # Hub stores {"fatigue_score": float, "boost": float} per team.
+        opp_team    = prop.get("opposing_team", "")
+        _raw_entry  = fatigue_map.get(opp_team, fatigue_map.get(team, -1))
+        if isinstance(_raw_entry, dict):
+            fatigue = float(_raw_entry.get("fatigue_score", 2.0))
+        else:
+            fatigue = float(_raw_entry)  # legacy scalar or -1 sentinel
 
         # If not in hub, fall back to neutral (BullpenFatigueScorer needs full
         # pitching_logs DataFrame + target_date which aren't available here)
@@ -3184,6 +3188,18 @@ def run_agent_tasklet() -> None:
     """
     hub   = read_hub()
     model = _load_xgb_model()
+
+    # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
+    # Avoids burning API quota, writing empty bet_ledger rows, and spamming logs
+    # at 3 AM when there are no games. Uses hub game_states (set by DataHubTasklet)
+    # rather than a hardcoded clock check so rain delays and doubleheaders are handled.
+    _gs = hub.get("game_states", {})
+    _active_states = {"Scheduled", "InProgress", "Live", "Pre-Game", "Warmup", "Delayed"}
+    _has_active_games = any(s in _active_states for s in _gs.values())
+    if _gs and not _has_active_games:
+        # Games exist in hub but none are active — all Final/Postponed
+        logger.debug("[AgentTasklet] No active or upcoming games this cycle — skipping.")
+        return
 
     # Decision logger — audit trail for every prop evaluation
     _DL = None

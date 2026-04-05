@@ -26,9 +26,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# line_stream.py writes to this path on the agent filesystem
+# line_stream.py writes to LINE_STREAM_DB_PATH (default /tmp/line_stream.db in root,
+# /agent/home/line_stream.db in ml_engine/). Read the same env var so both sides agree.
+# /app/data is created by Dockerfile and survives within a deployment longer than /tmp,
+# though a full Railway volume (set LINE_STREAM_DB_PATH in env) is needed for true persistence.
 import os as _os
-_DB_PATH = Path(_os.getenv("CLV_DB_PATH", "/tmp/line_stream.db"))
+_DB_PATH = Path(
+    _os.getenv("LINE_STREAM_DB_PATH")          # primary — matches line_stream.py writer
+    or _os.getenv("CLV_DB_PATH")               # legacy fallback
+    or "/app/data/line_stream.db"              # better than /tmp; persists within deploy
+)
 
 _EMPTY_SUMMARY: dict = {
     "available":   False,

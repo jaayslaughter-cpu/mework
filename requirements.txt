@@ -1,6 +1,5 @@
 # PropIQ Python ML Service — production dependencies
 # RabbitMQ (pika) REMOVED — Phase 29 HTTP migration complete
-# confluent-kafka REMOVED — never used in production code
 # pybaseball REMOVED — Phase 96 replaced with direct Baseball Savant + FanGraphs HTTP calls
 
 fastapi>=0.111.0
@@ -18,6 +17,7 @@ optuna>=3.6.1
 joblib>=1.4.2
 scipy>=1.13.0
 pytz>=2024.1
+PyYAML>=6.0.1
 beautifulsoup4>=4.12.3
 lxml>=5.2.1
 rapidfuzz>=3.9.0
@@ -28,5 +28,7 @@ apscheduler>=3.10.4
 aiohttp>=3.9.5
 tenacity>=8.3.0
 structlog>=24.1.0
+confluent-kafka>=2.3.0
+shap>=0.45.0
 
 redis>=5.0.0

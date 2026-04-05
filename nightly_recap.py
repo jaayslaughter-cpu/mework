@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 import urllib.request
@@ -44,10 +45,13 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DISCORD_WEBHOOK = (
+# Read webhook from env so rotating it only requires a Railway env var update.
+# Falls back to the hardcoded URL so existing deploys don't break silently.
+_WEBHOOK_FALLBACK = (
     "https://discordapp.com/api/webhooks/1484795164961800374/"
     "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
 )
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", _WEBHOOK_FALLBACK)
 
 logging.basicConfig(
     level=logging.INFO,
