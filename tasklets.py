@@ -3062,30 +3062,68 @@ class _SharpFadeAgent(_BaseAgent):
         return None
 
 
-class _TimeValueAgent(_BaseAgent):
-    """Time-based edge agent.
-    Targets props where line value has drifted since open — captures overnight
-    steam and early-sharp movement by comparing current implied vs model.
-    Also applies a dome/afternoon multiplier (dome + day game = higher scoring pace).
+class _LineDriftAgent(_BaseAgent):
+    """Sharp line drift detector.
+
+    Fires when sharp sportsbooks (DK/FD/BetMGM, vig-stripped) are pricing a prop
+    meaningfully higher than the DFS platform is implying — a signal that the
+    sharp market has moved toward this outcome and UD/PP hasn't caught up yet.
+
+    Primary signal  — drift:
+        sharp_implied (sb_implied_prob, 0-1) minus platform_implied (from over_american).
+        Threshold: DRIFT_MIN = 0.04 (4 percentage points).
+        Sharp books at 58% vs UD implying 53.5% → drift = 4.5% → fires.
+
+    Secondary signal — line gap:
+        sb_line_gap = prop_line - sportsbook_line.
+        Negative = DFS line is set lower than sharp books → easier to hit on Over.
+        Adds a small EV bonus when gap < -0.25.
+
+    Both signals require sb_implied_prob > 0 (i.e. Odds API actually returned data).
+    Excludes props on the excluded list (stolen_bases, home_runs, walks, walks_allowed).
     """
-    name = "TimeValueAgent"
+    name = "LineDriftAgent"
+
+    # Minimum drift between sharp implied and platform implied to consider firing
+    DRIFT_MIN: float = 0.04   # 4 percentage points
+    # Line gap bonus: if DFS line is 0.25+ lower than sportsbook line → small EV bonus
+    LINE_GAP_BONUS: float = 1.5   # added to ev_pct when gap favors Over
+
+    _EXCLUDED = {"stolen_bases", "home_runs", "walks", "walks_allowed"}
 
     def evaluate(self, prop: dict) -> dict | None:
         prop_type = prop.get("prop_type", "").lower()
-        is_dome   = bool(prop.get("_is_dome", False))
-        temp_f    = float(prop.get("_temp_f", 72.0) or 72.0)
-        # Dome boost for batter props — controlled environment inflates totals
-        batter_types = {"hits", "total_bases", "home_runs", "rbis", "runs_scored"}
-        dome_boost = 2.5 if (is_dome and prop_type in batter_types) else 0.0
-        # Hot weather boost for batter power props
-        temp_boost = 1.5 if (temp_f >= 85 and prop_type in {"home_runs", "total_bases"}) else 0.0
-        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
-        model_prob  = min(95.0, model_prob + dome_boost + temp_boost)
-        over_odds   = prop.get("over_american", -115)
-        implied     = _american_to_implied(over_odds) * 100
-        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if prop_type in self._EXCLUDED:
+            return None
+
+        # Sharp no-vig probability already stamped by sportsbook_reference_layer
+        sharp_implied: float = float(prop.get("sb_implied_prob", 0.0) or 0.0)
+        if sharp_implied <= 0.0:
+            # No Odds API data for this prop today — skip, don't fabricate signal
+            return None
+
+        over_odds       = prop.get("over_american", -115)
+        platform_implied: float = _american_to_implied(over_odds)  # 0-1 fraction
+
+        # Core drift signal: how far ahead of the DFS platform are the sharp books?
+        drift: float = sharp_implied - platform_implied
+        if drift < self.DRIFT_MIN:
+            return None
+
+        # Line gap bonus: DFS line set easier than sharp consensus line
+        sb_line_gap: float = float(prop.get("sb_line_gap", 0.0) or 0.0)
+        line_gap_bonus: float = self.LINE_GAP_BONUS if sb_line_gap < -0.25 else 0.0
+
+        # Use sharp implied as the model probability — it IS the signal
+        model_prob = min(95.0, sharp_implied * 100)
+        implied_pct = platform_implied * 100
+        ev_pct = (
+            (model_prob / 100 - platform_implied) / platform_implied * 100
+            + line_gap_bonus
+        )
+
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+            return self._build_bet(prop, "OVER", model_prob, implied_pct, ev_pct)
         return None
 
 
@@ -3191,6 +3229,7 @@ _AGENT_CLASSES = [
     _ChalkBusterAgent,  # fades heavy public chalk — prop_df lookup fixed (see evaluate())
     _PropCycleAgent,    # mean-reversion on form_adj + cv_nudge (no new deps)
     _LineupChaseAgent,  # K-props only, fires on confirmed lineups + high chase difficulty
+    _LineDriftAgent,    # sharp book drift: sb_implied_prob (DK/FD/BetMGM no-vig) vs platform implied
 ]
 
 
