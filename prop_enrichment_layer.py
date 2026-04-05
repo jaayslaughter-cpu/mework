@@ -523,6 +523,27 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
             return round(p, 4)
         return None
 
+    # ── Batter H+R+RBI composite ───────────────────────────────────────────
+    # Most common prop type; previously fell back to population avg 0.72.
+    # Now uses wRC+ and wOBA for a per-player Bayesian estimate.
+    if prop_type == "hits_runs_rbis":
+        wrc  = float(prop.get("wrc_plus", 0.0) or 0.0)
+        woba = float(prop.get("woba",     0.0) or 0.0)
+        if wrc < 1.0 and woba < 0.01:
+            return None
+        # League avg H+R+RBI Over 3.5 ≈ 55%.
+        # Elite batter (wRC+ 140, wOBA .390) → ~0.62; weak (wRC+ 80, wOBA .300) → ~0.49
+        base = 0.55
+        if wrc > 80:
+            base += (wrc - 100.0) / 100.0 * 0.08   # ±8pp for ±100 wRC+
+        if woba > 0.01:
+            base += (woba - 0.320) / 0.060 * 0.05   # ±5pp per .060 wOBA
+        base = max(0.38, min(0.78, base))
+        p = base if is_over else (1.0 - base)
+        if wrc > 80 or woba > 0.01:
+            return round(p, 4)
+        return None
+
     # ── Batter Total Bases ─────────────────────────────────────────────────
     if prop_type == "total_bases" and line <= 1.5:
         wrc     = float(prop.get("wrc_plus", 0.0) or 0.0)
