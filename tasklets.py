@@ -146,7 +146,7 @@ except ImportError:
         s2 = str(s).lower().replace(" ","_").replace("-","_").strip()
         result = m.get(s2, s2)
         # Block removed prop types even if they slip through via raw string match
-        _BLOCKED = {"stolen_bases","home_runs","walks","walks_allowed","doubles","triples","singles"}
+        _BLOCKED = {"stolen_bases","home_runs","walks","walks_allowed","doubles","triples"}
         return result if result not in _BLOCKED else ""
     ABS_FRAMING_WEIGHT = 0.20
     class SteamMonitor:
