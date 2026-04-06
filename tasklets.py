@@ -1541,7 +1541,7 @@ def run_data_hub_tasklet() -> None:
         except Exception as _an_exc:
             logger.warning(f"[DataHub] ActionNetwork sentiment unavailable: {_an_exc}")
 
-        # Action Network player-level prop ticket%/money% (public — no auth required)
+        # Action Network player-level prop ticket%/money% (PRO — Bearer JWT required)
         _sharp_report: list = []
         try:
             from action_network_layer import build_sharp_report
@@ -1553,18 +1553,32 @@ def run_data_hub_tasklet() -> None:
                 )
             else:
                 logger.info(
-                    "[DataHub] sharp_report empty — props not yet posted pre-game. "
+                    "[DataHub] sharp_report empty — token not set or props not yet posted. "
                     "SharpFadeAgent will use game-level RLM (Path 2)."
                 )
         except Exception as _sr_exc:
             logger.warning("[DataHub] ActionNetwork sharp_report build failed: %s", _sr_exc)
 
+        # Action Network live projections REST endpoint (PRO — Bearer JWT required)
+        _live_projections: list = []
+        try:
+            from action_network_layer import fetch_live_projections
+            _live_projections = fetch_live_projections()
+            if _live_projections:
+                logger.info(
+                    "[DataHub] ActionNetwork live projections: %d entries",
+                    len(_live_projections),
+                )
+        except Exception as _lp_exc:
+            logger.warning("[DataHub] ActionNetwork live projections failed: %s", _lp_exc)
+
         market = {
-            "public_betting":    _fetch_sbd_public_trends(),
-            "sharp_report":      _sharp_report,       # player-level; [] pre-game fallback
-            "an_game_sentiment": _an_sentiment,        # game-level RLM — always live
-            "prop_projections":  _fetch_draftedge_projections(),   # free — DraftEdge
-            "odds":              _odds_api_get(),                   # free fallback chain
+            "public_betting":      _fetch_sbd_public_trends(),
+            "sharp_report":        _sharp_report,          # player-level; [] if token not set
+            "an_live_projections": _live_projections,      # PRO live projections; [] pre-game
+            "an_game_sentiment":   _an_sentiment,          # game-level RLM — always live
+            "prop_projections":    _fetch_draftedge_projections(),   # free — DraftEdge
+            "odds":                _odds_api_get(),                  # free fallback chain
         }
         _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
 

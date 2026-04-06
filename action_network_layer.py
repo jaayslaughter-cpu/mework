@@ -16,11 +16,15 @@ Public endpoints (no auth required)
   fetch_mlb_pitcher_game_stats()  → same-day pitcher stats keyed by player_id
                                      Injects into game_prediction_layer as recency override.
 
-PRO-gated endpoint (requires ACTION_NETWORK_COOKIE env var)
--------------------------------------------------------------
+PRO-gated endpoints (require ACTION_NETWORK_COOKIE env var — Bearer JWT)
+-------------------------------------------------------------------------
   fetch_mlb_prop_projections()    → player-level ticket%/money% per prop market
                                      Unlocks _SharpFadeAgent Path 1 (true player-level signal).
-                                     Set ACTION_NETWORK_COOKIE in Railway env to activate.
+                                     Reads ACTION_NETWORK_COOKIE as Bearer JWT from Railway env.
+
+  fetch_live_projections()        → live MLB prop projections from REST v2 endpoint
+                                     api.actionnetwork.com/web/v2/leagues/1/projections/available
+                                     Same Bearer token. Returns [] if no live games.
 
 Usage
 -----
@@ -28,11 +32,13 @@ Usage
         fetch_mlb_game_sentiment,
         fetch_mlb_pitcher_game_stats,
         fetch_mlb_prop_projections,
+        fetch_live_projections,
     )
 
-    sentiment   = fetch_mlb_game_sentiment()
-    pitcher_stats = fetch_mlb_pitcher_game_stats()
-    props       = fetch_mlb_prop_projections()   # empty list if no cookie
+    sentiment      = fetch_mlb_game_sentiment()
+    pitcher_stats  = fetch_mlb_pitcher_game_stats()
+    props          = fetch_mlb_prop_projections()   # empty list if no token
+    live_projs     = fetch_live_projections()        # empty list if no live games
 """
 
 from __future__ import annotations
@@ -59,7 +65,7 @@ _SCOREBOARD_URL = (
     "?bookIds={books}&date={date}&periods=event"
 )
 
-# ── Prop projections endpoint (PRO-gated) ─────────────────────────────────────
+# ── Prop projections endpoint (PRO-gated — Bearer JWT required) ───────────────
 # build_id changes when AN deploys; must match the live value.
 # If fetches return 404, capture a fresh HAR from actionnetwork.com/mlb/prop-projections
 # and update _BUILD_ID from the _next/data/{build_id}/... URL.
@@ -67,6 +73,14 @@ _BUILD_ID = "xCV3Npj3q37WLxXkJelCQ"
 _PROP_PROJ_URL = (
     "https://www.actionnetwork.com/_next/data/{build_id}/mlb/prop-projections.json"
     "?league=mlb"
+)
+
+# ── Live projections REST endpoint (PRO-gated — Bearer JWT required) ──────────
+# Returns live MLB prop projections; league 1 = MLB.
+# stateCode=CA required by AN backend (matches user's PRO session state).
+_LIVE_PROJ_URL = (
+    "https://api.actionnetwork.com/web/v2/leagues/1/projections/available"
+    "?isLive=true&limit=50&stateCode=CA"
 )
 
 # ── AN market types → PropIQ prop_type canonical names ───────────────────────
@@ -100,14 +114,24 @@ _PUBLIC_HEADERS = {
 }
 
 # ── Headers for PRO-gated _next/data endpoint ─────────────────────────────────
-# These extra headers are required by the Next.js data route.
-# Cookie is injected at call-time from ACTION_NETWORK_COOKIE env var.
+# Bearer token injected at call-time from ACTION_NETWORK_COOKIE env var.
 _NEXT_HEADERS = {
     "User-Agent": _PUBLIC_HEADERS["User-Agent"],
     "Accept": "application/json",
     "Referer": "https://www.actionnetwork.com/mlb/prop-projections",
     "x-nextjs-data": "1",
     "sec-ch-ua-mobile": "?0",
+}
+
+# ── Headers for PRO REST API (api.actionnetwork.com) ─────────────────────────
+_PRO_REST_HEADERS = {
+    "User-Agent": _PUBLIC_HEADERS["User-Agent"],
+    "Accept": "application/json",
+    "Origin": "https://www.actionnetwork.com",
+    "Referer": "https://www.actionnetwork.com/pro-dashboard",
+    "sec-fetch-site": "same-site",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
 }
 
 # ── Per-day in-process cache ─────────────────────────────────────────────────
@@ -119,6 +143,9 @@ _PITCHER_CACHE_DATE: str     = ""
 
 _PROP_PROJ_CACHE: list       = []
 _PROP_PROJ_CACHE_DATE: str   = ""
+
+_LIVE_PROJ_CACHE: list       = []
+_LIVE_PROJ_CACHE_DATE: str   = ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -542,7 +569,7 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
         num_bets        int     game-level volume (proxy for prop volume)
         source          str     "action_network_pro"
 
-    Returns [] if cookie not set (graceful degradation — _SharpFadeAgent falls
+    Returns [] if Bearer token not set (graceful degradation — _SharpFadeAgent falls
     through to game-level Path 2 automatically).
     """
     global _PROP_PROJ_CACHE, _PROP_PROJ_CACHE_DATE
@@ -551,14 +578,34 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
     if _PROP_PROJ_CACHE_DATE == date_str and _PROP_PROJ_CACHE:
         return _PROP_PROJ_CACHE
 
-    cookie = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
+    token = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
+    if not token:
+        logger.info(
+            "[ActionNetwork] ACTION_NETWORK_COOKIE not set — "
+            "prop projections unavailable; SharpFadeAgent will use Path 2."
+        )
+        return []
 
-    url = _PROP_PROJ_URL.format(build_id=_BUILD_ID)
-    # Endpoint is public (confirmed via HAR — no auth required).
-    # Inject cookie only if set, in case AN adds PRO gating in the future.
-    headers = {**_NEXT_HEADERS}
-    if cookie:
-        headers["Cookie"] = cookie
+    # Fetch build_id dynamically from AN homepage to survive deploys
+    build_id = _BUILD_ID
+    try:
+        _home = requests.get(
+            "https://www.actionnetwork.com/mlb/prop-projections",
+            headers=_PUBLIC_HEADERS,
+            timeout=10,
+        )
+        import re as _re
+        _m = _re.search(r'"buildId"\s*:\s*"([^"]+)"', _home.text)
+        if _m:
+            build_id = _m.group(1)
+    except Exception:
+        pass  # fall back to cached _BUILD_ID
+
+    url = _PROP_PROJ_URL.format(build_id=build_id)
+    headers = {
+        **_NEXT_HEADERS,
+        "Authorization": f"Bearer {token}",
+    }
 
     try:
         resp = requests.get(url, headers=headers, timeout=20)
@@ -656,15 +703,77 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
     return result
 
 
+# ── PRO REST API — live projections ──────────────────────────────────────────
+
+def fetch_live_projections() -> list[dict]:
+    """
+    Fetch live MLB prop projections from Action Network PRO REST API.
+
+    Endpoint: api.actionnetwork.com/web/v2/leagues/1/projections/available
+    Requires ACTION_NETWORK_COOKIE env var (same Bearer JWT as prop projections).
+
+    Returns [] if no live games, token not set, or fetch fails.
+    Cached per PT calendar day.
+
+    Schema per entry (raw AN response — fields vary):
+        id              int
+        player_id       int
+        league_id       int     (1 = MLB)
+        market_id       int
+        value           float   projected value
+        is_live         bool
+        stateCode       str
+    """
+    global _LIVE_PROJ_CACHE, _LIVE_PROJ_CACHE_DATE
+
+    date_str = _today_pt()
+    if _LIVE_PROJ_CACHE_DATE == date_str and _LIVE_PROJ_CACHE:
+        return _LIVE_PROJ_CACHE
+
+    token = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
+    if not token:
+        logger.debug("[ActionNetwork] fetch_live_projections: no Bearer token set.")
+        return []
+
+    headers = {
+        **_PRO_REST_HEADERS,
+        "Authorization": f"Bearer {token}",
+    }
+
+    try:
+        resp = requests.get(_LIVE_PROJ_URL, headers=headers, timeout=12)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("[ActionNetwork] live projections fetch failed: %s", exc)
+        return []
+
+    # AN v2 wraps data in {"data": [...], "meta": {...}} or returns flat list
+    if isinstance(data, dict):
+        projections = data.get("data", data.get("projections", []))
+    elif isinstance(data, list):
+        projections = data
+    else:
+        projections = []
+
+    _LIVE_PROJ_CACHE      = projections
+    _LIVE_PROJ_CACHE_DATE = date_str
+
+    logger.info(
+        "[ActionNetwork] Live projections: %d entries",
+        len(projections),
+    )
+    return projections
+
+
 # ── Convenience: combined sharp_report list for DataHub ──────────────────────
 
 def build_sharp_report() -> list[dict]:
     """
-    Build the sharp_report list consumed by _SharpFadeAgent.
+    Build the sharp_report list consumed by _SharpFadeAgent Path 1.
 
-    Priority:
-        1. Player-level prop data (public endpoint, no auth required)
-        2. Empty list if props not yet posted (agent falls through to game-level RLM in Path 2)
+    Requires ACTION_NETWORK_COOKIE env var (Bearer JWT) for PRO endpoint.
+    Returns [] if token not set or props not yet posted pre-game.
 
     The game-level RLM signal lives in an_game_sentiment and is handled by
     _SharpFadeAgent Path 2 directly — it does not need to be in sharp_report.
