@@ -3899,7 +3899,7 @@ def run_agent_tasklet() -> None:
                 logger.info("[AgentTasklet] Parlay recorded in season_record for %s (%s)",
                             agent_name, today_str)
             except Exception as _sr_err:
-                logger.debug("[AgentTasklet] season_record insert skipped: %s", _sr_err)
+                logger.warning("[AgentTasklet] season_record insert skipped: %s", _sr_err)
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
