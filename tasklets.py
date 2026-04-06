@@ -1533,11 +1533,20 @@ def run_data_hub_tasklet() -> None:
     market_key = "hub:market"
     if not _hub_exists(r, market_key):
         logger.info("[DataHub] Scraping market / steam data…")
+        # Action Network game-level public betting (no auth required)
+        try:
+            from action_network_layer import fetch_mlb_game_sentiment
+            _an_sentiment = fetch_mlb_game_sentiment()
+        except Exception as _an_exc:
+            logger.warning(f"[DataHub] ActionNetwork sentiment unavailable: {_an_exc}")
+            _an_sentiment = {}
+
         market = {
             "public_betting":   _fetch_sbd_public_trends(),
             "sharp_report":     [],
             "prop_projections": _fetch_draftedge_projections(),   # free — DraftEdge
             "odds":             _odds_api_get(),                   # free fallback chain
+            "an_game_sentiment": _an_sentiment,                   # Action Network ticket%/money%
         }
         _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
 
@@ -3040,6 +3049,8 @@ class _SharpFadeAgent(_BaseAgent):
         sbd       = market.get("sharp_report", [])
         player    = prop.get("player", "")
         prop_type = prop.get("prop_type", "").lower()
+
+        # ── Path 1: player-level sharp report (SBD or future AN props) ────────
         for entry in sbd:
             if not isinstance(entry, dict):
                 continue
@@ -3047,7 +3058,6 @@ class _SharpFadeAgent(_BaseAgent):
                 continue
             ticket_pct = float(entry.get("ticket_pct", 50) or 50)
             money_pct  = float(entry.get("money_pct",  50) or 50)
-            # Sharp signal: ≥15pp divergence (money% < ticket% = sharp on UNDER)
             divergence = ticket_pct - money_pct
             if abs(divergence) < 15:
                 continue
@@ -3059,6 +3069,51 @@ class _SharpFadeAgent(_BaseAgent):
             ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
             if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+
+        # ── Path 2: game-level RLM from Action Network ────────────────────────
+        # If no player-level entry, use game-level ticket%/money% divergence.
+        # Only fires on batter props (hits, TB, RBIs, runs, h+r+rbi) where
+        # the game total direction implies a scoring environment mismatch.
+        an_sentiment = market.get("an_game_sentiment", {})
+        team = prop.get("_team", prop.get("team", "")).lower()
+        game_ctx = an_sentiment.get(team, {})
+
+        if not game_ctx or not game_ctx.get("rlm_signal"):
+            return None
+
+        # Only apply to batter props — game total RLM doesn't inform pitcher Ks
+        _BATTER_PROPS = {"hits", "total_bases", "rbis", "runs", "hits_runs_rbis",
+                         "fantasy_score", "singles"}
+        if prop_type not in _BATTER_PROPS:
+            return None
+
+        rlm_dir = game_ctx.get("rlm_direction", "")  # "over" or "under"
+        if not rlm_dir:
+            return None
+
+        # Sharp money on UNDER game total → batter props less favorable (LOWER)
+        # Sharp money on OVER game total  → batter props more favorable (HIGHER)
+        sharp_side = "OVER" if rlm_dir == "over" else "UNDER"
+
+        over_t  = game_ctx.get("over_ticket_pct", 50)
+        over_m  = game_ctx.get("over_money_pct",  50)
+        divergence = abs(over_t - over_m)
+        # Scale: 15pp=weak, 25pp=moderate, 35pp+=strong
+        signal_strength = min(divergence / 35.0, 1.0)
+
+        model_prob = self._model_prob(player, prop_type, prop=prop)
+        odds       = prop.get("over_american", -115) if sharp_side == "OVER" else prop.get("under_american", -115)
+        implied    = _american_to_implied(odds) * 100
+        prob_side  = model_prob if sharp_side == "OVER" else (100.0 - model_prob)
+
+        # Apply a signal-strength discount — game-level signal is weaker than player-level
+        adjusted_prob = prob_side * (0.85 + 0.15 * signal_strength)
+        ev_pct = (adjusted_prob / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+
+        ev_threshold = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
+        if ev_pct >= ev_threshold + 1.5:  # require +1.5pp extra EV for game-level signal
+            return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+
         return None
 
 
