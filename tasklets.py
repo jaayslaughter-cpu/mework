@@ -1534,19 +1534,37 @@ def run_data_hub_tasklet() -> None:
     if not _hub_exists(r, market_key):
         logger.info("[DataHub] Scraping market / steam data…")
         # Action Network game-level public betting (no auth required)
+        _an_sentiment: dict = {}
         try:
             from action_network_layer import fetch_mlb_game_sentiment
             _an_sentiment = fetch_mlb_game_sentiment()
         except Exception as _an_exc:
             logger.warning(f"[DataHub] ActionNetwork sentiment unavailable: {_an_exc}")
-            _an_sentiment = {}
+
+        # Action Network player-level prop ticket%/money% (public — no auth required)
+        _sharp_report: list = []
+        try:
+            from action_network_layer import build_sharp_report
+            _sharp_report = build_sharp_report()
+            if _sharp_report:
+                logger.info(
+                    "[DataHub] ActionNetwork sharp_report: %d player props loaded",
+                    len(_sharp_report),
+                )
+            else:
+                logger.info(
+                    "[DataHub] sharp_report empty — props not yet posted pre-game. "
+                    "SharpFadeAgent will use game-level RLM (Path 2)."
+                )
+        except Exception as _sr_exc:
+            logger.warning("[DataHub] ActionNetwork sharp_report build failed: %s", _sr_exc)
 
         market = {
-            "public_betting":   _fetch_sbd_public_trends(),
-            "sharp_report":     [],
-            "prop_projections": _fetch_draftedge_projections(),   # free — DraftEdge
-            "odds":             _odds_api_get(),                   # free fallback chain
-            "an_game_sentiment": _an_sentiment,                   # Action Network ticket%/money%
+            "public_betting":    _fetch_sbd_public_trends(),
+            "sharp_report":      _sharp_report,       # player-level; [] pre-game fallback
+            "an_game_sentiment": _an_sentiment,        # game-level RLM — always live
+            "prop_projections":  _fetch_draftedge_projections(),   # free — DraftEdge
+            "odds":              _odds_api_get(),                   # free fallback chain
         }
         _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
 
