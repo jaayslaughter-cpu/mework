@@ -1533,11 +1533,20 @@ def run_data_hub_tasklet() -> None:
     market_key = "hub:market"
     if not _hub_exists(r, market_key):
         logger.info("[DataHub] Scraping market / steam data…")
+        # Action Network game-level public betting (no auth required)
+        try:
+            from action_network_layer import fetch_mlb_game_sentiment
+            _an_sentiment = fetch_mlb_game_sentiment()
+        except Exception as _an_exc:
+            logger.warning(f"[DataHub] ActionNetwork sentiment unavailable: {_an_exc}")
+            _an_sentiment = {}
+
         market = {
             "public_betting":   _fetch_sbd_public_trends(),
             "sharp_report":     [],
             "prop_projections": _fetch_draftedge_projections(),   # free — DraftEdge
             "odds":             _odds_api_get(),                   # free fallback chain
+            "an_game_sentiment": _an_sentiment,                   # Action Network ticket%/money%
         }
         _hub_setex(r, market_key, TTL_MARKET, json.dumps(market))
 
@@ -2715,13 +2724,45 @@ def _underdog_edge(underdog_odds: int, sharp_prob_pct: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _are_legs_correlated(legs: list[dict]) -> bool:
-    """Return True if any two legs share the same player or same player+prop_type."""
+    """Return True if the slip would be rejected by PrizePicks/Underdog correlated parlay rules.
+
+    Rules enforced:
+    1. Same player in two legs → blocked.
+    2. Same player+prop combo → blocked.
+    3. Platform same-team rule: a slip where EVERY leg is from the same team is
+       blocked (pure same-team stack). Two teammates are fine IF at least one
+       leg from a different team is also in the slip.
+       - LAD+LAD (2-leg)         → blocked (pure stack, no break)
+       - LAD+LAD+NYY (3-leg)     → allowed (NYY breaks it)
+       - STL+DET+STL (3-leg)     → allowed (DET breaks it)
+       - LAD+LAD+LAD (3-leg)     → blocked (pure stack)
+       - all different teams      → always allowed
+    """
+    from collections import Counter  # noqa: PLC0415
+
+    # Rule 1 — duplicate player
     players = [lg.get("player", "") for lg in legs]
     if len(set(players)) < len(players):
-        return True  # same player in two legs
-    # Also block same player+prop combo (e.g. Aaron Judge hits Over AND Under)
+        return True
+
+    # Rule 2 — same player+prop combo (e.g. Judge Over AND Under strikeouts)
     combos = [(lg.get("player", ""), lg.get("prop_type", "")) for lg in legs]
-    return len(set(combos)) < len(combos)
+    if len(set(combos)) < len(combos):
+        return True
+
+    # Rule 3 — pure same-team stack
+    teams = [
+        lg.get("team", lg.get("team_abbrev", "")).strip().upper()
+        for lg in legs
+    ]
+    teams_known = [t for t in teams if t]          # drop legs with no team field
+    if len(teams_known) >= 2:
+        counts = Counter(teams_known)
+        # blocked only when EVERY known leg is on the same team
+        if len(counts) == 1 and max(counts.values()) >= 2:
+            return True
+
+    return False
 
 
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> list[dict]:
@@ -3008,6 +3049,8 @@ class _SharpFadeAgent(_BaseAgent):
         sbd       = market.get("sharp_report", [])
         player    = prop.get("player", "")
         prop_type = prop.get("prop_type", "").lower()
+
+        # ── Path 1: player-level sharp report (SBD or future AN props) ────────
         for entry in sbd:
             if not isinstance(entry, dict):
                 continue
@@ -3015,7 +3058,6 @@ class _SharpFadeAgent(_BaseAgent):
                 continue
             ticket_pct = float(entry.get("ticket_pct", 50) or 50)
             money_pct  = float(entry.get("money_pct",  50) or 50)
-            # Sharp signal: ≥15pp divergence (money% < ticket% = sharp on UNDER)
             divergence = ticket_pct - money_pct
             if abs(divergence) < 15:
                 continue
@@ -3027,33 +3069,116 @@ class _SharpFadeAgent(_BaseAgent):
             ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
             if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+
+        # ── Path 2: game-level RLM from Action Network ────────────────────────
+        # If no player-level entry, use game-level ticket%/money% divergence.
+        # Only fires on batter props (hits, TB, RBIs, runs, h+r+rbi) where
+        # the game total direction implies a scoring environment mismatch.
+        an_sentiment = market.get("an_game_sentiment", {})
+        team = prop.get("_team", prop.get("team", "")).lower()
+        game_ctx = an_sentiment.get(team, {})
+
+        if not game_ctx or not game_ctx.get("rlm_signal"):
+            return None
+
+        # Only apply to batter props — game total RLM doesn't inform pitcher Ks
+        _BATTER_PROPS = {"hits", "total_bases", "rbis", "runs", "hits_runs_rbis",
+                         "fantasy_score", "singles"}
+        if prop_type not in _BATTER_PROPS:
+            return None
+
+        rlm_dir = game_ctx.get("rlm_direction", "")  # "over" or "under"
+        if not rlm_dir:
+            return None
+
+        # Sharp money on UNDER game total → batter props less favorable (LOWER)
+        # Sharp money on OVER game total  → batter props more favorable (HIGHER)
+        sharp_side = "OVER" if rlm_dir == "over" else "UNDER"
+
+        over_t  = game_ctx.get("over_ticket_pct", 50)
+        over_m  = game_ctx.get("over_money_pct",  50)
+        divergence = abs(over_t - over_m)
+        # Scale: 15pp=weak, 25pp=moderate, 35pp+=strong
+        signal_strength = min(divergence / 35.0, 1.0)
+
+        model_prob = self._model_prob(player, prop_type, prop=prop)
+        odds       = prop.get("over_american", -115) if sharp_side == "OVER" else prop.get("under_american", -115)
+        implied    = _american_to_implied(odds) * 100
+        prob_side  = model_prob if sharp_side == "OVER" else (100.0 - model_prob)
+
+        # Apply a signal-strength discount — game-level signal is weaker than player-level
+        adjusted_prob = prob_side * (0.85 + 0.15 * signal_strength)
+        ev_pct = (adjusted_prob / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+
+        ev_threshold = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
+        if ev_pct >= ev_threshold + 1.5:  # require +1.5pp extra EV for game-level signal
+            return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+
         return None
 
 
-class _TimeValueAgent(_BaseAgent):
-    """Time-based edge agent.
-    Targets props where line value has drifted since open — captures overnight
-    steam and early-sharp movement by comparing current implied vs model.
-    Also applies a dome/afternoon multiplier (dome + day game = higher scoring pace).
+class _LineDriftAgent(_BaseAgent):
+    """Sharp line drift detector.
+
+    Fires when sharp sportsbooks (DK/FD/BetMGM, vig-stripped) are pricing a prop
+    meaningfully higher than the DFS platform is implying — a signal that the
+    sharp market has moved toward this outcome and UD/PP hasn't caught up yet.
+
+    Primary signal  — drift:
+        sharp_implied (sb_implied_prob, 0-1) minus platform_implied (from over_american).
+        Threshold: DRIFT_MIN = 0.04 (4 percentage points).
+        Sharp books at 58% vs UD implying 53.5% → drift = 4.5% → fires.
+
+    Secondary signal — line gap:
+        sb_line_gap = prop_line - sportsbook_line.
+        Negative = DFS line is set lower than sharp books → easier to hit on Over.
+        Adds a small EV bonus when gap < -0.25.
+
+    Both signals require sb_implied_prob > 0 (i.e. Odds API actually returned data).
+    Excludes props on the excluded list (stolen_bases, home_runs, walks, walks_allowed).
     """
-    name = "TimeValueAgent"
+    name = "LineDriftAgent"
+
+    # Minimum drift between sharp implied and platform implied to consider firing
+    DRIFT_MIN: float = 0.04   # 4 percentage points
+    # Line gap bonus: if DFS line is 0.25+ lower than sportsbook line → small EV bonus
+    LINE_GAP_BONUS: float = 1.5   # added to ev_pct when gap favors Over
+
+    _EXCLUDED = {"stolen_bases", "home_runs", "walks", "walks_allowed"}
 
     def evaluate(self, prop: dict) -> dict | None:
         prop_type = prop.get("prop_type", "").lower()
-        is_dome   = bool(prop.get("_is_dome", False))
-        temp_f    = float(prop.get("_temp_f", 72.0) or 72.0)
-        # Dome boost for batter props — controlled environment inflates totals
-        batter_types = {"hits", "total_bases", "home_runs", "rbis", "runs_scored"}
-        dome_boost = 2.5 if (is_dome and prop_type in batter_types) else 0.0
-        # Hot weather boost for batter power props
-        temp_boost = 1.5 if (temp_f >= 85 and prop_type in {"home_runs", "total_bases"}) else 0.0
-        model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
-        model_prob  = min(95.0, model_prob + dome_boost + temp_boost)
-        over_odds   = prop.get("over_american", -115)
-        implied     = _american_to_implied(over_odds) * 100
-        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        if prop_type in self._EXCLUDED:
+            return None
+
+        # Sharp no-vig probability already stamped by sportsbook_reference_layer
+        sharp_implied: float = float(prop.get("sb_implied_prob", 0.0) or 0.0)
+        if sharp_implied <= 0.0:
+            # No Odds API data for this prop today — skip, don't fabricate signal
+            return None
+
+        over_odds       = prop.get("over_american", -115)
+        platform_implied: float = _american_to_implied(over_odds)  # 0-1 fraction
+
+        # Core drift signal: how far ahead of the DFS platform are the sharp books?
+        drift: float = sharp_implied - platform_implied
+        if drift < self.DRIFT_MIN:
+            return None
+
+        # Line gap bonus: DFS line set easier than sharp consensus line
+        sb_line_gap: float = float(prop.get("sb_line_gap", 0.0) or 0.0)
+        line_gap_bonus: float = self.LINE_GAP_BONUS if sb_line_gap < -0.25 else 0.0
+
+        # Use sharp implied as the model probability — it IS the signal
+        model_prob = min(95.0, sharp_implied * 100)
+        implied_pct = platform_implied * 100
+        ev_pct = (
+            (model_prob / 100 - platform_implied) / platform_implied * 100
+            + line_gap_bonus
+        )
+
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+            return self._build_bet(prop, "OVER", model_prob, implied_pct, ev_pct)
         return None
 
 
@@ -3159,6 +3284,7 @@ _AGENT_CLASSES = [
     _ChalkBusterAgent,  # fades heavy public chalk — prop_df lookup fixed (see evaluate())
     _PropCycleAgent,    # mean-reversion on form_adj + cv_nudge (no new deps)
     _LineupChaseAgent,  # K-props only, fires on confirmed lineups + high chase difficulty
+    _LineDriftAgent,    # sharp book drift: sb_implied_prob (DK/FD/BetMGM no-vig) vs platform implied
 ]
 
 
