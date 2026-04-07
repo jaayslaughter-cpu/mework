@@ -1416,6 +1416,11 @@ def _ensure_bet_ledger() -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
+            try:
+                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS discord_sent BOOLEAN NOT NULL DEFAULT FALSE")
+                conn.commit()
+            except Exception:
+                conn.rollback()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
     except Exception as exc:
@@ -3938,6 +3943,7 @@ def run_leaderboard_tasklet() -> None:
     Read 14-day settled bets from Postgres, compute per-agent ROI,
     update capital multipliers (0.5x – 2.0x), store in Redis.
     """
+    import zoneinfo as _zi
     cutoff = (datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")) - datetime.timedelta(days=14)).isoformat()
     rows: list[tuple] = []
 

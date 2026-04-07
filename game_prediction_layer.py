@@ -313,7 +313,7 @@ def _predict_game(features: dict) -> dict:
         + 1.85 * h["win_pct_diff"]         # win% advantage
         + 0.08 * h["era_diff"]             # lower ERA = better
         + 0.15 * h["sp_era_gap"]           # opponent SP worse = good
-        + 0.12 * h["rd_per_g"]            # home run differential
+        + 0.12 * h["home_rd_per_g"]       # home run differential
         - 0.08 * h["away_rd_per_g"]       # away run differential
         + 0.30                             # home field advantage ~0.54
     )
@@ -414,7 +414,8 @@ def fetch_game_predictions_today() -> list[dict]:
     Results flow to WeatherAgent, UnderMachine, F5Agent, UmpireAgent.
     Graceful empty-list return on any failure.
     """
-    today = datetime.date.today()
+    import zoneinfo as _zi
+    today = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date()
     season = today.year
     date_str = today.strftime("%Y-%m-%d")
 
