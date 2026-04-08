@@ -80,7 +80,6 @@ _last_leaderboard_run: str | None = None
 # Uses Postgres so a Railway redeploy (new process) still sees today's dispatch.
 
 
-
 def _record_dispatch_ran_today() -> None:
     """Insert today's PT date into dispatch_date_log (no-op if already there).
     Cross-process guard: survives Railway restarts. If today is already present,
@@ -109,6 +108,59 @@ def _record_dispatch_ran_today() -> None:
         logger.info("[orchestrator] Dispatch date recorded: %s", pt_today)
     except Exception as exc:
         logger.warning("[orchestrator] _record_dispatch_ran_today failed: %s", exc)
+
+
+def _startup_ping_if_needed() -> None:
+    """Send the Discord startup ping at most once per PT calendar day.
+    Uses startup_ping_log table as a cross-process guard — survives Railway
+    redeploys so merging multiple PRs on the same day sends only one ping.
+    Falls back to always-send if Postgres is unavailable.
+    """
+    import psycopg2  # noqa: PLC0415
+    db_url = os.environ.get("DATABASE_URL")
+    pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    if not db_url:
+        # No DB — send unconditionally (edge case: DB env var not set)
+        try:
+            discord_alert.send_startup_ping()
+        except Exception as _e:
+            logger.warning("Discord startup ping failed: %s", _e)
+        return
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS startup_ping_log (
+                ping_date DATE PRIMARY KEY
+            )
+        """)
+        cur.execute(
+            "SELECT 1 FROM startup_ping_log WHERE ping_date = %s",
+            (pt_today,)
+        )
+        already_sent = cur.fetchone() is not None
+        if not already_sent:
+            discord_alert.send_startup_ping()
+            cur.execute(
+                "INSERT INTO startup_ping_log (ping_date) VALUES (%s) ON CONFLICT DO NOTHING",
+                (pt_today,)
+            )
+            conn.commit()
+            logger.info("[orchestrator] Startup ping sent for %s", pt_today)
+        else:
+            logger.info(
+                "[orchestrator] Startup ping suppressed — already sent today (%s)", pt_today
+            )
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        logger.warning(
+            "[orchestrator] startup_ping_log check failed: %s — sending ping anyway", exc
+        )
+        try:
+            discord_alert.send_startup_ping()
+        except Exception as _e2:
+            logger.warning("Discord startup ping failed: %s", _e2)
 
 
 async def _safe_run(name: str, fn, *args, **kwargs):
@@ -246,7 +298,6 @@ async def job_monthly_leaderboard():
         logger.warning("[orchestrator] monthly_leaderboard not available — skipping")
 
 
-
 async def job_settle():
     """11:00 PM PT (2:00 AM ET) daily — settle bets and post recap to Discord."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nightly_recap.py")
@@ -269,7 +320,7 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 9:30 AM PT, after the main dispatch window."""
+    """Streak pick — runs at 8:00 AM PT, before the main dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
@@ -336,11 +387,8 @@ async def lifespan(_app: FastAPI):
 
     scheduler.start()
 
-    # Discord startup ping
-    try:
-        discord_alert.send_startup_ping()
-    except Exception as _disc_err:
-        logger.warning("Discord startup ping failed: %s", _disc_err)
+    # Discord startup ping — guarded: at most once per PT calendar day
+    _startup_ping_if_needed()
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
