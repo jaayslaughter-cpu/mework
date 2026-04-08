@@ -214,7 +214,8 @@ def _check_sbref_cache() -> tuple[str, str, str]:
     """Check sportsbook reference disk cache (/tmp/sb_ref_YYYY-MM-DD.json).
     sportsbook_reference_layer._CACHE_DIR = '/tmp' — this matches that path."""
     try:
-        today = datetime.date.today().strftime("%Y-%m-%d")
+        import json
+        today = datetime.now(_PT).strftime("%Y-%m-%d")
         cache_path = f"/tmp/sb_ref_{today}.json"
         if not os.path.exists(cache_path):
             return "SB Reference", "warn", f"Cache file not found for {today} — fetch may not have run"
@@ -230,7 +231,9 @@ def _check_sbref_cache() -> tuple[str, str, str]:
 
 
 def _check_streak_state() -> tuple[str, str, str]:
-    """Check ud_streak_state and recent restart count."""
+    """Check ud_streak_state and recent reset count.
+    Table schema: current_count INTEGER, last_updated TIMESTAMPTZ
+    """
     try:
         import psycopg2  # type: ignore
         url = os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL", ""))
@@ -238,16 +241,16 @@ def _check_streak_state() -> tuple[str, str, str]:
             return "Streak State", "warn", "Cannot check — no DB URL"
         conn = psycopg2.connect(url)
         cur = conn.cursor()
-        # Active streaks
-        cur.execute("SELECT COUNT(*), MAX(streak_count) FROM ud_streak_state WHERE streak_count > 0")
+        # Active streaks (current_count > 0)
+        cur.execute("SELECT COUNT(*), MAX(current_count) FROM ud_streak_state WHERE current_count > 0")
         row = cur.fetchone()
         active_count = row[0] or 0
         max_count = row[1] or 0
-        # Restarts in last 7 days (resets = count went to 0)
+        # Resets in last 7 days
         seven_days_ago = (datetime.now(_PT) - timedelta(days=7)).strftime("%Y-%m-%d")
         cur.execute(
             "SELECT COUNT(*) FROM ud_streak_state "
-            "WHERE streak_count = 0 AND updated_at >= %s",
+            "WHERE current_count = 0 AND last_updated >= %s",
             (seven_days_ago,),
         )
         resets = cur.fetchone()[0] or 0
