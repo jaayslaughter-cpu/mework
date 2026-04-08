@@ -3839,6 +3839,8 @@ def run_agent_tasklet() -> None:
         r.lpush("bet_queue", payload)
         r.ltrim("bet_queue", 0, 499)
 
+    # bet_ledger INSERT moved: now fires only at send-time with discord_sent=TRUE baked in
+
     # ── Per-agent daily gate — each agent sends AT MOST ONE play per calendar day ──
     # Uses in-memory dict _AGENT_SENT_TODAY (agent → "YYYY-MM-DD") as primary
     # gate so it works with or without Redis.  Redis is also written as a
@@ -3850,9 +3852,8 @@ def run_agent_tasklet() -> None:
     # On cycle start, restore _AGENT_SENT_TODAY from bet_ledger for today so
     # a fresh restart never re-sends picks that were already Discord-sent today.
     try:
-        _pg = _get_pg()
-        if _pg:
-            with _pg.cursor() as _c:
+        _pg = _pg_conn()
+        with _pg.cursor() as _c:
                 _c.execute(
                     "SELECT DISTINCT agent_name FROM bet_ledger "
                     "WHERE bet_date = %s AND discord_sent = TRUE "
@@ -3976,11 +3977,11 @@ def run_agent_tasklet() -> None:
             r_dedup.setex(r_daily_key, _DAY_TTL, "1")   # 2. Redis (cross-process)
         except Exception:
             pass
-        try:                                              # 3. DB INSERT with discord_sent=TRUE (crash-safe)
+        try:                                              # 3. DB commit (crash-safe)
             _pg2 = _pg_conn()
             with _pg2.cursor() as _c2:
-                _today2 = _today_pt()
-                for _leg2 in parlay.get("legs", []):
+                _send_today = _today_pt().isoformat()
+                for _sl in parlay.get("legs", []):
                     _c2.execute(
                         """
                         INSERT INTO bet_ledger
@@ -3994,28 +3995,29 @@ def run_agent_tasklet() -> None:
                         ON CONFLICT DO NOTHING
                         """,
                         (
-                            _leg2.get("player") or _leg2.get("player_name"),
-                            _leg2.get("prop_type"),
-                            _leg2.get("line"),
-                            _leg2.get("side"),
-                            _leg2.get("odds_american"),
-                            _leg2.get("kelly_units"),
-                            _leg2.get("model_prob"),
-                            _leg2.get("ev_pct"),
+                            _sl.get("player") or _sl.get("player_name"),
+                            _sl.get("prop_type"),
+                            _sl.get("line"),
+                            _sl.get("side"),
+                            _sl.get("odds_american"),
+                            _sl.get("kelly_units"),
+                            _sl.get("model_prob"),
+                            _sl.get("ev_pct"),
                             agent_name,
-                            _today2,
-                            (_leg2.get("recommended_platform") or parlay.get("platform") or "Underdog").lower(),
-                            _leg2.get("_features_json"),
-                            _leg2.get("kelly_units") or 0.02,
-                            _leg2.get("mlbam_id") or _leg2.get("player_id"),
-                            (parlay.get("entry_type") or "FlexPlay").upper(),
+                            _send_today,
+                            (_sl.get("recommended_platform") or parlay.get("platform") or "underdog").lower(),
+                            _sl.get("_features_json"),
+                            _sl.get("kelly_units") or 0.02,
+                            _sl.get("mlbam_id") or _sl.get("player_id"),
+                            (parlay.get("entry_type") or "FlexPlay"),
                         ),
                     )
             _pg2.commit()
             _pg2.close()
-            logger.info("[AgentTasklet] discord_sent=TRUE + bet_ledger INSERT committed for %s before send.", agent_name)
+            logger.info("[AgentTasklet] discord_sent=TRUE inserted %d legs for %s.",
+                        len(parlay.get("legs", [])), agent_name)
         except Exception as _dbe2:
-            logger.warning("[AgentTasklet] bet_ledger INSERT failed for %s: %s — "
+            logger.warning("[AgentTasklet] bet_ledger send-time INSERT failed for %s: %s — "
                            "duplicate send on restart is possible.", agent_name, _dbe2)
 
         try:
