@@ -3738,7 +3738,7 @@ def run_agent_tasklet() -> None:
     # On cycle start, restore _AGENT_SENT_TODAY from bet_ledger for today so
     # a fresh restart never re-sends picks that were already Discord-sent today.
     try:
-        _pg = _get_pg()
+        _pg = _pg_conn()
         if _pg:
             with _pg.cursor() as _c:
                 _c.execute(
@@ -3865,7 +3865,7 @@ def run_agent_tasklet() -> None:
         except Exception:
             pass
         try:                                              # 3. DB commit (crash-safe)
-            _pg2 = _get_pg()
+            _pg2 = _pg_conn()
             if _pg2:
                 with _pg2.cursor() as _c2:
                     _c2.execute(
