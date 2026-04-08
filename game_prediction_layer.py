@@ -342,7 +342,7 @@ def _predict_game(features: dict) -> dict:
           0.00
         + 1.20 * h["win_pct_diff"]
         + 0.18 * h["sp_era_gap"]
-        + 0.10 * h["rd_per_g"]
+        + 0.10 * h["home_rd_per_g"]
         - 0.30                             # harder to cover -1.5 than ML
     )
     cover_prob = 1.0 / (1.0 + (2.718281828 ** -logit_cover))
