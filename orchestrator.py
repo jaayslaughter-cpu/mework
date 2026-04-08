@@ -82,12 +82,17 @@ _last_leaderboard_run: str | None = None
 
 
 def _record_dispatch_ran_today() -> None:
-    """Insert today's PT date into dispatch_date_log (no-op if already there)."""
+    """Insert today's PT date into dispatch_date_log (no-op if already there).
+    Cross-process guard: survives Railway restarts. If today is already present,
+    job_agents() post-window check will skip re-dispatch.
+    """
+    import psycopg2  # noqa: PLC0415
     pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return
     try:
-        conn = _get_db_conn()
-        if not conn:
-            return
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS dispatch_date_log (
@@ -160,6 +165,35 @@ async def job_agents():
     """Run AgentTasklet in a thread so it runs independently of DataHub."""
     global _last_agent_run
     loop = asyncio.get_event_loop()
+
+    # ── Post-window duplicate guard ─────────────────────────────────────────────
+    # If it's after 10 AM PT (outside the dispatch window) AND dispatch already
+    # ran today (dispatch_date_log has today's date), skip entirely.
+    # Prevents Railway restarts at noon from re-sending already-sent picks.
+    _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
+    if _pt_ck.hour >= 10:
+        try:
+            import psycopg2 as _pg2  # noqa: PLC0415
+            _db_url = os.environ.get("DATABASE_URL")
+            if _db_url:
+                _dg_conn = _pg2.connect(_db_url)
+                _dg_cur  = _dg_conn.cursor()
+                _dg_cur.execute(
+                    "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s",
+                    (_pt_ck.date(),)
+                )
+                _already_ran = _dg_cur.fetchone()
+                _dg_cur.close()
+                _dg_conn.close()
+                if _already_ran:
+                    logger.debug(
+                        "[orchestrator] Post-window cycle at %02d:%02d PT — dispatch already ran today. Skipping.",
+                        _pt_ck.hour, _pt_ck.minute,
+                    )
+                    return
+        except Exception as _dg_err:
+            logger.debug("[orchestrator] dispatch_date_log check failed: %s", _dg_err)
+
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
         start = time.time()
@@ -167,6 +201,8 @@ async def job_agents():
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
+        # Record that dispatch ran today — cross-process guard for Railway restarts
+        _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
