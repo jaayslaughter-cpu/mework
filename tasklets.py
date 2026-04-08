@@ -866,6 +866,118 @@ def _fetch_underdog_props_direct() -> list[dict]:
         return []
 
 
+
+def _fetch_sleeper_props_direct() -> list[dict]:
+    """Fetch Sleeper Fantasy MLB pick'em lines (free, no key required).
+    Used as a fallback when PrizePicks or Underdog return 0 props.
+    Falls back gracefully to [] on any failure.
+    """
+    _SL_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://sleeper.com/",
+        "x-sleeper-platform": "web",
+    }
+    props: list[dict] = []
+
+    # Primary: Sleeper beta sportsbook pick'em lines
+    try:
+        resp2 = _resilient_get(
+            "https://api.sleeper.com/picks/v1/sport/mlb/market/player_props",
+            headers=_SL_HEADERS,
+            timeout=15,
+        )
+        if resp2.status_code == 200:
+            data = resp2.json()
+            for item in (data if isinstance(data, list) else data.get("picks", [])):
+                try:
+                    player_name = (
+                        item.get("player_name")
+                        or item.get("name")
+                        or f"{item.get('first_name', '')} {item.get('last_name', '')}".strip()
+                    )
+                    if not player_name:
+                        continue
+                    stat_raw = str(item.get("stat_type") or item.get("stat") or "")
+                    stat_norm = _norm_stat(stat_raw)
+                    if not stat_norm:
+                        continue
+                    line_val = item.get("line") or item.get("value") or item.get("projection")
+                    if line_val is None:
+                        continue
+                    props.append({
+                        "player":         player_name,
+                        "player_name":    player_name,
+                        "stat_type":      stat_norm,
+                        "prop_type":      stat_norm,
+                        "line":           float(line_val),
+                        "over_american":  int(item.get("over_odds", -115) or -115),
+                        "under_american": int(item.get("under_odds", -115) or -115),
+                        "platform":       "Sleeper",
+                    })
+                except Exception:
+                    continue
+            if props:
+                logger.info("[DataHub] Sleeper sportsbook: %d props", len(props))
+                return props
+    except Exception as _exc:
+        logger.debug("[DataHub] Sleeper primary endpoint failed: %s", _exc)
+
+    # Secondary: Sleeper public player projections — parse as prop lines
+    # Excluded props: home_runs, stolen_bases, walks, walks_allowed (Phase 112 + 118)
+    try:
+        _today_sl = _today_pt()
+        resp3 = _resilient_get(
+            f"https://api.sleeper.app/projections/baseball/{_today_sl.year}/0",
+            headers=_SL_HEADERS,
+            timeout=15,
+        )
+        if resp3.status_code == 200:
+            data3 = resp3.json()
+            _PROJ_MAP = {
+                "h":    "hits",
+                "rbi":  "rbis",
+                "so":   "strikeouts",
+                "k":    "strikeouts",
+                "tb":   "total_bases",
+                "er":   "earned_runs",
+                "outs": "pitching_outs",
+            }
+            for player_id, proj in (data3.items() if isinstance(data3, dict) else {}.items()):
+                try:
+                    name = proj.get("name") or player_id
+                    for key, stat_norm in _PROJ_MAP.items():
+                        val = proj.get(key)
+                        if val is None or float(val) <= 0:
+                            continue
+                        if _norm_stat(stat_norm) in ("", None):
+                            continue
+                        props.append({
+                            "player":         name,
+                            "player_name":    name,
+                            "stat_type":      stat_norm,
+                            "prop_type":      stat_norm,
+                            "line":           round(float(val), 1),
+                            "over_american":  -115,
+                            "under_american": -115,
+                            "platform":       "Sleeper",
+                        })
+                except Exception:
+                    continue
+    except Exception as _exc2:
+        logger.debug("[DataHub] Sleeper secondary endpoint failed: %s", _exc2)
+
+    if props:
+        logger.info("[DataHub] Sleeper fallback: %d props (projection-derived)", len(props))
+    else:
+        logger.warning("[DataHub] Sleeper fallback returned 0 props — all three DFS sources dry.")
+    return props
+
+
 def _fetch_draftedge_projections() -> list[dict]:
     """
     Fetch DraftEdge batter and pitcher projections.
@@ -1635,11 +1747,33 @@ def run_data_hub_tasklet() -> None:
     dfs_key = "hub:dfs"
     if not _hub_exists(r, dfs_key):
         logger.info("[DataHub] Scraping DFS target data…")
+        _ud_props = _fetch_underdog_props_direct()
+        _pp_props = _fetch_prizepicks_direct()
+        _total_dfs_props = len(_ud_props) + len(_pp_props)
+
+        # ── Sleeper fallback — triggered per-platform if one or both are dry ──
+        _sl_props: list[dict] = []
+        _needs_sleeper = (_total_dfs_props == 0) or (len(_ud_props) == 0) or (len(_pp_props) == 0)
+        if _needs_sleeper:
+            logger.warning(
+                "[DataHub] UD=%d PP=%d — fetching Sleeper as fallback.",
+                len(_ud_props), len(_pp_props),
+            )
+            _sl_props = _fetch_sleeper_props_direct()
+
+        # Fill in missing platforms with Sleeper props tagged to that platform
+        if len(_ud_props) == 0 and _sl_props:
+            _ud_props = [{**p, "platform": "Sleeper"} for p in _sl_props]
+            logger.info("[DataHub] Underdog replaced by Sleeper fallback (%d props)", len(_ud_props))
+        if len(_pp_props) == 0 and _sl_props:
+            _pp_props = [{**p, "platform": "Sleeper"} for p in _sl_props]
+            logger.info("[DataHub] PrizePicks replaced by Sleeper fallback (%d props)", len(_pp_props))
+
         dfs = {
-            "underdog":   _fetch_underdog_props_direct(),
-            "prizepicks": _fetch_prizepicks_direct(),
-            "sleeper":    [],  # removed per DFS compliance directive
-            "optimizer":  [],  # no actor yet
+            "underdog":   _ud_props,
+            "prizepicks": _pp_props,
+            "sleeper":    _sl_props,
+            "optimizer":  [],
         }
         # ── Zero-prop and degraded-run guard ──────────────────────────────
         _total_dfs_props = len(dfs.get("underdog", [])) + len(dfs.get("prizepicks", []))
