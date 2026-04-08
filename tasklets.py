@@ -1641,6 +1641,28 @@ def run_data_hub_tasklet() -> None:
             "sleeper":    [],  # removed per DFS compliance directive
             "optimizer":  [],  # no actor yet
         }
+        # ── Zero-prop and degraded-run guard ──────────────────────────────
+        _total_dfs_props = len(dfs.get("underdog", [])) + len(dfs.get("prizepicks", []))
+        if _total_dfs_props == 0:
+            logger.error(
+                "[DataHub] ZERO props from Underdog + PrizePicks — pipeline is dry. "
+                "No picks will go out this cycle."
+            )
+            try:
+                from DiscordAlertService import discord_alert  # noqa: PLC0415
+                discord_alert.send(
+                    "⚠️ **PropIQ Pipeline Alert** — Zero props returned from both "
+                    "Underdog AND PrizePicks. No picks will go out until props are "
+                    "available. Check UD/PP API status immediately."
+                )
+            except Exception as _da_err:
+                logger.warning("[DataHub] Discord zero-prop alert failed: %s", _da_err)
+        elif _total_dfs_props < 20:
+            logger.warning(
+                "[DataHub] Degraded prop run — only %d props from UD+PP (normal ~250+). "
+                "Agent picks may be sparse or unreliable this cycle.",
+                _total_dfs_props,
+            )
         _hub_setex(r, dfs_key, TTL_DFS, json.dumps(dfs))
 
     # ── Merge all groups into master hub key ───────────────────────────────
@@ -3738,7 +3760,7 @@ def run_agent_tasklet() -> None:
     # On cycle start, restore _AGENT_SENT_TODAY from bet_ledger for today so
     # a fresh restart never re-sends picks that were already Discord-sent today.
     try:
-        _pg = _pg_conn()
+        _pg = _get_pg()
         if _pg:
             with _pg.cursor() as _c:
                 _c.execute(
@@ -3865,7 +3887,7 @@ def run_agent_tasklet() -> None:
         except Exception:
             pass
         try:                                              # 3. DB commit (crash-safe)
-            _pg2 = _pg_conn()
+            _pg2 = _get_pg()
             if _pg2:
                 with _pg2.cursor() as _c2:
                     _c2.execute(
