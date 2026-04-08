@@ -578,7 +578,7 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
     if _PROP_PROJ_CACHE_DATE == date_str and _PROP_PROJ_CACHE:
         return _PROP_PROJ_CACHE
 
-    token = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
+    token = os.getenv("ACTION_NETWORK_JWT", os.getenv("ACTION_NETWORK_COOKIE", "")).strip()
     if not token:
         logger.info(
             "[ActionNetwork] ACTION_NETWORK_COOKIE not set — "
@@ -730,7 +730,7 @@ def fetch_live_projections() -> list[dict]:
     if _LIVE_PROJ_CACHE_DATE == date_str and _LIVE_PROJ_CACHE:
         return _LIVE_PROJ_CACHE
 
-    token = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
+    token = os.getenv("ACTION_NETWORK_JWT", os.getenv("ACTION_NETWORK_COOKIE", "")).strip()
     if not token:
         logger.debug("[ActionNetwork] fetch_live_projections: no Bearer token set.")
         return []
