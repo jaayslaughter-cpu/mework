@@ -3536,12 +3536,14 @@ _STEAM_MONITOR = SteamMonitor(steam_threshold=0.15)
 _AGENT_CLASSES = [
     _EVHunter, _UnderMachine, _UmpireAgent, _F5Agent, _FadeAgent,
     _LineValueAgent, _BullpenAgent, _WeatherAgent, _MLEdgeAgent,  # SteamAgent: internal-only, not in Discord picks
-    _UnderDogAgent,     # Underdog-specific line value — hub.dfs already populated, no new deps
-    _StackSmithAgent,   # bullpen fatigue map + pitcher ERA/k_rate already in hub
-    _ChalkBusterAgent,  # fades heavy public chalk — prop_df lookup fixed (see evaluate())
-    _PropCycleAgent,    # mean-reversion on form_adj + cv_nudge (no new deps)
-    _LineupChaseAgent,  # K-props only, fires on confirmed lineups + high chase difficulty
-    _LineDriftAgent,    # sharp book drift: sb_implied_prob (DK/FD/BetMGM no-vig) vs platform implied
+    _UnderDogAgent,           # Underdog-specific line value — hub.dfs already populated, no new deps
+    _StackSmithAgent,         # bullpen fatigue map + pitcher ERA/k_rate already in hub
+    _ChalkBusterAgent,        # fades heavy public chalk — prop_df lookup fixed
+    _SharpFadeAgent,          # RLM: AN sharp_report Path 1 + AN game sentiment Path 2 (restored)
+    _CorrelatedParlayAgent,   # same-game K-prop correlation + high-chase lineup (restored)
+    _PropCycleAgent,          # mean-reversion on form_adj + cv_nudge (no new deps)
+    _LineupChaseAgent,        # K-props only, fires on confirmed lineups + high chase difficulty
+    _LineDriftAgent,          # sharp book drift: sb_implied_prob (DK/FD/BetMGM no-vig) vs platform implied
 ]
 
 
