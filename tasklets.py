@@ -3234,11 +3234,37 @@ class _StackSmithAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "").lower()
         if prop_type not in self._BATTER_TYPES:
             return None
-        # Stack signal: opposing pitcher has high ERA or low K rate
-        era   = float(prop.get("era", 4.20) or 4.20)
-        k_rate = float(prop.get("k_rate", 0.22) or 0.22)
-        # Only stack against pitchers with ERA > 4.5 or K-rate < 0.20
-        if era <= 4.50 and k_rate >= 0.20:
+
+        # Stack signal: look up the OPPOSING pitcher from projected_starters
+        # (prop is a batter prop — it carries batter stats, not pitcher stats)
+        opp_team = prop.get("opposing_team", "")
+        era    = 4.20  # league-average default
+        k_rate = 0.22
+
+        starters = self.hub.get("context", {}).get("projected_starters", [])
+        opp_sp = next((s for s in starters
+                       if (s.get("team", "") or "").lower() == opp_team.lower()
+                       and s.get("side") == "home"  # home pitcher faces away batters
+                       or (s.get("opponent", "") or "").lower() == opp_team.lower()),
+                      None)
+        if opp_sp:
+            try:
+                from fangraphs_layer import get_pitcher as _fg_sp  # noqa: PLC0415
+                _sp_fg = _fg_sp(opp_sp.get("full_name", "")) or {}
+                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.20)) or 4.20)
+                k_rate = float(_sp_fg.get("k_rate", _sp_fg.get("k_pct",  0.22)) or 0.22)
+            except Exception:
+                pass
+
+        # Also check bullpen fatigue as a secondary signal
+        bp_fatigue = self.hub.get("bullpen_fatigue", {})
+        opp_fatigue = bp_fatigue.get(opp_team.lower(), {})
+        fatigue_score = float(opp_fatigue.get("fatigue_score", 2.0) if isinstance(opp_fatigue, dict) else 2.0)
+
+        # Fire when opposing pitcher is weak OR bullpen is fatigued
+        weak_pitcher = era > 4.50 or k_rate < 0.20
+        tired_pen    = fatigue_score >= 3.0
+        if not weak_pitcher and not tired_pen:
             return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
