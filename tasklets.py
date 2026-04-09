@@ -3392,7 +3392,7 @@ class _LineDriftAgent(_BaseAgent):
     name = "LineDriftAgent"
 
     # Minimum drift between sharp implied and platform implied to consider firing
-    DRIFT_MIN: float = 0.04   # 4 percentage points
+    DRIFT_MIN: float = 4.0    # 4 percentage points (both sides in 0-100 scale)
     # Line gap bonus: if DFS line is 0.25+ lower than sportsbook line → small EV bonus
     LINE_GAP_BONUS: float = 1.5   # added to ev_pct when gap favors Over
 
@@ -3422,10 +3422,10 @@ class _LineDriftAgent(_BaseAgent):
         line_gap_bonus: float = self.LINE_GAP_BONUS if sb_line_gap < -0.25 else 0.0
 
         # Use sharp implied as the model probability — it IS the signal
-        model_prob = min(95.0, sharp_implied * 100)
-        implied_pct = platform_implied * 100
+        model_prob = min(95.0, sharp_implied)          # sharp_implied already 0-100 (percentage scale)
+        implied_pct = platform_implied                     # already 0-100 — no *100 needed
         ev_pct = (
-            (model_prob / 100 - platform_implied) / platform_implied * 100
+            (model_prob / 100 - platform_implied / 100) / (platform_implied / 100) * 100
             + line_gap_bonus
         )
 
@@ -4497,7 +4497,10 @@ def run_grading_tasklet() -> None:
                         {}
                     )
                 )
-                actual = _get_stat(stats, ptype, platform=plat)
+                # Normalise raw prop_type strings ("H+R+RBI" → "hits_runs_rbis") so
+                # _get_stat can always find the right field in its mapping table.
+                _ptype_norm = _norm_stat(ptype) if ptype else ptype
+                actual = _get_stat(stats, _ptype_norm, platform=plat)
 
                 if actual is None:
                     continue
@@ -4534,7 +4537,7 @@ def run_grading_tasklet() -> None:
 
                 closing_odds = _fetch_closing_odds(player, ptype, side) or odds
                 # CLV = model edge over closing line (both in decimal 0-1 scale)
-                clv = round(float(model_prob or 50) / 100.0 - _american_to_implied(int(closing_odds or -110)), 4)
+                clv = round(float(model_prob or 50) / 100.0 - _american_to_implied(int(closing_odds or -110)) / 100.0, 4)
 
                 # actual_outcome: 1=WIN, 0=LOSS (used by XGBoost retraining)
                 actual_outcome = 1 if status == "WIN" else 0 if status == "LOSS" else None
@@ -4778,6 +4781,7 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
         "pitching_outs": "InningsPitched",
         "outs_recorded": "__outs_recorded__",  # computed below
         "hits_runs_rbis": "__composite__",      # computed below
+        "h_r_rbi":        "__composite__",      # underscore variant from some enrichment paths
         "fantasy_score":  "__fantasy_score__",  # computed below
         # Legacy uppercase abbreviations (fallback)
         "h":  "Hits",    "hr": "HomeRuns",  "r":  "Runs",
