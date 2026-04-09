@@ -3966,6 +3966,20 @@ def run_agent_tasklet() -> None:
                          agent_name, play_conf, MIN_CONFIDENCE)
             continue
 
+        # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
+        # MIN_PROB is stored as fraction (0.57); model_prob is stored as percentage (57.0)
+        _legs = parlay.get("legs", [])
+        _min_prob_pct = MIN_PROB * 100  # 57.0
+        _low_legs = [
+            lg.get("player", lg.get("player_name", "?"))
+            for lg in _legs
+            if float(lg.get("model_prob", 0) or 0) < _min_prob_pct
+        ]
+        if _low_legs:
+            logger.debug("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
+                         agent_name, _min_prob_pct, _low_legs)
+            continue
+
         # Keep only the single highest-EV parlay per agent this cycle
         ev = parlay.get("combined_ev_pct", 0)
         if agent_name not in best_per_agent or ev > best_per_agent[agent_name][0]:
