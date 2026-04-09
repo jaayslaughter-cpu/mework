@@ -6,7 +6,7 @@ Runs 8 tasklets on their defined schedules:
   - AgentTasklet:        every 30s
   - LeaderboardTasklet:  every 60s
   - BacktestTasklet:     daily  12:01AM PT
-  - GradingTasklet:      daily  11:30PM PT
+  - GradingTasklet:      daily  2:00AM PT (after all West Coast games finish)
   - XGBoostTasklet:      weekly Sunday 2:00AM PT
   - NightlyRecap:        daily  11:00PM PT ( 2:00AM ET) → Discord settlement
 
@@ -340,7 +340,7 @@ async def lifespan(_app: FastAPI):
 
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
-    scheduler.add_job(job_grading,  CronTrigger(hour=23, minute=30, timezone="America/Los_Angeles"), id="grading")
+    scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
     scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, timezone="America/Los_Angeles"), id="xgboost")
 
     # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
@@ -396,7 +396,7 @@ async def lifespan(_app: FastAPI):
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@11:30PM, xgboost@Sun2AM"
+        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2AM"
     )
     yield
 

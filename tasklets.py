@@ -1418,7 +1418,7 @@ def _refresh_sample_counts() -> None:
     Called once per DataHub refresh cycle so sample counts grow from day 1
     rather than staying at 0 until the first Sunday XGBoost retrain.
 
-    Counts only rows with discord_sent=TRUE AND result IS NOT NULL so the
+    Counts only rows with discord_sent=TRUE AND actual_outcome IS NOT NULL so the
     floor matches exactly what XGBoost trains on.  The Sunday retrain will
     overwrite with richer per-prop-type stats; this is just a daily warm-up.
     """
@@ -1434,7 +1434,7 @@ def _refresh_sample_counts() -> None:
                     SELECT prop_type, COUNT(*) AS n
                     FROM bet_ledger
                     WHERE discord_sent = TRUE
-                      AND result IS NOT NULL
+                      AND actual_outcome IS NOT NULL
                     GROUP BY prop_type
                     """
                 )
@@ -1535,6 +1535,11 @@ def _ensure_bet_ledger() -> None:
                 conn.rollback()
             try:
                 cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS result VARCHAR(10)")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS lookahead_safe BOOLEAN")
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -2109,10 +2114,15 @@ class _BaseAgent:
         # ── Calibration quality ───────────────────────────────────────
         brier = 0.25  # neutral default
         try:
-            from calibration_layer import get_current_brier
-            brier = _clamp(get_current_brier())
+            # calibration_layer re-exports get_current_brier from drift_monitor
+            from calibration_layer import get_current_brier as _gcb
+            brier = _clamp(_gcb())
         except Exception:
-            pass
+            try:
+                from drift_monitor import get_current_brier as _gcb2
+                brier = _clamp(_gcb2())
+            except Exception:
+                pass
 
         # ── Confidence encoding ───────────────────────────────────────
         _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
@@ -2442,7 +2452,7 @@ class _UmpireAgent(_BaseAgent):
         if not umpires:
             try:
                 _d = _today_pt().strftime("%Y-%m-%d")
-                _sched = _req.get(
+                _sched = requests.get(
                     "https://statsapi.mlb.com/api/v1/schedule",
                     params={"sportId":1,"date":_d,"hydrate":"officials","gameType":"R"},
                     timeout=8,
@@ -2577,11 +2587,15 @@ class _LineValueAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         steam     = False
 
-        # Primary: Action Network sharp_report
+        # Primary: Action Network sharp_report — uses rlm_signal (AN schema key)
         sharp = self.hub.get("market", {}).get("sharp_report", [])
         for rec in sharp:
             if isinstance(rec, dict) and player.lower() in str(rec).lower():
-                steam = bool(rec.get("steam_move", False) or rec.get("reverse_line_move", False))
+                steam = bool(
+                    rec.get("rlm_signal", False)
+                    or rec.get("steam_move", False)
+                    or rec.get("reverse_line_move", False)
+                )
                 if steam:
                     break
 
@@ -2591,10 +2605,21 @@ class _LineValueAgent(_BaseAgent):
             for rec in (pub.get("prop_df", []) if isinstance(pub, dict) else []):
                 if not isinstance(rec, dict):
                     continue
-                if player.lower() not in str(rec.get("player", "")).lower():
+                _rec_player = str(rec.get("player_name", rec.get("player", ""))).lower()
+                if player.lower() not in _rec_player:
                     continue
-                over_pct  = float(rec.get("over_pct",  rec.get("ticket_pct", 0)) or 0)
-                under_pct = float(rec.get("under_pct", 0) or 0)
+                # SBD actual columns: prop_over_bets_pct, prop_over_money_pct
+                over_pct  = float(
+                    rec.get("prop_over_bets_pct")
+                    or rec.get("over_pct")
+                    or rec.get("ticket_pct")
+                    or 0
+                )
+                under_pct = float(
+                    rec.get("prop_under_bets_pct")
+                    or rec.get("under_pct")
+                    or 0
+                )
                 if over_pct >= 70 or under_pct >= 70:
                     steam = True
                     break
@@ -2743,12 +2768,21 @@ class _SteamAgent(_BaseAgent):
         rlm       = False
         fade_side = "OVER"  # default: sharp money on Over
 
-        # Primary: Action Network RLM flag
+        # Primary: Action Network RLM flag — uses rlm_signal (actual AN schema key)
         sharp = self.hub.get("market", {}).get("sharp_report", [])
         for rec in sharp:
             if isinstance(rec, dict) and player.lower() in str(rec).lower():
-                rlm = bool(rec.get("reverse_line_move", False))
+                rlm = bool(
+                    rec.get("rlm_signal", False)
+                    or rec.get("reverse_line_move", False)
+                )
                 if rlm:
+                    # rlm_direction tells us which side sharp money is on
+                    _dir = rec.get("rlm_direction", "")
+                    if _dir == "under":
+                        fade_side = "UNDER"
+                    else:
+                        fade_side = "OVER"
                     break
 
         # Fallback: SBD money% vs ticket% divergence
@@ -2757,10 +2791,21 @@ class _SteamAgent(_BaseAgent):
             for rec in (pub.get("prop_df", []) if isinstance(pub, dict) else []):
                 if not isinstance(rec, dict):
                     continue
-                if player.lower() not in str(rec.get("player", "")).lower():
+                _rec_player = str(rec.get("player_name", rec.get("player", ""))).lower()
+                if player.lower() not in _rec_player:
                     continue
-                ticket = float(rec.get("ticket_pct", rec.get("over_pct", 50)) or 50)
-                money  = float(rec.get("money_pct", 50) or 50)
+                # SBD actual columns: prop_over_bets_pct, prop_over_money_pct
+                ticket = float(
+                    rec.get("prop_over_bets_pct")
+                    or rec.get("ticket_pct")
+                    or rec.get("over_pct")
+                    or 50
+                )
+                money  = float(
+                    rec.get("prop_over_money_pct")
+                    or rec.get("money_pct")
+                    or 50
+                )
                 div    = abs(money - ticket)
                 if div >= 15:  # sharp money diverging from public = RLM
                     rlm = True
@@ -2800,17 +2845,17 @@ class _MLEdgeAgent(_BaseAgent):
             prop.get("player", ""), prop.get("prop_type", ""), prop=prop
         )
         over_odds  = prop.get("over_american", -110)
-        # _american_to_implied returns 0-1; multiply by 100 for percentage
-        implied    = _american_to_implied(over_odds) * 100
+        # _american_to_implied returns 0-100 (already percentage-scaled)
+        implied    = _american_to_implied(over_odds)
         divergence = abs(model_prob - implied)
         if divergence < 8.0:
             return None
         side   = "OVER" if model_prob > implied else "UNDER"
         odds   = over_odds if side == "OVER" else prop.get("under_american", -110)
         imp    = _american_to_implied(odds)
-        ev_pct = (model_prob / 100 - imp) / imp
+        ev_pct = (model_prob / 100 - imp / 100) / (imp / 100)
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, side, model_prob, imp * 100, ev_pct * 100)
+            return self._build_bet(prop, side, model_prob, imp, ev_pct * 100)
         return None
 
 
@@ -3163,8 +3208,8 @@ class _CorrelatedParlayAgent(_BaseAgent):
                 return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
-        implied    = _american_to_implied(over_odds) * 100
-        ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        implied    = _american_to_implied(over_odds)
+        ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
@@ -3191,8 +3236,8 @@ class _StackSmithAgent(_BaseAgent):
             return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
-        implied    = _american_to_implied(over_odds) * 100
-        ev_pct     = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        implied    = _american_to_implied(over_odds)
+        ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
@@ -3218,7 +3263,13 @@ class _ChalkBusterAgent(_BaseAgent):
         for _rec in _prop_records:
             _rec_player = str(_rec.get("player_name", _rec.get("player", ""))).lower()
             if _rec_player and (_rec_player in _player_lc or _player_lc in _rec_player):
-                _pct = float(_rec.get("over_pct", _rec.get("ticket_pct", 0)) or 0)
+                # SBD actual column is prop_over_bets_pct; fall back to legacy keys
+                _pct = float(
+                    _rec.get("prop_over_bets_pct")
+                    or _rec.get("over_pct")
+                    or _rec.get("ticket_pct")
+                    or 0
+                )
                 if _pct > 0:
                     pub_over = _pct
                     break
@@ -3227,9 +3278,9 @@ class _ChalkBusterAgent(_BaseAgent):
         if pub_over > 68:
             model_prob = self._model_prob(player, prop_type, prop=prop)
             under_odds = prop.get("under_american", -115)
-            implied    = _american_to_implied(under_odds) * 100
+            implied    = _american_to_implied(under_odds)
             under_prob = 100.0 - model_prob
-            ev_pct     = (under_prob / 100 - _american_to_implied(under_odds)) / _american_to_implied(under_odds) * 100
+            ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "UNDER", model_prob, implied, ev_pct)
         return None
@@ -3262,9 +3313,9 @@ class _SharpFadeAgent(_BaseAgent):
             sharp_side = "UNDER" if divergence > 0 else "OVER"
             model_prob = self._model_prob(player, prop_type, prop=prop)
             odds       = prop.get("under_american", -115) if sharp_side == "UNDER" else prop.get("over_american", -115)
-            implied    = _american_to_implied(odds) * 100
+            implied    = _american_to_implied(odds)
             prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
-            ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+            ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
 
@@ -3301,12 +3352,12 @@ class _SharpFadeAgent(_BaseAgent):
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
         odds       = prop.get("over_american", -115) if sharp_side == "OVER" else prop.get("under_american", -115)
-        implied    = _american_to_implied(odds) * 100
+        implied    = _american_to_implied(odds)
         prob_side  = model_prob if sharp_side == "OVER" else (100.0 - model_prob)
 
         # Apply a signal-strength discount — game-level signal is weaker than player-level
         adjusted_prob = prob_side * (0.85 + 0.15 * signal_strength)
-        ev_pct = (adjusted_prob / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        ev_pct = (adjusted_prob / 100 - implied / 100) / (implied / 100) * 100
 
         ev_threshold = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
         if ev_pct >= ev_threshold + 1.5:  # require +1.5pp extra EV for game-level signal
@@ -3400,8 +3451,8 @@ class _LineupChaseAgent(_BaseAgent):
         model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         model_prob  = min(95.0, model_prob + chase_adj * 120)
         over_odds   = prop.get("over_american", -115)
-        implied     = _american_to_implied(over_odds) * 100
-        ev_pct      = (model_prob / 100 - _american_to_implied(over_odds)) / _american_to_implied(over_odds) * 100
+        implied     = _american_to_implied(over_odds)
+        ev_pct      = (model_prob / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
@@ -3430,9 +3481,9 @@ class _PropCycleAgent(_BaseAgent):
         boost       = abs(cycle_score) * 100 * 0.5  # max ~5pp at 0.10 score
         model_prob  = min(95.0, model_prob + (boost if side == "OVER" else -boost))
         odds        = prop.get("over_american", -115) if side == "OVER" else prop.get("under_american", -115)
-        implied     = _american_to_implied(odds) * 100
+        implied     = _american_to_implied(odds)
         prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
-        ev_pct      = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        ev_pct      = (prob_side / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, side, model_prob, implied, ev_pct)
         return None
@@ -3456,16 +3507,16 @@ class _UnderDogAgent(_BaseAgent):
         if sharp_prob is None:
             return None
         ud_over_odds = prop.get("over_american", -115)
-        ud_implied   = _american_to_implied(ud_over_odds) * 100
+        ud_implied   = _american_to_implied(ud_over_odds)
         divergence   = sharp_prob - ud_implied
         if abs(divergence) < 5.0:  # need at least 5pp gap vs sharp books
             return None
         side       = "OVER" if divergence > 0 else "UNDER"
         model_prob = self._model_prob(player, prop_type, prop=prop)
         odds       = ud_over_odds if side == "OVER" else prop.get("under_american", -115)
-        implied    = _american_to_implied(odds) * 100
+        implied    = _american_to_implied(odds)
         prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
-        ev_pct     = (prob_side / 100 - _american_to_implied(odds)) / _american_to_implied(odds) * 100
+        ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, side, model_prob, implied, ev_pct)
         return None
@@ -3501,8 +3552,8 @@ def _build_synthetic_props(hub: dict) -> list[dict]:
                 "player":          pick.get("player", pick.get("name", "Unknown")),
                 "prop_type":       _norm_stat(pick.get("stat_type", pick.get("prop", "H"))),
                 "line":            float(pick.get("line", pick.get("value", 1.5)) or 1.5),
-                "over_american":   int(pick.get("over_odds", -115) or -115),
-                "under_american":  int(pick.get("under_odds", -115) or -115),
+                "over_american":   int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
+                "under_american":  int(pick.get("under_american", pick.get("under_odds", -115)) or -115),
                 "team":            pick.get("team", ""),
                 "venue":           pick.get("venue", ""),
                 "platform":        platform,
@@ -3573,8 +3624,8 @@ def _get_props(hub: dict) -> list[dict]:
                 "player":           player,
                 "prop_type":        str(prop_type).lower(),
                 "line":             float(line or 1.5),
-                "over_american":    -115,
-                "under_american":   -115,
+                "over_american":    int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
+                "under_american":   int(pick.get("under_american", pick.get("under_odds", -115)) or -115),
                 "team":             pick.get("player_team", pick.get("team", "")),
                 "venue":            "",
                 "platform":         "prizepicks",
@@ -3620,8 +3671,8 @@ def _get_props(hub: dict) -> list[dict]:
                     "player_name":    player,
                     "prop_type":      prop_type,
                     "line":           float(line or 1.5),
-                    "over_american":  -115,
-                    "under_american": -115,
+                    "over_american":  int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
+                    "under_american": int(pick.get("under_american", pick.get("under_odds", -115)) or -115),
                     "team":           pick.get("player_team", pick.get("team", "")),
                     "venue":          "",
                     "platform":       "prizepicks",
@@ -3854,22 +3905,22 @@ def run_agent_tasklet() -> None:
     try:
         _pg = _pg_conn()
         with _pg.cursor() as _c:
-                _c.execute(
-                    "SELECT DISTINCT agent_name FROM bet_ledger "
-                    "WHERE bet_date = %s AND discord_sent = TRUE "
-                    "AND created_at >= NOW() - INTERVAL '18 hours'",
-                    (today_str,)
-                )
-                _preloaded: list = []
-                for (_ag,) in _c.fetchall():
-                    _AGENT_SENT_TODAY.setdefault(_ag, today_str)
-                    _preloaded.append(_ag)
-            _pg.commit()
-            if _preloaded:
-                logger.info(
-                    "[AgentTasklet] Dedup preload — these agents already sent today"
-                    " and will be blocked this cycle: %s", _preloaded
-                )
+            _c.execute(
+                "SELECT DISTINCT agent_name FROM bet_ledger "
+                "WHERE bet_date = %s AND discord_sent = TRUE "
+                "AND created_at >= NOW() - INTERVAL '18 hours'",
+                (today_str,)
+            )
+            _preloaded: list = []
+            for (_ag,) in _c.fetchall():
+                _AGENT_SENT_TODAY.setdefault(_ag, today_str)
+                _preloaded.append(_ag)
+        _pg.commit()
+        if _preloaded:
+            logger.info(
+                "[AgentTasklet] Dedup preload — these agents already sent today"
+                " and will be blocked this cycle: %s", _preloaded
+            )
     except Exception as _dbe:
         logger.debug("[AgentTasklet] dedup preload skipped: %s", _dbe)
     _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
@@ -4296,7 +4347,8 @@ def run_grading_tasklet() -> None:
     calculate CLV, then send daily recap to Discord.
     SportsData.io replaced — was returning 403 on all calls.
     """
-    # GradingTasklet runs at 1:05 AM — must grade YESTERDAY's bets (not today's)
+    # GradingTasklet runs at 2:00 AM PT — grades YESTERDAY's bets so all West Coast
+    # games (ending ~10:30 PM PT) have complete ESPN boxscores available.
     _yesterday = (_today_pt() - datetime.timedelta(days=1))
     today      = _yesterday.strftime("%Y-%m-%d")   # used as grade_date throughout
     espn_date  = _yesterday.strftime("%Y%m%d")     # ESPN format
@@ -4584,8 +4636,11 @@ def run_grading_tasklet() -> None:
                     INSERT INTO propiq_season_record
                         (date, agent_name, parlay_legs, platform, stake, payout,
                          confidence, status, legs_json, created_at)
-                    VALUES (%s, %s, %s, 'mixed', 5.00, %s, 0.0, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
+                    SELECT %s, %s, %s, 'mixed', 5.00, %s, 0.0, %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM propiq_season_record
+                        WHERE date = %s AND agent_name = %s AND status != 'PENDING'
+                    )
                 """, (
                     today, _ag,
                     _stats["wins"] + _stats["losses"] + _stats["pushes"],
@@ -4594,6 +4649,7 @@ def run_grading_tasklet() -> None:
                     json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
                                 "pushes": _stats["pushes"]}),
                     datetime.datetime.utcnow().isoformat(),
+                    today, _ag,
                 ))
         conn2.commit()
         conn2.close()

@@ -52,6 +52,8 @@ _LEAGUE_AVG = {
     "win_pct":   0.500,
     "rs_per_g":  4.50,
     "ra_per_g":  4.50,
+    "rd_per_g":  0.00,   # neutral run differential for teams missing from standings
+    "games":     1,
     "era":       4.20,
     "whip":      1.28,
     "k9":        8.80,

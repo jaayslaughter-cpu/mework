@@ -27,6 +27,14 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Re-export get_current_brier from drift_monitor so callers can import it from
+# either module without caring which one owns the implementation.
+try:
+    from drift_monitor import get_current_brier  # noqa: F401 (re-export)
+except ImportError:
+    def get_current_brier() -> float:  # type: ignore[misc]
+        return 0.18
+
 # ── Universal Stat Normalizer ─────────────────────────────────────────────────
 
 _STAT_MAP: Dict[str, str] = {
