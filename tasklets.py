@@ -2318,6 +2318,9 @@ class _BaseAgent:
             "sim_edge_reasons":   prop.get("_sim_edge_reasons", []),
             "sim_starter_prob":   prop.get("_sim_starter_prob"),
             "sim_bullpen_prob":   prop.get("_sim_bullpen_prob"),
+            # Pass MLBAM ID through for accent-safe grading (Acuña, Peña, etc.)
+            "mlbam_id":           prop.get("mlbam_id") or prop.get("player_id"),
+            "player_id":          prop.get("player_id") or prop.get("mlbam_id"),
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
@@ -4780,6 +4783,11 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
         "h":  "Hits",    "hr": "HomeRuns",  "r":  "Runs",
         "sb": "StolenBases", "tb": "TotalBases",
         "bb": "Walks",   "k":  "Strikeouts",
+        # _norm_stat aliases that must round-trip through grading
+        "ks":           "Strikeouts",       # alternate K abbreviation
+        "er":           "EarnedRuns",       # alternate earned_runs abbreviation
+        "p_outs":       "InningsPitched",   # alternate pitching_outs abbreviation
+        "fantasy_pts":  "__fantasy_score__", # alternate fantasy_score label
     }
     prop_key = prop_type.lower().strip()
     # Strip common prefixes
