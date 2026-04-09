@@ -16,11 +16,11 @@ Public endpoints (no auth required)
   fetch_mlb_pitcher_game_stats()  → same-day pitcher stats keyed by player_id
                                      Injects into game_prediction_layer as recency override.
 
-PRO-gated endpoints (require ACTION_NETWORK_COOKIE env var — Bearer JWT)
+PRO-gated endpoints (require ACTION_NETWORK_JWT env var — Bearer JWT)
 -------------------------------------------------------------------------
   fetch_mlb_prop_projections()    → player-level ticket%/money% per prop market
                                      Unlocks _SharpFadeAgent Path 1 (true player-level signal).
-                                     Reads ACTION_NETWORK_COOKIE as Bearer JWT from Railway env.
+                                     Reads ACTION_NETWORK_JWT as Bearer JWT from Railway env.
 
   fetch_live_projections()        → live MLB prop projections from REST v2 endpoint
                                      api.actionnetwork.com/web/v2/leagues/1/projections/available
@@ -114,7 +114,7 @@ _PUBLIC_HEADERS = {
 }
 
 # ── Headers for PRO-gated _next/data endpoint ─────────────────────────────────
-# Bearer token injected at call-time from ACTION_NETWORK_COOKIE env var.
+# Bearer token injected at call-time from ACTION_NETWORK_JWT env var.
 _NEXT_HEADERS = {
     "User-Agent": _PUBLIC_HEADERS["User-Agent"],
     "Accept": "application/json",
@@ -548,7 +548,7 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
     Fetch player-level ticket%/money% from Action Network's prop projections page.
 
     Fully public endpoint — no cookie or API key required (confirmed from HAR).
-    ACTION_NETWORK_COOKIE env var is optional; injected if set as a future-proof
+    ACTION_NETWORK_JWT env var is optional; injected if set as a future-proof
     measure in case AN restricts access to PRO accounts.
     Returns empty list if request fails or props not yet posted pre-game.
 
@@ -578,10 +578,10 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
     if _PROP_PROJ_CACHE_DATE == date_str and _PROP_PROJ_CACHE:
         return _PROP_PROJ_CACHE
 
-    token = os.getenv("ACTION_NETWORK_JWT", os.getenv("ACTION_NETWORK_COOKIE", "")).strip()
+    token = os.getenv("ACTION_NETWORK_JWT", "").strip()
     if not token:
         logger.info(
-            "[ActionNetwork] ACTION_NETWORK_COOKIE not set — "
+            "[ActionNetwork] ACTION_NETWORK_JWT not set — "
             "prop projections unavailable; SharpFadeAgent will use Path 2."
         )
         return []
@@ -710,7 +710,7 @@ def fetch_live_projections() -> list[dict]:
     Fetch live MLB prop projections from Action Network PRO REST API.
 
     Endpoint: api.actionnetwork.com/web/v2/leagues/1/projections/available
-    Requires ACTION_NETWORK_COOKIE env var (same Bearer JWT as prop projections).
+    Requires ACTION_NETWORK_JWT env var (same Bearer JWT as prop projections).
 
     Returns [] if no live games, token not set, or fetch fails.
     Cached per PT calendar day.
@@ -730,7 +730,7 @@ def fetch_live_projections() -> list[dict]:
     if _LIVE_PROJ_CACHE_DATE == date_str and _LIVE_PROJ_CACHE:
         return _LIVE_PROJ_CACHE
 
-    token = os.getenv("ACTION_NETWORK_JWT", os.getenv("ACTION_NETWORK_COOKIE", "")).strip()
+    token = os.getenv("ACTION_NETWORK_JWT", "").strip()
     if not token:
         logger.debug("[ActionNetwork] fetch_live_projections: no Bearer token set.")
         return []
@@ -772,7 +772,7 @@ def build_sharp_report() -> list[dict]:
     """
     Build the sharp_report list consumed by _SharpFadeAgent Path 1.
 
-    Requires ACTION_NETWORK_COOKIE env var (Bearer JWT) for PRO endpoint.
+    Requires ACTION_NETWORK_JWT env var (Bearer JWT) for PRO endpoint.
     Returns [] if token not set or props not yet posted pre-game.
 
     The game-level RLM signal lives in an_game_sentiment and is handled by
