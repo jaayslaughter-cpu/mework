@@ -35,10 +35,10 @@ Pick selection algorithm:
 State persistence:
   • Postgres tables: streak_state (one row per active streak),
                      streak_picks (one row per pick)
-  • DB connection via POSTGRES_URL env var (same as the rest of the stack)
+  • DB connection via DATABASE_URL env var (same as the rest of the stack)
 
 Discord alerts:
-  • Pick announcement  : 8:00 AM PT (before main dispatch window — CronTrigger)
+  • Pick announcement  : 8:00 AM PT (CronTrigger — before main 9–10 AM window)
   • Settlement update  : 2 AM alongside nightly_recap.py
   • Streak milestones  : 5/11 and 8/11 celebration pings
 
@@ -86,35 +86,53 @@ try:
 except ImportError:
     _PG_AVAILABLE = False
 
-# live_dispatcher.py removed (Kill job_dispatch Directive).
-# Inline AGENT_CONFIGS for signal counting — 17 active agents with prob-threshold
-# proxies matching each agent's core filter logic in tasklets.py.
-_DISPATCHER_AVAILABLE = True   # always True — inline configs always available
+# FIX: AGENT_CONFIGS previously imported from live_dispatcher (deprecated).
+# live_dispatcher.AGENT_CONFIGS had 16 stale agent definitions — 8 new agents
+# (UnderDogAgent, StackSmithAgent, ChalkBusterAgent, SharpFadeAgent,
+#  CorrelatedParlayAgent, PropCycleAgent, LineupChaseAgent, LineDriftAgent)
+# were missing, and 7 old agents no longer in tasklets were present.
+# Now defined inline to match the actual 17 agents in tasklets._AGENT_CLASSES.
+# fetch_underdog_props fallback replaced with direct API call below.
 
-AGENT_CONFIGS = [
-    {"name": "EVHunter",              "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "UnderMachine",          "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.55},
-    {"name": "UmpireAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "F5Agent",               "filter": lambda sr: sr.implied_prob >= 0.60},
-    {"name": "FadeAgent",             "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineValueAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "BullpenAgent",          "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "WeatherAgent",          "filter": lambda sr: sr.implied_prob >= 0.58},
-    {"name": "MLEdgeAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "UnderDogAgent",         "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "StackSmithAgent",       "filter": lambda sr: sr.implied_prob >= 0.58},
-    {"name": "ChalkBusterAgent",      "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "SharpFadeAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "CorrelatedParlayAgent", "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "PropCycleAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineupChaseAgent",      "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineDriftAgent",        "filter": lambda sr: sr.implied_prob >= 0.60},
+_DISPATCHER_AVAILABLE = True   # always True — no longer depends on live_dispatcher
+
+AGENT_CONFIGS: list[dict] = [
+    {"name": "EVHunter",             "filter": lambda r: r.implied_prob >= 0.57},
+    {"name": "UnderMachine",         "filter": lambda r: r.side == "Under" and r.implied_prob >= 0.55},
+    {"name": "MLEdgeAgent",          "filter": lambda r: r.implied_prob >= 0.56},
+    {"name": "F5Agent",              "filter": lambda r: r.prop_type in ("strikeouts", "earned_runs", "hits_runs_rbis", "runs") and r.implied_prob >= 0.55},
+    {"name": "UmpireAgent",          "filter": lambda r: r.prop_type in ("strikeouts", "runs", "earned_runs") and r.implied_prob >= 0.54},
+    {"name": "FadeAgent",            "filter": lambda r: r.side == "Under" and r.implied_prob >= 0.53},
+    {"name": "LineValueAgent",       "filter": lambda r: r.implied_prob >= 0.55},
+    {"name": "BullpenAgent",         "filter": lambda r: r.prop_type in ("hits", "total_bases", "rbis", "runs", "fantasy_score") and r.implied_prob >= 0.54},
+    {"name": "WeatherAgent",         "filter": lambda r: r.prop_type in ("total_bases", "hits_runs_rbis", "fantasy_hitter") and r.implied_prob >= 0.54},
+    {"name": "UnderDogAgent",        "filter": lambda r: r.implied_prob >= 0.55},
+    {"name": "StackSmithAgent",      "filter": lambda r: r.prop_type in ("hits", "total_bases", "rbis", "runs") and r.implied_prob >= 0.54},
+    {"name": "ChalkBusterAgent",     "filter": lambda r: r.side == "Under" and r.implied_prob >= 0.53},
+    {"name": "SharpFadeAgent",       "filter": lambda r: r.implied_prob >= 0.55},
+    {"name": "CorrelatedParlayAgent","filter": lambda r: r.prop_type in ("strikeouts", "pitcher_strikeouts") and r.implied_prob >= 0.55},
+    {"name": "PropCycleAgent",       "filter": lambda r: r.implied_prob >= 0.54},
+    {"name": "LineupChaseAgent",     "filter": lambda r: r.prop_type in ("strikeouts", "pitcher_strikeouts") and r.implied_prob >= 0.56},
+    {"name": "LineDriftAgent",       "filter": lambda r: r.implied_prob >= 0.55},
 ]
 
-def fetch_today_schedule(): return []
-def normalise_stat(s): return s.lower().strip()
-def calc_ev(prob, odds=-110): return (prob - 0.5238) / 0.5238 * 100
-def implied_prob_from_odds(odds): return 100.0 / (abs(odds) + 100) if odds < 0 else abs(odds) / (abs(odds) + 100)
+
+def fetch_underdog_props() -> list[dict]:
+    """Direct Underdog Fantasy MLB prop fetch — no longer depends on live_dispatcher."""
+    try:
+        import requests as _req  # noqa: PLC0415
+        _headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://www.google.com/",
+        }
+        resp = _req.get("https://api.underdogfantasy.com/beta/v5/over_under_lines", headers=_headers, timeout=20)
+        if resp.status_code == 200:
+            return resp.json().get("over_under_lines", [])
+    except Exception as _e:
+        logger.warning("[StreakAgent] fetch_underdog_props fallback failed: %s", _e)
+    return []
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -150,7 +168,7 @@ DISCORD_WEBHOOK = os.getenv(
 )
 
 # Underdog API
-_UD_LINES_URL = "https://api.underdogfantasy.com/beta/v5/over_under_lines"
+_UD_LINES_URL = "https://api.underdogfantasy.com/v1/over_under_lines"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -276,7 +294,7 @@ def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
     Formula mirrors build_parlay() in live_dispatcher for consistency:
       prob_score    = (prob – 0.50) / 0.30 × 7.0   → 0–7 over 50%–80%
       ev_bonus      = min(ev_pct / 15.0 × 2.0, 2.0) → 0–2 for 0%–15% EV
-      signal_bonus  = min(signal_count × 0.1, 1.0)  → 0–1 for 0–10 agents
+      signal_bonus  = min(signal_count × 0.1, 1.0)  → 0–1 for 0–17 agents
 
     No legs_penalty (single-leg pick).  Gate for StreakAgent: 8.0/10.
     Gate is achievable when:
@@ -336,8 +354,6 @@ def fetch_underdog_props_with_teams() -> list[dict]:
 
         for line in data.get("over_under_lines", []):
             if line.get("status") != "active":
-                continue
-            if line.get("line_type") != "balanced":  # Phase 116: Pick'em balanced lines only
                 continue
 
             stable_id = line.get("stable_id", line.get("id", ""))
@@ -408,7 +424,7 @@ def fetch_underdog_props_with_teams() -> list[dict]:
 
 def _count_signals(prop_type: str, side: str, implied_prob: float) -> int:
     """
-    Count how many of the 18 AGENT_CONFIGS would approve this pick.
+    Count how many of the 17 AGENT_CONFIGS would approve this pick.
     Uses the same lambda filters defined in live_dispatcher.AGENT_CONFIGS.
     Returns 0 if dispatcher not available.
     """
@@ -610,7 +626,7 @@ def select_start_picks(
 # ---------------------------------------------------------------------------
 
 def _pg_conn():
-    """Return a Postgres connection using POSTGRES_URL env var."""
+    """Return a Postgres connection using DATABASE_URL env var."""
     if not _PG_AVAILABLE:
         raise RuntimeError("psycopg2 not installed")
     url = os.getenv("DATABASE_URL", os.getenv("POSTGRES_URL", ""))  # FIX: DATABASE_URL is primary (matches rest of stack)
@@ -856,7 +872,7 @@ def post_pick_alert(
     season_wins: int,
     line_compare_note: str = "",
 ) -> None:
-    """Post the 11 AM pick announcement to Discord."""
+    """Post the 8:00 AM PT pick announcement to Discord."""
     stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
     remaining  = STREAK_TOTAL_WINS - wins_in_row - 1   # after this pick
     prize_tier = _PRIZE_EMOJI.get(entry_amount, "💰")
@@ -1412,7 +1428,7 @@ def run_streak_pick(
     dry_run: bool = False,
 ) -> dict | None:
     """
-    Morning run (11 AM ET alongside main dispatcher).
+    Morning run (8:00 AM PT — streak window fires before main dispatch).
 
     Fetches props → scores → selects best pick → persists → alerts Discord.
     Returns the pick dict, or None if no qualifying pick exists today.
@@ -1604,7 +1620,8 @@ def run_streak_pick(
     )
 
     _line_comparison_note = _apply_line_comp(pick)
-    # Phase 92 line comparison already applied above via _apply_line_comp()
+    # ── Phase 92: compare Underdog vs PrizePicks — use better line ──────────
+    _line_comparison_note = ""
     if _LINE_COMP_AVAILABLE:
         try:
             # Fetch both platforms fresh for the streak (small overhead, once/day)

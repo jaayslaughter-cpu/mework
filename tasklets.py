@@ -4227,7 +4227,7 @@ def run_agent_tasklet() -> bool:
                     confidence=float(parlay.get("avg_confidence", parlay.get("confidence", 7.0))),
                     ev_pct=float(parlay.get("combined_ev_pct", 3.0)),
                     platform=parlay.get("platform", "Mixed"),
-                    stake=5.0,
+                    stake=float(parlay.get("stake", parlay.get("unit_dollars", 5.0))),  # FIX: use actual tier stake
                     legs=_legs_for_record,
                 )
                 logger.info("[AgentTasklet] Parlay recorded in season_record for %s (%s)",

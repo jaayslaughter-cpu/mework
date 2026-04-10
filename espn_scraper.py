@@ -121,36 +121,6 @@ _PITCHER_KEYS = [
 ]
 
 
-def _is_pitcher_stats_group(stats_group: dict) -> bool:
-    """
-    Detect whether an ESPN statistics group contains pitchers.
-
-    ESPN does NOT reliably populate the 'name' field on statistics groups
-    (it is often None). Instead we check:
-      1. The 'keys' list — pitcher groups contain innings-related keys
-         like 'fullInnings.partInnings' or 'ERA'.
-      2. The first athlete entry — pitchers have a 'throws' field.
-    """
-    # Check keys list for innings / ERA / pitcher-specific identifiers
-    group_keys = stats_group.get("keys", [])
-    for k in group_keys:
-        k_lower = k.lower()
-        if "inning" in k_lower or "era" in k_lower or "strike" in k_lower and "out" not in k_lower:
-            return True
-
-    # Fallback: check if first athlete has a 'throws' field (pitchers only)
-    athletes = stats_group.get("athletes", [])
-    if athletes and athletes[0].get("throws"):
-        return True
-
-    # Final fallback: 'name' field if ESPN starts populating it again
-    group_name = (stats_group.get("name") or "").lower()
-    if "pitch" in group_name:
-        return True
-
-    return False
-
-
 def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
     """Parse an ESPN athlete entry from a box-score statistics group."""
     stats_raw = athlete.get("stats", [])
@@ -273,10 +243,6 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
             {full_name, is_pitcher, hits, runs, rbi, home_runs, ...}
 
     Players not in a FINAL or IN_PROGRESS game are excluded.
-
-    FIX (PR #273): ESPN returns 'displayName' on athlete objects, not 'fullName'.
-    The old code used get("fullName") which is always None → all players skipped →
-    GradingTasklet saw 0 ESPN stats → all bets stranded OPEN forever.
     """
     date_fmt = date_str.replace("-", "")
     games = get_game_states(date_fmt)
@@ -313,15 +279,19 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
 
             for team_data in box_data.get("players", []):
                 for stats_group in team_data.get("statistics", []):
-                    # FIX: use _is_pitcher_stats_group() — ESPN 'name' field is often None
-                    is_pitcher = _is_pitcher_stats_group(stats_group)
+                    # FIX (PR #275): ESPN boxscore summary returns stats_group["name"] = null.
+                    # Pitcher vs batter detection must use the "keys" list instead:
+                    # Pitcher keys contain "IP" (innings pitched); batter keys contain "AB".
+                    _group_keys = [k.upper() for k in (stats_group.get("keys") or [])]
+                    is_pitcher = "IP" in _group_keys or "ERA" in _group_keys
 
                     for athlete_entry in stats_group.get("athletes", []):
                         athlete_info = athlete_entry.get("athlete", {})
-                        # FIX: ESPN uses 'displayName' not 'fullName' (fullName is always None)
+                        # FIX (PR #275): ESPN returns "displayName" not "fullName".
+                        # "fullName" is always None in the summary endpoint response.
                         full_name = (
                             athlete_info.get("displayName")
-                            or athlete_info.get("fullName")
+                            or athlete_info.get("fullName")   # fallback for older API versions
                             or ""
                         ).strip()
                         if not full_name:
