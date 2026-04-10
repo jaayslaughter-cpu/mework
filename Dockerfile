@@ -2,6 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Force stdout/stderr to flush immediately — required for Railway log streaming
+ENV PYTHONUNBUFFERED=1
+
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \

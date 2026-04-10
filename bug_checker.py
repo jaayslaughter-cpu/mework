@@ -259,6 +259,38 @@ def _check_streak_state() -> tuple[str, str, str]:
         return "Streak State", "warn", str(exc)
 
 
+def _check_action_network_cookie() -> tuple[str, str, str]:
+    """Check that ACTION_NETWORK_COOKIE is set — required for SharpFadeAgent PRO path."""
+    token = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
+    if not token:
+        return (
+            "Action Network Cookie",
+            "fail",
+            "ACTION_NETWORK_COOKIE not set — SharpFadeAgent on Path 2 fallback only. "
+            "Set at Railway SERVICE level (not project level).",
+        )
+    if len(token) < 20:
+        return (
+            "Action Network Cookie",
+            "warn",
+            f"ACTION_NETWORK_COOKIE looks too short ({len(token)} chars) — may be truncated.",
+        )
+    return "Action Network Cookie", "ok", f"Token present ({len(token)} chars)"
+
+
+def _check_pythonunbuffered() -> tuple[str, str, str]:
+    """Check PYTHONUNBUFFERED is set — required for Railway log streaming."""
+    val = os.getenv("PYTHONUNBUFFERED", "").strip()
+    if val != "1":
+        return (
+            "PYTHONUNBUFFERED",
+            "warn",
+            "PYTHONUNBUFFERED not set to '1' — Railway may show no logs. "
+            "Add ENV PYTHONUNBUFFERED=1 to Dockerfile or set as Railway variable.",
+        )
+    return "PYTHONUNBUFFERED", "ok", "Set correctly"
+
+
 # ── Discord embed sender ───────────────────────────────────────────────────────
 
 def _post_discord_embed(results: list[tuple[str, str, str]]) -> None:
@@ -327,6 +359,8 @@ def run_bug_checker() -> None:
         _check_odds_api_quota,
         _check_sbref_cache,
         _check_streak_state,
+        _check_action_network_cookie,
+        _check_pythonunbuffered,
     ]
 
     results: list[tuple[str, str, str]] = []
