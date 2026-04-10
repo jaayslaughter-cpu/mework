@@ -4486,7 +4486,7 @@ def run_grading_tasklet() -> None:
                        mlbam_id,
                        COALESCE(entry_type, 'STANDARD') AS entry_type
                 FROM bet_ledger
-                WHERE status = 'OPEN' AND bet_date = %s AND discord_sent = TRUE
+                WHERE status = 'OPEN' AND bet_date <= %s AND discord_sent = TRUE
                 """,
                 (today,),
             )
