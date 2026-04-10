@@ -43,25 +43,25 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "agent_config.yaml")
 # These are the expected win rates from historical validation.
 # Update these after each off-season re-tuning.
 BACKTEST_BASELINES: dict[str, float] = {
-    "EVHunter": 0.587,
-    "UnderMachine": 0.571,
-    "F5Agent": 0.563,
-    "MLEdgeAgent": 0.601,
-    "UmpireAgent": 0.558,
-    "FadeAgent": 0.544,
-    "LineValueAgent": 0.574,
-    "BullpenAgent": 0.556,
-    "WeatherAgent": 0.561,
-    "SteamAgent": 0.578,
-    "ArsenalAgent": 0.562,
-    "PlatoonAgent": 0.547,
-    "CatcherAgent": 0.559,
-    "LineupAgent": 0.551,
-    "GetawayAgent": 0.553,
-    "ArbitrageAgent": 0.620,
-    "VultureStack": 0.571,
-    "OmegaStack": 0.652,
-    "StreakAgent": 0.803,
+    # Canonical 17 agents — updated PR#278 (removed legacy ArsenalAgent/OmegaStack/etc.)
+    "EVHunter":             0.587,
+    "UnderMachine":         0.571,
+    "F5Agent":              0.563,
+    "MLEdgeAgent":          0.601,
+    "UmpireAgent":          0.558,
+    "FadeAgent":            0.544,
+    "LineValueAgent":       0.574,
+    "BullpenAgent":         0.556,
+    "WeatherAgent":         0.561,
+    "UnderDogAgent":        0.567,
+    "StackSmithAgent":      0.562,
+    "ChalkBusterAgent":     0.553,
+    "SharpFadeAgent":       0.578,
+    "CorrelatedParlayAgent": 0.558,
+    "PropCycleAgent":       0.561,
+    "LineupChaseAgent":     0.553,
+    "LineDriftAgent":       0.549,
+    "StreakAgent":          0.803,
 }
 
 # Z-score thresholds
@@ -92,7 +92,6 @@ def fetch_rolling_bets(days: int = 30) -> list[dict]:
                 SELECT agent_name, status, stake, payout, confidence, legs_json, created_at
                 FROM propiq_season_record
                 WHERE status IN ('WIN', 'LOSS', 'PUSH')
-                  AND settled_at IS NOT NULL
                   AND created_at::date >= %s
                 ORDER BY created_at
             """, (since,))
@@ -108,6 +107,20 @@ def fetch_clv_data(days: int = 30) -> list[dict]:
     since = (date.today() - timedelta(days=days)).isoformat()
     try:
         with _get_conn() as conn, conn.cursor() as cur:
+            # FIX PR#278 Error5: create line_snapshots if it doesn't exist yet
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS line_snapshots (
+                    id               SERIAL PRIMARY KEY,
+                    player_name      TEXT NOT NULL,
+                    prop_type        TEXT NOT NULL,
+                    game_date        DATE NOT NULL,
+                    line             FLOAT NOT NULL,
+                    is_closing_line  BOOLEAN NOT NULL DEFAULT FALSE,
+                    bookmaker        TEXT,
+                    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn.commit()
             cur.execute("""
                 SELECT player_name, prop_type, game_date,
                        MIN(line) AS opening_line,
@@ -271,6 +284,24 @@ def store_edge_metrics(metrics: dict[str, dict], clv: dict[str, float], config_v
 # ---------------------------------------------------------------------------
 # Discord report
 # ---------------------------------------------------------------------------
+def _post_discord(text: str) -> None:
+    """Post plain-text block to Discord webhook."""
+    import json as _json, urllib.request as _urllib_req  # noqa: PLC0415
+    if not _DISCORD:
+        logger.warning("[EdgeHealth] DISCORD_WEBHOOK_URL not set — skipping Discord post")
+        return
+    payload = _json.dumps({"content": f"```\n{text[:1900]}\n```"}).encode()
+    req = _urllib_req.Request(
+        _DISCORD, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _urllib_req.urlopen(req, timeout=10):
+            pass
+    except Exception as exc:
+        logger.warning("[EdgeHealth] Discord post failed: %s", exc)
+
 def _post_edge_report(metrics: dict, clv: dict, days: int) -> dict[str, dict]:
     """Format and post the edge health report to Discord."""
     Z_ALERT_THRESHOLD = -1.5

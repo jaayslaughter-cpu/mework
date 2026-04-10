@@ -28,7 +28,8 @@ import time
 import urllib.request
 import urllib.error
 import http.cookiejar
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo as _ZI
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +272,7 @@ def _parse_batters(raw: str) -> pd.DataFrame:
                     "sb_pct": _pct_to_float(row.get("SB", 0)),
                     "run_pct": _pct_to_float(row.get("RUNS", 0)),
                     "rbi_pct": _pct_to_float(row.get("RBI", 0)),
-                    "fetch_date": str(date.today()),
+                    "fetch_date": str(datetime.now(_ZI("America/Los_Angeles")).date()),
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -320,7 +321,7 @@ def _parse_pitchers(raw: str) -> pd.DataFrame:
                     "hr_allowed_pct": _pct_to_float(_strip_html(row.get("HR", "0"))),
                     "k_pct": _pct_to_float(_strip_html(row.get("KO", "0"))),
                     "pitches_proj": float(_strip_html(row.get("PITCH", "0")) or 0),
-                    "fetch_date": str(date.today()),
+                    "fetch_date": str(datetime.now(_ZI("America/Los_Angeles")).date()),
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -338,7 +339,7 @@ def _parse_pitchers(raw: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _cache_path(kind: str) -> Path:
-    today = str(date.today())
+    today = str(datetime.now(_ZI("America/Los_Angeles")).date())
     return CACHE_DIR / f"{kind}_{today}.parquet"
 
 
@@ -368,7 +369,7 @@ def _save_cache(kind: str, df: pd.DataFrame) -> None:
 def _pg_load_cache(kind: str) -> pd.DataFrame | None:
     """Load DraftEdge cache from Postgres for today's date.
     Returns DataFrame or None if unavailable."""
-    today = str(date.today())
+    today = str(datetime.now(_ZI("America/Los_Angeles")).date())
     db_url = _os.getenv("DATABASE_URL", "")
     if not db_url:
         return None
@@ -376,6 +377,18 @@ def _pg_load_cache(kind: str) -> pd.DataFrame | None:
         import psycopg2  # noqa: PLC0415
         conn = psycopg2.connect(db_url)
         cur = conn.cursor()
+        # FIX PR#278 Error2: create table before SELECT so first-run doesn't crash
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS draftedge_cache (
+                id         SERIAL PRIMARY KEY,
+                kind       VARCHAR(20)  NOT NULL,
+                cache_date DATE         NOT NULL,
+                data       TEXT         NOT NULL,
+                cached_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                UNIQUE(kind, cache_date)
+            )
+        """)
+        conn.commit()
         cur.execute(
             """
             SELECT data FROM draftedge_cache
@@ -399,7 +412,7 @@ def _pg_load_cache(kind: str) -> pd.DataFrame | None:
 
 def _pg_save_cache(kind: str, df: pd.DataFrame) -> None:
     """Upsert DraftEdge DataFrame into Postgres draftedge_cache table."""
-    today = str(date.today())
+    today = str(datetime.now(_ZI("America/Los_Angeles")).date())
     db_url = _os.getenv("DATABASE_URL", "")
     if not db_url or df.empty:
         return
@@ -439,7 +452,7 @@ def _pg_save_cache(kind: str, df: pd.DataFrame) -> None:
 
 def _check_fetch_cap(kind: str) -> bool:
     """Return True if we're still under the daily fetch cap."""
-    today = str(date.today())
+    today = str(datetime.now(_ZI("America/Los_Angeles")).date())
     key = f"{kind}_{today}"
     count = _fetch_count_today.get(key, 0)
     if count >= DAILY_FETCH_CAP:

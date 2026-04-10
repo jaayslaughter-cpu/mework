@@ -214,13 +214,14 @@ def _check_sbref_cache() -> tuple[str, str, str]:
     """Check sportsbook reference disk cache (/tmp/sb_ref_YYYY-MM-DD.json).
     sportsbook_reference_layer._CACHE_DIR = '/tmp' — this matches that path."""
     try:
-        today = datetime.date.today().strftime("%Y-%m-%d")
+        today = datetime.now(_PT).strftime("%Y-%m-%d")
         cache_path = f"/tmp/sb_ref_{today}.json"
         if not os.path.exists(cache_path):
             return "SB Reference", "warn", f"Cache file not found for {today} — fetch may not have run"
         size_kb = os.path.getsize(cache_path) // 1024
+        import json as _json_  # noqa: PLC0415
         with open(cache_path) as f:
-            data = json.load(f)
+            data = _json_.load(f)
         count = len(data)
         if count == 0:
             return "SB Reference", "warn", "Cache exists but is empty — Odds API returned no prop markets"

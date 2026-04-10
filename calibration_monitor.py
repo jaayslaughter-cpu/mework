@@ -93,18 +93,18 @@ def fetch_settled_bets(days: int = 30, agent_name: str | None = None) -> list[di
         SELECT agent_name, legs_json, status, confidence, created_at
         FROM propiq_season_record
         WHERE status IN ('WIN', 'LOSS', 'PUSH')
-          AND settled_at IS NOT NULL
           AND created_at::date >= %s
     """
+    # FIX PR#278: was "query +=" (NameError) and "cur.execute(query, ...)" — both wrong variable names
     params: list = [since]
     if agent_name:
-        query += " AND agent_name = %s"
+        fallback_query += " AND agent_name = %s"
         params.append(agent_name)
 
     rows = []
     try:
         with _get_conn() as conn, conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(fallback_query, params)
             for row in cur.fetchall():
                 rows.append({
                     "agent_name": row[0],

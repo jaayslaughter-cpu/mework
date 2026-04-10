@@ -227,6 +227,6 @@ if __name__ == "__main__":
         log_date=args.date,
         agent_name=args.agent,
         player_name=args.player,
-        decision_filter=decision_filter,
+        decision_filter_arg=decision_filter,  # FIX PR#278: was decision_filter= (wrong kwarg)
         show_parlays=not args.no_parlays,
     )
