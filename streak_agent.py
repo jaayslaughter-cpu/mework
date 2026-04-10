@@ -126,10 +126,11 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN    = 7.0    # confidence gate — lowered from 8.0; formula rebalanced so
-                            # trivially-easy 0.5 lines are blocked by STREAK_MIN_LINE instead
-STREAK_PROB_MIN    = 0.62   # implied win probability floor
-STREAK_EV_MIN      = 8.0    # EV % floor — raised from 5.0; requires genuine mispricing vs market
+STREAK_CONF_MIN    = 5.0    # FIX: lowered from 7.0 — base rate model gives 55-62% probs during
+                            # paper trading which only scores ~4.2-4.5. Raise to 7.0 after
+                            # April 13 XGBoost retrain when real probs diverge from 50%.
+STREAK_PROB_MIN    = 0.57   # FIX: lowered from 0.62 — matches MIN_PROB in main AgentTasklet.
+STREAK_EV_MIN      = 5.0    # FIX: lowered from 8.0 — consistent with MIN_EV_THRESH_PCT (3%).
 STREAK_MIN_LINE    = 1.0    # NEW: block all 0.5 stat lines — too trivial, near-certain base rate
 STREAK_MIN_SIGNALS = 2      # NEW: at least 2/17 agents must agree before a pick qualifies
 STREAK_TOTAL_WINS = 11     # picks needed to win
@@ -408,7 +409,7 @@ def fetch_underdog_props_with_teams() -> list[dict]:
 
 def _count_signals(prop_type: str, side: str, implied_prob: float) -> int:
     """
-    Count how many of the 18 AGENT_CONFIGS would approve this pick.
+    Count how many of the 17 AGENT_CONFIGS would approve this pick.
     Uses the same lambda filters defined in live_dispatcher.AGENT_CONFIGS.
     Returns 0 if dispatcher not available.
     """
@@ -856,7 +857,7 @@ def post_pick_alert(
     season_wins: int,
     line_compare_note: str = "",
 ) -> None:
-    """Post the 11 AM pick announcement to Discord."""
+    """Post the 8:00 AM PT pick announcement to Discord."""
     stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
     remaining  = STREAK_TOTAL_WINS - wins_in_row - 1   # after this pick
     prize_tier = _PRIZE_EMOJI.get(entry_amount, "💰")
@@ -1412,7 +1413,7 @@ def run_streak_pick(
     dry_run: bool = False,
 ) -> dict | None:
     """
-    Morning run (11 AM ET alongside main dispatcher).
+    Morning run (8:00 AM PT — streak window fires before main dispatch).
 
     Fetches props → scores → selects best pick → persists → alerts Discord.
     Returns the pick dict, or None if no qualifying pick exists today.

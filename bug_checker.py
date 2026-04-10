@@ -40,7 +40,7 @@ def _check_postgres() -> tuple[str, str, str]:
         import psycopg2  # type: ignore
         url = os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL", ""))
         if not url:
-            return "Postgres", "fail", "POSTGRES_URL not set"
+            return "Postgres", "fail", "DATABASE_URL not set"
         conn = psycopg2.connect(url)
         cur = conn.cursor()
         # Check required tables exist
