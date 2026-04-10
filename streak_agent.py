@@ -26,7 +26,7 @@ Rules enforced:
 Pick selection algorithm:
   1. Fetch live Underdog Fantasy MLB props (with team enrichment)
   2. Evaluate each prop using MLB historical base rates (same as dispatcher)
-  3. Run all 18 AGENT_CONFIGS filters to count cross-agent "signals"
+  3. Run all 17 AGENT_CONFIGS filters to count cross-agent "signals"
   4. Score each prop: streak_confidence() = prob_score + ev_bonus + signal_bonus
   5. Filter: conf ≥ 8.0, prob ≥ 0.62, ev_pct ≥ 5.0%
   6. Apply team-diversity rule for picks 1 & 2
@@ -38,7 +38,7 @@ State persistence:
   • DB connection via POSTGRES_URL env var (same as the rest of the stack)
 
 Discord alerts:
-  • Pick announcement  : 11 AM alongside the main dispatcher
+  • Pick announcement  : 8:00 AM PT (before main dispatch window — CronTrigger)
   • Settlement update  : 2 AM alongside nightly_recap.py
   • Streak milestones  : 5/11 and 8/11 celebration pings
 
@@ -57,6 +57,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import requests
@@ -85,22 +86,35 @@ try:
 except ImportError:
     _PG_AVAILABLE = False
 
-# Re-use AGENT_CONFIGS filters from live_dispatcher so signal counting stays
-# perfectly in sync with the 18-agent roster without duplicating logic.
-try:
-    from live_dispatcher import (
-        AGENT_CONFIGS,
-        fetch_underdog_props,
-        fetch_today_schedule,
-        normalise_stat,
-        PROP_CONFIG,
-        calc_ev,
-        implied_prob_from_odds,
-    )
-    _DISPATCHER_AVAILABLE = True
-except ImportError:
-    _DISPATCHER_AVAILABLE = False
-    AGENT_CONFIGS = []
+# live_dispatcher.py removed (Kill job_dispatch Directive).
+# Inline AGENT_CONFIGS for signal counting — 17 active agents with prob-threshold
+# proxies matching each agent's core filter logic in tasklets.py.
+_DISPATCHER_AVAILABLE = True   # always True — inline configs always available
+
+AGENT_CONFIGS = [
+    {"name": "EVHunter",              "filter": lambda sr: sr.implied_prob >= 0.55},
+    {"name": "UnderMachine",          "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.55},
+    {"name": "UmpireAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "F5Agent",               "filter": lambda sr: sr.implied_prob >= 0.60},
+    {"name": "FadeAgent",             "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "LineValueAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "BullpenAgent",          "filter": lambda sr: sr.implied_prob >= 0.55},
+    {"name": "WeatherAgent",          "filter": lambda sr: sr.implied_prob >= 0.58},
+    {"name": "MLEdgeAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "UnderDogAgent",         "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "StackSmithAgent",       "filter": lambda sr: sr.implied_prob >= 0.58},
+    {"name": "ChalkBusterAgent",      "filter": lambda sr: sr.implied_prob >= 0.55},
+    {"name": "SharpFadeAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "CorrelatedParlayAgent", "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "PropCycleAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "LineupChaseAgent",      "filter": lambda sr: sr.implied_prob >= 0.57},
+    {"name": "LineDriftAgent",        "filter": lambda sr: sr.implied_prob >= 0.60},
+]
+
+def fetch_today_schedule(): return []
+def normalise_stat(s): return s.lower().strip()
+def calc_ev(prob, odds=-110): return (prob - 0.5238) / 0.5238 * 100
+def implied_prob_from_odds(odds): return 100.0 / (abs(odds) + 100) if odds < 0 else abs(odds) / (abs(odds) + 100)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,7 +131,7 @@ STREAK_CONF_MIN    = 7.0    # confidence gate — lowered from 8.0; formula reba
 STREAK_PROB_MIN    = 0.62   # implied win probability floor
 STREAK_EV_MIN      = 8.0    # EV % floor — raised from 5.0; requires genuine mispricing vs market
 STREAK_MIN_LINE    = 1.0    # NEW: block all 0.5 stat lines — too trivial, near-certain base rate
-STREAK_MIN_SIGNALS = 2      # NEW: at least 2/18 agents must agree before a pick qualifies
+STREAK_MIN_SIGNALS = 2      # NEW: at least 2/17 agents must agree before a pick qualifies
 STREAK_TOTAL_WINS = 11     # picks needed to win
 STREAK_WINDOW_DAYS = 10    # calendar days to complete the streak
 
@@ -136,7 +150,7 @@ DISCORD_WEBHOOK = os.getenv(
 )
 
 # Underdog API
-_UD_LINES_URL = "https://api.underdogfantasy.com/v1/over_under_lines"
+_UD_LINES_URL = "https://api.underdogfantasy.com/beta/v5/over_under_lines"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -322,6 +336,8 @@ def fetch_underdog_props_with_teams() -> list[dict]:
 
         for line in data.get("over_under_lines", []):
             if line.get("status") != "active":
+                continue
+            if line.get("line_type") != "balanced":  # Phase 116: Pick'em balanced lines only
                 continue
 
             stable_id = line.get("stable_id", line.get("id", ""))
@@ -883,7 +899,7 @@ def post_pick_alert(
                 "value": (
                     f"Win Prob: **{prob_pct}%**\n"
                     f"EV: **+{pick.ev_pct:.1f}%**\n"
-                    f"Signals: **{pick.signal_count}/18** agents agree"
+                    f"Signals: **{pick.signal_count}/17** agents agree"
                 ),
                 "inline": True,
             },
@@ -958,7 +974,7 @@ def post_start_picks_alert(
                 f"**{direction}  {pick.line}  {prop_label}**\n"
                 f"Platform: **{pick.platform}** | Entry: `{pick.entry_type}`{note_str}\n"
                 f"Win Prob: **{prob_pct}%** | EV: **+{pick.ev_pct:.1f}%** | "
-                f"Signals: **{pick.signal_count}/18**\n"
+                f"Signals: **{pick.signal_count}/17**\n"
                 f"`{conf_bar}` **{pick.confidence:.1f}/10**"
             ),
             "inline": False,
@@ -1588,8 +1604,7 @@ def run_streak_pick(
     )
 
     _line_comparison_note = _apply_line_comp(pick)
-    # ── Phase 92: compare Underdog vs PrizePicks — use better line ──────────
-    _line_comparison_note = ""
+    # Phase 92 line comparison already applied above via _apply_line_comp()
     if _LINE_COMP_AVAILABLE:
         try:
             # Fetch both platforms fresh for the streak (small overhead, once/day)
