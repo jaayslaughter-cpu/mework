@@ -80,7 +80,12 @@ def record_parlay(
     stake: float = _DEFAULT_STAKE,
     legs: Optional[list] = None,
 ) -> bool:
-    """Insert a new PENDING parlay into the season record."""
+    """Insert a new PENDING parlay into the season record.
+
+    FIX: Dedup guard — if a row already exists for (date, agent_name, legs_json)
+    today, skip the insert. Prevents the 30s agent loop from writing the same
+    parlay multiple times when dispatch fires in the same 9AM window.
+    """
     conn = _get_conn()
     if not conn:
         logger.warning("[SeasonRecord] record_parlay skipped — no DB connection")
@@ -89,6 +94,22 @@ def record_parlay(
         _ensure_table(conn)
         legs_json = json.dumps(legs) if legs else None
         cur = conn.cursor()
+
+        # ── Dedup check: skip if identical parlay already recorded today ──────
+        cur.execute(
+            """
+            SELECT 1 FROM propiq_season_record
+            WHERE date = %s AND agent_name = %s AND legs_json = %s
+            LIMIT 1
+            """,
+            (date, agent, legs_json),
+        )
+        if cur.fetchone():
+            logger.debug("[SeasonRecord] Duplicate parlay skipped: %s %s (already recorded)",
+                         date, agent)
+            cur.close()
+            return True  # not an error — just already written
+
         cur.execute(
             """
             INSERT INTO propiq_season_record
@@ -131,7 +152,7 @@ def settle_parlay_record(
             cur.execute(
                 """
                 UPDATE propiq_season_record
-                SET status = %s, payout = %s
+                SET status = %s, payout = %s, settled_at = NOW()
                 WHERE id = %s
                 """,
                 (status, units_profit, parlay_id),
@@ -245,7 +266,8 @@ def get_overall_season_stats() -> dict:
                     COUNT(*) FILTER (WHERE status = 'PUSH')    AS pushes,
                     COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
                     COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
-                    COALESCE(SUM(stake) FILTER (WHERE status != 'PENDING'), 0) AS total_staked
+                    -- FIX: exclude PUSH from staked denominator — pushes return stake, not a loss
+                    COALESCE(SUM(stake) FILTER (WHERE status IN ('WIN','LOSS')), 0) AS total_staked
                 FROM propiq_season_record
             """)
             row = cur.fetchone()

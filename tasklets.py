@@ -4041,6 +4041,10 @@ def run_agent_tasklet() -> bool:
             continue
 
         # Redis gate (secondary — cross-process guard)
+        # FIX PR#277: Use atomic SET NX instead of non-atomic exists()+setex().
+        # Multiple Railway replicas running simultaneously all pass exists()=False
+        # before any replica writes the key → race condition → duplicate dispatches.
+        # SET NX is atomic: only ONE replica gets True; all others skip immediately.
         r_daily_key = f"agent_sent:{agent_name}:{today_str}"
         try:
             if r_dedup.exists(r_daily_key):
@@ -4131,17 +4135,27 @@ def run_agent_tasklet() -> bool:
     best_per_agent = _deduped
 
     for agent_name, (_ev, parlay, r_daily_key) in best_per_agent.items():
-        # ── Claim all three dedup stores BEFORE sending ──────────────────────
-        # Order matters: in-memory → Redis → DB → Discord.
-        # If the process crashes after the DB commit but before Discord fires,
-        # the next restart's dedup preload will find discord_sent=TRUE and block
-        # the re-send. This is intentional — a missed send is better than a
-        # duplicate send spamming subscribers every restart.
-        _AGENT_SENT_TODAY[agent_name] = today_str        # 1. in-memory (instant)
+        # ── Atomically claim this agent slot BEFORE any DB/Discord work ───────
+        # FIX PR#277: Atomic Redis SET NX replaces the non-atomic exists()+setex()
+        # pattern in the evaluation loop above.  Here we do the actual cross-
+        # replica lock: only the first replica to execute SET NX wins the slot.
+        # All other replicas (or restart cycles) get False and skip immediately.
+        # Order: atomic Redis claim → in-memory → DB → Discord.
+        _redis_claimed = False
         try:
-            r_dedup.setex(r_daily_key, _DAY_TTL, "1")   # 2. Redis (cross-process)
+            # set(key, val, ex=TTL, nx=True) returns True if key was set (we won),
+            # None/False if key already existed (another replica claimed it).
+            _result = r_dedup.set(r_daily_key, "1", ex=_DAY_TTL, nx=True)
+            _redis_claimed = bool(_result)
+            if not _redis_claimed:
+                # Another replica already claimed this agent for today
+                _AGENT_SENT_TODAY[agent_name] = today_str   # sync in-memory
+                logger.info("[AgentTasklet] %s claimed by another replica (Redis NX) — skipping.", agent_name)
+                continue
         except Exception:
-            pass
+            # Redis down — fall through and rely on in-memory gate only
+            _redis_claimed = True  # assume we have the slot if Redis is unavailable
+        _AGENT_SENT_TODAY[agent_name] = today_str        # 1. in-memory (instant, post-claim)
         try:                                              # 3. DB commit (crash-safe)
             _pg2 = _pg_conn()
             with _pg2.cursor() as _c2:
