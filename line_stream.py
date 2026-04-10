@@ -567,32 +567,19 @@ def _post_discord(payload: dict) -> bool:
 
 
 def post_steam_alert(date_str: str, moves: list[dict]) -> None:
-    """Post a steam move Discord alert for detected line movements."""
-    if not moves:
-        return
+    """Post a steam move Discord alert for detected line movements.
 
-    lines: list[str] = []
-    for m in moves[:8]:
-        arrow = "🔺" if m["delta"] > 0 else "🔻"
-        sign = "+" if m["delta"] > 0 else ""
-        lines.append(
-            f"{arrow} **{m['player']}** {m['prop'].title()} "
-            f"({m['platform'].title()}) "
-            f"~~{m['old_line']}~~ → **{m['new_line']}** "
-            f"({sign}{m['delta']:.1f})"
+    NOTE: Steam signals are internal-only. This function is intentionally
+    suppressed — detection runs and logs, but no Discord message is sent.
+    SteamAgent feeds enrichment data to other agents; it does not produce
+    Discord picks directly.
+    """
+    # Suppressed: steam detection is internal-only (do not post to Discord)
+    if moves:
+        logger.info(
+            "[Steam] %d significant move(s) detected (internal only — not posted to Discord)",
+            len(moves),
         )
-
-    _post_discord({
-        "embeds": [{
-            "title": f"🌊 Steam Alert — {date_str}",
-            "description": "\n".join(lines),
-            "color": 0xF4A300,
-            "footer": {
-                "text": f"PropIQ Line Stream · {len(moves)} move(s) detected"
-            },
-        }]
-    })
-    logger.info("[Discord] Steam alert posted (%d moves)", len(moves))
 
 
 def post_ingame_update(
@@ -728,12 +715,12 @@ def main() -> None:
 
     conn = _get_db()
 
-    # ── Phase 0: ESPN game states ───────────────────────────────────────
+    # ── Phase 0: ESPN game states ───────────────────────────────────────────────
     games = get_game_states(today)
     pre_count, live_count, final_count = _get_game_counts(games)
     _log_game_state(pre_count, live_count, final_count)
 
-    # ── Phase 1: Pre-game snapshot + steam detection ────────────────────
+    # ── Phase 1: Pre-game snapshot + steam detection ────────────────────────
     if pre_count or live_count:
         props, is_first = _phase1(conn, today)
 
@@ -743,14 +730,17 @@ def main() -> None:
         if previous_snap:
             moves = detect_steam_moves(props, previous_snap)
             if moves:
-                logger.info("[Steam] %d significant moves detected", len(moves))
-                post_steam_alert(today, moves)  # FIX: re-enabled for data collection (Phase 95 removed)
+                logger.info("[Steam] %d significant moves detected (internal only)", len(moves))
+                # Steam signals are internal-only: detection runs and logs,
+                # but post_steam_alert() is NOT called here. SteamAgent feeds
+                # enrichment data to other agents; it does not post to Discord.
+                # post_steam_alert(today, moves)  <-- intentionally suppressed
             else:
                 logger.info("[Steam] No significant moves this window")
         else:
             logger.info("[Steam] No previous snapshot to compare — first run of day")
 
-    # ── Phase 2: In-game leg tracking ──────────────────────────────────
+    # ── Phase 2: In-game leg tracking ──────────────────────────────
     if live_count > 0:
         # Mark closing lines (first time a game goes IN_PROGRESS)
         newly_marked = mark_closing_lines(conn, today, now_ts)
@@ -764,7 +754,7 @@ def main() -> None:
         parlays = get_pending_parlays(today)
         if parlays and player_stats:
             enriched = check_parlay_legs_live(parlays, player_stats)
-            post_ingame_update(today, enriched, games)  # FIX: re-enabled for data collection (Phase 95 removed)
+            post_ingame_update(today, enriched, games)
             logger.info("[InGame] Update posted — %d parlays tracked", len(enriched))
         else:
             logger.info("[InGame] No pending parlays or no ESPN stats — skipping update")
@@ -785,7 +775,7 @@ def main() -> None:
             parlays = get_pending_parlays(today)
             if parlays:
                 clv_results = compute_and_store_clv(conn, today, parlays)
-                post_clv_report(today, clv_results)  # FIX: re-enabled for data collection (Phase 95 removed)
+                post_clv_report(today, clv_results)
                 logger.info("[CLV] Report posted for %s", today)
             else:
                 logger.info("[CLV] No pending parlays found for CLV calc")
