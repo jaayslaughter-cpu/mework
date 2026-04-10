@@ -6,7 +6,7 @@ consumed by the root orchestrator.py.
 
   run_data_hub_tasklet()     → scrape Apify / APIs → Redis mlb_hub
   read_hub()                 → read mlb_hub from Redis
-  run_agent_tasklet()        → 10 agents → EV → Kafka / Redis bet_queue
+  run_agent_tasklet()        → 17 agents → EV → Discord bet_queue
   get_agents()               → agent leaderboard dict
   run_leaderboard_tasklet()  → 14-day ROI → capital multipliers
   read_leaderboard()         → read leaderboard from Redis
@@ -1095,6 +1095,48 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                         _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
                     except Exception:
                         pass
+                    # FIX: Real-time Discord alert when quota drops below threshold
+                    # bug_checker only runs at 10 AM — this catches mid-day quota burns
+                    # Dedup: alert fires at most once per hour via Redis TTL key
+                    try:
+                        _remaining_int = int(remaining)
+                        if _remaining_int < 50:
+                            _alert_key = "odds_api_alert_critical"
+                            _already_alerted = _redis().get(_alert_key)
+                            if not _already_alerted:
+                                from DiscordAlertService import discord_alert  # noqa: PLC0415
+                                discord_alert._post({
+                                    "embeds": [{
+                                        "title": "🚨 Odds API Quota Critical",
+                                        "description": (
+                                            f"**{_remaining_int} requests remaining** — "
+                                            "switching to free ESPN fallback on next failure.\n"
+                                            "Add ODDS_API_KEY_2 to Railway or reduce scrape frequency."
+                                        ),
+                                        "color": 0xE74C3C,
+                                    }]
+                                })
+                                _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                logger.warning("[OddsAPI] CRITICAL quota: %d remaining — Discord alerted", _remaining_int)
+                        elif _remaining_int < 200:
+                            _alert_key = "odds_api_alert_low"
+                            _already_alerted = _redis().get(_alert_key)
+                            if not _already_alerted:
+                                from DiscordAlertService import discord_alert  # noqa: PLC0415
+                                discord_alert._post({
+                                    "embeds": [{
+                                        "title": "⚠️ Odds API Quota Low",
+                                        "description": (
+                                            f"**{_remaining_int} requests remaining** — "
+                                            "monitor usage. Bug checker will flag at next 10 AM run."
+                                        ),
+                                        "color": 0xF39C12,
+                                    }]
+                                })
+                                _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                logger.warning("[OddsAPI] Low quota: %d remaining — Discord alerted", _remaining_int)
+                    except Exception:
+                        pass  # never block on alert failure
                     return data
             elif resp.status_code in (401, 403, 422, 429):
                 logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
@@ -1842,7 +1884,7 @@ def read_hub() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. AgentTasklet — 10-agent army
+# 2. AgentTasklet — 17-agent army
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _BaseAgent:
@@ -3152,7 +3194,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         "entry_type":      entry_type,
         "combined_ev_pct": combined_ev,
         "ev_pct":          combined_ev,
-        "stake":           10.0,
+        "stake":           5.0,   # FIX: floor stake — overridden by agent tier in run_agent_tasklet
         "confidence":      p_conf,
         "platform":        parlay_platform,
         "season_stats":    {},
@@ -3741,7 +3783,7 @@ def _get_props(hub: dict) -> list[dict]:
 
 def run_agent_tasklet() -> bool:
     """
-    Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
+    Run all 17 agents INDEPENDENTLY against live Underdog Fantasy props.
 
     Each agent:
       1. Evaluates every prop using its own unique quantitative logic.
@@ -3823,6 +3865,18 @@ def run_agent_tasklet() -> bool:
 
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
 
+    # ── FIX: Load per-agent stake from agent_unit_sizing tier ladder ─────────
+    # Previously every parlay was hardcoded to $10.0 regardless of agent performance.
+    # Now each agent's stake reflects their earned tier ($5→$8→$12→$16→$20).
+    _agent_stakes: dict = {}
+    try:
+        from agent_unit_sizing import get_all_units as _get_all_units  # noqa: PLC0415
+        _agent_stakes = _get_all_units()
+        logger.info("[AgentTasklet] Unit stakes loaded: %s",
+                    {k: f"${v:.0f}" for k, v in _agent_stakes.items()})
+    except Exception as _us_err:
+        logger.warning("[AgentTasklet] Could not load unit stakes — defaulting all to $5: %s", _us_err)
+
     all_parlays: list[dict] = []
 
     for cls in _AGENT_CLASSES:
@@ -3888,9 +3942,15 @@ def run_agent_tasklet() -> bool:
 
         agent_parlays = _build_agent_parlays(agent_hits, agent.name)
         if agent_parlays:
+            # FIX: stamp the agent's earned tier stake onto each parlay
+            # _make_parlay hardcodes 10.0 — override here with real tier dollar
+            _this_stake = _agent_stakes.get(agent.name, 5.0)
+            for _p in agent_parlays:
+                _p["stake"]        = _this_stake
+                _p["unit_dollars"] = _this_stake
             all_parlays.extend(agent_parlays)
-            logger.info("[AgentTasklet] %s → %d slip(s) from %d hit(s).",
-                        agent.name, len(agent_parlays), len(agent_hits))
+            logger.info("[AgentTasklet] %s → %d slip(s) from %d hit(s). Stake: $%.0f",
+                        agent.name, len(agent_parlays), len(agent_hits), _this_stake)
 
     if not all_parlays:
         logger.info("[AgentTasklet] No qualifying slips this cycle.")
@@ -4692,9 +4752,12 @@ def run_grading_tasklet() -> None:
         with conn2.cursor() as cur2:
             # Upsert a daily summary row per agent
             from collections import defaultdict
-            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0})
+            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0,"stake":5.0})
             for r in results:
                 _ag = r.get("agent", "Unknown")
+                # FIX: use actual stake from bet_ledger row (reflects tier progression)
+                _row_stake = float(r.get("units_wagered", r.get("stake", 5.0)) or 5.0)
+                _agent_results[_ag]["stake"] = _row_stake  # last row's stake (all same agent/day)
                 if r["status"] == "WIN":
                     _agent_results[_ag]["wins"]   += 1
                     _agent_results[_ag]["profit"] += float(r.get("profit_loss", 0))
@@ -4706,11 +4769,13 @@ def run_grading_tasklet() -> None:
             for _ag, _stats in _agent_results.items():
                 _status = "WIN" if _stats["wins"] > _stats["losses"] else (
                           "LOSS" if _stats["losses"] > _stats["wins"] else "PUSH")
+                _actual_stake  = round(_stats["stake"], 2)
+                _actual_payout = round(_actual_stake + _stats["profit"], 2)
                 cur2.execute("""
                     INSERT INTO propiq_season_record
                         (date, agent_name, parlay_legs, platform, stake, payout,
                          confidence, status, legs_json, created_at)
-                    SELECT %s, %s, %s, 'mixed', 5.00, %s, 0.0, %s, %s, %s
+                    SELECT %s, %s, %s, 'mixed', %s, %s, 0.0, %s, %s, %s
                     WHERE NOT EXISTS (
                         SELECT 1 FROM propiq_season_record
                         WHERE date = %s AND agent_name = %s AND status != 'PENDING'
@@ -4718,7 +4783,8 @@ def run_grading_tasklet() -> None:
                 """, (
                     today, _ag,
                     _stats["wins"] + _stats["losses"] + _stats["pushes"],
-                    round(5.0 + _stats["profit"], 2),
+                    _actual_stake,   # FIX: actual tier stake, not hardcoded 5.00
+                    _actual_payout,  # FIX: stake + profit, not 5.0 + profit
                     _status,
                     json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
                                 "pushes": _stats["pushes"]}),
