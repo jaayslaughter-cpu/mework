@@ -1,6 +1,6 @@
 """
 agent_unit_sizing.py — Phase 43
-Per-agent dynamic unit sizing with 5-tier ladder.
+Per-agent dynamic unit sizing with 5-tier ladder (17 core agents + StreakAgent = 18 total).
 
 Tier ladder:
   Tier 1 → $5   (floor, all agents start here)
@@ -30,6 +30,49 @@ def _get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
+def _ensure_table() -> None:
+    """Auto-create agent_unit_sizing table if migration hasn't run yet.
+    Safe to call on every startup — CREATE TABLE IF NOT EXISTS is idempotent.
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_unit_sizing (
+                id                  SERIAL PRIMARY KEY,
+                agent_name          VARCHAR(100) NOT NULL UNIQUE,
+                tier                INTEGER      NOT NULL DEFAULT 1,
+                unit_dollars        REAL         NOT NULL DEFAULT 5.0,
+                consecutive_wins    INTEGER      NOT NULL DEFAULT 0,
+                consecutive_losses  INTEGER      NOT NULL DEFAULT 0,
+                last_result         VARCHAR(1),
+                temperature         REAL         NOT NULL DEFAULT 1.5,
+                updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            )
+        """)
+        # Seed all 17 agents at tier 1 if missing
+        _ALL_AGENTS = [
+            "EVHunter", "UnderMachine", "UmpireAgent", "F5Agent", "FadeAgent",
+            "LineValueAgent", "BullpenAgent", "WeatherAgent", "MLEdgeAgent",
+            "UnderDogAgent", "StackSmithAgent", "ChalkBusterAgent", "SharpFadeAgent",
+            "CorrelatedParlayAgent", "PropCycleAgent", "LineupChaseAgent", "LineDriftAgent",
+        ]
+        for _ag in _ALL_AGENTS:
+            cur.execute(
+                """
+                INSERT INTO agent_unit_sizing (agent_name, tier, unit_dollars)
+                VALUES (%s, 1, 5.0)
+                ON CONFLICT (agent_name) DO NOTHING
+                """,
+                (_ag,),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[UnitSizing] _ensure_table error: {e}")
+
+
 def get_unit(agent_name: str) -> float:
     """Return current unit dollar amount for a given agent. Defaults to $5 if missing."""
     try:
@@ -50,7 +93,10 @@ def get_unit(agent_name: str) -> float:
 
 
 def get_all_units() -> dict:
-    """Return {agent_name: unit_dollars} for all 18 agents."""
+    """Return {agent_name: unit_dollars} for all 17 agents.
+    Auto-creates the table and seeds agents at tier 1 if missing.
+    """
+    _ensure_table()
     try:
         conn = _get_conn()
         cur = conn.cursor()
