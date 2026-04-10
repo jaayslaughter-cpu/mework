@@ -175,6 +175,137 @@ def _get_fg_batter(name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# MLB Stats API fallback (free, no key) — used when FanGraphs 403s
+# Fetches 2026 season stats directly from statsapi.mlb.com
+# ---------------------------------------------------------------------------
+
+_MLBAPI_FALLBACK_BASE = "https://statsapi.mlb.com/api/v1"
+_mlbapi_pitcher_cache: dict[str, dict] = {}
+_mlbapi_batter_cache:  dict[str, dict] = {}
+
+
+def _get_mlbapi_pitcher(player_name: str, player_id: int | None) -> dict:
+    """
+    Fetch 2026 pitcher season stats from statsapi.mlb.com.
+    Returns real k_rate, bb_rate, era, whip derived from season totals.
+    Falls back to empty dict if unavailable.
+    """
+    if not player_id:
+        return {}
+    cache_key = str(player_id)
+    if cache_key in _mlbapi_pitcher_cache:
+        return _mlbapi_pitcher_cache[cache_key]
+    try:
+        import requests as _req  # noqa: PLC0415
+        import datetime as _dt   # noqa: PLC0415
+        season = _dt.date.today().year
+        resp = _req.get(
+            f"{_MLBAPI_FALLBACK_BASE}/people/{player_id}/stats",
+            params={"stats": "season", "group": "pitching", "season": str(season)},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            _mlbapi_pitcher_cache[cache_key] = {}
+            return {}
+        for sg in resp.json().get("stats", []):
+            splits = sg.get("splits", [])
+            if not splits:
+                continue
+            s  = splits[0].get("stat", {})
+            ip = float(s.get("inningsPitched", 0) or 0)
+            so = float(s.get("strikeOuts",     0) or 0)
+            bb = float(s.get("baseOnBalls",    0) or 0)
+            er = float(s.get("earnedRuns",     0) or 0)
+            h  = float(s.get("hits",           0) or 0)
+            gs = max(int(s.get("gamesStarted", 0) or 0), 1)
+            if ip < 1:
+                continue
+            # Derive rates from season totals (IP unit = full innings)
+            # K per 9: so / ip * 9 → normalize to K% proxy (K/27 PA approx)
+            k_rate  = round(min(so / (ip * 4.35), 0.40), 4)   # SO per BF proxy
+            bb_rate = round(min(bb / (ip * 4.35), 0.20), 4)
+            era_val = round(float(s.get("era",  0) or 0), 2) or round(er / ip * 9, 2)
+            whip_val = round(float(s.get("whip", 0) or 0), 3) or round((h + bb) / ip, 3)
+            result = {
+                "k_rate":    k_rate  if k_rate  > 0 else 0.224,
+                "bb_rate":   bb_rate if bb_rate > 0 else 0.085,
+                "era":       era_val  if era_val  > 0 else 4.20,
+                "whip":      whip_val if whip_val > 0 else 1.28,
+                "k_per_start": round(so / gs, 1),
+                "_source":   "mlbapi_2026",
+            }
+            _mlbapi_pitcher_cache[cache_key] = result
+            return result
+    except Exception as _e:
+        logger.debug("[Enrichment] mlbapi pitcher fallback failed for %s: %s", player_name, _e)
+    _mlbapi_pitcher_cache[cache_key] = {}
+    return {}
+
+
+def _get_mlbapi_batter(player_name: str, player_id: int | None) -> dict:
+    """
+    Fetch 2026 batter season stats from statsapi.mlb.com.
+    Returns real k_pct, bb_pct, babip, slg, obp as FanGraphs proxies.
+    Falls back to empty dict if unavailable.
+    """
+    if not player_id:
+        return {}
+    cache_key = str(player_id)
+    if cache_key in _mlbapi_batter_cache:
+        return _mlbapi_batter_cache[cache_key]
+    try:
+        import requests as _req  # noqa: PLC0415
+        import datetime as _dt   # noqa: PLC0415
+        season = _dt.date.today().year
+        resp = _req.get(
+            f"{_MLBAPI_FALLBACK_BASE}/people/{player_id}/stats",
+            params={"stats": "season", "group": "hitting", "season": str(season)},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            _mlbapi_batter_cache[cache_key] = {}
+            return {}
+        for sg in resp.json().get("stats", []):
+            splits = sg.get("splits", [])
+            if not splits:
+                continue
+            s  = splits[0].get("stat", {})
+            pa = max(float(s.get("plateAppearances", 0) or 0), 1)
+            so = float(s.get("strikeOuts",   0) or 0)
+            bb = float(s.get("baseOnBalls",  0) or 0)
+            ab = max(float(s.get("atBats",   1) or 1), 1)
+            h  = float(s.get("hits",         0) or 0)
+            if pa < 5:
+                continue
+            avg   = round(float(s.get("avg",  0) or h / ab), 3)
+            obp   = round(float(s.get("obp",  0) or (h + bb) / pa), 3)
+            slg   = round(float(s.get("slg",  0) or 0), 3)
+            babip = round(float(s.get("babip", 0) or 0), 3) or avg
+            k_pct = round(so / pa, 4)
+            bb_pct = round(bb / pa, 4)
+            # Derive wRC+ proxy: (OBP/lgOBP + SLG/lgSLG - 1) * 100
+            # lg avg OBP=0.317, SLG=0.407 for 2026
+            wrc_proxy = round(((obp / 0.317) + (slg / 0.407) - 1) * 100, 1) if slg > 0 else 100.0
+            iso = round(slg - avg, 3) if slg > avg else 0.155
+            result = {
+                "wrc_plus":  max(40.0, min(200.0, wrc_proxy)),
+                "babip":     babip  if babip  > 0 else 0.300,
+                "obp":       obp    if obp    > 0 else 0.320,
+                "slg":       slg    if slg    > 0 else 0.405,
+                "iso":       iso    if iso    > 0 else 0.155,
+                "k_pct":     k_pct  if k_pct  > 0 else 0.224,
+                "bb_pct":    bb_pct if bb_pct > 0 else 0.085,
+                "_source":   "mlbapi_2026",
+            }
+            _mlbapi_batter_cache[cache_key] = result
+            return result
+    except Exception as _e:
+        logger.debug("[Enrichment] mlbapi batter fallback failed for %s: %s", player_name, _e)
+    _mlbapi_batter_cache[cache_key] = {}
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # Step 3 — Bayesian nudge
 # ---------------------------------------------------------------------------
 
@@ -678,24 +809,30 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     "k_bb_pct":      fg.get("k_bb_pct",  0.139),
                 })
             else:
-                # FIX: FanGraphs disabled (403) — use Statcast sc_whiff_rate as k_rate proxy.
-                # sc_whiff_rate (whiff% per swing) correlates strongly with K-rate.
-                # Typical range: 0.18–0.38. Normalize: whiff% / 0.35 ≈ K-rate / 0.30.
-                # All other fields keep their league-average defaults so feature vector
-                # slots aren't all identical — gives XGBoost real variance to train on.
-                _sc_whiff = float(prop.get("sc_whiff_rate", 0.0) or 0.0)
-                _sc_hard  = float(prop.get("sc_hard_hit_rate", 0.0) or 0.0)
-                _sc_barrel = float(prop.get("sc_barrel_rate", 0.0) or 0.0)
-                if _sc_whiff > 0.0:
-                    # Convert whiff% to approximate K-rate: K% ≈ whiff% * 0.85
+                # FIX: FanGraphs disabled (403) — chain of fallbacks using only real 2026 data.
+                # Priority: Statcast (already fetched) → statsapi.mlb.com 2026 season → skip slot.
+                _player_id = prop.get("player_id") or prop.get("mlbam_id")
+                _mlbapi = _get_mlbapi_pitcher(player, _player_id)
+
+                _sc_whiff  = float(prop.get("sc_whiff_rate",    0.0) or 0.0)
+                _sc_hard   = float(prop.get("sc_hard_hit_rate", 0.0) or 0.0)
+                _sc_barrel = float(prop.get("sc_barrel_rate",   0.0) or 0.0)
+
+                # k_rate: statsapi SO/BF ratio (most accurate) → Statcast whiff proxy
+                if _mlbapi.get("k_rate", 0) > 0:
+                    prop.setdefault("k_rate",    _mlbapi["k_rate"])
+                    prop.setdefault("bb_rate",   _mlbapi.get("bb_rate", 0.085))
+                    prop.setdefault("era",       _mlbapi.get("era",     4.20))
+                    prop.setdefault("whip",      _mlbapi.get("whip",    1.28))
+                    logger.debug("[Enrichment] Pitcher %s using statsapi 2026 fallback", player)
+                elif _sc_whiff > 0.0:
                     prop.setdefault("k_rate",    round(_sc_whiff * 0.85, 4))
                     prop.setdefault("swstr_pct", _sc_whiff)
-                if _sc_hard > 0.0:
-                    # Hard-hit% allowed → proxy for ERA quality (inverted: more HH = higher ERA)
-                    prop.setdefault("era",  round(3.0 + _sc_hard * 5.0, 2))   # 30% HH → ~4.5 ERA
-                    prop.setdefault("whip", round(1.1 + _sc_hard * 2.0, 2))   # 30% HH → ~1.7 WHIP
-                if _sc_barrel > 0.0:
-                    prop.setdefault("bb_rate", round(0.07 + _sc_barrel * 0.5, 4))
+                    if _sc_hard > 0.0:
+                        prop.setdefault("era",  round(3.0 + _sc_hard * 5.0, 2))
+                        prop.setdefault("whip", round(1.1 + _sc_hard * 2.0, 2))
+                    if _sc_barrel > 0.0:
+                        prop.setdefault("bb_rate", round(0.07 + _sc_barrel * 0.5, 4))
 
         if is_batter_prop:
             if pn not in _fg_batter_cache:
@@ -713,6 +850,52 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     "k_pct":       fg.get("k_pct",      0.224),
                     "bb_pct":      fg.get("bb_pct",     0.085),
                 })
+            else:
+                # FIX: FanGraphs 403 — use statsapi.mlb.com 2026 season stats (free, no key).
+                # Provides real k_pct, bb_pct, babip, slg, iso, wrc_plus proxy from actual AB/PA.
+                _player_id = prop.get("player_id") or prop.get("mlbam_id")
+                _mlbapi_b = _get_mlbapi_batter(player, _player_id)
+                if _mlbapi_b:
+                    prop.setdefault("wrc_plus", _mlbapi_b.get("wrc_plus", 100.0))
+                    prop.setdefault("babip",    _mlbapi_b.get("babip",    0.300))
+                    prop.setdefault("iso",      _mlbapi_b.get("iso",      0.155))
+                    prop.setdefault("k_pct",    _mlbapi_b.get("k_pct",    0.224))
+                    prop.setdefault("bb_pct",   _mlbapi_b.get("bb_pct",   0.085))
+                    prop.setdefault("slg",      _mlbapi_b.get("slg",      0.405))
+                    prop.setdefault("obp",      _mlbapi_b.get("obp",      0.320))
+                    logger.debug("[Enrichment] Batter %s using statsapi 2026 fallback", player)
+                # o_swing fallback: Statcast sc_whiff_rate is batter whiff% — proxy for chase tendency
+                # Higher whiff = more chasing = higher o_swing. Typical o_swing range: 0.22-0.38
+                _sc_whiff_b = float(prop.get("sc_whiff_rate", 0.0) or 0.0)
+                if _sc_whiff_b > 0.0 and not prop.get("o_swing"):
+                    prop.setdefault("o_swing", round(min(0.45, max(0.20, _sc_whiff_b * 1.15)), 3))
+
+        # ── FIX: Stamp zone_mult from Statcast pitch-zone analysis ────────────
+        # Previously _zone_integrity_mult was never set during enrichment — the feature
+        # vector slot 5 always defaulted to 1.0 → 0.667. Now computed here for pitcher props.
+        if is_pitcher_prop:
+            _pitcher_id = prop.get("player_id") or prop.get("mlbam_id")
+            if _pitcher_id and not prop.get("_zone_integrity_mult"):
+                try:
+                    from statcast_feature_layer import analyze_zone_integrity  # noqa: PLC0415
+                    _zi = analyze_zone_integrity(int(_pitcher_id))
+                    if _zi:
+                        prop["_zone_integrity_mult"] = float(_zi.get("integrity_multiplier", 1.0))
+                except Exception:
+                    pass  # leave unset — feature vector will use default 1.0
+
+        # ── FIX: Stamp batting order slot from hub lineups ────────────────────
+        # Previously _batting_order_slot was never set in enrichment — slot 26 always 0.
+        # Hub lineups contain batting_order for confirmed lineups.
+        if not prop.get("_batting_order_slot") and not is_pitcher_prop:
+            _player_lower = player.lower().strip()
+            for _entry in prop.get("_context_lineups", []):
+                _name = (_entry.get("full_name") or _entry.get("name") or "").lower().strip()
+                if _name and _name == _player_lower:
+                    _slot = int(_entry.get("batting_order", 0) or 0)
+                    if _slot > 0:
+                        prop["_batting_order_slot"] = _slot
+                    break
 
         # ── Weather ───────────────────────────────────────────────────────────
         if team not in _weather_cache:

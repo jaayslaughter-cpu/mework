@@ -6,7 +6,7 @@ consumed by the root orchestrator.py.
 
   run_data_hub_tasklet()     → scrape Apify / APIs → Redis mlb_hub
   read_hub()                 → read mlb_hub from Redis
-  run_agent_tasklet()        → 17 agents → EV → Discord bet_queue
+  run_agent_tasklet()        → 10 agents → EV → Kafka / Redis bet_queue
   get_agents()               → agent leaderboard dict
   run_leaderboard_tasklet()  → 14-day ROI → capital multipliers
   read_leaderboard()         → read leaderboard from Redis
@@ -1884,7 +1884,7 @@ def read_hub() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. AgentTasklet — 17-agent army
+# 2. AgentTasklet — 10-agent army
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _BaseAgent:
@@ -3194,7 +3194,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         "entry_type":      entry_type,
         "combined_ev_pct": combined_ev,
         "ev_pct":          combined_ev,
-        "stake":           5.0,   # FIX: floor stake — overridden by agent tier in run_agent_tasklet
+        "stake":           10.0,
         "confidence":      p_conf,
         "platform":        parlay_platform,
         "season_stats":    {},
@@ -3370,7 +3370,7 @@ class _ChalkBusterAgent(_BaseAgent):
             implied    = _american_to_implied(under_odds)
             under_prob = 100.0 - model_prob
             ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
-            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            if ev_pct >= MIN_EV_THRESH_PCT:  # FIX PR#276: percent-scale gate (was _get_ev_threshold()=0.03 ratio — always passed)
                 # FIX: pass under_prob (not model_prob) so bet_ledger stores P(UNDER)
                 # and Brier/XGBoost retraining uses the correct outcome probability.
                 return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct)
@@ -3783,7 +3783,7 @@ def _get_props(hub: dict) -> list[dict]:
 
 def run_agent_tasklet() -> bool:
     """
-    Run all 17 agents INDEPENDENTLY against live Underdog Fantasy props.
+    Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
 
     Each agent:
       1. Evaluates every prop using its own unique quantitative logic.
@@ -3865,18 +3865,6 @@ def run_agent_tasklet() -> bool:
 
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
 
-    # ── FIX: Load per-agent stake from agent_unit_sizing tier ladder ─────────
-    # Previously every parlay was hardcoded to $10.0 regardless of agent performance.
-    # Now each agent's stake reflects their earned tier ($5→$8→$12→$16→$20).
-    _agent_stakes: dict = {}
-    try:
-        from agent_unit_sizing import get_all_units as _get_all_units  # noqa: PLC0415
-        _agent_stakes = _get_all_units()
-        logger.info("[AgentTasklet] Unit stakes loaded: %s",
-                    {k: f"${v:.0f}" for k, v in _agent_stakes.items()})
-    except Exception as _us_err:
-        logger.warning("[AgentTasklet] Could not load unit stakes — defaulting all to $5: %s", _us_err)
-
     all_parlays: list[dict] = []
 
     for cls in _AGENT_CLASSES:
@@ -3942,15 +3930,9 @@ def run_agent_tasklet() -> bool:
 
         agent_parlays = _build_agent_parlays(agent_hits, agent.name)
         if agent_parlays:
-            # FIX: stamp the agent's earned tier stake onto each parlay
-            # _make_parlay hardcodes 10.0 — override here with real tier dollar
-            _this_stake = _agent_stakes.get(agent.name, 5.0)
-            for _p in agent_parlays:
-                _p["stake"]        = _this_stake
-                _p["unit_dollars"] = _this_stake
             all_parlays.extend(agent_parlays)
-            logger.info("[AgentTasklet] %s → %d slip(s) from %d hit(s). Stake: $%.0f",
-                        agent.name, len(agent_parlays), len(agent_hits), _this_stake)
+            logger.info("[AgentTasklet] %s → %d slip(s) from %d hit(s).",
+                        agent.name, len(agent_parlays), len(agent_hits))
 
     if not all_parlays:
         logger.info("[AgentTasklet] No qualifying slips this cycle.")
@@ -4227,7 +4209,7 @@ def run_agent_tasklet() -> bool:
                     confidence=float(parlay.get("avg_confidence", parlay.get("confidence", 7.0))),
                     ev_pct=float(parlay.get("combined_ev_pct", 3.0)),
                     platform=parlay.get("platform", "Mixed"),
-                    stake=float(parlay.get("stake", parlay.get("unit_dollars", 5.0))),  # FIX: actual tier stake
+                    stake=5.0,
                     legs=_legs_for_record,
                 )
                 logger.info("[AgentTasklet] Parlay recorded in season_record for %s (%s)",
@@ -4546,7 +4528,7 @@ def run_grading_tasklet() -> None:
                        mlbam_id,
                        COALESCE(entry_type, 'STANDARD') AS entry_type
                 FROM bet_ledger
-                WHERE status = 'OPEN' AND bet_date = %s AND discord_sent = TRUE
+                WHERE status = 'OPEN' AND bet_date <= %s AND discord_sent = TRUE  -- FIX PR#276: <= catches all historical OPEN rows
                 """,
                 (today,),
             )
@@ -4752,12 +4734,9 @@ def run_grading_tasklet() -> None:
         with conn2.cursor() as cur2:
             # Upsert a daily summary row per agent
             from collections import defaultdict
-            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0,"stake":5.0})
+            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0})
             for r in results:
                 _ag = r.get("agent", "Unknown")
-                # FIX: use actual stake from bet_ledger row (reflects tier progression)
-                _row_stake = float(r.get("units_wagered", r.get("stake", 5.0)) or 5.0)
-                _agent_results[_ag]["stake"] = _row_stake  # last row's stake (all same agent/day)
                 if r["status"] == "WIN":
                     _agent_results[_ag]["wins"]   += 1
                     _agent_results[_ag]["profit"] += float(r.get("profit_loss", 0))
@@ -4769,13 +4748,11 @@ def run_grading_tasklet() -> None:
             for _ag, _stats in _agent_results.items():
                 _status = "WIN" if _stats["wins"] > _stats["losses"] else (
                           "LOSS" if _stats["losses"] > _stats["wins"] else "PUSH")
-                _actual_stake  = round(_stats["stake"], 2)
-                _actual_payout = round(_actual_stake + _stats["profit"], 2)
                 cur2.execute("""
                     INSERT INTO propiq_season_record
                         (date, agent_name, parlay_legs, platform, stake, payout,
                          confidence, status, legs_json, created_at)
-                    SELECT %s, %s, %s, 'mixed', %s, %s, 0.0, %s, %s, %s
+                    SELECT %s, %s, %s, 'mixed', 5.00, %s, 0.0, %s, %s, %s
                     WHERE NOT EXISTS (
                         SELECT 1 FROM propiq_season_record
                         WHERE date = %s AND agent_name = %s AND status != 'PENDING'
@@ -4783,8 +4760,7 @@ def run_grading_tasklet() -> None:
                 """, (
                     today, _ag,
                     _stats["wins"] + _stats["losses"] + _stats["pushes"],
-                    _actual_stake,   # FIX: actual tier stake, not hardcoded 5.00
-                    _actual_payout,  # FIX: stake + profit, not 5.0 + profit
+                    round(5.0 + _stats["profit"], 2),
                     _status,
                     json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
                                 "pushes": _stats["pushes"]}),

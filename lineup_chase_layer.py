@@ -99,28 +99,71 @@ def get_lineup_chase_score(
         return defaults
 
     # ── Pull FanGraphs plate discipline stats for each batter ────────────────
+    _fg_available = True
     try:
         from fangraphs_layer import get_batter  # noqa: PLC0415
     except ImportError:
-        logger.warning("[Chase] fangraphs_layer not available")
-        return defaults
+        logger.warning("[Chase] fangraphs_layer not available — using statsapi fallback")
+        _fg_available = False
+        get_batter = lambda name: None  # noqa: E731
 
     o_swings:   list[float] = []
     k_pcts:     list[float] = []
     z_contacts: list[float] = []
 
     for player in opposing:
-        name = player.get("full_name", "")
+        name    = player.get("full_name", "")
+        mlbam   = player.get("player_id") or player.get("mlbam_id")
         if not name:
             continue
-        fg = get_batter(name)
+
+        fg = get_batter(name) if _fg_available else None
         if fg:
             o_swings.append(fg.get("o_swing",   _LEAGUE_O_SWING))
             k_pcts.append(  fg.get("k_pct",     _LEAGUE_K_PCT))
             z_contacts.append(fg.get("z_contact", _LEAGUE_Z_CONTACT))
+        else:
+            # FIX: FanGraphs 403 — use statsapi.mlb.com 2026 season k_pct + Statcast sc_whiff
+            # statsapi gives real K% from PA/SO counts this season (free, no key)
+            _used_fallback = False
+            if mlbam:
+                try:
+                    import requests as _req  # noqa: PLC0415
+                    import datetime as _dt   # noqa: PLC0415
+                    _season = _dt.date.today().year
+                    _r = _req.get(
+                        f"https://statsapi.mlb.com/api/v1/people/{mlbam}/stats",
+                        params={"stats": "season", "group": "hitting", "season": str(_season)},
+                        timeout=6,
+                    )
+                    if _r.status_code == 200:
+                        for _sg in _r.json().get("stats", []):
+                            _splits = _sg.get("splits", [])
+                            if not _splits:
+                                continue
+                            _s  = _splits[0].get("stat", {})
+                            _pa = max(float(_s.get("plateAppearances", 0) or 0), 1)
+                            _so = float(_s.get("strikeOuts", 0) or 0)
+                            if _pa >= 5:
+                                _k_pct_real = _so / _pa
+                                k_pcts.append(_k_pct_real)
+                                # o_swing proxy: K% * 1.35 ≈ O-Swing (high K% batters chase more)
+                                o_swings.append(min(0.45, _k_pct_real * 1.35))
+                                z_contacts.append(_LEAGUE_Z_CONTACT)  # no statsapi equivalent
+                                _used_fallback = True
+                                break
+                except Exception:
+                    pass
+            # Last resort: Statcast sc_whiff_rate on the prop itself (already fetched)
+            if not _used_fallback:
+                _sc_w = float(player.get("sc_whiff_rate", 0.0) or 0.0)
+                if _sc_w > 0.0:
+                    o_swings.append(min(0.45, _sc_w * 1.15))
+                    k_pcts.append(min(0.38, _sc_w * 0.90))
+                    z_contacts.append(_LEAGUE_Z_CONTACT)
 
     if not o_swings:
-        logger.debug("[Chase] Zero FanGraphs hits for team '%s'", team_name)
+        logger.debug("[Chase] Zero FanGraphs/fallback hits for team '%s'", team_name)
         return defaults
 
     avg_chase   = sum(o_swings)   / len(o_swings)

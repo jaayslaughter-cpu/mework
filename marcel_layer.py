@@ -511,8 +511,59 @@ class MarcelLayer:
 
         if not batter_rows and not pitcher_rows:
             logger.warning(
-                "[Marcel] No FanGraphs data retrieved — Marcel layer disabled."
+                "[Marcel] No FanGraphs data retrieved — trying statsapi.mlb.com 2025 fallback."
             )
+            # FIX: statsapi single-season fallback when FanGraphs 403s.
+            # Uses 2025 season totals as a 1-year Marcel proxy (no 3-year weighting).
+            # Gives XGBoost real per-player variance instead of all zeros.
+            try:
+                import requests as _req  # noqa: PLC0415
+                _r = _req.get(
+                    "https://statsapi.mlb.com/api/v1/stats/leaders",
+                    params={
+                        "leaderCategories": "strikeoutRate,walkRate,earnedRunAverage,whip",
+                        "season": str(self._year - 1),
+                        "sportId": 1,
+                        "limit": 500,
+                        "statGroup": "pitching",
+                    },
+                    timeout=10,
+                )
+                if _r.status_code != 200:
+                    logger.warning("[Marcel] statsapi fallback also failed — Marcel disabled.")
+                    return
+                # Build minimal pitcher projections from statsapi leaders
+                _minimal_pitchers: dict = {}
+                for _cat in _r.json().get("leagueLeaders", []):
+                    for _entry in _cat.get("leaders", []):
+                        _name = (_entry.get("person", {}).get("fullName") or "").strip().lower()
+                        _val  = _entry.get("value")
+                        _stat = _cat.get("leaderCategory", "")
+                        if _name and _val is not None:
+                            if _name not in _minimal_pitchers:
+                                _minimal_pitchers[_name] = {}
+                            try:
+                                _minimal_pitchers[_name][_stat] = float(_val)
+                            except (ValueError, TypeError):
+                                pass
+                if _minimal_pitchers:
+                    # Map statsapi field names to Marcel output format
+                    _mapped = {}
+                    for _n, _s in _minimal_pitchers.items():
+                        _mapped[_n] = {
+                            "k_pct":  _s.get("strikeoutRate", 0.224) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.224),
+                            "bb_pct": _s.get("walkRate",      0.085) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.085),
+                            "era":    _s.get("earnedRunAverage", 4.20),
+                            "whip":   _s.get("whip", 1.28),
+                            "_source": "statsapi_fallback",
+                        }
+                    self._pitchers = _mapped
+                    self._loaded   = True
+                    logger.info("[Marcel] Loaded %d pitchers from statsapi fallback.", len(_mapped))
+                else:
+                    logger.warning("[Marcel] statsapi fallback returned no leaders — Marcel disabled.")
+            except Exception as _me:
+                logger.warning("[Marcel] statsapi fallback exception: %s — Marcel disabled.", _me)
             return
 
         self._batters  = _build_batter_projections(batter_rows,  self._year)
