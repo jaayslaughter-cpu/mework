@@ -1095,6 +1095,48 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                         _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
                     except Exception:
                         pass
+                    # FIX: Real-time Discord alert when quota drops below threshold
+                    # bug_checker only runs at 10 AM — this catches mid-day quota burns
+                    # Dedup: alert fires at most once per hour via Redis TTL key
+                    try:
+                        _remaining_int = int(remaining)
+                        if _remaining_int < 50:
+                            _alert_key = "odds_api_alert_critical"
+                            _already_alerted = _redis().get(_alert_key)
+                            if not _already_alerted:
+                                from DiscordAlertService import discord_alert  # noqa: PLC0415
+                                discord_alert._post({
+                                    "embeds": [{
+                                        "title": "🚨 Odds API Quota Critical",
+                                        "description": (
+                                            f"**{_remaining_int} requests remaining** — "
+                                            "switching to free ESPN fallback on next failure.\n"
+                                            "Add ODDS_API_KEY_2 to Railway or reduce scrape frequency."
+                                        ),
+                                        "color": 0xE74C3C,
+                                    }]
+                                })
+                                _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                logger.warning("[OddsAPI] CRITICAL quota: %d remaining — Discord alerted", _remaining_int)
+                        elif _remaining_int < 200:
+                            _alert_key = "odds_api_alert_low"
+                            _already_alerted = _redis().get(_alert_key)
+                            if not _already_alerted:
+                                from DiscordAlertService import discord_alert  # noqa: PLC0415
+                                discord_alert._post({
+                                    "embeds": [{
+                                        "title": "⚠️ Odds API Quota Low",
+                                        "description": (
+                                            f"**{_remaining_int} requests remaining** — "
+                                            "monitor usage. Bug checker will flag at next 10 AM run."
+                                        ),
+                                        "color": 0xF39C12,
+                                    }]
+                                })
+                                _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                logger.warning("[OddsAPI] Low quota: %d remaining — Discord alerted", _remaining_int)
+                    except Exception:
+                        pass  # never block on alert failure
                     return data
             elif resp.status_code in (401, 403, 422, 429):
                 logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
