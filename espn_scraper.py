@@ -203,23 +203,14 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                         stats = entry.get("stats", {})
 
                         # Batting supplement (doubles, triples, exact total_bases)
-                        # Also capture full batter line as fallback if ESPN missed the player
                         bat = stats.get("batting", {})
                         if bat:
                             if name not in extra:
                                 extra[name] = {}
                             extra[name].update({
-                                "doubles":        float(bat.get("doubles",     0) or 0),
-                                "triples":        float(bat.get("triples",     0) or 0),
-                                "total_bases":    float(bat.get("totalBases",  0) or 0),
-                                "_mlb_hits":      float(bat.get("hits",        0) or 0),
-                                "_mlb_runs":      float(bat.get("runs",        0) or 0),
-                                "_mlb_rbi":       float(bat.get("rbi",         0) or 0),
-                                "_mlb_home_runs": float(bat.get("homeRuns",    0) or 0),
-                                "_mlb_at_bats":   float(bat.get("atBats",      0) or 0),
-                                "_mlb_walks":     float(bat.get("baseOnBalls", 0) or 0),
-                                "_mlb_strikeouts":float(bat.get("strikeOuts",  0) or 0),
-                                "_is_batter":     True,
+                                "doubles":     float(bat.get("doubles",    0) or 0),
+                                "triples":     float(bat.get("triples",    0) or 0),
+                                "total_bases": float(bat.get("totalBases", 0) or 0),
                             })
 
                         # Pitching supplement — primary source for pitching_outs
@@ -318,56 +309,4 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
             supplemented += 1
     logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/TB",
                 supplemented, len(all_stats))
-
-    # MLB Stats API fallback: inject any player ESPN missed so settlement can still grade them
-    injected = 0
-    for name_lower, extra in mlb_extra.items():
-        if name_lower in all_stats:
-            continue  # already have ESPN data
-        if not extra.get("_is_batter") and "pitching_outs" not in extra:
-            continue  # no usable stats
-        h   = extra.get("_mlb_hits",      0.0)
-        r   = extra.get("_mlb_runs",      0.0)
-        rbi = extra.get("_mlb_rbi",       0.0)
-        hr  = extra.get("_mlb_home_runs", 0.0)
-        ab  = extra.get("_mlb_at_bats",   0.0)
-        bb  = extra.get("_mlb_walks",     0.0)
-        k   = extra.get("_mlb_strikeouts",0.0)
-        tb  = extra.get("total_bases",    h + hr * 3)
-        if extra.get("_is_batter"):
-            all_stats[name_lower] = {
-                "full_name":      name_lower.title(),
-                "is_pitcher":     False,
-                "hits":           h,
-                "runs":           r,
-                "rbi":            rbi,
-                "rbis":           rbi,
-                "home_runs":      hr,
-                "at_bats":        ab,
-                "base_on_balls":  bb,
-                "strikeouts":     k,
-                "total_bases":    tb,
-                "doubles":        extra.get("doubles", 0.0),
-                "triples":        extra.get("triples", 0.0),
-                "hits_runs_rbis": h + r + rbi,
-                "_source":        "mlb_api_fallback",
-            }
-            injected += 1
-        elif "pitching_outs" in extra:
-            po = extra["pitching_outs"]
-            all_stats[name_lower] = {
-                "full_name":      name_lower.title(),
-                "is_pitcher":     True,
-                "pitching_outs":  po,
-                "innings_pitched":po / 3,
-                "hits_allowed":   0.0,
-                "earned_runs":    0.0,
-                "base_on_balls":  0.0,
-                "strikeouts":     0.0,
-                "_source":        "mlb_api_fallback",
-            }
-            injected += 1
-    if injected:
-        logger.info("[ESPN] MLB fallback injected %d players ESPN missed", injected)
-
     return all_stats
