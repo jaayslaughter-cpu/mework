@@ -62,25 +62,29 @@ logger = logging.getLogger("nightly_recap")
 
 # Emoji map for agent names
 _AGENT_EMOJI: dict[str, str] = {
-    "EVHunter":      "\U0001f3af",
-    "UnderMachine":  "\U0001f53d",
-    "F5Agent":       "5\ufe0f\u20e3",
-    "MLEdgeAgent":   "\U0001f9e0",
-    "UmpireAgent":   "\u2696\ufe0f",
-    "FadeAgent":     "\U0001f47b",
-    "LineValueAgent": "\U0001f4ca",
-    "BullpenAgent":  "\U0001f525",
-    "WeatherAgent":  "\U0001f32c\ufe0f",
-    "SteamAgent":    "\u2668\ufe0f",
-    "ArsenalAgent":  "\u2694\ufe0f",
-    "PlatoonAgent":  "\U0001f91d",
-    "CatcherAgent":  "\U0001f9e4",
-    "LineupAgent":   "\U0001f4cb",
-    "GetawayAgent":  "\u2708\ufe0f",
-    "ArbitrageAgent": "\U0001f4b0",
-    "VultureStack":  "\U0001f985",
-    "OmegaStack":    "\U0001f531",
+    "EVHunter":              "🎯",
+    "UnderMachine":          "🔽",
+    "F5Agent":               "5️⃣",
+    "MLEdgeAgent":           "🧠",
+    "UmpireAgent":           "⚖️",
+    "FadeAgent":             "👻",
+    "LineValueAgent":        "📐",
+    "BullpenAgent":          "🔥",
+    "WeatherAgent":          "🌬️",
+    "UnderDogAgent":         "🐕",
+    "StackSmithAgent":       "🏗️",
+    "ChalkBusterAgent":      "💥",
+    "SharpFadeAgent":        "📡",
+    "CorrelatedParlayAgent": "🔗",
+    "PropCycleAgent":        "🔄",
+    "LineupChaseAgent":      "🎣",
+    "LineDriftAgent":        "📈",
+    "StreakAgent":            "⚡",
 }
+
+# FIX: canonical list of active agents — filter out phantom legacy picks
+# (ArsenalAgent, OmegaStack, LineupAgent, SteamAgent, etc.) from live_dispatcher era
+_ACTIVE_AGENTS = set(_AGENT_EMOJI.keys())
 
 _OUTCOME_EMOJI = {"WIN": "\u2705", "LOSS": "\u274c", "PUSH": "\u23e9"}
 
@@ -259,6 +263,16 @@ def run(settle_date: Optional[str] = None) -> None:
 
     # 1. Fetch all PENDING parlays across all dates (rollover-aware)
     pending = get_all_pending_parlays()
+    # FIX: filter out legacy live_dispatcher agents (ArsenalAgent, OmegaStack, etc.)
+    # that were written to season_record before the system was migrated to AgentTasklet
+    _phantom_count = len([p for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS])
+    if _phantom_count:
+        logger.warning(
+            "[Recap] Filtering %d parlays from legacy agents not in current roster: %s",
+            _phantom_count,
+            list({p["agent_name"] for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS}),
+        )
+    pending = [p for p in pending if p.get("agent_name") in _ACTIVE_AGENTS]
     if not pending:
         logger.info("No PENDING parlays for %s — nothing to settle", settle_date)
         # Still post a recap showing no action today
@@ -376,6 +390,12 @@ def run(settle_date: Optional[str] = None) -> None:
                     _conn.close()
             except Exception as _ledger_err:
                 logger.warning("[Phase94] bet_ledger insert error: %s", _ledger_err)
+
+        # FIX: skip ghost agents from pre-Phase-89 era (ArsenalAgent, OmegaStack, etc.)
+        # The pending filter catches new rows but old PENDING rows may already be in DB.
+        if agent_name not in _ACTIVE_AGENTS:
+            logger.info("[Recap] Skipping ghost agent %s — not in current roster.", agent_name)
+            continue
 
         settled_results.append({
             "parlay_id":    parlay_id,
