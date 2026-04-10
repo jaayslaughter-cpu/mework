@@ -328,7 +328,8 @@ AGENT_NAMES = [
 ]
 KELLY_FRACTION  = 0.25    # Quarter-Kelly
 MAX_UNIT_CAP    = 0.05    # 5 % bankroll cap per bet
-MIN_EV_THRESH   = 0.03    # 3 % minimum edge to queue a bet
+MIN_EV_THRESH     = 0.03   # 3% minimum edge to queue a bet (ratio scale, e.g. 0.085)
+MIN_EV_THRESH_PCT = 3.0    # same threshold in percent scale (e.g. 8.5) — used by Group B agents
 
 # Capital allocation bounds (14-day ROI → multiplier)
 CAP_FLOOR = 0.5
@@ -2492,11 +2493,13 @@ class _UmpireAgent(_BaseAgent):
             # No umpire data — still evaluate but without umpire boost
             model_prob = min(model_prob + 3.0, 95.0)
 
+        # FIX: _model_prob returns P(OVER). Flip to P(UNDER) before EV calc.
+        under_prob = 100.0 - model_prob
         under_odds = prop.get("under_american", -110)
         implied    = _american_to_implied(under_odds) / 100
-        ev_pct     = (model_prob / 100 - implied) / implied
+        ev_pct     = (under_prob / 100 - implied) / implied
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "UNDER", model_prob,
+            return self._build_bet(prop, "UNDER", under_prob,
                                    implied * 100, ev_pct * 100)
         return None
 
@@ -2588,10 +2591,12 @@ class _LineValueAgent(_BaseAgent):
         """Hunts steam moves (sharp money signals).
         Primary: sharp_report from Action Network (if available).
         Fallback: SBD public_betting — >70% public tickets = steam signal.
+        FIX: now tracks which side steam is on and bets accordingly.
         """
         player    = prop.get("player", "")
         prop_type = prop.get("prop_type", "")
         steam     = False
+        steam_side = "OVER"  # default; overridden when side is determinable
 
         # Primary: Action Network sharp_report — uses rlm_signal (AN schema key)
         sharp = self.hub.get("market", {}).get("sharp_report", [])
@@ -2603,9 +2608,13 @@ class _LineValueAgent(_BaseAgent):
                     or rec.get("reverse_line_move", False)
                 )
                 if steam:
+                    # Use rlm_direction if available
+                    _dir = str(rec.get("rlm_direction", rec.get("steam_direction", "over"))).lower()
+                    steam_side = "UNDER" if _dir == "under" else "OVER"
                     break
 
         # Fallback: SBD public betting — extreme ticket% = steam proxy
+        # FIX: determine side from which bucket triggered (over vs under)
         if not steam:
             pub = self.hub.get("market", {}).get("public_betting", {})
             for rec in (pub.get("prop_df", []) if isinstance(pub, dict) else []):
@@ -2614,7 +2623,6 @@ class _LineValueAgent(_BaseAgent):
                 _rec_player = str(rec.get("player_name", rec.get("player", ""))).lower()
                 if player.lower() not in _rec_player:
                     continue
-                # SBD actual columns: prop_over_bets_pct, prop_over_money_pct
                 over_pct  = float(
                     rec.get("prop_over_bets_pct")
                     or rec.get("over_pct")
@@ -2626,19 +2634,26 @@ class _LineValueAgent(_BaseAgent):
                     or rec.get("under_pct")
                     or 0
                 )
-                if over_pct >= 70 or under_pct >= 70:
+                if over_pct >= 70:
                     steam = True
+                    steam_side = "OVER"   # public piling on Over → steam on Over
+                    break
+                if under_pct >= 70:
+                    steam = True
+                    steam_side = "UNDER"  # public piling on Under → steam on Under
                     break
 
         if not steam:
             return None
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
-        over_odds  = prop.get("over_american", -110)
-        implied    = _american_to_implied(over_odds) / 100
-        ev_pct     = (model_prob / 100 - implied) / implied
+        odds   = prop.get("over_american", -110) if steam_side == "OVER" else prop.get("under_american", -110)
+        implied = _american_to_implied(odds) / 100
+        # Use side-appropriate probability
+        prob_side = model_prob if steam_side == "OVER" else (100.0 - model_prob)
+        ev_pct = (prob_side / 100 - implied) / implied
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "OVER", model_prob,
+            return self._build_bet(prop, steam_side, prob_side,
                                    implied * 100, ev_pct * 100)
         return None
 
@@ -3216,7 +3231,7 @@ class _CorrelatedParlayAgent(_BaseAgent):
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds)
         ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -3270,7 +3285,7 @@ class _StackSmithAgent(_BaseAgent):
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds)
         ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -3314,7 +3329,9 @@ class _ChalkBusterAgent(_BaseAgent):
             under_prob = 100.0 - model_prob
             ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-                return self._build_bet(prop, "UNDER", model_prob, implied, ev_pct)
+                # FIX: pass under_prob (not model_prob) so bet_ledger stores P(UNDER)
+                # and Brier/XGBoost retraining uses the correct outcome probability.
+                return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct)
         return None
 
 
@@ -3348,7 +3365,7 @@ class _SharpFadeAgent(_BaseAgent):
             implied    = _american_to_implied(odds)
             prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
             ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
-            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
                 return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
 
         # ── Path 2: game-level RLM from Action Network ────────────────────────
@@ -3460,7 +3477,7 @@ class _LineDriftAgent(_BaseAgent):
             + line_gap_bonus
         )
 
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
             return self._build_bet(prop, "OVER", model_prob, implied_pct, ev_pct)
         return None
 
@@ -3487,7 +3504,7 @@ class _LineupChaseAgent(_BaseAgent):
         over_odds   = prop.get("over_american", -115)
         implied     = _american_to_implied(over_odds)
         ev_pct      = (model_prob / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
             return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
         return None
 
@@ -3518,7 +3535,7 @@ class _PropCycleAgent(_BaseAgent):
         implied     = _american_to_implied(odds)
         prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct      = (prob_side / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
             return self._build_bet(prop, side, model_prob, implied, ev_pct)
         return None
 
@@ -3551,7 +3568,7 @@ class _UnderDogAgent(_BaseAgent):
         implied    = _american_to_implied(odds)
         prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
             return self._build_bet(prop, side, model_prob, implied, ev_pct)
         return None
 
@@ -3722,7 +3739,7 @@ def _get_props(hub: dict) -> list[dict]:
     return []
 
 
-def run_agent_tasklet() -> None:
+def run_agent_tasklet() -> bool:
     """
     Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
 
@@ -4172,6 +4189,7 @@ def run_agent_tasklet() -> None:
                 "Best slip: %s | %d legs | combined EV=%.1f%%",
                 len(all_parlays), active_agents,
                 best["agent"], best["leg_count"], best["combined_ev_pct"])
+    return True  # FIX: signals orchestrator that picks were actually sent
 
 
 def get_agents() -> dict:
