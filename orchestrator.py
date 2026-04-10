@@ -249,12 +249,15 @@ async def job_agents():
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
         start = time.time()
-        await loop.run_in_executor(None, run_agent_tasklet)
+        _picks_sent = await loop.run_in_executor(None, run_agent_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
-        # Record that dispatch ran today — cross-process guard for Railway restarts
-        _record_dispatch_ran_today()
+        # FIX: only record dispatch date when picks were actually sent to Discord.
+        # Previously fired on every cycle including zero-pick runs, which caused
+        # post-window restarts to be permanently blocked even with nothing sent.
+        if _picks_sent:
+            _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
@@ -334,7 +337,7 @@ async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
 
     # ── Tasklet interval jobs ─────────────────────────────────────────────────
-    scheduler.add_job(job_data_hub,   IntervalTrigger(seconds=15), id="data_hub")
+    scheduler.add_job(job_data_hub,   IntervalTrigger(seconds=20), id="data_hub")  # FIX: was 15s — caused max-instances skips when scrape >15s
     scheduler.add_job(job_agents,     IntervalTrigger(seconds=30), id="agents")
     scheduler.add_job(job_leaderboard, IntervalTrigger(seconds=60), id="leaderboard")
 
