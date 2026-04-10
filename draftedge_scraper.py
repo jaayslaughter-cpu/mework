@@ -363,6 +363,80 @@ def _save_cache(kind: str, df: pd.DataFrame) -> None:
         log.warning("Cache write failed for %s: %s", kind, exc)
 
 
+# ── Postgres cache helpers — survives Railway redeploys (/tmp is wiped) ──────
+
+def _pg_load_cache(kind: str) -> pd.DataFrame | None:
+    """Load DraftEdge cache from Postgres for today's date.
+    Returns DataFrame or None if unavailable."""
+    today = str(date.today())
+    db_url = _os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return None
+    try:
+        import psycopg2  # noqa: PLC0415
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT data FROM draftedge_cache
+            WHERE kind = %s AND cache_date = %s
+            LIMIT 1
+            """,
+            (kind, today),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0]:
+            import io  # noqa: PLC0415
+            df = pd.read_json(io.StringIO(row[0]))
+            log.info("[DE] Postgres cache hit — %s %d rows (%s)", kind, len(df), today)
+            return df
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[DE] Postgres cache load failed for %s: %s", kind, exc)
+    return None
+
+
+def _pg_save_cache(kind: str, df: pd.DataFrame) -> None:
+    """Upsert DraftEdge DataFrame into Postgres draftedge_cache table."""
+    today = str(date.today())
+    db_url = _os.getenv("DATABASE_URL", "")
+    if not db_url or df.empty:
+        return
+    try:
+        import psycopg2  # noqa: PLC0415
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draftedge_cache (
+                id         SERIAL PRIMARY KEY,
+                kind       VARCHAR(20)  NOT NULL,
+                cache_date DATE         NOT NULL,
+                data       TEXT         NOT NULL,
+                cached_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                UNIQUE(kind, cache_date)
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO draftedge_cache (kind, cache_date, data)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (kind, cache_date) DO UPDATE
+                SET data = EXCLUDED.data,
+                    cached_at = NOW()
+            """,
+            (kind, today, df.to_json(orient="records")),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        log.info("[DE] Postgres cache saved — %s %d rows (%s)", kind, len(df), today)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[DE] Postgres cache save failed for %s: %s", kind, exc)
+
+
 def _check_fetch_cap(kind: str) -> bool:
     """Return True if we're still under the daily fetch cap."""
     today = str(date.today())
@@ -391,6 +465,11 @@ def fetch_batter_projections(force_refresh: bool = False) -> pd.DataFrame:
 
     Probabilities are floats in [0, 1]. E.g. hit_pct=0.68 means 68% chance of a hit.
 
+    Cache hierarchy (survives Railway redeploys):
+      1. /tmp disk parquet  — fastest, wiped on redeploy
+      2. Postgres           — durable, survives restarts
+      3. Live DraftEdge fetch
+
     Args:
         force_refresh: Bypass cache and fetch fresh data (still respects daily cap).
 
@@ -398,13 +477,22 @@ def fetch_batter_projections(force_refresh: bool = False) -> pd.DataFrame:
         DataFrame, or empty DataFrame on failure.
     """
     if not force_refresh:
+        # 1. Disk cache (fastest)
         cached = _load_cache("batters")
         if cached is not None:
             return cached
+        # 2. Postgres cache (survives Railway redeploys)
+        pg_cached = _pg_load_cache("batters")
+        if pg_cached is not None:
+            _save_cache("batters", pg_cached)  # restore disk cache from Postgres
+            return pg_cached
 
     if not _check_fetch_cap("batters"):
         cached = _load_cache("batters")
-        return cached if cached is not None else pd.DataFrame()
+        if cached is not None:
+            return cached
+        pg_cached = _pg_load_cache("batters")
+        return pg_cached if pg_cached is not None else pd.DataFrame()
 
     session = _build_session()
     log.info("Warming up DraftEdge session...")
@@ -415,11 +503,17 @@ def fetch_batter_projections(force_refresh: bool = False) -> pd.DataFrame:
     raw = _fetch_url(session, BATTER_ENDPOINT, referer=BATTER_PAGE, is_json=True)
     if not raw:
         log.error("Batter fetch returned no data")
+        # FIX: fall back to Postgres cache on live fetch failure
+        pg_cached = _pg_load_cache("batters")
+        if pg_cached is not None:
+            log.warning("[DE] Live batter fetch failed — serving Postgres cache (%d rows)", len(pg_cached))
+            return pg_cached
         return pd.DataFrame()
 
     df = _parse_batters(raw)
     if not df.empty:
         _save_cache("batters", df)
+        _pg_save_cache("batters", df)  # FIX: dual-write to Postgres for redeploy survival
     return df
 
 
@@ -433,6 +527,11 @@ def fetch_pitcher_projections(force_refresh: bool = False) -> pd.DataFrame:
     k_pct is the probability the pitcher records a strikeout on any given batter
     (strong signal for K prop lines).
 
+    Cache hierarchy (survives Railway redeploys):
+      1. /tmp disk parquet  — fastest, wiped on redeploy
+      2. Postgres           — durable, survives restarts
+      3. Live DraftEdge fetch
+
     Args:
         force_refresh: Bypass cache and fetch fresh data (still respects daily cap).
 
@@ -440,13 +539,22 @@ def fetch_pitcher_projections(force_refresh: bool = False) -> pd.DataFrame:
         DataFrame, or empty DataFrame on failure.
     """
     if not force_refresh:
+        # 1. Disk cache (fastest)
         cached = _load_cache("pitchers")
         if cached is not None:
             return cached
+        # 2. Postgres cache (survives Railway redeploys)
+        pg_cached = _pg_load_cache("pitchers")
+        if pg_cached is not None:
+            _save_cache("pitchers", pg_cached)  # restore disk cache from Postgres
+            return pg_cached
 
     if not _check_fetch_cap("pitchers"):
         cached = _load_cache("pitchers")
-        return cached if cached is not None else pd.DataFrame()
+        if cached is not None:
+            return cached
+        pg_cached = _pg_load_cache("pitchers")
+        return pg_cached if pg_cached is not None else pd.DataFrame()
 
     session = _build_session()
     log.info("Warming up DraftEdge session...")
@@ -457,11 +565,17 @@ def fetch_pitcher_projections(force_refresh: bool = False) -> pd.DataFrame:
     raw = _fetch_url(session, PITCHER_ENDPOINT, referer=PITCHER_PAGE, is_json=True)
     if not raw:
         log.error("Pitcher fetch returned no data")
+        # FIX: fall back to Postgres cache on live fetch failure
+        pg_cached = _pg_load_cache("pitchers")
+        if pg_cached is not None:
+            log.warning("[DE] Live pitcher fetch failed — serving Postgres cache (%d rows)", len(pg_cached))
+            return pg_cached
         return pd.DataFrame()
 
     df = _parse_pitchers(raw)
     if not df.empty:
         _save_cache("pitchers", df)
+        _pg_save_cache("pitchers", df)  # FIX: dual-write to Postgres for redeploy survival
     return df
 
 
