@@ -152,7 +152,7 @@ def settle_parlay_record(
             cur.execute(
                 """
                 UPDATE propiq_season_record
-                SET status = %s, payout = %s
+                SET status = %s, payout = %s, settled_at = NOW()
                 WHERE id = %s
                 """,
                 (status, units_profit, parlay_id),
