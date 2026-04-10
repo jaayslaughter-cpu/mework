@@ -222,12 +222,46 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                                 "_is_batter":     True,
                             })
 
-                        # Pitching supplement — primary source for pitching_outs
-                        pit = stats.get("pitching", {})
-                        if pit and "outs" in pit:
+                        # Batting supplement — add HBP, CS, SB not in ESPN boxscore keys
+                        bat = stats.get("batting", {})
+                        if bat:
                             if name not in extra:
                                 extra[name] = {}
-                            extra[name]["pitching_outs"] = float(pit.get("outs", 0) or 0)
+                            extra[name].update({
+                                "doubles":        float(bat.get("doubles",       0) or 0),
+                                "triples":        float(bat.get("triples",       0) or 0),
+                                "total_bases":    float(bat.get("totalBases",    0) or 0),
+                                "hit_by_pitch":   float(bat.get("hitByPitch",    0) or 0),
+                                "stolen_bases":   float(bat.get("stolenBases",   0) or 0),
+                                "caught_stealing":float(bat.get("caughtStealing",0) or 0),
+                                "_mlb_hits":      float(bat.get("hits",          0) or 0),
+                                "_mlb_runs":      float(bat.get("runs",          0) or 0),
+                                "_mlb_rbi":       float(bat.get("rbi",           0) or 0),
+                                "_mlb_home_runs": float(bat.get("homeRuns",      0) or 0),
+                                "_mlb_at_bats":   float(bat.get("atBats",        0) or 0),
+                                "_mlb_walks":     float(bat.get("baseOnBalls",   0) or 0),
+                                "_mlb_strikeouts":float(bat.get("strikeOuts",    0) or 0),
+                                "_is_batter":     True,
+                            })
+
+                        # Pitching supplement — primary source for outs, wins, QS
+                        pit = stats.get("pitching", {})
+                        if pit:
+                            if name not in extra:
+                                extra[name] = {}
+                            # outs is the authoritative pitching_outs (total outs recorded)
+                            if "outs" in pit:
+                                extra[name]["pitching_outs"] = float(pit.get("outs", 0) or 0)
+                            # inningsPitched as float (6.2 = 6 full + 2 partial outs)
+                            if "inningsPitched" in pit:
+                                extra[name]["innings_pitched"] = float(pit.get("inningsPitched", 0) or 0)
+                            # Win/Loss/QualityStart for fantasy scorer
+                            extra[name]["wins"]          = float(pit.get("wins",          0) or 0)
+                            extra[name]["losses"]        = float(pit.get("losses",         0) or 0)
+                            extra[name]["quality_start"] = float(pit.get("qualityStart",   0) or 0)
+                            extra[name]["earned_runs"]   = float(pit.get("earnedRuns",     0) or 0)
+                            extra[name]["strikeouts"]    = float(pit.get("strikeOuts",     0) or 0)
+                            extra[name]["hits_allowed"]  = float(pit.get("hits",           0) or 0)
     except Exception as exc:
         logger.warning("[ESPN] MLB gamelog supplement failed: %s", exc)
     return extra
@@ -312,20 +346,35 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
 
     logger.info("[ESPN] Parsed box-score stats for %d players", len(all_stats))
 
-    # Supplement with MLB Stats API for missing stats (2B, 3B, exact TB, pitching_outs)
+    # Supplement with MLB Stats API for missing stats (2B, 3B, exact TB, pitching_outs, HBP, SB, CS, W, QS)
     mlb_extra = _fetch_mlb_gamelog_stats(date_str)
     supplemented = 0
     for name_lower, extra in mlb_extra.items():
         if name_lower in all_stats:
             p = all_stats[name_lower]
-            p["doubles"]  = extra.get("doubles",  0.0)
-            p["triples"]  = extra.get("triples",  0.0)
+            # Batter supplements
+            p["doubles"]       = extra.get("doubles",        0.0)
+            p["triples"]       = extra.get("triples",        0.0)
+            p["hit_by_pitch"]  = extra.get("hit_by_pitch",   0.0)
+            p["caught_stealing"] = extra.get("caught_stealing", 0.0)
+            # Prefer MLB API stolen_bases over ESPN (more accurate)
+            if extra.get("stolen_bases", 0) > 0:
+                p["stolen_bases"] = extra["stolen_bases"]
             if extra.get("total_bases", 0) > 0:
                 p["total_bases"] = extra["total_bases"]
+            # Pitcher supplements — override with MLB API authoritative values
             if "pitching_outs" in extra:
                 p["pitching_outs"] = extra["pitching_outs"]
+            if extra.get("wins", 0) > 0:
+                p["wins"]  = extra["wins"]
+            if extra.get("quality_start", 0) > 0:
+                p["quality_start"] = extra["quality_start"]
+            if extra.get("earned_runs", 0) >= 0 and "earned_runs" in extra:
+                p["earned_runs"] = extra["earned_runs"]
+            if extra.get("strikeouts", 0) > 0:
+                p["strikeouts"] = extra["strikeouts"]
             supplemented += 1
-    logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/TB",
+    logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/TB/HBP/SB/CS/W/QS",
                 supplemented, len(all_stats))
 
     # MLB Stats API fallback: inject any player ESPN missed so settlement can still grade them
