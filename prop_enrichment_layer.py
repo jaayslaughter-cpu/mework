@@ -677,6 +677,25 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     "xfip":          fg.get("xfip",      4.20),
                     "k_bb_pct":      fg.get("k_bb_pct",  0.139),
                 })
+            else:
+                # FIX: FanGraphs disabled (403) — use Statcast sc_whiff_rate as k_rate proxy.
+                # sc_whiff_rate (whiff% per swing) correlates strongly with K-rate.
+                # Typical range: 0.18–0.38. Normalize: whiff% / 0.35 ≈ K-rate / 0.30.
+                # All other fields keep their league-average defaults so feature vector
+                # slots aren't all identical — gives XGBoost real variance to train on.
+                _sc_whiff = float(prop.get("sc_whiff_rate", 0.0) or 0.0)
+                _sc_hard  = float(prop.get("sc_hard_hit_rate", 0.0) or 0.0)
+                _sc_barrel = float(prop.get("sc_barrel_rate", 0.0) or 0.0)
+                if _sc_whiff > 0.0:
+                    # Convert whiff% to approximate K-rate: K% ≈ whiff% * 0.85
+                    prop.setdefault("k_rate",    round(_sc_whiff * 0.85, 4))
+                    prop.setdefault("swstr_pct", _sc_whiff)
+                if _sc_hard > 0.0:
+                    # Hard-hit% allowed → proxy for ERA quality (inverted: more HH = higher ERA)
+                    prop.setdefault("era",  round(3.0 + _sc_hard * 5.0, 2))   # 30% HH → ~4.5 ERA
+                    prop.setdefault("whip", round(1.1 + _sc_hard * 2.0, 2))   # 30% HH → ~1.7 WHIP
+                if _sc_barrel > 0.0:
+                    prop.setdefault("bb_rate", round(0.07 + _sc_barrel * 0.5, 4))
 
         if is_batter_prop:
             if pn not in _fg_batter_cache:

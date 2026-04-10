@@ -4807,8 +4807,9 @@ def run_grading_tasklet() -> None:
                             "SELECT id, model_prob FROM bet_ledger WHERE id = ANY(%s)",
                             (_ids,)
                         )
-                        _brier_probs = {row[0]: float(row[1] or 52) / 100
-                                        for row in _bcur.fetchall()}
+                        _brier_probs = {row[0]: float(row[1]) / 100
+                                        for row in _bcur.fetchall()
+                                        if row[1] is not None}  # FIX: skip NULL model_prob rows
                 _bc.close()
             except Exception:
                 pass
@@ -4818,7 +4819,9 @@ def run_grading_tasklet() -> None:
                 if r["status"] == "PUSH":
                     continue   # PUSH is not a WIN/LOSS — exclude from Brier
                 outcome = 1 if r["status"] == "WIN" else 0
-                prob    = _brier_probs.get(r.get("id"), 0.52)
+                prob    = _brier_probs.get(r.get("id"))
+                if prob is None:
+                    continue  # FIX: skip rows with no model_prob — 0.52 default biases calibration
                 brier_inputs.append({"prob": prob, "outcome": outcome})
             if brier_inputs:
                 from calibration_layer import calculate_brier_score  # noqa: PLC0415
@@ -4827,7 +4830,25 @@ def run_grading_tasklet() -> None:
                     record_brier(brier)
                     logger.info("[GradingTasklet] Brier score recorded: %.4f", brier)
         except Exception as _brier_err:
-            logger.debug("[GradingTasklet] Brier record failed: %s", _brier_err)
+            logger.warning("[GradingTasklet] Brier record failed: %s", _brier_err)  # FIX: was debug
+
+    # ── FIX: Update calibration map nightly after grading ────────────────────
+    # Previously calibration_map.json only updated on Sunday XGBoost retrain.
+    # Now it updates every night once MIN_SAMPLE (20) graded rows exist in Postgres.
+    # Probabilities start being corrected after ~3-4 days instead of up to 7 days.
+    try:
+        from calibrate_model import generate_calibration_map_from_db  # noqa: PLC0415
+        _graded_count = len([r for r in results if r.get("status") in ("WIN", "LOSS")])
+        if _graded_count > 0:
+            generate_calibration_map_from_db()
+            logger.info(
+                "[GradingTasklet] Calibration map updated from %d WIN/LOSS rows.",
+                _graded_count,
+            )
+        else:
+            logger.info("[GradingTasklet] No WIN/LOSS rows this cycle — calibration map unchanged.")
+    except Exception as _cal_map_err:
+        logger.warning("[GradingTasklet] Calibration map update failed: %s", _cal_map_err)
 
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
