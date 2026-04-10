@@ -146,13 +146,51 @@ def _normalize_name(name: str) -> str:
 
 
 def _log_quota(response: requests.Response) -> None:
-    """Log remaining API quota from response headers."""
-    remaining = response.headers.get("x-requests-remaining", "?")
-    used      = response.headers.get("x-requests-used", "?")
-    logger.info(
-        "[SB_REF] Quota — used: %s | remaining: %s",
-        used, remaining,
+    """Log remaining API quota from response headers. Post Discord alert when low."""
+    remaining_str = response.headers.get("x-requests-remaining", "")
+    used_str      = response.headers.get("x-requests-used", "?")
+    logger.info("[SB_REF] Quota — used: %s | remaining: %s", used_str, remaining_str or "?")
+
+    try:
+        remaining = int(remaining_str)
+    except (ValueError, TypeError):
+        return  # header absent — no alert possible
+
+    if remaining >= 200:
+        return  # healthy — no alert needed
+
+    level   = "critical" if remaining < 50 else "warning"
+    color   = 0xE74C3C  if remaining < 50 else 0xF4A300
+    message = (
+        f"🚨 **OddsAPI Quota {level.upper()}** — {remaining} requests remaining!\n"
+        f"Used: {used_str} · Remaining: {remaining}\n"
+        + ("⛔ Sportsbook reference layer will shut down soon." if remaining < 50
+           else "⚠️ Consider reducing refresh frequency.")
     )
+
+    # Redis dedup — fire at most once per hour per level
+    try:
+        import redis as _redis
+        _r = _redis.from_url(os.getenv("REDIS_URL", ""))
+        _dedup_key = f"oddsapi_quota_alert_{level}"
+        if _r.exists(_dedup_key):
+            return  # already alerted this hour
+        _r.setex(_dedup_key, 3600, "1")
+    except Exception:
+        pass  # Redis unavailable — fire alert anyway (better noisy than silent)
+
+    # Post to Discord
+    try:
+        webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
+        if webhook:
+            requests.post(
+                webhook,
+                json={"embeds": [{"title": f"OddsAPI Quota {level.title()}", "description": message, "color": color}]},
+                headers={"Content-Type": "application/json"},
+                timeout=8,
+            )
+    except Exception as _exc:
+        logger.warning("[SB_REF] Quota Discord alert failed: %s", _exc)
 
 
 # ---------------------------------------------------------------------------
@@ -193,14 +231,21 @@ def _fetch_events(date: str, api_key: str = "") -> list[dict]:
             )
             return []
         events = resp.json()
-        # Filter to today's date (commence_time starts with YYYY-MM-DD)
+        # Build a set of acceptable dates: PT today + PT tomorrow (covers evening games
+        # that cross midnight UTC, e.g. 7 PM PT = 2 AM UTC next day)
+        from zoneinfo import ZoneInfo as _ZI
+        import datetime as _dtmod
+        _pt_now = _dtmod.datetime.now(_ZI("America/Los_Angeles"))
+        _pt_today = _pt_now.date().isoformat()
+        _pt_tomorrow = (_pt_now.date() + _dtmod.timedelta(days=1)).isoformat()
+        _acceptable_dates = {_pt_today, _pt_tomorrow, date}
         todays = [
             e for e in events
-            if e.get("commence_time", "").startswith(date)
+            if any(e.get("commence_time", "").startswith(d) for d in _acceptable_dates)
         ]
         logger.info(
-            "[SB_REF] %d events today (%s) from %d total",
-            len(todays), date, len(events),
+            "[SB_REF] %d events today (%s+window) from %d total",
+            len(todays), _pt_today, len(events),
         )
         return todays
     except Exception as exc:
@@ -476,6 +521,8 @@ _RAW_STAT_TO_PROP: dict[str, str] = {
     "earned runs":          "earned_runs",
     "earned runs allowed":  "earned_runs",
     "earned_runs":          "earned_runs",
+    "hits_runs_rbis":       "hits_runs_rbis",   # underscored form from UD/PP props
+    "pitching_outs":        "pitching_outs",    # add pitching_outs for completeness
 }
 
 

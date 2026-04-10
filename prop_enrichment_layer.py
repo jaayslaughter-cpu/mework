@@ -58,7 +58,8 @@ logger = logging.getLogger("propiq.enrichment")
 
 _PITCHER_PROP_TYPES = {
     "strikeouts", "pitcher_strikeouts", "pitching_outs",
-    "earned_runs", "hits_allowed", "walks_allowed",
+    "earned_runs", "hits_allowed",
+    # walks_allowed excluded per Prop Exclusion Directive (Phase 112+118)
     "hitter_strikeouts",   # batter K — still lookup pitcher's K stats
 }
 
@@ -582,7 +583,7 @@ def _get_sportsbook_ref(props: list[dict]) -> list[dict]:
 # Step 12 — Player-specific base rate override
 # ---------------------------------------------------------------------------
 # Replaces population base rates for K and HR props when we have
-# enough player-specific signal (FanGraphs + Statcast).
+# enough player-specific signal (FanGraphs + Statcast)
 # This is what fixes "Cole K Over 7.5 = 22%" — for elite pitchers
 # the real rate is 40-55%.
 

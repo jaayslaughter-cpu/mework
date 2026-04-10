@@ -44,6 +44,7 @@ Author: PropIQ Analytics Engine (Phase 37)
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import time
@@ -423,7 +424,7 @@ def fetch_shadow_zone_whiff(pitcher_mlbam_id: int, season: int | None = None) ->
         f"?hfPT=&hfZ=Shadow%7C%7C&player_type=pitcher"
         f"&pitchers_lookup%5B%5D={pitcher_mlbam_id}"
         f"&game_date_gt={season}-01-01&game_date_lt={season}-12-31"
-        "&hfGT=R%7C&hfC=&hfSea={season}%7C&hfSit=&position=&hfOuts="
+        f"&hfGT=R%7C&hfC=&hfSea={season}%7C&hfSit=&position=&hfOuts="
         "&opponent=&pitcher_throws=&batter_stands=&hfSA="
         "&player_lookup%5B%5D=&team=&home_road=&game_date_gt="
         "&game_date_lt=&hfFlag=&hfBBL=&metric_1=&hfInn=&min_pitches=0"
