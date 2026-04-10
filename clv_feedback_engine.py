@@ -75,29 +75,8 @@ def _ensure_tables() -> None:
             updated_at    TIMESTAMP    DEFAULT NOW()
         )
         """,
-        # Full bet_ledger table — created here so all columns exist on first run
-        """
-        CREATE TABLE IF NOT EXISTS bet_ledger (
-            id                SERIAL       PRIMARY KEY,
-            date              TEXT         NOT NULL,
-            agent             TEXT         NOT NULL,
-            player_name       TEXT         NOT NULL,
-            prop_type         TEXT         NOT NULL,
-            direction         TEXT         NOT NULL,
-            line              FLOAT,
-            platform          TEXT,
-            prob_final        FLOAT,
-            ev_pct            FLOAT,
-            sim_edge_reasons  TEXT         DEFAULT '[]',
-            actual_outcome    INTEGER,
-            profit_loss       FLOAT,
-            clv               FLOAT,
-            kelly_units       FLOAT,
-            status            TEXT         DEFAULT 'PENDING',
-            settled_at        TIMESTAMP,
-            created_at        TIMESTAMP    DEFAULT NOW()
-        )
-        """,
+        # FIX PR#278: bet_ledger CREATE TABLE removed — schema owned by Flyway migrations.
+        # Old schema used "direction" column (should be "side") causing Error 1/3 on fresh deploys.
         # Safe migration: add any columns introduced after initial deploy
         """
         ALTER TABLE bet_ledger

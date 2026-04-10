@@ -20,7 +20,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import yaml
@@ -103,7 +104,7 @@ def log_leg(
     Buffering avoids N individual DB round-trips during the hot dispatch loop.
     """
     _BUFFER.append({
-        "log_date": date.today().isoformat(),
+        "log_date": datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat(),
         "agent_name": agent_name,
         "player_name": player_name,
         "prop_type": prop_type,
