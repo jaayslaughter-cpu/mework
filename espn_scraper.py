@@ -121,6 +121,36 @@ _PITCHER_KEYS = [
 ]
 
 
+def _is_pitcher_stats_group(stats_group: dict) -> bool:
+    """
+    Detect whether an ESPN statistics group contains pitchers.
+
+    ESPN does NOT reliably populate the 'name' field on statistics groups
+    (it is often None). Instead we check:
+      1. The 'keys' list — pitcher groups contain innings-related keys
+         like 'fullInnings.partInnings' or 'ERA'.
+      2. The first athlete entry — pitchers have a 'throws' field.
+    """
+    # Check keys list for innings / ERA / pitcher-specific identifiers
+    group_keys = stats_group.get("keys", [])
+    for k in group_keys:
+        k_lower = k.lower()
+        if "inning" in k_lower or "era" in k_lower or "strike" in k_lower and "out" not in k_lower:
+            return True
+
+    # Fallback: check if first athlete has a 'throws' field (pitchers only)
+    athletes = stats_group.get("athletes", [])
+    if athletes and athletes[0].get("throws"):
+        return True
+
+    # Final fallback: 'name' field if ESPN starts populating it again
+    group_name = (stats_group.get("name") or "").lower()
+    if "pitch" in group_name:
+        return True
+
+    return False
+
+
 def _parse_athlete_stats(athlete: dict, is_pitcher: bool) -> dict:
     """Parse an ESPN athlete entry from a box-score statistics group."""
     stats_raw = athlete.get("stats", [])
@@ -203,14 +233,23 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                         stats = entry.get("stats", {})
 
                         # Batting supplement (doubles, triples, exact total_bases)
+                        # Also capture full batter line as fallback if ESPN missed the player
                         bat = stats.get("batting", {})
                         if bat:
                             if name not in extra:
                                 extra[name] = {}
                             extra[name].update({
-                                "doubles":     float(bat.get("doubles",    0) or 0),
-                                "triples":     float(bat.get("triples",    0) or 0),
-                                "total_bases": float(bat.get("totalBases", 0) or 0),
+                                "doubles":        float(bat.get("doubles",     0) or 0),
+                                "triples":        float(bat.get("triples",     0) or 0),
+                                "total_bases":    float(bat.get("totalBases",  0) or 0),
+                                "_mlb_hits":      float(bat.get("hits",        0) or 0),
+                                "_mlb_runs":      float(bat.get("runs",        0) or 0),
+                                "_mlb_rbi":       float(bat.get("rbi",         0) or 0),
+                                "_mlb_home_runs": float(bat.get("homeRuns",    0) or 0),
+                                "_mlb_at_bats":   float(bat.get("atBats",      0) or 0),
+                                "_mlb_walks":     float(bat.get("baseOnBalls", 0) or 0),
+                                "_mlb_strikeouts":float(bat.get("strikeOuts",  0) or 0),
+                                "_is_batter":     True,
                             })
 
                         # Pitching supplement — primary source for pitching_outs
@@ -234,6 +273,10 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
             {full_name, is_pitcher, hits, runs, rbi, home_runs, ...}
 
     Players not in a FINAL or IN_PROGRESS game are excluded.
+
+    FIX (PR #273): ESPN returns 'displayName' on athlete objects, not 'fullName'.
+    The old code used get("fullName") which is always None → all players skipped →
+    GradingTasklet saw 0 ESPN stats → all bets stranded OPEN forever.
     """
     date_fmt = date_str.replace("-", "")
     games = get_game_states(date_fmt)
@@ -270,12 +313,17 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
 
             for team_data in box_data.get("players", []):
                 for stats_group in team_data.get("statistics", []):
-                    group_name = (stats_group.get("name") or "").lower()
-                    is_pitcher = "pitch" in group_name
+                    # FIX: use _is_pitcher_stats_group() — ESPN 'name' field is often None
+                    is_pitcher = _is_pitcher_stats_group(stats_group)
 
                     for athlete_entry in stats_group.get("athletes", []):
                         athlete_info = athlete_entry.get("athlete", {})
-                        full_name    = (athlete_info.get("fullName") or "").strip()
+                        # FIX: ESPN uses 'displayName' not 'fullName' (fullName is always None)
+                        full_name = (
+                            athlete_info.get("displayName")
+                            or athlete_info.get("fullName")
+                            or ""
+                        ).strip()
                         if not full_name:
                             continue
 
@@ -309,4 +357,56 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
             supplemented += 1
     logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/TB",
                 supplemented, len(all_stats))
+
+    # MLB Stats API fallback: inject any player ESPN missed so settlement can still grade them
+    injected = 0
+    for name_lower, extra in mlb_extra.items():
+        if name_lower in all_stats:
+            continue  # already have ESPN data
+        if not extra.get("_is_batter") and "pitching_outs" not in extra:
+            continue  # no usable stats
+        h   = extra.get("_mlb_hits",      0.0)
+        r   = extra.get("_mlb_runs",      0.0)
+        rbi = extra.get("_mlb_rbi",       0.0)
+        hr  = extra.get("_mlb_home_runs", 0.0)
+        ab  = extra.get("_mlb_at_bats",   0.0)
+        bb  = extra.get("_mlb_walks",     0.0)
+        k   = extra.get("_mlb_strikeouts",0.0)
+        tb  = extra.get("total_bases",    h + hr * 3)
+        if extra.get("_is_batter"):
+            all_stats[name_lower] = {
+                "full_name":      name_lower.title(),
+                "is_pitcher":     False,
+                "hits":           h,
+                "runs":           r,
+                "rbi":            rbi,
+                "rbis":           rbi,
+                "home_runs":      hr,
+                "at_bats":        ab,
+                "base_on_balls":  bb,
+                "strikeouts":     k,
+                "total_bases":    tb,
+                "doubles":        extra.get("doubles", 0.0),
+                "triples":        extra.get("triples", 0.0),
+                "hits_runs_rbis": h + r + rbi,
+                "_source":        "mlb_api_fallback",
+            }
+            injected += 1
+        elif "pitching_outs" in extra:
+            po = extra["pitching_outs"]
+            all_stats[name_lower] = {
+                "full_name":      name_lower.title(),
+                "is_pitcher":     True,
+                "pitching_outs":  po,
+                "innings_pitched":po / 3,
+                "hits_allowed":   0.0,
+                "earned_runs":    0.0,
+                "base_on_balls":  0.0,
+                "strikeouts":     0.0,
+                "_source":        "mlb_api_fallback",
+            }
+            injected += 1
+    if injected:
+        logger.info("[ESPN] MLB fallback injected %d players ESPN missed", injected)
+
     return all_stats
