@@ -3083,7 +3083,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
     _qualifying_streak_legs = [
         lg for lg in enriched_legs
         if check_streaks_gate(
-            min(0.95, max(0.05, lg.get("model_prob", 52.0) / 100)),
+            min(0.95, max(0.05, lg.get("model_prob", 0.0) / 100)),  # Fix 30: default 0 → fails MIN_PROB gate explicitly
             phase=_streak_phase,
         )[0]
     ]
@@ -3106,7 +3106,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
 
     # ── Step 3: build the single parlay ──────────────────────────────────────
     n      = len(enriched_legs)
-    probs  = [min(0.95, max(0.05, l.get("model_prob", 52.0) / 100)) for l in enriched_legs]
+    probs  = [min(0.95, max(0.05, l.get("model_prob", 0.0) / 100)) for l in enriched_legs]  # Fix 30: default 0 → fails MIN_PROB gate explicitly
     p_conf = round(sum(l.get("confidence", 5) for l in enriched_legs) / max(n, 1), 1)
 
     if parlay_platform == "underdog":
