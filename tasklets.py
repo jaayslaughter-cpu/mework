@@ -3739,11 +3739,16 @@ def run_agent_tasklet() -> None:
     hub   = read_hub()
     model = _load_xgb_model()
 
+    import zoneinfo as _zi_entry
+    _entry_now = datetime.datetime.now(_zi_entry.ZoneInfo("America/Los_Angeles"))
+    logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
+                _entry_now.hour, _entry_now.minute)
+
     # ── Send-window clock gate — only dispatch picks 9:00–10:00 AM PT ──────────
-    import zoneinfo as _zi
-    _pt_now = datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles"))
+    _pt_now = _entry_now
     if not (9 <= _pt_now.hour < 10):
-        logger.debug("[AgentTasklet] Outside 9–10 AM PT send window (%02d:%02d) — skipping.", _pt_now.hour, _pt_now.minute)
+        logger.info("[AgentTasklet] Outside 9–10 AM PT send window (%02d:%02d PT) — skipping cycle.",
+                    _pt_now.hour, _pt_now.minute)
         return
 
     # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
@@ -3755,7 +3760,7 @@ def run_agent_tasklet() -> None:
     _has_active_games = any(s in _active_states for s in _gs.values())
     if _gs and not _has_active_games:
         # Games exist in hub but none are active — all Final/Postponed
-        logger.debug("[AgentTasklet] No active or upcoming games this cycle — skipping.")
+        logger.info("[AgentTasklet] No active or upcoming games this cycle (all Final/Postponed) — skipping.")
         return
 
     # Decision logger — audit trail for every prop evaluation
@@ -3860,7 +3865,7 @@ def run_agent_tasklet() -> None:
                              agent.name, player, e)
 
         if len(agent_hits) < 2:
-            logger.debug("[AgentTasklet] %s — %d hit(s), not enough for a slip.",
+            logger.info("[AgentTasklet] %s — %d hit(s) (need ≥2 for a slip).",
                          agent.name, len(agent_hits))
             continue
 
@@ -3990,7 +3995,7 @@ def run_agent_tasklet() -> None:
         # Confidence gate — MIN_CONFIDENCE minimum, nothing lower reaches Discord
         play_conf = parlay.get("confidence", 0)
         if play_conf < MIN_CONFIDENCE:
-            logger.debug("[AgentTasklet] %s confidence %.1f < %d — skipping.",
+            logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
             continue
 
@@ -4004,7 +4009,7 @@ def run_agent_tasklet() -> None:
             if float(lg.get("model_prob", 0) or 0) < _min_prob_pct
         ]
         if _low_legs:
-            logger.debug("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
+            logger.info("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
                          agent_name, _min_prob_pct, _low_legs)
             continue
 

@@ -53,6 +53,17 @@ logger = logging.getLogger(__name__)
 
 _PT = ZoneInfo("America/Los_Angeles")
 
+# ── Startup check — warn once if ACTION_NETWORK_JWT is not configured ─────────
+# SharpFadeAgent will run in Path 2 (game-level RLM) without it, but PRO data
+# is active for this account. Missing token = wasted PRO subscription.
+# FIX: Railway → select SERVICE (not project) → Variables → ACTION_NETWORK_JWT
+_jwt_startup = os.getenv("ACTION_NETWORK_JWT", "").strip()
+if not _jwt_startup:
+    logging.getLogger(__name__).warning(
+        "[ActionNetwork] STARTUP: ACTION_NETWORK_JWT env var not set. "        "SharpFadeAgent PRO path disabled. "        "Set this variable at the Railway SERVICE level (not project level)."
+    )
+del _jwt_startup
+
 # Books included: Bovada(15), Caesars(30), BetMGM(79), FanDuel(2988),
 #                  Bet365(75), PointsBet(123), WynnBet(71), DraftKings(68), BetRivers(69)
 _BOOK_IDS      = "15,30,79,2988,75,123,71,68,69"
@@ -580,9 +591,11 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
 
     token = os.getenv("ACTION_NETWORK_JWT", "").strip()
     if not token:
-        logger.info(
+        logger.warning(
             "[ActionNetwork] ACTION_NETWORK_JWT not set — "
-            "prop projections unavailable; SharpFadeAgent will use Path 2."
+            "PRO prop projections unavailable. SharpFadeAgent falls back to game-level RLM. "
+            "FIX: Railway → select your SERVICE (not the project) → Variables → "
+            "add ACTION_NETWORK_JWT with the Bearer JWT value."
         )
         return []
 
