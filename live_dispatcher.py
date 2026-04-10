@@ -1,13 +1,17 @@
 """
 live_dispatcher.py
 ==================
-Daily pre-game parlay dispatcher for PropIQ Analytics Engine.
+⚠️  DEPRECATED — DO NOT USE ⚠️
 
-Runs once per day (triggered by scheduler at ~11 AM ET before first pitch).
-Fetches live props from PrizePicks and Underdog Fantasy, runs platform
-comparison, applies agent-specific filters, builds optimal parlays per
-agent, and fires Discord alerts for manual entry.
+This file is retained for reference only. As of Phase 89+, the canonical
+dispatch system is AgentTasklet in tasklets.py, scheduled every 30s by
+orchestrator.py. Both /propiq/dispatch endpoints return {"status": "disabled"}.
 
+This file is NOT imported or called by orchestrator.py or tasklets.py.
+It imports phase89_DiscordAlertService (old pre-Phase-89 service) and will
+break if run directly. Safe to delete once confirmed no downstream references.
+
+DO NOT add new features here. DO NOT call this from orchestrator.py.
 Flow
 ----
   1. Fetch today's MLB schedule via MLB Stats API (free, no key)
