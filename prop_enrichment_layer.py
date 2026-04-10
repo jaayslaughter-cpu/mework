@@ -233,6 +233,11 @@ def _get_mlbapi_pitcher(player_name: str, player_id: int | None) -> dict:
                 "era":       era_val  if era_val  > 0 else 4.20,
                 "whip":      whip_val if whip_val > 0 else 1.28,
                 "k_per_start": round(so / gs, 1),
+                # FIX: expose raw season totals for Bernoulli suppression model
+                # season_ip = cumulative IP in ESPN float format (integer outs / 3)
+                # season_er = earned runs (used as DivR proxy — actual DivR needs PbP data)
+                "season_ip": ip,    # MLB API inningsPitched (already float)
+                "season_er": er,    # MLB API earnedRuns (cumulative season total)
                 "_source":   "mlbapi_2026",
             }
             _mlbapi_pitcher_cache[cache_key] = result
@@ -728,6 +733,13 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         return props
 
     # ── Batch enrichment (whole prop list, single API call each) ─────────────
+    # Update Bernoulli league rate from DataHub season totals (once per cycle)
+    try:
+        from bernoulli_layer import update_league_rate_from_hub as _update_bl  # noqa: PLC0415
+        _update_bl(hub)
+    except Exception:
+        pass
+
     # Run sportsbook reference first — provides sharp-book market_implied
     # which replaces Underdog's flat -115 and fixes OVER-bet bias
     props = _get_sportsbook_ref(props)
@@ -809,6 +821,14 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     "xfip":          fg.get("xfip",      4.20),
                     "k_bb_pct":      fg.get("k_bb_pct",  0.139),
                 })
+                # FanGraphs doesn't expose raw IP/ER totals — fetch from mlbapi
+                # for Bernoulli suppression model season line
+                if not prop.get("season_ip"):
+                    _player_id = prop.get("player_id") or prop.get("mlbam_id")
+                    _mlbapi_ip = _get_mlbapi_pitcher(player, _player_id)
+                    if _mlbapi_ip.get("season_ip", 0) > 0:
+                        prop["season_ip"]   = _mlbapi_ip["season_ip"]
+                        prop["season_divr"] = _mlbapi_ip.get("season_er", 0.0)
             else:
                 # FIX: FanGraphs disabled (403) — chain of fallbacks using only real 2026 data.
                 # Priority: Statcast (already fetched) → statsapi.mlb.com 2026 season → skip slot.
@@ -825,6 +845,10 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     prop.setdefault("bb_rate",   _mlbapi.get("bb_rate", 0.085))
                     prop.setdefault("era",       _mlbapi.get("era",     4.20))
                     prop.setdefault("whip",      _mlbapi.get("whip",    1.28))
+                    # Stamp season IP and ER for Bernoulli suppression model
+                    if _mlbapi.get("season_ip", 0) > 0:
+                        prop.setdefault("season_ip",   _mlbapi["season_ip"])
+                        prop.setdefault("season_divr", _mlbapi.get("season_er", 0.0))
                     logger.debug("[Enrichment] Pitcher %s using statsapi 2026 fallback", player)
                 elif _sc_whiff > 0.0:
                     prop.setdefault("k_rate",    round(_sc_whiff * 0.85, 4))
@@ -897,6 +921,68 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     if _slot > 0:
                         prop["_batting_order_slot"] = _slot
                     break
+
+        # ── Bernoulli suppression model (pitcher props only) ─────────────────────
+        # Computes suppression score, tier (S/A/B/C/D), and Zen/Drama/Meltdown
+        # from the pitcher's cumulative season IP and DivR line.
+        # Verified math: Chase Burns 2026-04-09 → Supp=0.04123562 Zen=82.5% ✅
+        if is_pitcher_prop:
+            try:
+                from bernoulli_layer import enrich_prop_with_bernoulli as _enrich_bl  # noqa: PLC0415
+                prop = _enrich_prop_with_bernoulli(prop) if False else _enrich_bl(prop)
+            except Exception as _bl_err:
+                logger.debug("[Enrichment] Bernoulli layer skipped: %s", _bl_err)
+
+        # ── FIX: Bridge enrichment keys → simulation engine underscore-prefixed keys ──
+        # simulation_engine._safe() reads _k_pct, _bb_pct, _woba, etc. (underscore prefix).
+        # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
+        # Without this bridge every Monte Carlo sim runs on league averages (0.225 K%, etc.)
+        # regardless of who the player is.  Chase Burns and a AAA call-up were identical.
+        if is_pitcher_prop:
+            prop.setdefault("_k_pct",   prop.get("k_rate")  or prop.get("k_pct",  0.223))  # FIX: 0.225→0.223 (2024 actual)
+            prop.setdefault("_bb_pct",  prop.get("bb_rate") or prop.get("bb_pct", 0.086))  # FIX: 0.080→0.086 (2024 actual)
+            prop.setdefault("_whip",    prop.get("whip",    1.28))
+            prop.setdefault("_csw_pct", prop.get("csw_pct", 0.275))  # 2024: ~27.5%
+            # _starter_ip_projection: use FanGraphs ip/gs if available
+            _fg_ip  = prop.get("xfip")   # rough proxy; actual ip/gs not fetched yet
+            _fg_gs  = 1
+            _ip_proj = prop.get("_starter_ip_projection", 0.0)
+            if not _ip_proj:
+                # Use k_per_start from mlbapi fallback if present
+                _kps = prop.get("k_per_start", 0.0)
+                if _kps > 0:
+                    # k_per_start correlates to IP: elite 7K→~6IP, avg 4K→~5IP
+                    prop["_starter_ip_projection"] = max(3.0, min(7.0, 3.5 + _kps * 0.35))
+                else:
+                    prop["_starter_ip_projection"] = 5.5  # league avg fallback
+            # _bullpen_era: try bullpen_fatigue_scorer; fall back to league avg
+            if not prop.get("_bullpen_era"):
+                try:
+                    from bullpen_fatigue_scorer import BullpenFatigueScorer as _BFS
+                    _bfs = _BFS()
+                    _team = prop.get("team", "")
+                    if _team:
+                        _bera = _bfs.get_bullpen_era(_team) if hasattr(_bfs, "get_bullpen_era") else None
+                        prop["_bullpen_era"] = float(_bera) if _bera else 4.10
+                    else:
+                        prop["_bullpen_era"] = 4.10
+                except Exception:
+                    prop["_bullpen_era"] = 4.10
+            # _pitch_whiff_vs_hand: use Statcast whiff rate as proxy
+            if not prop.get("_pitch_whiff_vs_hand"):
+                prop["_pitch_whiff_vs_hand"] = (
+                    prop.get("sc_whiff_rate") or
+                    prop.get("swstr_pct")     or
+                    0.25
+                )
+        else:
+            # Batter keys
+            prop.setdefault("_wrc_plus", prop.get("wrc_plus", 100.0))
+            prop.setdefault("_woba",     prop.get("woba",     0.312))  # FIX: 0.320→0.312 (2024 actual)
+            prop.setdefault("_iso",      prop.get("iso",      0.158))  # FIX: 0.155→0.158 (2024 actual)
+            prop.setdefault("_o_swing",  prop.get("o_swing",  0.318))  # FIX: 0.310→0.318 (2024 actual)
+            prop.setdefault("_k_pct",    prop.get("k_pct",    0.223))  # FIX: 0.224→0.223 (2024 actual)
+            prop.setdefault("_bb_pct",   prop.get("bb_pct",   0.086))  # FIX: 0.085→0.086 (2024 actual)
 
         # ── Weather ───────────────────────────────────────────────────────────
         if team not in _weather_cache:

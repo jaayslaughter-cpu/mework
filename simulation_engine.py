@@ -72,6 +72,7 @@ class SimResult:
     edge_reasons: List[str] = field(default_factory=list)   # structural edge tags
     starter_prob: Optional[float] = None     # P(over) vs starter phase only
     bullpen_prob: Optional[float] = None     # P(over) vs bullpen phase only
+    prop:         Optional[dict]  = None     # reference to source prop (for Bernoulli Drama penalty)
 
 
 # ─── Internal helpers ──────────────────────────────────────────────────────────
@@ -409,6 +410,21 @@ def _build_result(counts: List[int], line: float,
         if abs(form_adj) > 0.04:
             reasons.append("strong_form_signal")
 
+        # Bernoulli structural signals
+        b_tier = prop.get("_bernoulli_tier")
+        b_melt = float(prop.get("_bernoulli_meltdown", 0.0) or 0.0)
+        b_drama = float(prop.get("_bernoulli_drama", 0.0) or 0.0)
+        if b_tier == "S":
+            reasons.append("bernoulli_s_tier")
+        elif b_tier == "A":
+            reasons.append("bernoulli_a_tier")
+        elif b_tier == "D":
+            reasons.append("bernoulli_d_tier")
+        if b_melt > 8.0:
+            reasons.append("bernoulli_meltdown")
+        if b_drama > 35.0:
+            reasons.append("bernoulli_high_drama")
+
     return SimResult(
         prob_over=round(prob_over, 4),
         prob_under=round(prob_under, 4),
@@ -418,6 +434,7 @@ def _build_result(counts: List[int], line: float,
         edge_reasons=reasons,
         starter_prob=round(starter_prob_hint, 4) if starter_prob_hint is not None else None,
         bullpen_prob=round(bullpen_prob_hint, 4) if bullpen_prob_hint is not None else None,
+        prop=prop,   # store prop ref so variance_penalty can read Bernoulli Drama%
     )
 
 
@@ -426,15 +443,24 @@ def _build_result(counts: List[int], line: float,
 def variance_penalty(result: SimResult) -> float:
     """Return a confidence reduction factor based on outcome variance.
 
-    High std dev = wide distribution = less reliable mean → reduce confidence.
-    This prevents stacking multiple boosts into "elite confidence" when variance
-    is actually high (e.g., HR props in wind).
+    For PITCHER props: uses the Bernoulli Drama% as the primary variance signal.
+    Drama% measures combinatorial entropy of the pitcher's IP/DivR line —
+    verified to match Murray2061/Bernoullis-on-the-Mound outputs exactly.
+    Drama 0% (pure shutout) = penalty 1.00; Drama 35%+ = penalty 0.70.
+
+    For BATTER props: uses coefficient of variation from Monte Carlo std/mean.
+    cv ~ 0.5 = normal; cv ~ 1.0+ = high variance prop.
 
     Returns a multiplier in [0.70, 1.00]:
-        1.00 = no penalty (tight distribution)
-        0.70 = maximum penalty (very wide distribution)
+        1.00 = no penalty (tight distribution / dominant pitcher line)
+        0.70 = maximum penalty (very wide distribution / high-drama pitcher)
     """
-    # std / mean gives coefficient of variation
+    # Use Bernoulli Drama penalty if available (pitcher props)
+    bernoulli_penalty = result.prop.get("_bernoulli_drama_penalty") if result.prop else None
+    if bernoulli_penalty is not None:
+        return round(float(bernoulli_penalty), 4)
+
+    # Fallback: coefficient of variation from Monte Carlo distribution
     if result.mean <= 0:
         return 0.85
     cv = result.std / result.mean

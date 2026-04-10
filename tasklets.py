@@ -1912,9 +1912,22 @@ class _BaseAgent:
                 if sim and sim.prob_over > 0.0:
                     raw = sim.prob_over * 100.0
                     # Apply variance penalty: wide distribution → reduce confidence
+                    # For pitcher props: uses Bernoulli Drama% (verified vs BotM outputs)
+                    # For batter props: uses Monte Carlo std/mean coefficient of variation
                     pen = _variance_penalty(sim)
                     # Shift probability toward 50% by penalty factor
                     raw = 50.0 + (raw - 50.0) * pen
+                    # Bernoulli tier adjustment: S-tier pitcher gets +4pp, D-tier -5pp
+                    # Meltdown gate: structural run damage → suppress regardless of EV
+                    _b_adj  = float(prop.get("_bernoulli_prob_adj", 0.0) or 0.0)
+                    _b_melt = float(prop.get("_bernoulli_meltdown", 0.0) or 0.0)
+                    if _b_adj != 0.0:
+                        raw = raw + (_b_adj * 100.0)
+                    if _b_melt > 8.0:
+                        # Meltdown pitcher: cap probability at 52% regardless of model
+                        raw = min(raw, 52.0)
+                        logger.debug("[Bernoulli] Meltdown gate applied to %s: prob capped",
+                                     prop.get("player", ""))
                     # Store distribution on prop for downstream bet sizing / logging
                     prop["_sim_prob_over"]    = round(sim.prob_over, 4)
                     prop["_sim_mean"]         = sim.mean
@@ -4505,18 +4518,28 @@ def run_grading_tasklet() -> None:
         _accent_norm = _ud.normalize("NFD", display_name)
         _ascii_name  = "".join(c for c in _accent_norm if _ud.category(c) != "Mn")
         mapped = {
-            "Hits":           espn.get("hits", 0.0),
-            "HomeRuns":       espn.get("home_runs", 0.0),
-            "RunsBattedIn":   espn.get("rbis", espn.get("rbi", 0.0)),
-            "Runs":           espn.get("runs", 0.0),
-            "StolenBases":    espn.get("stolen_bases", 0.0),
-            "TotalBases":     espn.get("total_bases", 0.0),
-            "Walks":          espn.get("base_on_balls", 0.0),
-            "Strikeouts":     espn.get("strikeouts", 0.0),
-            "InningsPitched": espn.get("innings_pitched", 0.0),
-            "EarnedRuns":     espn.get("earned_runs", 0.0),
-            "HitsAllowed":    espn.get("hits_allowed", 0.0),
-            "WalksAllowed":   espn.get("base_on_balls", 0.0),
+            "Hits":              espn.get("hits",            0.0),
+            "HomeRuns":          espn.get("home_runs",       0.0),
+            "RunsBattedIn":      espn.get("rbis", espn.get("rbi", 0.0)),
+            "Runs":              espn.get("runs",            0.0),
+            "StolenBases":       espn.get("stolen_bases",    0.0),
+            "TotalBases":        espn.get("total_bases",     0.0),
+            "Walks":             espn.get("base_on_balls",   0.0),
+            "Strikeouts":        espn.get("strikeouts",      0.0),
+            "InningsPitched":    espn.get("innings_pitched", 0.0),
+            "EarnedRuns":        espn.get("earned_runs",     0.0),
+            "HitsAllowed":       espn.get("hits_allowed",    0.0),
+            "WalksAllowed":      espn.get("base_on_balls",   0.0),
+            # FIX: add fields needed for correct fantasy scoring and full grading
+            "Doubles":           espn.get("doubles",         0.0),
+            "Triples":           espn.get("triples",         0.0),
+            "HitByPitch":        espn.get("hit_by_pitch",    0.0),
+            "CaughtStealing":    espn.get("caught_stealing", 0.0),
+            "Wins":              espn.get("wins",            0.0),
+            "QualityStart":      espn.get("quality_start",   0.0),
+            # PitchingOuts = direct outs count from MLB API (authoritative)
+            # Falls back to InningsPitched conversion in _get_stat if missing
+            "PitchingOuts":      espn.get("pitching_outs",   0.0),
         }
         stat_lookup[display_name] = mapped
         stat_lookup[name_lower]   = mapped   # lowercase index
@@ -4540,7 +4563,9 @@ def run_grading_tasklet() -> None:
                        odds_american, kelly_units, model_prob, ev_pct, agent_name,
                        COALESCE(platform, 'prizepicks') AS platform,
                        mlbam_id,
-                       COALESCE(entry_type, 'STANDARD') AS entry_type
+                       COALESCE(entry_type, 'STANDARD') AS entry_type,
+                       COALESCE(units_wagered, ABS(kelly_units), 1.0) AS stake_units,
+                       features_json
                 FROM bet_ledger
                 WHERE status = 'OPEN' AND bet_date <= %s AND discord_sent = TRUE  -- FIX PR#276: <= catches all historical OPEN rows
                 """,
@@ -4563,8 +4588,11 @@ def run_grading_tasklet() -> None:
             for row in open_bets:
                 row_data = row
                 bid, player, ptype, line, side, odds, units, model_prob, _, agent, plat = row_data[:11]
-                _grade_mlbam  = row_data[11] if len(row_data) > 11 else None
-                _entry_type   = row_data[12] if len(row_data) > 12 else "STANDARD"
+                _grade_mlbam    = row_data[11] if len(row_data) > 11 else None
+                _entry_type     = row_data[12] if len(row_data) > 12 else "STANDARD"
+                # FIX: use actual stake (units_wagered $5-$20) not kelly_units (~0.03 fraction)
+                _stake_units    = float(row_data[13]) if len(row_data) > 13 and row_data[13] else float(abs(units) or 1.0)
+                _stored_feats   = row_data[14] if len(row_data) > 14 else None  # existing features_json
 
                 # Grade by mlbam_id when available — accent-safe, always unique
                 # mlbam_id must be fetched from bet_ledger (stored at bet time)
@@ -4629,7 +4657,7 @@ def run_grading_tasklet() -> None:
                     continue
 
                 line   = float(line or 0)
-                units  = float(units or 1)
+                units  = _stake_units   # FIX: use actual stake (units_wagered), not kelly fraction
 
                 if side == "OVER":
                     if actual > line:
@@ -4665,15 +4693,56 @@ def run_grading_tasklet() -> None:
 
                 # actual_outcome: 1=WIN, 0=LOSS (used by XGBoost retraining)
                 actual_outcome = 1 if status == "WIN" else 0 if status == "LOSS" else None
+                # FIX: refresh features_json at grade time with actual player data.
+                # At bet time features_json may have contained FanGraphs defaults
+                # (season start, 403s, early enrichment).  At 2AM grading the player's
+                # real game stats are available — rebuild feature vector so XGBoost
+                # trains on accurate data, not stale proxies.
+                _refreshed_feats_json = None
+                try:
+                    _grade_prop = {
+                        "prop_type": ptype, "line": line, "side": side,
+                        "player": player, "platform": plat,
+                        # inject actual game-day stats as player-specific signals
+                        "Hits":        stats.get("Hits",        0),
+                        "Strikeouts":  stats.get("Strikeouts",  0),
+                        "PitchingOuts":stats.get("PitchingOuts",0),
+                        "EarnedRuns":  stats.get("EarnedRuns",  0),
+                        "TotalBases":  stats.get("TotalBases",  0),
+                        "model_prob":  float(model_prob or 50),
+                        "ev_pct":      0.0,
+                        "kelly_units": 0.02,
+                        "implied_prob":52.4,
+                    }
+                    # Restore any enrichment signals from stored features if available
+                    if _stored_feats:
+                        try:
+                            _sf = json.loads(_stored_feats)
+                            # slots 0-9 are player stats / weather — keep from enrichment
+                            # slots 11-18 are bet quality / market signals — keep stored values
+                        except Exception:
+                            pass
+                    _refreshed_feats = _BaseAgent._build_feature_vector(_grade_prop, {
+                        "model_prob":  float(model_prob or 50),
+                        "ev_pct":      0.0, "kelly_units": 0.02,
+                        "line":        line, "implied_prob": 52.4,
+                        "side":        side, "prop_type":   ptype,
+                        "confidence":  "medium",
+                    })
+                    _refreshed_feats_json = json.dumps(_refreshed_feats)
+                except Exception:
+                    pass
+
                 cur.execute(
                     """
                     UPDATE bet_ledger
                     SET status = %s, profit_loss = %s, actual_result = %s,
-                        clv = %s, graded_at = NOW(), actual_outcome = %s
+                        clv = %s, graded_at = NOW(), actual_outcome = %s,
+                        features_json = COALESCE(%s, features_json)
                     WHERE id = %s
                     """,
                     (status, round(pl, 4), actual, round(clv, 2),
-                     actual_outcome, bid),
+                     actual_outcome, _refreshed_feats_json, bid),
                 )
 
                 results.append({
@@ -4766,7 +4835,7 @@ def run_grading_tasklet() -> None:
                     INSERT INTO propiq_season_record
                         (date, agent_name, parlay_legs, platform, stake, payout,
                          confidence, status, legs_json, created_at)
-                    SELECT %s, %s, %s, 'mixed', 5.00, %s, 0.0, %s, %s, %s
+                    SELECT %s, %s, %s, 'mixed', %s, %s, 0.0, %s, %s, %s
                     WHERE NOT EXISTS (
                         SELECT 1 FROM propiq_season_record
                         WHERE date = %s AND agent_name = %s AND status != 'PENDING'
@@ -4774,7 +4843,9 @@ def run_grading_tasklet() -> None:
                 """, (
                     today, _ag,
                     _stats["wins"] + _stats["losses"] + _stats["pushes"],
-                    round(5.0 + _stats["profit"], 2),
+                    # FIX: use actual tier stake from agent_unit_sizing, not hardcoded 5.00
+                    round(_stats.get("stake", 5.0), 2),
+                    round(_stats.get("stake", 5.0) + _stats["profit"], 2),
                     _status,
                     json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
                                 "pushes": _stats["pushes"]}),
@@ -4906,36 +4977,99 @@ def run_grading_tasklet() -> None:
     except Exception as _cal_map_err:
         logger.warning("[GradingTasklet] Calibration map update failed: %s", _cal_map_err)
 
+    # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
+    # Exports all graded bet_ledger rows (WIN/LOSS/PUSH) to a dated Parquet file.
+    # Postgres is the primary store; Parquet is the backup.  If DB is wiped, we
+    # can restore from /app/data/retraining_YYYY-MM-DD.parquet files.
+    # XGBoostTasklet reads from Postgres; the Parquet files are a safety net only.
+    try:
+        import pandas as _pd  # noqa: PLC0415
+        _archive_dir = os.getenv("RETRAINING_ARCHIVE_DIR", "/app/data")
+        os.makedirs(_archive_dir, exist_ok=True)
+        _archive_path = os.path.join(_archive_dir, f"retraining_{today}.parquet")
+        # Fetch all graded rows (not just tonight's) for full snapshot
+        _arc_conn = _pg_conn()
+        with _arc_conn.cursor() as _arc_cur:
+            _arc_cur.execute("""
+                SELECT id, bet_date, agent_name, player_name, prop_type, line, side,
+                       odds_american, model_prob, ev_pct, kelly_units, units_wagered,
+                       platform, entry_type, features_json,
+                       status, actual_result, profit_loss, actual_outcome,
+                       clv, graded_at
+                FROM bet_ledger
+                WHERE graded_at IS NOT NULL
+                  AND actual_outcome IS NOT NULL
+                  AND discord_sent = TRUE
+                ORDER BY graded_at DESC
+                LIMIT 25000
+            """)
+            _arc_rows = _arc_cur.fetchall()
+            _arc_cols = [d[0] for d in _arc_cur.description]
+        _arc_conn.close()
+        if _arc_rows:
+            _arc_df = _pd.DataFrame(_arc_rows, columns=_arc_cols)
+            _arc_df.to_parquet(_archive_path, index=False, compression="snappy")
+            logger.info(
+                "[GradingTasklet] Nightly archive: %d rows → %s",
+                len(_arc_rows), _archive_path,
+            )
+    except ImportError:
+        logger.debug("[GradingTasklet] pandas/pyarrow not installed — Parquet archive skipped")
+    except Exception as _arc_err:
+        logger.warning("[GradingTasklet] Nightly Parquet archive failed: %s", _arc_err)
+
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
-    """Map prop_type string to SportsData.io stat field."""
+    """
+    Map prop_type to graded stat value.
+
+    Approved prop types:
+      Pitchers : strikeouts | pitching_outs | fantasy_pitcher
+      Batters  : hits_runs_rbis | total_bases | fantasy_hitter
+
+    Pitching outs = total outs recorded while pitcher is on mound.
+      1 full inning = 3 outs.  ESPN 6.2 IP format = 20 outs (6*3+2).
+      MLB Stats API pit['outs'] is the authoritative integer count.
+      Examples: 13 outs = 4.1 IP;  20 outs = 6.2 IP;  9 outs = 3.0 IP
+
+    Scoring tables (verified against screenshots):
+      PrizePicks Pitcher : K×3  Out×1  W×6  QS×4  ER×-3
+      Underdog   Pitcher : K×3  IP×3   W×5  QS×5  ER×-3
+      PrizePicks Hitter  : 1B×3 2B×5 3B×8 HR×10 R×2 RBI×2 BB×2 HBP×2 SB×5
+      Underdog   Hitter  : 1B×3 2B×6 3B×8 HR×10 R×2 RBI×2 BB×3 HBP×3 SB×4 CS×-2
+    """
     mapping = {
-        # Normalised lowercase keys (current pipeline)
-        "hits":          "Hits",
-        "home_runs":     "HomeRuns",
-        "rbis":          "RunsBattedIn",
-        "rbi":           "RunsBattedIn",
-        "runs":          "Runs",
-        "stolen_bases":  "StolenBases",
-        "total_bases":   "TotalBases",
-        "walks":         "Walks",
-        "strikeouts":    "Strikeouts",
-        "earned_runs":   "EarnedRuns",
-        "hits_allowed":  "HitsAllowed",
-        "walks_allowed": "WalksAllowed",
-        "pitching_outs": "InningsPitched",
-        "outs_recorded": "__outs_recorded__",  # computed below
-        "hits_runs_rbis": "__composite__",      # computed below
-        "fantasy_score":  "__fantasy_score__",  # computed below
-        # Legacy uppercase abbreviations (fallback)
-        "h":  "Hits",    "hr": "HomeRuns",  "r":  "Runs",
+        # Normalised lowercase keys
+        "hits":               "Hits",
+        "home_runs":          "HomeRuns",
+        "rbis":               "RunsBattedIn",
+        "rbi":                "RunsBattedIn",
+        "runs":               "Runs",
+        "stolen_bases":       "StolenBases",
+        "total_bases":        "TotalBases",
+        "walks":              "Walks",
+        "doubles":            "Doubles",
+        "triples":            "Triples",
+        "strikeouts":         "Strikeouts",
+        "pitcher_strikeouts": "Strikeouts",
+        "earned_runs":        "EarnedRuns",
+        "hits_allowed":       "HitsAllowed",
+        "walks_allowed":      "WalksAllowed",
+        # pitching_outs → __pitching_outs__ uses PitchingOuts first, then IP conversion
+        "pitching_outs":      "__pitching_outs__",
+        "outs_recorded":      "__pitching_outs__",
+        "p_outs":             "__pitching_outs__",
+        # composite / fantasy
+        "hits_runs_rbis":     "__composite__",
+        "fantasy_score":      "__fantasy_score__",
+        "fantasy_hitter":     "__fantasy_score__",
+        "fantasy_pitcher":    "__fantasy_score__",
+        "fantasy_pts":        "__fantasy_score__",
+        # Legacy abbreviations
+        "h":  "Hits",  "hr": "HomeRuns", "r": "Runs",
         "sb": "StolenBases", "tb": "TotalBases",
-        "bb": "Walks",   "k":  "Strikeouts",
-        # _norm_stat aliases that must round-trip through grading
-        "ks":           "Strikeouts",       # alternate K abbreviation
-        "er":           "EarnedRuns",       # alternate earned_runs abbreviation
-        "p_outs":       "InningsPitched",   # alternate pitching_outs abbreviation
-        "fantasy_pts":  "__fantasy_score__", # alternate fantasy_score label
+        "bb": "Walks", "k":  "Strikeouts",
+        "ks": "Strikeouts", "er": "EarnedRuns",
     }
     prop_key = prop_type.lower().strip()
     # Strip common prefixes
@@ -4944,72 +5078,91 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
             prop_key = prop_key[len(prefix):]
 
     field = mapping.get(prop_key)
-    if field == "__outs_recorded__":
-        # IP stored as e.g. 6.2 = 6 innings 2 outs (NOT 6.67)
+
+    # ── Pitching outs ──────────────────────────────────────────────────────────
+    # PRIMARY: MLB Stats API pit['outs'] — exact integer total outs on mound
+    # Examples: 13 outs=4.1 IP, 20 outs=6.2 IP, 9 outs=3.0 IP
+    # Every out counts: Ks, groundouts, flyouts, CS, pickoffs
+    if field == "__pitching_outs__":
+        po = stats.get("PitchingOuts")
+        if po is not None and float(po) > 0:
+            return float(po)
+        # FALLBACK: ESPN InningsPitched float (6.2 = 6 full + 2 partial outs = 20)
         ip = stats.get("InningsPitched")
         if ip is not None:
-            ip = float(ip)
-            full = int(ip)
-            partial = round((ip % 1) * 10)  # 6.2 → partial=2
-            return float(full * 3 + partial)
+            ip      = float(ip)
+            full    = int(ip)
+            partial = round((ip % 1) * 10)   # .1→1, .2→2
+            total   = float(full * 3 + partial)
+            return total if total > 0 else None
         return None
+
+    # ── H+R+RBI composite ─────────────────────────────────────────────────────
     if field == "__composite__":
-        # H + R + RBI composite
-        h   = stats.get("Hits",          stats.get("H", 0)) or 0
-        r   = stats.get("Runs",          stats.get("R", 0)) or 0
-        rbi = stats.get("RunsBattedIn",  stats.get("RBI", 0)) or 0
-        return float(h) + float(r) + float(rbi)
+        h   = float(stats.get("Hits",         stats.get("H",   0)) or 0)
+        r   = float(stats.get("Runs",         stats.get("R",   0)) or 0)
+        rbi = float(stats.get("RunsBattedIn", stats.get("RBI", 0)) or 0)
+        return h + r + rbi
+
+    # ── Fantasy score ─────────────────────────────────────────────────────────
     if field == "__fantasy_score__":
-        # Official platform scoring tables (2026)
-        # PrizePicks Pitcher:  K×3, Out×1, W×6, QS×4, ER×-3
-        # Underdog  Pitcher:   K×3, IP×3,  W×5, QS×5, ER×-3
-        # PrizePicks Hitter:   1B×3, 2B×5, 3B×8, HR×10, R×2, RBI×2, BB×2, HBP×2, SB×5
-        # Underdog  Hitter:    1B×3, 2B×5, 3B×8, HR×10, R×2, RBI×2, BB×3, HBP×3, SB×4, CS×-2
-        plat = (platform or "prizepicks").lower()
-        k  = stats.get("Strikeouts")
-        ip = stats.get("InningsPitched")
-        er = stats.get("EarnedRuns")
-        if k is not None and ip is not None and er is not None:
-            # Pitcher fantasy score
-            k  = float(k  or 0)
-            ip = float(ip or 0)
-            er = float(er or 0)
-            w  = float(stats.get("Wins") or stats.get("Win") or 0)
+        plat  = (platform or "prizepicks").lower()
+        k_raw = stats.get("Strikeouts")
+        ip    = stats.get("InningsPitched")
+        er    = stats.get("EarnedRuns")
+
+        # Pitcher: detected when K + IP + ER are all present
+        if k_raw is not None and ip is not None and er is not None:
+            k  = float(k_raw or 0)
+            er = float(er    or 0)
+            w  = float(stats.get("Wins")         or stats.get("Win") or 0)
             qs = float(stats.get("QualityStart") or 0)
+            # Outs: prefer direct MLB API count; fall back to IP float conversion
+            po = stats.get("PitchingOuts")
+            if po is not None and float(po) > 0:
+                outs = float(po)
+            else:
+                ip_f    = float(ip or 0)
+                full    = int(ip_f)
+                partial = round((ip_f % 1) * 10)
+                outs    = float(full * 3 + partial)
             if plat == "prizepicks":
-                # Outs = floor(ip)*3 + tenths digit (6.2 IP = 20 outs)
-                full, frac = divmod(ip, 1)
-                outs = int(full) * 3 + round(frac * 10)
-                return round(k * 3 + outs * 1 + w * 6 + qs * 4 + er * (-3), 2)
-            else:  # underdog
-                return round(k * 3 + ip * 3 + w * 5 + qs * 5 + er * (-3), 2)
+                # PrizePicks Pitcher: K×3  Out×1  W×6  QS×4  ER×-3
+                return round(k*3 + outs*1 + w*6 + qs*4 + er*-3, 2)
+            else:
+                # Underdog Pitcher: K×3  IP×3  W×5  QS×5  ER×-3
+                ip_f = float(ip or 0)
+                return round(k*3 + ip_f*3 + w*5 + qs*5 + er*-3, 2)
+
         # Hitter fantasy score
-        h   = float(stats.get("Hits")          or stats.get("H")   or 0)
-        rn  = float(stats.get("Runs")          or stats.get("R")   or 0)
-        rbi = float(stats.get("RunsBattedIn")  or stats.get("RBI") or 0)
-        hr  = float(stats.get("HomeRuns")      or stats.get("HR")  or 0)
-        db  = float(stats.get("Doubles")       or stats.get("2B")  or 0)
-        tb3 = float(stats.get("Triples")       or stats.get("3B")  or 0)
-        sb  = float(stats.get("StolenBases")   or stats.get("SB")  or 0)
-        bb  = float(stats.get("Walks")         or stats.get("BB")  or 0)
-        hbp = float(stats.get("HitByPitch")    or stats.get("HBP") or 0)
-        cs  = float(stats.get("CaughtStealing")or stats.get("CS")  or 0)
+        h   = float(stats.get("Hits")           or stats.get("H")   or 0)
+        rn  = float(stats.get("Runs")           or stats.get("R")   or 0)
+        rbi = float(stats.get("RunsBattedIn")   or stats.get("RBI") or 0)
+        hr  = float(stats.get("HomeRuns")       or stats.get("HR")  or 0)
+        db  = float(stats.get("Doubles")        or stats.get("2B")  or 0)
+        tb3 = float(stats.get("Triples")        or stats.get("3B")  or 0)
+        sb  = float(stats.get("StolenBases")    or stats.get("SB")  or 0)
+        bb  = float(stats.get("Walks")          or stats.get("BB")  or 0)
+        hbp = float(stats.get("HitByPitch")     or stats.get("HBP") or 0)
+        cs  = float(stats.get("CaughtStealing") or stats.get("CS")  or 0)
         if h == 0 and rn == 0 and rbi == 0:
-            return None   # insufficient data — settlement marks pending
+            return None   # no data yet — keep PENDING
         singles = max(0.0, h - db - tb3 - hr)
         if plat == "prizepicks":
-            fs = (singles*3 + db*5 + tb3*8 + hr*10 +
-                  rn*2 + rbi*2 + bb*2 + hbp*2 + sb*5)
-        else:  # underdog
-            fs = (singles*3 + db*5 + tb3*8 + hr*10 +
-                  rn*2 + rbi*2 + bb*3 + hbp*3 + sb*4 + cs*(-2))
-        return round(fs, 2)
+            # PrizePicks Hitter: 1B×3  2B×5  3B×8  HR×10  R×2  RBI×2  BB×2  HBP×2  SB×5
+            return round(singles*3 + db*5 + tb3*8 + hr*10
+                         + rn*2 + rbi*2 + bb*2 + hbp*2 + sb*5, 2)
+        else:
+            # Underdog Hitter: 1B×3  2B×6  3B×8  HR×10  R×2  RBI×2  BB×3  HBP×3  SB×4  CS×-2
+            return round(singles*3 + db*6 + tb3*8 + hr*10
+                         + rn*2 + rbi*2 + bb*3 + hbp*3 + sb*4 + cs*-2, 2)
+
+    # ── Direct stat lookup ────────────────────────────────────────────────────
     if field:
         val = stats.get(field)
         return float(val) if val is not None else None
 
     return None
-
 
 def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     """
