@@ -841,15 +841,30 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
 
                 # k_rate: statsapi SO/BF ratio (most accurate) → Statcast whiff proxy
                 if _mlbapi.get("k_rate", 0) > 0:
-                    prop.setdefault("k_rate",    _mlbapi["k_rate"])
-                    prop.setdefault("bb_rate",   _mlbapi.get("bb_rate", 0.085))
-                    prop.setdefault("era",       _mlbapi.get("era",     4.20))
-                    prop.setdefault("whip",      _mlbapi.get("whip",    1.28))
+                    # Stability-weighted blend: 2026 mlbapi + 2025 FanGraphs
+                    # K% trusts 2026 quickly; ERA leans on 2025 for most of April
+                    try:
+                        from season_blender import get_blender as _sb  # noqa: PLC0415
+                        _bw = _sb()
+                        _s26 = {"k_rate": _mlbapi["k_rate"], "bb_rate": _mlbapi.get("bb_rate", 0.086),
+                                "era": _mlbapi.get("era", 4.15), "whip": _mlbapi.get("whip", 1.28)}
+                        _s25 = {"k_rate": fg.get("k_rate", 0), "bb_rate": fg.get("bb_rate", 0),
+                                "era": fg.get("xfip", fg.get("era", 4.15)), "whip": fg.get("whip", 1.28)} if fg else {}
+                        _blend = _bw.blend_pitcher(_s26, _s25) if _s25 else _s26
+                        prop.setdefault("k_rate",  _blend.get("k_rate",  _mlbapi["k_rate"]))
+                        prop.setdefault("bb_rate", _blend.get("bb_rate", _mlbapi.get("bb_rate", 0.086)))
+                        prop.setdefault("era",     _blend.get("era",     _mlbapi.get("era",  4.15)))
+                        prop.setdefault("whip",    _blend.get("whip",    _mlbapi.get("whip", 1.28)))
+                    except Exception:
+                        prop.setdefault("k_rate",  _mlbapi["k_rate"])
+                        prop.setdefault("bb_rate", _mlbapi.get("bb_rate", 0.086))
+                        prop.setdefault("era",     _mlbapi.get("era",     4.15))
+                        prop.setdefault("whip",    _mlbapi.get("whip",    1.28))
                     # Stamp season IP and ER for Bernoulli suppression model
                     if _mlbapi.get("season_ip", 0) > 0:
                         prop.setdefault("season_ip",   _mlbapi["season_ip"])
                         prop.setdefault("season_divr", _mlbapi.get("season_er", 0.0))
-                    logger.debug("[Enrichment] Pitcher %s using statsapi 2026 fallback", player)
+                    logger.debug("[Enrichment] Pitcher %s: 2026+2025 blended fallback", player)
                 elif _sc_whiff > 0.0:
                     prop.setdefault("k_rate",    round(_sc_whiff * 0.85, 4))
                     prop.setdefault("swstr_pct", _sc_whiff)
