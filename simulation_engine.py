@@ -30,18 +30,18 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ─── League average constants (2021-2024 MLB) ──────────────────────────────────
+# ─── League average constants (2021-2025 MLB) ──────────────────────────────────
 # FIX: All league constants updated to 2024 MLB actuals (FanGraphs + Baseball Reference)
 # Previously several values were overestimates causing systematic OVER bias on hit props
 _LG_HIT_RATE      = 0.209   # H/PA  (BA × AB/PA: 0.243 × 0.858) — was 0.237 (13% too high)
 _LG_HR_RATE       = 0.032   # HR/PA (1.24 HR/game ÷ 38.5 PA/game) — was 0.034
-_LG_K_RATE        = 0.223   # K/PA (batter strikeout rate, FG 2024) — was 0.226
-_LG_PITCHER_K9    = 8.7     # average K/9 for starters — unchanged (FG 2024: ~8.7)
-_LG_STARTER_IP    = 5.2     # average innings before bullpen (FG 2024) — was 5.5 (5.8% too high)
-_LG_BULLPEN_ERA   = 4.05    # league average bullpen ERA (FG 2024) — was 4.10
-_LG_TEAM_TOTAL    = 4.38    # average runs per team per game (BR 2024) — was 4.5
+_LG_K_RATE        = 0.222   # K/PA (batter strikeout rate, FG 2025) — was 0.226
+_LG_PITCHER_K9    = 8.7     # average K/9 for starters — unchanged (FG 2025: ~8.7)
+_LG_STARTER_IP    = 5.2     # average innings before bullpen (FG 2025) — was 5.5 (5.8% too high)
+_LG_BULLPEN_ERA   = 4.05    # league average bullpen ERA (FG 2025) — was 4.10
+_LG_TEAM_TOTAL    = 4.45    # average runs per team per game (BR 2025) — was 4.5
 
-# Empirical PA-per-game by lineup slot (2021-2024 MLB)
+# Empirical PA-per-game by lineup slot (2021-2025 MLB)
 # Includes home bottom-9 not always played + late-game pinch-hit effects
 # FIX: PA by batting order slot updated to 2024 MLB actuals (FanGraphs splits data)
 # Lower slots (5-9) were previously understated by 0.09-0.15 PA/game
@@ -280,7 +280,7 @@ def _simulate_pitcher_strikeouts(prop: dict, line: float, n_sims: int) -> SimRes
     if ip_mean < 1.0:
         ip_mean = _LG_STARTER_IP
 
-    # Batters faced per inning: MLB average ~4.30 (FanGraphs 2022-2024 starters)
+    # Batters faced per inning: MLB average ~4.30 (FanGraphs 2022-2025 starters)
     # Formula: 3 outs + hits-in-play + walks + HBP per inning
     # BF/IP = 3.0 + 3.0 * (bb_pct + BABIP + HBP_rate)
     # With BABIP≈0.30, HBP≈0.01, extra base events ≈ 0.04 → effective constant = 0.35

@@ -55,8 +55,8 @@ logger = logging.getLogger("propiq.confidence")
 
 # FIX: Updated to 2024 MLB actuals
 LEAGUE_RATES = {
-    "K":   0.223,   # FG 2024: 22.3% (was 0.224)
-    "BB":  0.086,   # FG 2024: 8.6%  (was 0.085)
+    "K":   0.223,   # FG 2025: 22.3% (was 0.224)
+    "BB":  0.086,   # FG 2025: 8.6%  (was 0.085)
     "HBP": 0.011,
     "HR":  0.032,   # 2024: 1.24 HR/game ÷ 38.5 PA (was 0.030)
     "3B":  0.004,
@@ -74,7 +74,7 @@ WOBA_WEIGHTS = {
     "3B":  1.569,
     "HR":  2.004,
 }
-LEAGUE_WOBA = 0.312   # FIX: FG 2024 actual (was 0.310)
+LEAGUE_WOBA = 0.313   # FIX: FG 2025 actual (was 0.310)
 
 # ---------------------------------------------------------------------------
 # Season depth: maps games played this season → confidence in data

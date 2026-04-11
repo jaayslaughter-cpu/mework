@@ -189,27 +189,27 @@ _data_year: int = 0
 # Used as fallback when FanGraphs API is unavailable or player not found
 LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
     "pitcher": {
-        "csw_pct":   0.275,   # FG 2024: ~27.5% (was 0.280)
-        "swstr_pct": 0.110,   # FG 2024: ~11.0% (unchanged)
-        "k_bb_pct":  0.130,   # FG 2024: ~13.0% (unchanged)
-        "xfip":      4.15,    # FG 2024: ~4.15  (was 4.20)
-        "siera":     4.15,    # FG 2024: ~4.15  (was 4.20)
-        "fip":       4.15,    # FG 2024: ~4.15  (was 4.20)
-        "hr_fb_pct": 0.118,   # FG 2024: ~11.8% (was 0.120)
+        "csw_pct":   0.275,   # FG 2025: ~27.5% (was 0.280)
+        "swstr_pct": 0.110,   # FG 2025: ~11.0% (unchanged)
+        "k_bb_pct":  0.130,   # FG 2025: ~13.0% (unchanged)
+        "xfip":      4.15,    # FG 2025: ~4.15  (was 4.20)
+        "siera":     4.15,    # FG 2025: ~4.15  (was 4.20)
+        "fip":       4.15,    # FG 2025: ~4.15  (was 4.20)
+        "hr_fb_pct": 0.118,   # FG 2025: ~11.8% (was 0.120)
         "lob_pct":   0.720,   # unchanged
-        "babip":     0.298,   # FG 2024: ~0.298 (was 0.300)
+        "babip":     0.298,   # FG 2025: ~0.298 (was 0.300)
     },
     "batter": {
         "wrc_plus":    100.0,  # by definition
-        "woba":        0.312,  # FG 2024: ~0.312 (was 0.320)
-        "iso":         0.158,  # FG 2024: ~0.158 (was 0.150 — power has increased)
-        "babip":       0.298,  # FG 2024: ~0.298 (was 0.300)
-        "o_swing":     0.318,  # FG 2024: ~31.8% (was 0.310)
-        "z_contact":   0.848,  # FG 2024: ~84.8% (was 0.850)
-        "hr_fb_pct":   0.118,  # FG 2024: ~11.8% (was 0.120)
-        "k_pct":       0.223,  # FG 2024: ~22.3% (was 0.230)
-        "bb_pct":      0.086,  # FG 2024: ~8.6%  (was 0.085)
-        "slg":         0.411,  # FG 2024: ~0.411 (was 0.405) — #3 feature for TB (16% importance)
+        "woba":        0.312,  # FG 2025: ~0.312 (was 0.320)
+        "iso":         0.158,  # FG 2025: ~0.158 (was 0.150 — power has increased)
+        "babip":       0.298,  # FG 2025: ~0.298 (was 0.300)
+        "o_swing":     0.318,  # FG 2025: ~31.8% (was 0.310)
+        "z_contact":   0.848,  # FG 2025: ~84.8% (was 0.850)
+        "hr_fb_pct":   0.118,  # FG 2025: ~11.8% (was 0.120)
+        "k_pct":       0.223,  # FG 2025: ~22.3% (was 0.230)
+        "bb_pct":      0.086,  # FG 2025: ~8.6%  (was 0.085)
+        "slg":         0.411,  # FG 2025: ~0.411 (was 0.405) — #3 feature for TB (16% importance)
         "xbh_per_game": 0.50,  # extra base hits per game — #1 feature for TB (45% importance)
     },
 }
