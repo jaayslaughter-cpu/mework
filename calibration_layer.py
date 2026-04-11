@@ -211,19 +211,29 @@ def calculate_streak_penalty(
 # ── Calibration Governor ──────────────────────────────────────────────────────
 
 def apply_calibration_governor(model_prob: float, historical_brier: float) -> float:
-    """Shrink edge 50 % toward market if Brier score exceeds 0.22.
+    """Shrink edge toward market when Brier score exceeds threshold.
 
     Brier score interpretation:
-      0.00 = perfect  |  0.25 = random  |  >0.30 = actively misleading
+      0.00 = perfect  |  0.15-0.18 = decent model  |  0.25 = random  |  >0.30 = misleading
 
-    When Brier > 0.22, the model is drifting; we pull output toward the
-    standard -110 market implied probability (0.524) to protect bankroll.
+    FIX: Threshold lowered from 0.22 → 0.18.  At 0.22 the model is already ~88% as bad
+    as random — too late to start protecting the bankroll.  At 0.18 (still 72% of random)
+    we apply early-warning shrinkage before meaningful damage accumulates.
+
+    Two-stage shrinkage:
+      Brier 0.18-0.22: shrink 25% toward market (early warning — mild)
+      Brier > 0.22:    shrink 50% toward market (active drift — strong)
     """
+    market_implied = 0.5238   # -110 vig-stripped
     if historical_brier > 0.22:
-        market_implied = 0.524
+        # Strong shrinkage: model is near-random
         calibrated = model_prob - ((model_prob - market_implied) * 0.50)
-        return round(max(0.01, min(0.99, calibrated)), 4)
-    return round(max(0.01, min(0.99, model_prob)), 4)
+    elif historical_brier > 0.18:
+        # Early-warning shrinkage: model is degrading
+        calibrated = model_prob - ((model_prob - market_implied) * 0.25)
+    else:
+        calibrated = model_prob
+    return round(max(0.01, min(0.99, calibrated)), 4)
 
 
 # ── Brier Score ───────────────────────────────────────────────────────────────

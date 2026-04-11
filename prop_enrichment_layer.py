@@ -64,9 +64,12 @@ _PITCHER_PROP_TYPES = {
 }
 
 _BATTER_PROP_TYPES = {
-    "hits", "home_runs", "total_bases", "rbis", "rbi", "runs",
-    "stolen_bases", "doubles", "singles", "walks",
+    "hits", "total_bases", "rbis", "rbi", "runs",
     "hits_runs_rbis", "fantasy_hitter",
+    # FIX PR#282: home_runs, stolen_bases, doubles, singles, walks removed —
+    # excluded prop types (Phase 112+118) must not be enriched. Enriching them
+    # produces false signals that leak into the feature vector even after the
+    # _EXCLUDED_PROP_TYPES filter drops the prop from the final list.
 }
 
 
