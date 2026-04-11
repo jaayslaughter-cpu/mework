@@ -62,17 +62,18 @@ logger = logging.getLogger("propiq.marcel")
 # ---------------------------------------------------------------------------
 
 # 2024–2025 MLB baseline rates used as regression anchors
+# FIX: Updated to 2024 MLB actuals (FanGraphs leaderboards)
 _LEAGUE_AVG: dict = {
     # Batter rates
-    "batter_k_pct":  0.228,   # 22.8% K rate
-    "batter_bb_pct": 0.083,   # 8.3%  BB rate
-    "batter_hr_pa":  0.033,   # 3.3%  HR per PA (~1 HR per 30 PA)
-    "batter_woba":   0.315,   # .315  wOBA
-    "batter_iso":    0.165,   # .165  ISO
+    "batter_k_pct":  0.223,   # FG 2024: 22.3% (was 0.228)
+    "batter_bb_pct": 0.086,   # FG 2024: 8.6%  (was 0.083)
+    "batter_hr_pa":  0.032,   # 2024: 1.24 HR/game ÷ 38.5 PA (was 0.033)
+    "batter_woba":   0.312,   # FG 2024: .312  (was 0.315)
+    "batter_iso":    0.158,   # FG 2024: .158  (was 0.165 — power has risen)
     # Pitcher rates (rates *allowed*)
-    "pitcher_k_pct":  0.228,  # 22.8% K%
-    "pitcher_bb_pct": 0.083,  # 8.3%  BB%
-    "pitcher_hr9":    1.30,   # 1.30  HR/9
+    "pitcher_k_pct":  0.223,  # FG 2024: 22.3% (was 0.228)
+    "pitcher_bb_pct": 0.086,  # FG 2024: 8.6%  (was 0.083)
+    "pitcher_hr9":    1.28,   # FG 2024: ~1.28 HR/9 (was 1.30)
 }
 
 _FG_BASE_URL = "https://www.fangraphs.com/api/leaders/major-league/data"
@@ -551,8 +552,8 @@ class MarcelLayer:
                     _mapped = {}
                     for _n, _s in _minimal_pitchers.items():
                         _mapped[_n] = {
-                            "k_pct":  _s.get("strikeoutRate", 0.224) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.224),
-                            "bb_pct": _s.get("walkRate",      0.085) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.085),
+                            "k_pct":  _s.get("strikeoutRate", 0.223) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.223),
+                            "bb_pct": _s.get("walkRate",      0.086) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.086),
                             "era":    _s.get("earnedRunAverage", 4.20),
                             "whip":   _s.get("whip", 1.28),
                             "_source": "statsapi_fallback",

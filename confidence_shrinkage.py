@@ -53,15 +53,16 @@ logger = logging.getLogger("propiq.confidence")
 # Adapted from baseball-sims/src/simulation/constants.py
 # ---------------------------------------------------------------------------
 
+# FIX: Updated to 2024 MLB actuals
 LEAGUE_RATES = {
-    "K":   0.224,
-    "BB":  0.085,
+    "K":   0.223,   # FG 2024: 22.3% (was 0.224)
+    "BB":  0.086,   # FG 2024: 8.6%  (was 0.085)
     "HBP": 0.011,
-    "HR":  0.030,
+    "HR":  0.032,   # 2024: 1.24 HR/game ÷ 38.5 PA (was 0.030)
     "3B":  0.004,
     "2B":  0.047,
     "1B":  0.143,
-    "OUT": 0.456,
+    "OUT": 0.454,   # adjusted to sum = 1.0
 }
 
 # wOBA linear weights (2024 FanGraphs)
@@ -73,7 +74,7 @@ WOBA_WEIGHTS = {
     "3B":  1.569,
     "HR":  2.004,
 }
-LEAGUE_WOBA = 0.310
+LEAGUE_WOBA = 0.312   # FIX: FG 2024 actual (was 0.310)
 
 # ---------------------------------------------------------------------------
 # Season depth: maps games played this season → confidence in data
@@ -415,13 +416,13 @@ def log5_blend(
 
     Examples:
         >>> log5_blend(0.30, 0.28, outcome="K")   # high-K batter vs high-K pitcher
-        0.376  # above league avg (0.224)
+        0.376  # above league avg (0.223)
         >>> log5_blend(0.15, 0.20, outcome="K")   # low-K batter vs avg pitcher
         0.134  # below league avg
     """
     eps = 1e-9
     if league_rate is None:
-        league_rate = LEAGUE_RATES.get(outcome, 0.224)
+        league_rate = LEAGUE_RATES.get(outcome, 0.223)
 
     b = max(eps, min(1.0, batter_rate))
     p = max(eps, min(1.0, pitcher_rate))

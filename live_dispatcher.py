@@ -369,43 +369,46 @@ _AGENT_UNITS_CACHE: dict = {}
 # ── MLB historical base-rate probabilities ────────────────────────────────────
 # (line, P_over) tuples from 2019-2024 MLB regular-season data.
 # Used by _build_legs() base_prob() interpolation.
+# FIX: Base rates synced with base_rate_model.py corrected values (2024 DFS calibration).
+# These are P(Over | line offered by platform) — not raw MLB frequencies.
+# Platforms set lines when expected outcome ≈ line value, so P(Over 0.5 hits) ≠ P(batter gets a hit).
 _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "hits": [
-        (0.5, 0.72), (1.5, 0.38), (2.5, 0.13), (3.5, 0.03),
+        (0.5, 0.62), (1.5, 0.38), (2.5, 0.13), (3.5, 0.03),
     ],
     "rbis": [
-        (0.5, 0.38), (1.5, 0.18), (2.5, 0.07), (3.5, 0.020),
-    ],  # corrected: MLB avg ~38% batters get 1+ RBI per game
+        (0.5, 0.40), (1.5, 0.18), (2.5, 0.07), (3.5, 0.020),
+    ],
     "runs": [
-        (0.5, 0.47), (1.5, 0.19), (2.5, 0.07), (3.5, 0.018),
-    ],  # corrected: ~47% batters score 1+ run per game
+        (0.5, 0.45), (1.5, 0.18), (2.5, 0.06), (3.5, 0.015),
+    ],
     "total_bases": [
-        (0.5, 0.85), (1.5, 0.55), (2.5, 0.28), (3.5, 0.12), (4.5, 0.04),
+        (0.5, 0.64), (1.5, 0.50), (2.5, 0.28), (3.5, 0.12), (4.5, 0.04),
     ],
     "hits_runs_rbis": [
-        (0.5, 0.95), (1.5, 0.72), (2.5, 0.48), (3.5, 0.28),
-        (4.5, 0.14), (5.5, 0.06), (6.5, 0.02),
+        (0.5, 0.78), (1.5, 0.58), (2.5, 0.40), (3.5, 0.24),
+        (4.5, 0.12), (5.5, 0.05), (6.5, 0.02),
     ],
     "strikeouts": [
-        (1.5, 0.68), (3.5, 0.52), (5.5, 0.36), (7.5, 0.20),
-        (9.5, 0.09), (11.5, 0.03),
-    ],  # corrected: ~68% SP record 2+ Ks (was slightly inflated at 0.72)
+        (1.5, 0.72), (3.5, 0.55), (5.5, 0.38), (6.5, 0.30),
+        (7.5, 0.22), (8.5, 0.15), (9.5, 0.10), (10.5, 0.06), (11.5, 0.03),
+    ],
     "earned_runs": [
-        (0.5, 0.55), (1.5, 0.38), (2.5, 0.22), (3.5, 0.12), (4.5, 0.05),
+        (0.5, 0.88), (1.5, 0.62), (2.5, 0.38), (3.5, 0.20), (4.5, 0.08),
     ],
     "fantasy_hitter": [
-        (5.0, 0.88), (10.0, 0.68), (15.0, 0.46), (20.0, 0.28),
-        (25.0, 0.15), (30.0, 0.07), (40.0, 0.02),
+        (5.0, 0.85), (10.0, 0.65), (15.0, 0.44), (20.0, 0.27),
+        (25.0, 0.14), (30.0, 0.06), (40.0, 0.02),
     ],
     "fantasy_pitcher": [
-        (15.0, 0.80), (20.0, 0.60), (25.0, 0.42), (30.0, 0.27),
-        (35.0, 0.15), (40.0, 0.08), (50.0, 0.02),
+        (15.0, 0.78), (20.0, 0.58), (25.0, 0.40), (30.0, 0.25),
+        (35.0, 0.14), (40.0, 0.07), (50.0, 0.02),
     ],
     "hits_allowed": [
-        (1.5, 0.78), (3.5, 0.55), (5.5, 0.28), (7.5, 0.10),
-    ],  # corrected: ~78% SP allow 2+ hits (was inflated at 0.85)
+        (1.5, 0.82), (3.5, 0.55), (5.5, 0.28), (7.5, 0.10),
+    ],
     "pitching_outs": [
-        (8.5, 0.62), (11.5, 0.46), (14.5, 0.30), (17.5, 0.17), (20.5, 0.06),
+        (8.5, 0.60), (11.5, 0.44), (14.5, 0.28), (17.5, 0.15), (20.5, 0.05),
     ],
 }
 
@@ -2461,11 +2464,11 @@ class LiveDispatcher:
                         prob = min(0.80, prob + max(0.0, sc_avg - 0.250) * 0.10)
 
                 # Phase 37: xwOBA boost for hits/contact props
-                # xwOBA > 0.320 (above avg) = confirmed quality contact -> +hit prob
+                # xwOBA > 0.312 (above avg, FIX: was 0.320) = confirmed quality contact -> +hit prob
                 if prop_type in ("hits", "hits_runs_rbis") and side == "Over":
                     sc_xwoba = float(chosen_entry.get("sc_xwoba", 0.0) or 0.0)
-                    if sc_xwoba > 0.320:
-                        prob = min(0.80, prob + (sc_xwoba - 0.320) * 0.12)
+                    if sc_xwoba > 0.312:  # FIX: true 2024 avg wOBA (was 0.320)
+                        prob = min(0.80, prob + (sc_xwoba - 0.312) * 0.12)  # FIX: center 0.320→0.312
 
                 # Phase 37: barrel rate boost for HR/TB props
                 # Barrel% > 8% (above avg) = elite hard contact -> +power prop prob

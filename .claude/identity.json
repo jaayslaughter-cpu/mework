@@ -6,10 +6,7 @@
     "codeComments": true,
     "explanations": true
   },
-  "domains": [
-    "python"
-  ],
+  "domains": ["python"],
   "suggestedBy": "ecc-tools-repo-analysis",
   "createdAt": "2026-04-01T03:01:26.137Z"
-  "createdAt": "2026-04-01T03:01:18.859Z"
 }

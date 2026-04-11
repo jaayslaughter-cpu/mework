@@ -730,15 +730,15 @@ def fangraphs_adjustment(
             wrc  = fg.get("wrc_plus", ld_b["wrc_plus"])
             woba = fg.get("woba",     ld_b["woba"])
             wrc_adj  = (wrc  - 100.0) / 30.0 * 0.015
-            woba_adj = (woba - 0.320) / 0.060 * 0.010
+            woba_adj = (woba - 0.312) / 0.060 * 0.010  # FIX: center 0.320→0.312
             adj += flip * (wrc_adj + woba_adj)
 
         elif _in_group(prop_type, "power_props"):
             iso   = fg.get("iso",      ld_b["iso"])
             hr_fb = fg.get("hr_fb_pct", ld_b["hr_fb_pct"])
             wrc   = fg.get("wrc_plus", ld_b["wrc_plus"])
-            iso_adj   = (iso   - 0.150) / 0.070 * 0.014
-            hr_fb_adj = (hr_fb - 0.120) / 0.050 * 0.010
+            iso_adj   = (iso   - 0.158) / 0.070 * 0.014  # FIX: center 0.150→0.158
+            hr_fb_adj = (hr_fb - 0.118) / 0.050 * 0.010  # FIX: center 0.120→0.118
             wrc_adj   = (wrc   - 100.0) / 30.0  * 0.006
             adj += flip * (iso_adj + hr_fb_adj + wrc_adj)
 
@@ -747,18 +747,18 @@ def fangraphs_adjustment(
             woba = fg.get("woba",     ld_b["woba"])
             adj += flip * (
                 (wrc - 100.0) / 30.0 * 0.012
-                + (woba - 0.320) / 0.060 * 0.010
+                + (woba - 0.312) / 0.060 * 0.010  # FIX: center 0.320→0.312
             )
 
         elif _in_group(prop_type, "batter_k"):
             o_swing = fg.get("o_swing", ld_b["o_swing"])
             k_pct   = fg.get("k_pct",   ld_b["k_pct"])
-            o_adj = (o_swing - 0.310) / 0.100 * 0.015
-            k_adj = (k_pct   - 0.230) / 0.050 * 0.012
+            o_adj = (o_swing - 0.318) / 0.100 * 0.015  # FIX: center 0.310→0.318
+            k_adj = (k_pct   - 0.223) / 0.050 * 0.012  # FIX: center 0.230→0.223
             adj += flip * (o_adj + k_adj)
 
         elif _in_group(prop_type, "sb_props"):
             bb_pct = fg.get("bb_pct", ld_b["bb_pct"])
-            adj += flip * (bb_pct - 0.085) / 0.030 * 0.010
+            adj += flip * (bb_pct - 0.086) / 0.030 * 0.010  # FIX: center 0.085→0.086
 
     return max(-_FG_CAP, min(_FG_CAP, adj))

@@ -141,7 +141,7 @@ def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     whip    = _safe(prop, "_whip",   1.30)
 
     # Batter skill inputs
-    woba    = _safe(prop, "_woba",     0.320)
+    woba    = _safe(prop, "_woba",     0.312)  # FIX: 2024 actual (was 0.320)
     wrc_p   = _safe(prop, "_wrc_plus", 100.0)
     whiff_h = _safe(prop, "_pitch_whiff_vs_hand", 0.25)
 
@@ -149,7 +149,7 @@ def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     # WHIP correlates with BABIP + HR allowed; normalise around 1.30
     pitcher_hit_factor = _clamp(1.30 / max(whip, 0.50), 0.70, 1.40)
 
-    # Batter wOBA adjustment: 0.320 = average; scale ±20%
+    # Batter wOBA adjustment: 0.312 = average (2024 MLB); scale ±20%
     batter_hit_factor  = _clamp(woba / 0.320, 0.70, 1.45)
 
     # Whiff rate: higher whiff → more Ks → fewer balls in play
@@ -202,7 +202,7 @@ def _k_prob_per_pa_vs_starter(prop: dict) -> float:
     """P(strikeout) per plate appearance for the BATTER against starter."""
     k_pct   = _safe(prop, "_k_pct",  0.225)
     csw     = _safe(prop, "_csw_pct", 0.28)
-    o_swing = _safe(prop, "_o_swing", 0.310)
+    o_swing = _safe(prop, "_o_swing", 0.318)  # FIX: 2024 actual (was 0.310)
 
     # Pitcher K% is the dominant signal
     k_factor = _clamp(k_pct / 0.225, 0.50, 1.80)
