@@ -53,8 +53,8 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/2.0)"}
 # ---------------------------------------------------------------------------
 
 MLB_AVGS = {
-    "K_Rate":  0.223,   # FIX: FG 2025 (was 0.224)
-    "BB_Rate": 0.086,   # FIX: FG 2025 (was 0.085)
+    "K_Rate":  0.223,   # FIX: FG 2024 (was 0.224)
+    "BB_Rate": 0.086,   # FIX: FG 2024 (was 0.085)
     "1B_Rate": 0.143,
     "2B_Rate": 0.047,
     "3B_Rate": 0.004,

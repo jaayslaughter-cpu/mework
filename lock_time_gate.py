@@ -190,12 +190,7 @@ def fetch_game_times_today() -> dict[str, dict]:
     import datetime as _dt
     import requests
 
-    try:
-        import pytz as _lk_pytz
-        _lk_pt = _lk_pytz.timezone("America/Los_Angeles")
-        today = _dt.datetime.now(_lk_pt).strftime("%Y-%m-%d")
-    except ImportError:
-        today = (_dt.datetime.utcnow() - _dt.timedelta(hours=8)).strftime("%Y-%m-%d")
+    today = _dt.date.today().strftime("%Y-%m-%d")
     result: dict[str, dict] = {}
 
     try:

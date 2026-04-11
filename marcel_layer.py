@@ -62,17 +62,18 @@ logger = logging.getLogger("propiq.marcel")
 # ---------------------------------------------------------------------------
 
 # 2024–2025 MLB baseline rates used as regression anchors
+# FIX: Updated to 2024 MLB actuals (FanGraphs leaderboards)
 _LEAGUE_AVG: dict = {
-    # Batter rates — FG 2025 actuals (most recently completed full season)
-    "batter_k_pct":  0.222,   # FG 2025: 22.2%
-    "batter_bb_pct": 0.084,   # FG 2025: 8.4%
-    "batter_hr_pa":  0.031,   # 2025: ~1.20 HR/game ÷ 38.5 PA
-    "batter_woba":   0.313,   # FG 2025: .313
-    "batter_iso":    0.159,   # 2025: SLG(.404) - BA(.245)
-    # Pitcher rates (rates *allowed*) — FG 2025
-    "pitcher_k_pct":  0.222,  # FG 2025: 22.2%
-    "pitcher_bb_pct": 0.084,  # FG 2025: 8.4%
-    "pitcher_hr9":    1.25,   # 2025: slightly lower than 2024
+    # Batter rates
+    "batter_k_pct":  0.223,   # FG 2024: 22.3% (was 0.228)
+    "batter_bb_pct": 0.086,   # FG 2024: 8.6%  (was 0.083)
+    "batter_hr_pa":  0.032,   # 2024: 1.24 HR/game ÷ 38.5 PA (was 0.033)
+    "batter_woba":   0.312,   # FG 2024: .312  (was 0.315)
+    "batter_iso":    0.158,   # FG 2024: .158  (was 0.165 — power has risen)
+    # Pitcher rates (rates *allowed*)
+    "pitcher_k_pct":  0.223,  # FG 2024: 22.3% (was 0.228)
+    "pitcher_bb_pct": 0.086,  # FG 2024: 8.6%  (was 0.083)
+    "pitcher_hr9":    1.28,   # FG 2024: ~1.28 HR/9 (was 1.30)
 }
 
 _FG_BASE_URL = "https://www.fangraphs.com/api/leaders/major-league/data"
