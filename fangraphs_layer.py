@@ -362,26 +362,51 @@ def _load() -> None:
             len(_BATTER_CACHE), len(_PITCHER_CACHE), yr,
         )
 
-        # ── Blend with prior year when current season sample is small ──────────
-        # Early season (April/May): 2026 has <150 players vs 2025's ~700+
-        # Merge: prefer 2026 values when available, fill gaps with 2025
-        if yr == season and len(_BATTER_CACHE) < 150:
-            logger.info(
-                "[FG] Season %d small sample (%d batters) — blending with %d",
-                yr, len(_BATTER_CACHE), yr - 1,
-            )
-            prior_bat = _parse_batters(_fetch_season("bat", yr - 1))
-            prior_pit = _parse_pitchers(_fetch_season("pit", yr - 1))
-            # Merge: current season overrides prior (current is more recent)
-            merged_bat = {**prior_bat, **_BATTER_CACHE}
-            merged_pit = {**prior_pit, **_PITCHER_CACHE}
-            _BATTER_CACHE  = merged_bat
-            _PITCHER_CACHE = merged_pit
-            logger.info(
-                "[FG] Blended cache: %d batters, %d pitchers (current=%d + prior=%d)",
-                len(_BATTER_CACHE), len(_PITCHER_CACHE),
-                len(_BATTER_CACHE), len(prior_bat),
-            )
+        # ── Stability-weighted season blend ──────────────────────────────────────
+        # Uses SeasonBlender to weight each stat individually by sample reliability.
+        # Early season: ERA→ mostly 2025; K%→ mostly 2026 (stabilizes fast).
+        # Transitions smoothly: all 2025 on Opening Day → all 2026 by mid-season.
+        # Always blends — even in August 2026 has more data than 2025 for rate stats.
+        if yr == season:
+            try:
+                from season_blender import get_blender as _get_blender  # noqa: PLC0415
+                _blender = _get_blender()
+                prior_bat = _parse_batters(_fetch_season("bat", yr - 1))
+                prior_pit = _parse_pitchers(_fetch_season("pit", yr - 1))
+
+                # Stat-by-stat weighted blend for every player in 2026
+                merged_bat: dict[str, dict] = {}
+                for name, stats_2026 in _BATTER_CACHE.items():
+                    stats_2025 = prior_bat.get(name, {})
+                    merged_bat[name] = _blender.blend_batter(stats_2026, stats_2025) if stats_2025 else stats_2026
+                # For players only in 2025 (not yet played in 2026), include them
+                for name, stats_2025 in prior_bat.items():
+                    if name not in merged_bat:
+                        merged_bat[name] = stats_2025
+
+                merged_pit: dict[str, dict] = {}
+                for name, stats_2026 in _PITCHER_CACHE.items():
+                    stats_2025 = prior_pit.get(name, {})
+                    merged_pit[name] = _blender.blend_pitcher(stats_2026, stats_2025) if stats_2025 else stats_2026
+                for name, stats_2025 in prior_pit.items():
+                    if name not in merged_pit:
+                        merged_pit[name] = stats_2025
+
+                _BATTER_CACHE  = merged_bat
+                _PITCHER_CACHE = merged_pit
+                _blender.log_weights()
+                logger.info(
+                    "[FG] Stability-blended: %d batters, %d pitchers (%d+%d players)",
+                    len(_BATTER_CACHE), len(_PITCHER_CACHE),
+                    len(_BATTER_CACHE), len(prior_bat),
+                )
+            except Exception as _blend_err:
+                # Fallback: binary merge (old behavior) if blender fails
+                logger.warning("[FG] Blend failed (%s) — using binary merge", _blend_err)
+                prior_bat = _parse_batters(_fetch_season("bat", yr - 1))
+                prior_pit = _parse_pitchers(_fetch_season("pit", yr - 1))
+                _BATTER_CACHE  = {**prior_bat, **_BATTER_CACHE}
+                _PITCHER_CACHE = {**prior_pit, **_PITCHER_CACHE}
 
         # ── Persist cache: disk (fast) + Postgres (durable across restarts) ──
         try:

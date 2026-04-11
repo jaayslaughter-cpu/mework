@@ -1589,6 +1589,19 @@ def _ensure_bet_ledger() -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
+            # FIX GAP 2: add UNIQUE constraint to prevent duplicate grading
+            # ON CONFLICT DO NOTHING was a no-op without this — same pick could be
+            # inserted twice in overlapping cycles, causing inflated ROI numbers.
+            try:
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_bet_ledger_dedup
+                    ON bet_ledger (player_name, prop_type, line, side, agent_name, bet_date)
+                    """
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
         conn.close()
         logger.info("[DB] bet_ledger table ensured.")
     except Exception as exc:
@@ -4183,7 +4196,7 @@ def run_agent_tasklet() -> bool:
                              units_wagered, mlbam_id, entry_type, discord_sent)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s), %s, %s, TRUE)
+                                ABS(%s), %s, %s, FALSE)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -4214,6 +4227,25 @@ def run_agent_tasklet() -> bool:
 
         try:
             discord_alert.send_parlay_alert(parlay)      # 4. Discord (fires last)
+            # FIX GAP 1: flip discord_sent=TRUE only after Discord confirms receipt
+            # Prevents ghost grades where DB has a row but subscriber never saw the pick
+            try:
+                _pg3 = _pg_conn()
+                with _pg3.cursor() as _c3:
+                    _c3.execute(
+                        """
+                        UPDATE bet_ledger
+                           SET discord_sent = TRUE
+                         WHERE agent_name = %s
+                           AND bet_date   = %s
+                           AND discord_sent = FALSE
+                        """,
+                        (agent_name, _today_pt().isoformat()),
+                    )
+                _pg3.commit()
+                _pg3.close()
+            except Exception as _flip_err:
+                logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
 
             # Record parlay in propiq_season_record so nightly_recap.py can settle it
             # Without this, recap always shows "No parlays sent today" even when plays fire
@@ -4242,7 +4274,14 @@ def run_agent_tasklet() -> bool:
                 logger.info("[AgentTasklet] Parlay recorded in season_record for %s (%s)",
                             agent_name, today_str)
             except Exception as _sr_err:
-                logger.warning("[AgentTasklet] season_record insert skipped: %s", _sr_err)
+                # FIX GAP 3: surface this clearly — nightly_recap depends on season_record
+                # If this fails, recap shows "No parlays sent today" even when picks fired.
+                # Common cause: DATABASE_URL not set at Railway SERVICE level (vs project).
+                logger.error(
+                    "[AgentTasklet] season_record.record_parlay FAILED for %s: %s — "
+                    "nightly_recap will show 'no parlays'. Check DATABASE_URL at SERVICE level.",
+                    agent_name, _sr_err
+                )
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
 
