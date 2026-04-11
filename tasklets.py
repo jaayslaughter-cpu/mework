@@ -3308,7 +3308,7 @@ class _StackSmithAgent(_BaseAgent):
         # Stack signal: look up the OPPOSING pitcher from projected_starters
         # (prop is a batter prop — it carries batter stats, not pitcher stats)
         opp_team = prop.get("opposing_team", "")
-        era    = 4.20  # league-average default
+        era    = 4.15  # FIX: 2024 league ERA (was 4.20)
         k_rate = 0.22
 
         starters = self.hub.get("context", {}).get("projected_starters", [])
@@ -3859,7 +3859,6 @@ def run_agent_tasklet() -> bool:
         "stolen_bases", "home_runs", "sb", "hr",
         "walks", "bb", "bases_on_balls",
         "walks_allowed",
-        "doubles", "triples",  # FIX PR#282: also excluded per Phase 112+118 — _normalize_prop_type already returns "" for these but _EXCLUDED_PROP_TYPES must also block them before enrichment lookup
     }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 

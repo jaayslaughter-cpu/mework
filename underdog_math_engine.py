@@ -74,9 +74,10 @@ FLEX_PAYOUTS: Dict[int, Tuple[float, float, Optional[float]]] = {
 }
 
 # Standard payouts: leg_count → multiplier (all picks correct, no insurance)
+# FIX: 3-leg STANDARD was 5.0x — user confirmed 6.0x (matches calibration_layer, tasklets, settlement_engine)
 STANDARD_PAYOUTS: Dict[int, float] = {
     2: 3.50,
-    3: 5.00,
+    3: 6.00,
     4: 10.0,
     5: 20.0,
     6: 40.0,

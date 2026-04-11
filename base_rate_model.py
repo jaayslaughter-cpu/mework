@@ -2,7 +2,7 @@
 base_rate_model.py — PropIQ calibrated base-rate probability model.
 
 Replaces flat 50% fallback in _model_prob() when XGBoost isn't trained yet.
-Uses historical MLB frequencies (2022-2024) interpolated from the same
+Uses historical MLB frequencies (2022-2025) interpolated from the same
 _BASE_RATES table live_dispatcher.py uses, then layers on FanGraphs stats
 and context signals already attached by prop_enrichment_layer.
 
