@@ -52,6 +52,19 @@ from typing import Any
 
 logger = logging.getLogger("propiq.enrichment")
 
+try:
+    from bayesian_shrinkage import (
+        apply_shrinkage_to_prop,
+        shrink_rate_auto,
+        get_season_week,
+        compute_prior,
+        get_k_prior,
+    )
+    _BAYESIAN_AVAILABLE = True
+except ImportError:
+    _BAYESIAN_AVAILABLE = False
+    logger.warning("bayesian_shrinkage not available — skipping early-season shrinkage")
+
 # ---------------------------------------------------------------------------
 # Pitcher prop types — used to decide whether to look up pitcher vs batter
 # ---------------------------------------------------------------------------
@@ -785,6 +798,26 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         _ps_rate = _player_specific_rate(prop, _side_hint)
         if _ps_rate is not None:
             prop["_player_specific_prob"] = _ps_rate
+
+        # Early-season Bayesian shrinkage: blend current 2026 rates toward
+        # multi-year priors based on sample size and stat stability tier.
+        # Only fires if bayesian_shrinkage module is available.
+        if _BAYESIAN_AVAILABLE:
+            try:
+                _is_pitcher_prop = prop.get("prop_type", "") in _PITCHER_PROP_TYPES
+                # Use current season PA/BF if stamped on prop, else estimate from games
+                _n_current = float(
+                    prop.get("season_pa") or prop.get("season_bf") or
+                    prop.get("season_ip", 0) * 3.3 or   # IP → approx BF
+                    40.0   # conservative default: ~10 games × 4 PA
+                )
+                apply_shrinkage_to_prop(
+                    prop=prop,
+                    is_pitcher=_is_pitcher_prop,
+                    n_current=_n_current,
+                )
+            except Exception as _e:
+                logger.debug("bayesian shrinkage failed for %s: %s", prop.get("player"), _e)
 
         team     = prop.get("team", "")
         opp_team = prop.get("opposing_team", "")
