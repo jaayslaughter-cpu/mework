@@ -38,8 +38,13 @@ from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import pika
-import pika.exceptions
+try:
+    import pika
+    import pika.exceptions
+    _PIKA_AVAILABLE = True
+except ImportError:  # RabbitMQ client not installed — execution_agents disabled
+    pika = None  # type: ignore[assignment]
+    _PIKA_AVAILABLE = False
 from odds_math import MIN_EV_THRESHOLD, calculate_no_vig_ev  # noqa: E402
 from underdog_math_engine import SlipEvaluation, UnderdogMathEngine  # noqa: E402
 from apify_scrapers import DataEnricher  # noqa: E402

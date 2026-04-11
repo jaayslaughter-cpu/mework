@@ -113,7 +113,7 @@ AGENT_CONFIGS = [
 
 def fetch_today_schedule(): return []
 def normalise_stat(s): return s.lower().strip()
-def calc_ev(prob, odds=-110): return (prob - 0.5238) / 0.5238 * 100
+def calc_ev(prob, odds=-110): return (prob - 0.50) / 0.50 * 100  # FIX: Streaks = even money (0.50 break-even), not -110 (0.5238)
 def implied_prob_from_odds(odds): return 100.0 / (abs(odds) + 100) if odds < 0 else abs(odds) / (abs(odds) + 100)
 
 logging.basicConfig(
@@ -190,20 +190,26 @@ class StreakCandidate:
 # MLB historical base rates (mirrored from live_dispatcher._evaluate_props)
 # ---------------------------------------------------------------------------
 
+# FIX: Base rates aligned with corrected DFS calibration (2024 actual hit rates).
+# These are P(Over | line offered by Underdog) — conditional on Underdog's line-setting,
+# NOT raw MLB frequencies. Underdog only offers a line when expected outcome ≈ line value.
 _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     # Only high-quality, reliable MLB DFS prop types
     # stolen_bases, walks, home_runs removed — low base rates / unreliable for streaks
-    "hits":           [(0.5, 0.67), (1.5, 0.40), (2.5, 0.19), (3.5, 0.08)],
-    "rbis":           [(0.5, 0.38), (1.5, 0.18), (2.5, 0.07)],
-    "runs":           [(0.5, 0.47), (1.5, 0.23), (2.5, 0.09)],
-    "total_bases":    [(0.5, 0.70), (1.5, 0.49), (2.5, 0.28), (3.5, 0.14)],
-    "hits_runs_rbis": [(0.5, 0.82), (1.5, 0.64), (2.5, 0.44), (3.5, 0.27), (4.5, 0.15)],
-    "strikeouts":     [(3.5, 0.74), (4.5, 0.62), (5.5, 0.51), (6.5, 0.40), (7.5, 0.29), (8.5, 0.19)],
-    "earned_runs":    [(0.5, 0.42), (1.5, 0.59), (2.5, 0.72), (3.5, 0.82)],
-    "fantasy_hitter": [(15.0, 0.58), (20.0, 0.45), (25.0, 0.33), (30.0, 0.22)],
-    "fantasy_pitcher":[(30.0, 0.58), (35.0, 0.47), (40.0, 0.36), (45.0, 0.27)],
-    "pitching_outs":  [(14.5, 0.62), (17.5, 0.46), (20.5, 0.30)],
-    "hits_allowed":   [(3.5, 0.55), (4.5, 0.40), (5.5, 0.28)],
+    "hits":           [(0.5, 0.62), (1.5, 0.38), (2.5, 0.13), (3.5, 0.03)],
+    "rbis":           [(0.5, 0.40), (1.5, 0.18), (2.5, 0.07)],
+    "runs":           [(0.5, 0.45), (1.5, 0.18), (2.5, 0.06)],
+    "total_bases":    [(0.5, 0.64), (1.5, 0.50), (2.5, 0.28), (3.5, 0.12)],
+    "hits_runs_rbis": [(0.5, 0.78), (1.5, 0.58), (2.5, 0.40), (3.5, 0.24), (4.5, 0.12)],
+    # Strikeouts: line-conditional rates (8.5 line only offered for aces → P(Over)≈40%)
+    # FIX: old 8.5 rate was 0.19 (raw MLB avg), corrected to 0.40 (conditional on line)
+    "strikeouts":     [(3.5, 0.72), (4.5, 0.63), (5.5, 0.54), (6.5, 0.47), (7.5, 0.42), (8.5, 0.40), (9.5, 0.35), (10.5, 0.28)],
+    # Earned runs: FIX: 0.5 rate was 0.42 (badly too low), corrected to 0.88 (real ER/start)
+    "earned_runs":    [(0.5, 0.88), (1.5, 0.62), (2.5, 0.38), (3.5, 0.20)],
+    "fantasy_hitter": [(15.0, 0.55), (20.0, 0.42), (25.0, 0.30), (30.0, 0.20)],
+    "fantasy_pitcher":[(30.0, 0.55), (35.0, 0.44), (40.0, 0.33), (45.0, 0.24)],
+    "pitching_outs":  [(14.5, 0.58), (17.5, 0.44), (20.5, 0.28)],
+    "hits_allowed":   [(3.5, 0.52), (4.5, 0.38), (5.5, 0.25)],
 }
 
 _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
@@ -492,7 +498,7 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
                 continue
 
             # EV at DFS standard -110 payout
-            ev_pct = (prob - 0.5238) / 0.5238 * 100   # vs. break-even at -110
+            ev_pct = (prob - 0.50) / 0.50 * 100   # FIX: Streaks = even money break-even
 
             signals = _count_signals(prop_type, side, prob)
             conf    = streak_confidence(prob, ev_pct, signals)

@@ -25,11 +25,13 @@ logger = logging.getLogger(__name__)
 
 # Payout multipliers by number of legs — Underdog PowerPlay defaults.
 # These are the confirmed multipliers from the Dual-Platform Directive.
+# FIX: 5-leg multiplier was 10.0 — should be 20.0 (confirmed Underdog STANDARD)
+# Was inconsistent with calibration_layer._UD_MULTIPLIERS which correctly had 20.0
 _UD_POWERPLAY_MULT: dict[int, float] = {
     2: 3.5,
     3: 6.0,
     4: 10.0,
-    5: 10.0,
+    5: 20.0,
 }
 _DEFAULT_PAYOUT_MULTIPLIER = 3.5   # fallback if leg count not in table
 
