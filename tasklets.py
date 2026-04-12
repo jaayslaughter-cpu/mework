@@ -327,6 +327,7 @@ MIN_EV_THRESH     = 0.03   # 3% minimum edge to queue a bet (ratio scale, e.g. 0
 MIN_EV_THRESH_PCT = 3.0    # same threshold in percent scale (e.g. 8.5) — used by Group B agents
 CAP_FLOOR = 0.5
 CAP_CEIL  = 2.0
+_MAX_LEGS_PER_TEAM = 3  # Team concentration cap: max legs per team per parlay
 
 # ── Railway-safe service connections ─────────────────────────────────────────
 
@@ -3072,6 +3073,16 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
     return False
 
 
+def _team_concentration_ok(legs: list[dict], max_per_team: int = _MAX_LEGS_PER_TEAM) -> bool:
+    """Return True if no single team has more than max_per_team legs."""
+    from collections import Counter  # noqa: PLC0415
+    teams = [leg.get("team", "") for leg in legs if leg.get("team")]
+    if not teams:
+        return True  # can't check — pass through
+    counts = Counter(teams)
+    return max(counts.values()) <= max_per_team
+
+
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> list[dict]:
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
 
@@ -3233,10 +3244,15 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
             if _are_legs_correlated(two):
                 continue
 
+            # NEW: Team concentration cap
+            if not _team_concentration_ok(two):
+                logger.warning("[%s] Legs dropped — team concentration > %d", agent_name, _MAX_LEGS_PER_TEAM)
+                continue
+
             if max_legs >= 3:
                 for k in range(j + 1, len(top)):
                     three = two + [top[k]]
-                    if not _are_legs_correlated(three):
+                    if not _are_legs_correlated(three) and _team_concentration_ok(three):
                         key = "|".join(sorted(
                             f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
                             for lg in three
