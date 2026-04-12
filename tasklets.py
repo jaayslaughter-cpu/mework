@@ -2059,6 +2059,7 @@ class _BaseAgent:
                 ("form_adj",        float(prop.get("_form_adj",            0.0)) * 100.0),
                 ("park_factor",     float(prop.get("_park_factor_adj",     0.0)) * 100.0),
                 ("arsenal_k_sig",   float(prop.get("_arsenal_k_sig_nudge", 0.0)) * 100.0 * _fw.get("csw_pct", 1.0)),
+                ("rolling_window",  float(prop.get("_rolling_adj",         0.0)) * 100.0),
                 ("game_env",        _game_env_nudge),
                 ("streak",          _streak_nudge),
                 ("last_10",         _last10_nudge),
