@@ -249,12 +249,13 @@ async def job_agents():
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
         start = time.time()
-        await loop.run_in_executor(None, run_agent_tasklet)
+        dispatched = await loop.run_in_executor(None, run_agent_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
-        # Record that dispatch ran today — cross-process guard for Railway restarts
-        _record_dispatch_ran_today()
+        # Only record dispatch if picks were actually sent (run_agent_tasklet returns True)
+        if dispatched:
+            _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
