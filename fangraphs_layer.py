@@ -192,24 +192,24 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
         "csw_pct":   0.275,   # FG 2025: ~27.5% (was 0.280)
         "swstr_pct": 0.110,   # FG 2025: ~11.0% (unchanged)
         "k_bb_pct":  0.130,   # FG 2025: ~13.0% (unchanged)
-        "xfip":      4.08,    # FG 2025 (was 4.15)    # FG 2025: ~4.15  (was 4.20)
-        "siera":     4.08,    # FG 2025 (was 4.15)    # FG 2025: ~4.15  (was 4.20)
-        "fip":       4.08,    # FG 2025 (was 4.15)    # FG 2025: ~4.15  (was 4.20)
+        "xfip":      4.08,    # FG 2025 (was 4.15)  
+        "siera":     4.08,    # FG 2025 (was 4.15)  
+        "fip":       4.08,    # FG 2025 (was 4.15)  
         "hr_fb_pct": 0.119,   # FG 2025: 11.9% (confirmed VSiN Feb 2026): ~11.8% (was 0.120)
         "lob_pct":   0.720,   # unchanged
         "babip":     0.289,   # FG 2025: .289 (confirmed VSiN Feb 2026): ~0.298 (was 0.300)
     },
     "batter": {
         "wrc_plus":    100.0,  # by definition
-        "woba":        0.308,  # FG 2025 (was 0.312)  # FG 2025: ~0.312 (was 0.320)
-        "iso":         0.160,  # FG 2025: elevated power (was 0.158)  # FG 2025: ~0.158 (was 0.150 — power has increased)
-        "babip":       0.289,  # FG 2025: .289 (confirmed VSiN Feb 2026)  # FG 2025: ~0.298 (was 0.300)
-        "o_swing":     0.316,  # FG 2025 (was 0.318)  # FG 2025: ~31.8% (was 0.310)
+        "woba":        0.308,  # FG 2025 (was 0.312)
+        "iso":         0.160,  # FG 2025: elevated power (was 0.158)
+        "babip":       0.289,  # FG 2025: .289 (confirmed VSiN Feb 2026)
+        "o_swing":     0.316,  # FG 2025 (was 0.318)
         "z_contact":   0.848,  # FG 2025: ~84.8% (was 0.850)
-        "hr_fb_pct":   0.119,  # FG 2025: 11.9% (confirmed VSiN Feb 2026)  # FG 2025: ~11.8% (was 0.120)
-        "k_pct":       0.222,  # FG 2025: 22.2% (confirmed VSiN Feb 2026)  # FG 2025: ~22.3% (was 0.230)
-        "bb_pct":      0.084,  # FG 2025: 8.4% (confirmed VSiN Feb 2026)  # FG 2025: ~8.6%  (was 0.085)
-        "slg":         0.410,  # FG 2025 (was 0.411)  # FG 2025: ~0.411 (was 0.405) — #3 feature for TB (16% importance)
+        "hr_fb_pct":   0.119,  # FG 2025: 11.9% (confirmed VSiN Feb 2026)
+        "k_pct":       0.222,  # FG 2025: 22.2% (confirmed VSiN Feb 2026)
+        "bb_pct":      0.084,  # FG 2025: 8.4% (confirmed VSiN Feb 2026)
+        "slg":         0.410,  # FG 2025 (was 0.411)
         "xbh_per_game": 0.50,  # extra base hits per game — #1 feature for TB (45% importance)
     },
 }
@@ -251,7 +251,6 @@ def _parse_batters(rows: list[dict]) -> dict[str, dict[str, float]]:
         if not key:
             continue
         # Compute xbh_per_game = (2B + 3B + HR) / G — #1 feature for TB props (45% importance)
-        # Source: baseball-models feature importance analysis (gmalbert/baseball-predictions)
         _hr  = _safe_float(row.get("HR"),  0.0)
         _2b  = _safe_float(row.get("2B"),  0.0)
         _3b  = _safe_float(row.get("3B"),  0.0)
@@ -340,7 +339,6 @@ def _load() -> None:
         return
 
     # ── Live fetch — prefer current year data, blend with prior if sample small ─
-    # min=10 PA threshold means 2026 data appears from Opening Day.
     # If 2026 has <100 players (early season), merge with 2025 for stability.
     for yr in (season, season - 1):
         logger.info("[FG] Fetching season %d from FanGraphs API...", yr)
@@ -363,9 +361,7 @@ def _load() -> None:
         )
 
         # ── Stability-weighted season blend ──────────────────────────────────────
-        # Uses SeasonBlender to weight each stat individually by sample reliability.
         # Early season: ERA→ mostly 2025; K%→ mostly 2026 (stabilizes fast).
-        # Transitions smoothly: all 2025 on Opening Day → all 2026 by mid-season.
         # Always blends — even in August 2026 has more data than 2025 for rate stats.
         if yr == season:
             try:
@@ -684,8 +680,6 @@ def get_pitcher(name: str) -> dict[str, float]:
 
 
 # ─── Probability adjustment engine ───────────────────────────────────────────
-
-# Hard cap: no single FanGraphs nudge exceeds +/-0.030
 _FG_CAP = 0.030
 
 _PROP_GROUPS: dict[str, list[str]] = {

@@ -60,19 +60,17 @@ logger = logging.getLogger("propiq.marcel")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-# 2024–2025 MLB baseline rates used as regression anchors
 # FIX: Updated to 2025 MLB actuals (FanGraphs leaderboards)
 _LEAGUE_AVG: dict = {
     # Batter rates
-    "batter_k_pct":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026)   # FG 2025: 22.3% (was 0.228)
-    "batter_bb_pct": 0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026)   # FG 2025: 8.6%  (was 0.083)
-    "batter_hr_pa":  0.033,   # FG 2025: elevated power   # 2025: 1.24 HR/game ÷ 38.5 PA (was 0.033)
-    "batter_woba":   0.308,   # FG 2025: ~.308 (was 0.312)   # FG 2025: .312  (was 0.315)
-    "batter_iso":    0.160,   # FG 2025: elevated power (was 0.158)   # FG 2025: .158  (was 0.165 — power has risen)
+    "batter_k_pct":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
+    "batter_bb_pct": 0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
+    "batter_hr_pa":  0.033,   # FG 2025: elevated power 
+    "batter_woba":   0.308,   # FG 2025: ~.308 (was 0.312) 
+    "batter_iso":    0.160,   # FG 2025: elevated power (was 0.158) 
     # Pitcher rates (rates *allowed*)
-    "pitcher_k_pct":  0.222,  # FG 2025: 22.2% (confirmed)  # FG 2025: 22.3% (was 0.228)
-    "pitcher_bb_pct": 0.084,  # FG 2025: 8.4% (confirmed)  # FG 2025: 8.6%  (was 0.083)
+    "pitcher_k_pct":  0.222,  # FG 2025: 22.2% (confirmed)
+    "pitcher_bb_pct": 0.084,  # FG 2025: 8.4% (confirmed)
     "pitcher_hr9":    1.28,   # FG 2025: ~1.28 HR/9 (was 1.30)
 }
 
@@ -89,9 +87,6 @@ _BATTER_REGRESSION_PA  = 200   # Marcel spec: regress batters at 200 PA
 _PITCHER_REGRESSION_BF = 250   # Marcel spec: regress pitchers at 250 BF
 
 _MARCEL_WEIGHTS = [5, 4, 3]    # most-recent year first
-
-
-# ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
 
@@ -402,7 +397,6 @@ def _build_pitcher_projections(
         )
 
         # Pitcher age multiplier is *inverted* vs batter:
-        # K% (strikeout ability) declines with age → use forward age_mult directly
         # BB% and HR/9 (control and flyball) use inverted mult for rates *allowed*
         age_mult_base     = _age_multiplier(proj_age)
         age_mult_inverted = 1.0 / age_mult_base if age_mult_base > 0 else 1.0
@@ -515,7 +509,6 @@ class MarcelLayer:
                 "[Marcel] No FanGraphs data retrieved — trying statsapi.mlb.com 2025 fallback."
             )
             # FIX: statsapi single-season fallback when FanGraphs 403s.
-            # Uses 2025 season totals as a 1-year Marcel proxy (no 3-year weighting).
             # Gives XGBoost real per-player variance instead of all zeros.
             try:
                 import requests as _req  # noqa: PLC0415

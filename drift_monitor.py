@@ -27,24 +27,104 @@ DISCORD_WEBHOOK = os.getenv(
     "https://discordapp.com/api/webhooks/1484795164961800374/"
     "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM",
 )
-BRIER_LEDGER_PATH = os.getenv("BRIER_LEDGER_PATH", "brier_score_ledger.json")
 DRIFT_THRESHOLD_PCT = 15.0   # % increase in Brier score that triggers alert
 DRIFT_ABSOLUTE_MAX = 0.22    # absolute Brier ceiling before governor kicks in
 
+# Legacy JSON path (used only as fallback when DB unavailable)
+_BRIER_JSON_FALLBACK = "/tmp/brier_score_ledger.json"
 
-# ── Ledger I/O ────────────────────────────────────────────────────────────────
 
-def load_brier_ledger() -> dict:
+# ── Postgres helpers ───────────────────────────────────────────────────────────
+
+def _get_brier_conn():
+    import psycopg2  # noqa: PLC0415
+    return psycopg2.connect(os.environ["DATABASE_URL"])
+
+
+def _ensure_brier_table() -> None:
     try:
-        with open(BRIER_LEDGER_PATH) as fh:
-            return json.load(fh)
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS brier_ledger (
+                id SERIAL PRIMARY KEY,
+                recorded_at TIMESTAMPTZ DEFAULT NOW(),
+                brier_score FLOAT NOT NULL
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"brier_ledger table ensure failed: {e}")
+
+
+def _save_brier_pg(score: float) -> None:
+    """Persist Brier score to Postgres. Falls back to JSON if DB unavailable."""
+    try:
+        _ensure_brier_table()
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO brier_ledger (brier_score) VALUES (%s)",
+            (score,),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.debug("[DriftMonitor] Brier %.4f saved to Postgres", score)
+    except Exception as e:
+        logger.error(f"brier_ledger DB save failed, falling back to JSON: {e}")
+        _save_brier_json(score)
+
+
+def _load_last_brier_pg() -> float:
+    """Load the previous Brier score from Postgres (or JSON fallback)."""
+    try:
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT brier_score FROM brier_ledger ORDER BY id DESC LIMIT 2"
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        if len(rows) >= 2:
+            return float(rows[1][0])   # second-most-recent = previous week
+        elif len(rows) == 1:
+            return float(rows[0][0])   # only one record → use it as "old"
+        return 0.18  # no history yet
+    except Exception as e:
+        logger.warning(f"brier_ledger DB load failed, falling back to JSON: {e}")
+        return _load_last_brier_json()
+
+
+def _save_brier_json(score: float) -> None:
+    """JSON fallback for Brier persistence."""
+    try:
+        if os.path.exists(_BRIER_JSON_FALLBACK):
+            with open(_BRIER_JSON_FALLBACK) as f:
+                ledger = json.load(f)
+        else:
+            ledger = {"history": [], "last_score": 0.18}
+        ledger.setdefault("history", []).append(round(score, 4))
+        ledger["history"] = ledger["history"][-52:]
+        ledger["last_score"] = round(score, 4)
+        with open(_BRIER_JSON_FALLBACK, "w") as f:
+            json.dump(ledger, f, indent=2)
+    except Exception as e:
+        logger.error(f"brier JSON fallback also failed: {e}")
+
+
+def _load_last_brier_json() -> float:
+    try:
+        if os.path.exists(_BRIER_JSON_FALLBACK):
+            with open(_BRIER_JSON_FALLBACK) as f:
+                data = json.load(f)
+            return float(data.get("last_score", 0.18))
     except Exception:
-        return {"history": [], "last_score": 0.18}
-
-
-def save_brier_ledger(ledger: dict) -> None:
-    with open(BRIER_LEDGER_PATH, "w") as fh:
-        json.dump(ledger, fh, indent=2)
+        pass
+    return 0.18
 
 
 # ── Drift Check ───────────────────────────────────────────────────────────────
@@ -106,16 +186,14 @@ def _send_drift_alert(brier: float, drift_pct: float) -> None:
 def record_brier(new_score: float) -> bool:
     """Record a Brier score and check for drift.
 
+    Persists to Postgres ``brier_ledger`` table. Falls back to JSON file
+    at /tmp/brier_score_ledger.json if DATABASE_URL is unavailable.
+
     Returns True if drift was detected (Discord alert fired).
     Should be called from ``calibrate_model.py`` weekly.
     """
-    ledger = load_brier_ledger()
-    old_score = ledger.get("last_score", 0.18)
-
-    ledger.setdefault("history", []).append(round(new_score, 4))
-    ledger["history"] = ledger["history"][-52:]  # keep 52 weeks
-    ledger["last_score"] = round(new_score, 4)
-    save_brier_ledger(ledger)
+    old_score = _load_last_brier_pg()
+    _save_brier_pg(round(new_score, 4))
 
     drift = check_for_model_drift(new_score, old_score)
     logger.info(
@@ -127,4 +205,15 @@ def record_brier(new_score: float) -> bool:
 
 def get_current_brier() -> float:
     """Return the most recently recorded Brier score."""
-    return float(load_brier_ledger().get("last_score", 0.18))
+    try:
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT brier_score FROM brier_ledger ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return float(row[0])
+    except Exception:
+        pass
+    return _load_last_brier_json()

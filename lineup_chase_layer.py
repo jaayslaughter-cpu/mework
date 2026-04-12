@@ -48,8 +48,6 @@ _LEAGUE_Z_CONTACT = 0.850
 # Chase thresholds
 _K_TARGET_THRESHOLD    = 0.31   # O-Swing% above this → K-target lineup
 _DISCIPLINE_THRESHOLD  = 0.25   # O-Swing% below this → discipline trap
-
-# Max probability adjustment (cap ±4pp from lineup chase alone)
 _MAX_ADJ = 0.040
 
 
@@ -124,7 +122,6 @@ def get_lineup_chase_score(
             z_contacts.append(fg.get("z_contact", _LEAGUE_Z_CONTACT))
         else:
             # FIX: FanGraphs 403 — use statsapi.mlb.com 2026 season k_pct + Statcast sc_whiff
-            # statsapi gives real K% from PA/SO counts this season (free, no key)
             _used_fallback = False
             if mlbam:
                 try:
@@ -177,14 +174,12 @@ def get_lineup_chase_score(
         is_k_target     = True
         is_disc_trap    = False
         # High-chase lineup → boost K-over probability
-        # Scale: 31%→neutral, 36%→+2pp, 41%→+4pp (cap at 4pp)
         k_adj = min(_MAX_ADJ, (avg_chase - _K_TARGET_THRESHOLD) / 0.10 * 0.020)
     elif avg_chase < _DISCIPLINE_THRESHOLD:
         difficulty      = "DISCIPLINE_TRAP"
         is_k_target     = False
         is_disc_trap    = True
         # Disciplined lineup → fade pitcher K-over
-        # Scale: 25%→neutral, 20%→-2pp, 15%→-4pp (cap at -4pp)
         k_adj = max(-_MAX_ADJ, (avg_chase - _DISCIPLINE_THRESHOLD) / 0.10 * 0.020)
     else:
         difficulty   = "NEUTRAL"

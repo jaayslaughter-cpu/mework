@@ -32,4 +32,4 @@ EXPOSE 8080
 
 # railway.toml startCommand overrides this in production.
 # Local docker run fallback uses api_server (ML inference layer).
-CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["python", "orchestrator.py"]

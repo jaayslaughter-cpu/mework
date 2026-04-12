@@ -215,8 +215,6 @@ def _build_game_features(game: dict, team_stats: dict[int, dict], season: int) -
         )
 
     h = {}  # feature dict
-
-    # Team win rates and run differentials
     h["home_win_pct"]    = _ts(home_id, "win_pct",  "win_pct")
     h["away_win_pct"]    = _ts(away_id, "win_pct",  "win_pct")
     h["win_pct_diff"]    = h["home_win_pct"] - h["away_win_pct"]
@@ -232,8 +230,6 @@ def _build_game_features(game: dict, team_stats: dict[int, dict], season: int) -
     h["exp_total"]       = h["home_rs_per_g"] + h["away_rs_per_g"]
     h["scoring_env"]     = h["home_rs_per_g"] + h["away_rs_per_g"] + \
                            h["home_ra_per_g"] + h["away_ra_per_g"]  # 4-way avg
-
-    # Team pitching
     h["home_era"]        = _ts(home_id, "era",  "era")
     h["away_era"]        = _ts(away_id, "era",  "era")
     h["era_diff"]        = h["away_era"] - h["home_era"]
@@ -306,7 +302,6 @@ def _predict_game(features: dict) -> dict:
     h = features
 
     # ── Home win probability ─────────────────────────────────────────────────
-    # Logistic: log-odds = intercept + sum(coef * feature)
     # Calibrated from ~10,000 MLB games (2019-2025, regular season only)
     logit_win = (
           0.00                              # intercept (balanced)
@@ -321,7 +316,6 @@ def _predict_game(features: dict) -> dict:
     home_win_prob = max(0.30, min(0.75, home_win_prob))
 
     # ── Over/Under probability ───────────────────────────────────────────────
-    # Uses expected total and pitching quality
     # FG 2025: League median ~8.60 runs/game total (2×4.30 R/G)
     exp_total   = h["exp_total"]
     avg_sp_era  = (h["home_sp_era"] + h["away_sp_era"]) / 2
@@ -349,7 +343,6 @@ def _predict_game(features: dict) -> dict:
     cover_prob = max(0.30, min(0.70, cover_prob))
 
     # ── Confidence tier ──────────────────────────────────────────────────────
-    # Edge over 50% threshold
     max_edge = max(
         abs(home_win_prob - 0.50),
         abs(over_prob - 0.50),

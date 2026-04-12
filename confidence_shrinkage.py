@@ -52,13 +52,11 @@ logger = logging.getLogger("propiq.confidence")
 # Used as fallback when player-specific data is absent
 # Adapted from baseball-sims/src/simulation/constants.py
 # ---------------------------------------------------------------------------
-
-# FIX: Updated to 2025 MLB actuals
 LEAGUE_RATES = {
-    "K":   0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026)   # FG 2025: 22.3% (was 0.224)
-    "BB":  0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026)   # FG 2025: 8.6%  (was 0.085)
+    "K":   0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
+    "BB":  0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
     "HBP": 0.011,
-    "HR":  0.033,   # FG 2025: elevated power   # 2025: 1.24 HR/game ÷ 38.5 PA (was 0.030)
+    "HR":  0.033,   # FG 2025: elevated power 
     "3B":  0.004,
     "2B":  0.047,
     "1B":  0.143,
@@ -74,7 +72,7 @@ WOBA_WEIGHTS = {
     "3B":  1.569,
     "HR":  2.004,
 }
-LEAGUE_WOBA = 0.308   # FG 2025: ~.308 (was 0.312)   # FIX: FG 2025 actual (was 0.310)
+LEAGUE_WOBA = 0.308   # FG 2025: ~.308 (was 0.312) 
 
 # ---------------------------------------------------------------------------
 # Season depth: maps games played this season → confidence in data
@@ -481,8 +479,6 @@ def blend_matchup_rates(
 # ---------------------------------------------------------------------------
 # Step 5: Per-prop-type thin-data shrinkage
 # ---------------------------------------------------------------------------
-
-# Sample count thresholds for per-prop-type confidence
 _THIN_MIN_SAMPLES  = 25    # below this: maximum shrinkage (confidence = 0.10)
 _THIN_FULL_SAMPLES = 400   # above this: no thin-data shrinkage applied
 
