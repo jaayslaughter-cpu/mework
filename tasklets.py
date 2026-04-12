@@ -3868,6 +3868,16 @@ def run_agent_tasklet() -> bool:
     all_parlays: list[dict] = []
 
     for cls in _AGENT_CLASSES:
+        # ── Freeze gate: skip agents with 20+ consecutive negative-ROI days ──
+        _agent_class_name = getattr(cls, "name", cls.__name__)
+        try:
+            from agent_diagnostics import get_frozen_agents as _get_frozen  # noqa: PLC0415
+            _frozen_set = _get_frozen()
+            if _agent_class_name in _frozen_set:
+                logger.info("[Dispatch] %s is FROZEN — skipping this cycle.", _agent_class_name)
+                continue
+        except Exception:
+            pass  # fail-open — never skip an agent due to diagnostics error
         agent      = cls(hub, model)
         agent_hits: list[dict] = []
 
@@ -4982,7 +4992,15 @@ def run_grading_tasklet() -> None:
     except Exception as _void_err:
         logger.debug("[GradingTasklet] Stale OPEN void sweep failed: %s", _void_err)
 
-    # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
+        # ── Per-agent nightly diagnostics ────────────────────────────────────────
+        try:
+            from agent_diagnostics import run_agent_diagnostics as _run_diag  # noqa: PLC0415
+            _run_diag()
+            logger.info("[Grading] Agent diagnostics completed.")
+        except Exception as _diag_err:
+            logger.warning("[Grading] Agent diagnostics failed: %s", _diag_err)
+
+        # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
     # Postgres is the primary store; Parquet is the backup.  If DB is wiped, we
     # XGBoostTasklet reads from Postgres; the Parquet files are a safety net only.
     try:
