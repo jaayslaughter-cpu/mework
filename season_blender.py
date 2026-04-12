@@ -12,31 +12,35 @@ At game 13 of 162, 2026 season stats are too small a sample to trust alone:
 
 SOLUTION
 --------
-Stat-specific weighting based on FanGraphs stability research.
-Each stat has a PA/BF threshold at which it stabilizes (becomes reliable).
-Before that threshold, blend with 2025 data:
+Research-backed blend weighting based on how much to trust 2026 in early April.
+Each stat has a PA/BF threshold calibrated so that at ~56 PA (13 games) the
+2026 weight matches research targets (e.g. K% ~30%, BABIP ≤15%).
 
     blend(stat) = w * value_2026 + (1 - w) * value_2025
-    where w = min(1.0, sample_size / stability_threshold)
+    where w = min(1.0, sample_size / blend_threshold)
 
 This transitions smoothly from 100% 2025 at game 1 → 100% 2026 at season midpoint.
 
-STABILITY THRESHOLDS (from FanGraphs research)
------------------------------------------------
-Pitchers (BF):       K% ~150   BB% ~250   xFIP/ERA ~750
-Batters  (PA):       K% ~60    BB% ~120   wOBA ~300   ISO ~400
+STABILITY THRESHOLDS (research-calibrated for blend weights, not raw reliability)
+----------------------------------------------------------------------------------
+Batters (PA):   K%/BB% ~190   xwOBA/Barrel% ~160   wOBA ~300   BABIP ~380   ISO ~400
+Pitchers (BF):  K% ~230       xFIP ~315             ERA ~600    LOB%/BABIP ~800
+
+Early-April (13 games) blend weight targets:
+  Batter K%=29%  xwOBA=35%  wOBA=19%  BABIP=15%  ISO=14%
+  Pitcher K%=30%  xFIP=22%  ERA=12%   LOB%=9%
 
 USAGE
 -----
     from season_blender import SeasonBlender
     blender = SeasonBlender()
-    
+
     # Blend a pitcher's 2026 and 2025 stat dicts
     blended = blender.blend_pitcher(stats_2026, stats_2025)
-    
+
     # Blend a batter's stats
     blended = blender.blend_batter(stats_2026, stats_2025)
-    
+
     # Get current weights for inspection/logging
     weights = blender.pitcher_weights()
 """
@@ -53,36 +57,55 @@ _OPENING_DAY = datetime.date(2026, 3, 27)
 _SEASON_GAMES = 162
 _SEASON_DAYS  = 183   # ~6 month season
 
-# PA/BF stability thresholds from FanGraphs research
-# Lower = stabilizes faster = trust 2026 sooner
+# Blend thresholds (PA/BF) calibrated to research-backed early-season weights.
+# These are NOT FanGraphs reliability thresholds — they're tuned so that
+# at ~56 PA / ~69 BF (13 games, April) the 2026 weight matches research targets.
 _PITCHER_THRESHOLDS = {
-    "k_rate":    150,   # K%:  fast stabilizer
-    "bb_rate":   250,   # BB%: medium
-    "k_bb_pct":  200,   # K-BB: medium
-    "csw_pct":   200,   # CSW: medium (contact quality signal)
-    "swstr_pct": 200,   # SwStr: medium
-    "xfip":      300,   # xFIP: medium-slow (defense-independent)
-    "siera":     350,   # SIERA: slow
-    "fip":       400,   # FIP: slow
-    "era":       750,   # ERA: very slow (BABIP/sequencing noise)
+    # Rate stats (faster stabilizers for pitchers)
+    "k_rate":    230,   # K%: ~30% 2026 in April
+    "bb_rate":   260,   # BB%: slightly slower than K%
+    "k_bb_pct":  240,   # K-BB
+    "csw_pct":   260,   # CSW: medium
+    "swstr_pct": 260,   # SwStr: medium
+    # Defense-independent ERA estimators (medium-slow)
+    "xfip":      315,   # xFIP: ~22% 2026 in April
+    "siera":     360,   # SIERA: slower
+    "fip":       380,   # FIP: slower (contains HR luck)
+    # Outcome-heavy (slow)
+    "era":       600,   # ERA: ~12% 2026 in April (~85% 2025 anchor)
     "whip":      500,   # WHIP: slow
-    "hr_fb_pct": 500,   # HR/FB: very noisy
-    "lob_pct":   800,   # LOB%: pure luck, don't trust 2026 until very late
+    "hr_fb_pct": 550,   # HR/FB: luck-driven
+    # Pure luck stats — essentially never trust April 2026
+    "lob_pct":   800,   # LOB%: pure sequencing luck
     "babip":     800,   # BABIP: pure luck
 }
 
 _BATTER_THRESHOLDS = {
-    "k_pct":      60,   # K%: fastest stabilizer in baseball
-    "bb_pct":    120,   # BB%: fast
-    "k_bb_pct":  100,   # K-BB: fast
-    "o_swing":   150,   # O-Swing: medium
-    "z_contact": 150,   # Z-Contact: medium
-    "csw_pct":   200,   # CSW: medium
-    "woba":      300,   # wOBA: slow
-    "slg":       350,   # SLG: slow
-    "iso":       400,   # ISO: very slow
-    "hr_fb_pct": 500,   # HR/FB: very slow
-    "babip":     800,   # BABIP: luck
+    # Statcast-style (fast stabilizers — lean into 2026 a bit sooner)
+    "xwoba":      160,   # xwOBA: Statcast, trust 2026 at ~35% in April
+    "xba":        160,   # xBA:   Statcast, same
+    "barrel_pct": 175,   # Barrel%: reliable within 160-200 PA
+    "hard_hit_pct": 175, # Hard-hit%: same
+    "exit_velo":  175,   # Exit velo: same
+    # Rate stats (medium-fast stabilizers)
+    "k_pct":      190,   # K%: fast, but keep 2026 ≤30% in April
+    "bb_pct":     190,   # BB%: similar to K%
+    "k_bb_pct":   190,   # K-BB combined
+    "o_swing":    220,   # O-Swing: medium
+    "z_contact":  220,   # Z-Contact: medium
+    "csw_pct":    250,   # CSW: medium
+    # Outcome stats (slow stabilizers)
+    "woba":       300,   # wOBA: slow (300 PA to stabilize)
+    "slg":        280,   # SLG: slower than rate stats
+    "iso":        400,   # ISO/power: very slow
+    "hr_fb_pct":  500,   # HR/FB: very slow — keep 2025-heavy
+    # Luck-driven (essentially don't trust 2026 in April at all)
+    "babip":      380,   # BABIP: luck-driven, stay ≥85% 2025 in April
+    # Platoon splits — require much bigger per-split samples
+    "woba_vs_hand":   350,  # vs-LHP or vs-RHP wOBA
+    "k_pct_vs_hand":  300,  # vs-hand K%
+    "bb_pct_vs_hand": 350,  # vs-hand BB%
+    "iso_vs_hand":    450,  # vs-hand ISO
 }
 
 
@@ -105,7 +128,9 @@ class SeasonBlender:
         self._sp_rate   = starts_per_game
 
     def _days_played(self) -> int:
-        return max(0, (datetime.date.today() - self._opening).days)
+        from zoneinfo import ZoneInfo
+        today_pt = datetime.datetime.now(ZoneInfo("America/Los_Angeles")).date()
+        return max(0, (today_pt - self._opening).days)
 
     def _games_played(self) -> float:
         """Estimated team games played."""
@@ -214,11 +239,12 @@ class SeasonBlender:
         )
         logger.info(
             "[Blend] Pitcher: K%%=%.0f%% xFIP=%.0f%% ERA=%.0f%% "
-            "| Batter: K%%=%.0f%% wOBA=%.0f%% ISO=%.0f%%",
+            "| Batter: K%%=%.0f%% xwOBA=%.0f%% wOBA=%.0f%% ISO=%.0f%%",
             pw.get("k_rate", 0) * 100,
             pw.get("xfip",   0) * 100,
             pw.get("era",    0) * 100,
             bw.get("k_pct",  0) * 100,
+            bw.get("xwoba",  0) * 100,
             bw.get("woba",   0) * 100,
             bw.get("iso",    0) * 100,
         )
