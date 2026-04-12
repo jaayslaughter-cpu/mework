@@ -957,7 +957,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             prop.setdefault("_k_pct",   prop.get("k_rate")  or prop.get("k_pct",  0.223))  # FIX: 0.225→0.223 (2024 actual)
             prop.setdefault("_bb_pct",  prop.get("bb_rate") or prop.get("bb_pct", 0.086))  # FIX: 0.080→0.086 (2024 actual)
             prop.setdefault("_whip",    prop.get("whip",    1.28))
-            prop.setdefault("_csw_pct", prop.get("csw_pct", 0.275))  # 2024: ~27.5%
+            prop.setdefault("_csw_pct", prop.get("csw_pct", 0.275))  # 2025: ~27.5%
             # _starter_ip_projection: use FanGraphs ip/gs if available
             _fg_ip  = prop.get("xfip")   # rough proxy; actual ip/gs not fetched yet
             _fg_gs  = 1

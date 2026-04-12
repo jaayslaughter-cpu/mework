@@ -50,14 +50,14 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/2.0)"}
 # League-average fallbacks used when a team has <5 games played
 _LEAGUE_AVG = {
     "win_pct":   0.500,
-    "rs_per_g":  4.38,   # FIX: 2024 MLB actual R/G (was 4.50)
-    "ra_per_g":  4.38,   # FIX: 2024 MLB actual R/G (was 4.50)
-    "era":       4.15,   # FIX: 2024 MLB actual ERA (was 4.20)
+    "rs_per_g":  4.30,   # FG 2025: actual R/G (was 4.38 in 2024)
+    "ra_per_g":  4.30,   # FG 2025: actual R/G (was 4.38 in 2024)
+    "era":       4.08,   # FG 2025: actual ERA (was 4.15 in 2024)
     "whip":      1.28,
     "k9":        8.80,
     "ba":        0.248,
     "slg":       0.410,
-    "sp_era":    4.15,   # FIX: 2024 MLB actual SP ERA (was 4.20)
+    "sp_era":    4.08,   # FG 2025: actual SP ERA (was 4.15 in 2024)
     "sp_whip":   1.28,
     "sp_k9":     8.80,
 }
@@ -322,7 +322,7 @@ def _predict_game(features: dict) -> dict:
 
     # ── Over/Under probability ───────────────────────────────────────────────
     # Uses expected total and pitching quality
-    # FIX: League median ~8.76 runs/game total (2×4.38 R/G, was 8.80)
+    # FG 2025: League median ~8.60 runs/game total (2×4.30 R/G)
     exp_total   = h["exp_total"]
     avg_sp_era  = (h["home_sp_era"] + h["away_sp_era"]) / 2
     avg_era     = (h["home_era"] + h["away_era"]) / 2
@@ -330,8 +330,8 @@ def _predict_game(features: dict) -> dict:
     logit_over = (
           0.00
         + 0.35 * (exp_total - 8.80)       # teams scoring more = over lean
-        - 0.25 * (avg_sp_era - 4.15)      # FIX: center 4.20→4.15 (2024 MLB ERA)
-        - 0.15 * (avg_era - 4.15)         # FIX: center 4.20→4.15 (2024 MLB ERA)
+        - 0.25 * (avg_sp_era - 4.08)      # FG 2025: center 4.08
+        - 0.15 * (avg_era - 4.08)         # FG 2025: center 4.08
         + 0.10 * h["slg_diff"]            # power hitters = over lean
     )
     over_prob = 1.0 / (1.0 + (2.718281828 ** -logit_over))
