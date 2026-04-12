@@ -48,26 +48,26 @@ MAX_NUDGE = 0.025            # Hard cap — Bayes cannot swing a pick by more th
 # These are the "population hyperparameters" that anchor partial pooling —
 # a 50 PA rookie gets pulled strongly toward these; a 600 PA vet less so.
 # alpha / (alpha + beta) = league mean rate
+# Zip #4 corrections: h_rate was H/BIP not H/PA (19% overconfident on hit props)
 LEAGUE_PRIORS = {
-    "k_rate":  {"alpha": 22.1, "beta": 77.9},   # ~22.1% K rate per PA
-    "h_rate":  {"alpha": 24.2, "beta": 75.8},   # ~24.2% H rate per PA
-    "hr_rate": {"alpha":  3.1, "beta": 96.9},   # ~3.1%  HR rate per PA
-    "tb_rate": {"alpha": 38.5, "beta": 61.5},   # ~38.5% TB rate per PA
-    "bb_rate": {"alpha":  8.5, "beta": 91.5},   # ~8.5%  BB rate per PA
+    "k_rate":  {"alpha": 22.2, "beta": 77.8},   # ~22.2% K rate per PA
+    "h_rate":  {"alpha": 20.4, "beta": 79.6},   # ~20.4% H rate per PA (was 24.2 — H/BIP error)
+    "hr_rate": {"alpha":  3.3, "beta": 96.7},   # ~3.3%  HR rate per PA
+    "tb_rate": {"alpha": 35.0, "beta": 65.0},   # ~35.0% TB rate per PA
+    "bb_rate": {"alpha":  8.4, "beta": 91.6},   # ~8.4%  BB rate per PA
 }
 
 # Maps prop type strings from dispatcher to rate keys above
+# Zip #4: removed 'singles' and 'home_runs' (banned props — must not appear)
 PROP_TO_RATE = {
     "strikeouts":       "k_rate",
     "hits":             "h_rate",
-    "home_runs":        "hr_rate",
     "total_bases":      "tb_rate",
     "hits+runs+rbi":    "h_rate",
     "hits_runs_rbis":   "h_rate",   # normalized form used by calibration_layer._norm_stat
     "walks":            "bb_rate",
     "runs":             "h_rate",
     "rbis":             "h_rate",
-    "singles":          "h_rate",
 }
 
 # Estimated PAs per game per prop type (used in Monte Carlo simulation)
@@ -431,7 +431,7 @@ if __name__ == "__main__":
         {"player": "Freddie Freeman",
          "prop_type": "hits", "line": 1.5, "implied_prob": 0.54},
         {"player": "Aaron Judge",
-         "prop_type": "home_runs", "line": 0.5, "implied_prob": 0.32},
+         "prop_type": "total_bases", "line": 1.5, "implied_prob": 0.52},
     ]
 
     result = apply_bayesian_layer(
