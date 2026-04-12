@@ -311,8 +311,15 @@ AGENT_NAMES = [
     "LineValueAgent",
     "BullpenAgent",
     "WeatherAgent",
-    "SteamAgent",
     "MLEdgeAgent",
+    "UnderDogAgent",
+    "StackSmithAgent",
+    "ChalkBusterAgent",
+    "SharpFadeAgent",
+    "CorrelatedParlayAgent",
+    "PropCycleAgent",
+    "LineupChaseAgent",
+    "LineDriftAgent",
 ]
 KELLY_FRACTION  = 0.25    # Quarter-Kelly
 MAX_UNIT_CAP    = 0.05    # 5 % bankroll cap per bet
@@ -1569,7 +1576,26 @@ def _ensure_bet_ledger() -> None:
             except Exception:
                 conn.rollback()
             # FIX GAP 2: add UNIQUE constraint to prevent duplicate grading
-            # inserted twice in overlapping cycles, causing inflated ROI numbers.
+            # Step 1: remove existing duplicate rows first (keeps lowest id per group)
+            # Without this, CREATE UNIQUE INDEX fails if duplicates already exist.
+            try:
+                cur.execute(
+                    """
+                    DELETE FROM bet_ledger a
+                    USING bet_ledger b
+                    WHERE a.id > b.id
+                      AND a.player_name = b.player_name
+                      AND a.prop_type   = b.prop_type
+                      AND a.line        = b.line
+                      AND a.side        = b.side
+                      AND a.agent_name  = b.agent_name
+                      AND a.bet_date    = b.bet_date
+                    """
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            # Step 2: now safe to create the unique index
             try:
                 cur.execute(
                     """
@@ -2025,11 +2051,14 @@ class _BaseAgent:
                 _game_env_nudge += 1.0
             _streak_nudge = float(prop.get("_streak_adj",  0.0)) * 100.0
             _last10_nudge = float(prop.get("_last10_adj",  0.0)) * 100.0
+            # Reliability weights scale each nudge by how much we trust that signal
+            _fw = prop.get("_feature_weights", {})
             _fb_adjs = [
-                ("bayesian",        float(prop.get("_bayesian_nudge",   0.0)) * 100.0),
-                ("cv_consistency",  float(prop.get("_cv_nudge",         0.0)) * 100.0),
-                ("form_adj",        float(prop.get("_form_adj",         0.0)) * 100.0),
-                ("park_factor",     float(prop.get("_park_factor_adj",  0.0)) * 100.0),
+                ("bayesian",        float(prop.get("_bayesian_nudge",      0.0)) * 100.0 * _fw.get("xwoba",   1.0)),
+                ("cv_consistency",  float(prop.get("_cv_nudge",            0.0)) * 100.0 * _fw.get("wrc_plus", 1.0)),
+                ("form_adj",        float(prop.get("_form_adj",            0.0)) * 100.0),
+                ("park_factor",     float(prop.get("_park_factor_adj",     0.0)) * 100.0),
+                ("arsenal_k_sig",   float(prop.get("_arsenal_k_sig_nudge", 0.0)) * 100.0 * _fw.get("csw_pct", 1.0)),
                 ("game_env",        _game_env_nudge),
                 ("streak",          _streak_nudge),
                 ("last_10",         _last10_nudge),
@@ -2092,19 +2121,19 @@ class _BaseAgent:
                 _xbh = float(prop.get("xbh_per_game", 0.50) or 0.50)
                 bb_rate = _clamp(_xbh / 1.50)   # 0=0, 0.50=avg(0.33), 1.0=elite(0.67)
             else:
-                bb_rate = _clamp(float(prop.get("iso", 0.155) or 0.155) / 0.35)
+                bb_rate = _clamp(float(prop.get("iso", 0.160) or 0.160) / 0.35)
 
             # slot 2: SLG for TB/power props (16% feature importance)
             if _is_tb_prop:
-                _slg = float(prop.get("slg", 0.405) or 0.405)
-                era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.405=avg(0.39), 0.650=elite(1.0)
+                _slg = float(prop.get("slg", 0.410) or 0.410)
+                era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.410=avg(0.40), 0.650=elite(1.0)
             else:
-                era = _clamp((float(prop.get("babip", 0.300) or 0.300) - 0.200) / 0.200)
+                era = _clamp((float(prop.get("babip", 0.289) or 0.289) - 0.200) / 0.200)
 
             # slot 3: batter bb_pct (plate discipline)
-            whip    = _clamp(float(prop.get("bb_pct", 0.085) or 0.085) / 0.20)
+            whip    = _clamp(float(prop.get("bb_pct", 0.084) or 0.084) / 0.20)
             # slot 4: batter K% (inverse contact — higher K = worse contact)
-            shadow_whiff = _clamp(float(prop.get("k_pct", 0.224) or 0.224) / 0.35)
+            shadow_whiff = _clamp(float(prop.get("k_pct", 0.222) or 0.222) / 0.35)
 
         # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
         zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
