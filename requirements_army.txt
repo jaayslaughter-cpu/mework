@@ -39,3 +39,4 @@ shap>=0.45.1
 statsmodels>=0.14.2
 
 # ── Backtesting & data ──
+pyarrow
