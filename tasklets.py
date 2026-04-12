@@ -2485,11 +2485,13 @@ class _BaseAgent:
     @staticmethod
     def _confidence(ev_pct: float) -> int:
         # ev_pct is stored as percentage (3–20 range) in _build_bet
+        # FIX PR#314: lowered thresholds — confidence=6 now starts at >=3% EV (was >=5%)
+        # A realistic -115 prop with 3-5% EV should not be silently dropped.
         if ev_pct >= 15: return 9
         if ev_pct >= 10: return 8
         if ev_pct >= 7:  return 7
-        if ev_pct >= 5:  return 6
-        if ev_pct >= 3:  return 5
+        if ev_pct >= 3:  return 6
+        if ev_pct >= 1:  return 5
         return 4
 
 
@@ -3349,7 +3351,7 @@ class _CorrelatedParlayAgent(_BaseAgent):
         # Pitcher strikeout correlation: high K-lineup + chase-heavy opponent
         if prop_type in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
             chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
-            if chase_adj < 0.03:  # opponent isn't a high-chase lineup
+            if chase_adj < 0.015:  # FIX PR#314: was 0.03 — lowered to match F5Agent gate
                 return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
@@ -3612,7 +3614,7 @@ class _LineupChaseAgent(_BaseAgent):
         if prop_type not in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
             return None
         chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
-        if chase_adj < 0.04:  # only high-chase lineups
+        if chase_adj < 0.02:  # FIX PR#314: was 0.04 (_MAX_ADJ ceiling) — essentially never fired
             return None
         model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         model_prob  = min(95.0, model_prob + chase_adj * 120)

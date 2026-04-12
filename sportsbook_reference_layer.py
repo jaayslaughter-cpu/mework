@@ -317,10 +317,12 @@ def _build_reference_from_draftedge() -> dict[tuple, dict]:
                 name = str(row.get("player_name", "")).strip().lower()
                 if not name:
                     continue
-                for prop_type, pct_col, line_default in [
-                    ("batter_hits",          "hit_pct",  1.5),
-                    ("batter_runs_scored",    "run_pct",  0.5),
-                    ("batter_rbis",           "rbi_pct",  0.5),
+                # FIX PR#314: use internal prop_type keys ("hits"/"runs"/"rbis")
+                # so enrich_props_with_sportsbook() lookups match (_RAW_STAT_TO_PROP maps to these)
+                for prop_type, pct_col, line_diff in [
+                    ("hits",  "hit_pct",  1.5),
+                    ("runs",  "run_pct",  0.5),
+                    ("rbis",  "rbi_pct",  0.5),
                 ]:
                     prob = float(row.get(pct_col, 0) or 0)
                     if prob <= 0:
@@ -329,14 +331,14 @@ def _build_reference_from_draftedge() -> dict[tuple, dict]:
                         "sb_implied_prob":       round(prob, 4),
                         "sb_implied_prob_over":  round(prob, 4),
                         "sb_implied_prob_under": round(1 - prob, 4),
-                        "sb_line":               line_default,
+                        "sb_line":               line_diff,
                         "bookmakers":            ["draftedge"],
                     }
                     reference[(name, prop_type, "under")] = {
                         "sb_implied_prob":       round(1 - prob, 4),
                         "sb_implied_prob_over":  round(prob, 4),
                         "sb_implied_prob_under": round(1 - prob, 4),
-                        "sb_line":               line_default,
+                        "sb_line":               line_diff,
                         "bookmakers":            ["draftedge"],
                     }
 
