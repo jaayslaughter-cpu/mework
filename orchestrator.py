@@ -249,12 +249,13 @@ async def job_agents():
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
         start = time.time()
-        dispatched = await loop.run_in_executor(None, run_agent_tasklet)
+        result = await loop.run_in_executor(None, run_agent_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
-        # Only record dispatch if picks were actually sent (run_agent_tasklet returns True)
-        if dispatched:
+        # Only record dispatch when picks were actually sent (run_agent_tasklet returns True)
+        # Avoids "Dispatch date recorded" log spam every 30s during non-dispatch hours
+        if result is True:
             _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
