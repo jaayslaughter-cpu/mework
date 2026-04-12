@@ -660,6 +660,56 @@ def enrich_pitchers_shadow_whiff(pitcher_props: list[dict]) -> list[dict]:
         enriched.append(prop)
     return enriched
 
+
+# ===========================================================================
+# 6. ARSENAL K-SIGNATURE — Public API
+# ===========================================================================
+
+def compute_arsenal_k_signature(
+    pitcher_mlbam_id: int,
+    layer: "StatcastFeatureLayer | None" = None,
+) -> float | None:
+    """
+    Compute the Arsenal K-Signature for a pitcher from cached Statcast data.
+
+    Arsenal K-Signature = reliability-weighted combination of:
+      - sc_whiff_rate       (weight 0.45)
+      - sc_shadow_whiff_rate (weight 0.30, when available)
+      - csw proxy           (weight 0.25)
+
+    Formula from baseball_simulator_v2 WeightedRBFSimilarity stabilization research.
+
+    Returns float [0.0–1.0] or None if no Statcast data for this pitcher.
+
+    Interpretation:
+      > 0.35 = elite K upside (e.g., top-10 K% pitchers)
+      0.25–0.35 = above average K arsenal
+      0.15–0.25 = neutral
+      < 0.15 = fade K props (contact pitcher)
+    """
+    if not pitcher_mlbam_id:
+        return None
+
+    if layer is None:
+        layer = StatcastFeatureLayer()
+
+    pitcher_snap = layer.get_inference_snapshot("pitcher")
+    stats = pitcher_snap.get(pitcher_mlbam_id)
+    if not stats:
+        return None
+
+    whiff  = float(stats.get("sc_whiff_rate", 0.0) or 0.0)
+    shadow = fetch_shadow_zone_whiff(pitcher_mlbam_id) or 0.0
+    # No CSW in statcast leaderboard — use whiff as proxy for command quality
+    csw_norm = whiff * 1.15   # CSW ≈ whiff × 1.15 empirically
+
+    if shadow > 0.0:
+        sig = whiff * 0.45 + shadow * 0.30 + csw_norm * 0.25
+    else:
+        sig = whiff * 0.65 + csw_norm * 0.35
+
+    return round(max(0.0, min(1.0, sig)), 4)
+
 # ===========================================================================
 # 4. STANDALONE TEST
 # ===========================================================================
