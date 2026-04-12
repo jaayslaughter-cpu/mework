@@ -1476,17 +1476,29 @@ def run_streak_pick(
     current_pick = streak["current_pick"]
     pick_number  = wins_in_row + 1    # next pick needed
 
-    # FIX: is_fresh_start must check actual pick count from DB, not state columns.
+    # is_fresh_start = True when:
+    #   A) No picks exist for this streak yet (clean start), OR
+    #   B) wins_in_row == 0 AND no picks recorded for TODAY (picks may exist from
+    #      prior failed attempts on other dates — e.g. partial insert + Discord crash)
+    # This ensures both picks 1 & 2 always go out together on a fresh start day.
     try:
         _fs_conn = _pg_conn()
         with _fs_conn.cursor() as _fc:
+            # Count total picks for this streak
             _fc.execute(
                 "SELECT COUNT(*) FROM streak_picks WHERE streak_id = %s",
                 (streak_id,)
             )
             _pick_count = _fc.fetchone()[0]
+            # Count picks recorded for TODAY specifically
+            _fc.execute(
+                "SELECT COUNT(*) FROM streak_picks WHERE streak_id = %s AND game_date = %s",
+                (streak_id, date)
+            )
+            _today_pick_count = _fc.fetchone()[0]
         _fs_conn.close()
-        is_fresh_start = (_pick_count == 0)
+        # Fresh start if: no picks at all, OR no wins yet AND no picks today
+        is_fresh_start = (_pick_count == 0) or (wins_in_row == 0 and _today_pick_count == 0)
     except Exception as _fs_err:
         logger.warning("[Streak] is_fresh_start DB check failed: %s — using state columns", _fs_err)
         is_fresh_start = (wins_in_row == 0 and current_pick == 0)
@@ -1609,6 +1621,31 @@ def run_streak_pick(
             )
 
         if not dry_run:
+            # Clean up any stale PENDING picks from prior failed attempts on OTHER dates
+            # (same streak_id, pick_number 1 or 2, but from a different game_date)
+            # Without this, record_streak_pick will fail with a duplicate key error
+            # if picks 1 & 2 were partially recorded before a crash/redeploy.
+            try:
+                _clean_conn = _pg_conn()
+                with _clean_conn.cursor() as _cc:
+                    _cc.execute(
+                        """
+                        DELETE FROM streak_picks
+                        WHERE streak_id = %s
+                          AND game_date != %s
+                          AND pick_number IN (1, 2)
+                          AND status = 'PENDING'
+                        """,
+                        (streak_id, date),
+                    )
+                    _deleted = _cc.rowcount
+                _clean_conn.commit()
+                _clean_conn.close()
+                if _deleted:
+                    logger.info("[Streak] Cleaned %d stale PENDING picks from prior attempt.", _deleted)
+            except Exception as _ce:
+                logger.warning("[Streak] Stale pick cleanup failed (non-fatal): %s", _ce)
+
             for i, sp in enumerate(start_picks, start=1):
                 record_streak_pick(streak_id, i, sp, date)
             season_total, season_wins_c = get_streak_season_stats()
