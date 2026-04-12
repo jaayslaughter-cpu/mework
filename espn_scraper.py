@@ -239,17 +239,21 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                             if name not in extra:
                                 extra[name] = {}
                             extra[name].update({
-                                "doubles":        float(bat.get("doubles",     0) or 0),
-                                "triples":        float(bat.get("triples",     0) or 0),
-                                "total_bases":    float(bat.get("totalBases",  0) or 0),
-                                "_mlb_hits":      float(bat.get("hits",        0) or 0),
-                                "_mlb_runs":      float(bat.get("runs",        0) or 0),
-                                "_mlb_rbi":       float(bat.get("rbi",         0) or 0),
-                                "_mlb_home_runs": float(bat.get("homeRuns",    0) or 0),
-                                "_mlb_at_bats":   float(bat.get("atBats",      0) or 0),
-                                "_mlb_walks":     float(bat.get("baseOnBalls", 0) or 0),
-                                "_mlb_strikeouts":float(bat.get("strikeOuts",  0) or 0),
-                                "_is_batter":     True,
+                                "doubles":         float(bat.get("doubles",       0) or 0),
+                                "triples":         float(bat.get("triples",       0) or 0),
+                                "total_bases":     float(bat.get("totalBases",    0) or 0),
+                                "_mlb_hits":       float(bat.get("hits",          0) or 0),
+                                "_mlb_runs":       float(bat.get("runs",          0) or 0),
+                                "_mlb_rbi":        float(bat.get("rbi",           0) or 0),
+                                "_mlb_home_runs":  float(bat.get("homeRuns",      0) or 0),
+                                "_mlb_at_bats":    float(bat.get("atBats",        0) or 0),
+                                "_mlb_walks":      float(bat.get("baseOnBalls",   0) or 0),
+                                "_mlb_strikeouts": float(bat.get("strikeOuts",    0) or 0),
+                                # FIX: fields needed for fantasy scoring
+                                "hit_by_pitch":    float(bat.get("hitByPitch",    0) or 0),
+                                "caught_stealing": float(bat.get("caughtStealing",0) or 0),
+                                "stolen_bases":    float(bat.get("stolenBases",   0) or 0),
+                                "_is_batter":      True,
                             })
 
                         # Pitching supplement — primary source for pitching_outs
@@ -257,7 +261,23 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                         if pit and "outs" in pit:
                             if name not in extra:
                                 extra[name] = {}
-                            extra[name]["pitching_outs"] = float(pit.get("outs", 0) or 0)
+                            pit_outs = float(pit.get("outs", 0) or 0)
+                            pit_er   = float(pit.get("earnedRuns", 0) or 0)
+                            extra[name].update({
+                                "pitching_outs": pit_outs,
+                                "earned_runs":   pit_er,
+                                # FIX: Quality Start = 18+ outs AND 3 or fewer ER
+                                "quality_start": 1.0 if pit_outs >= 18 and pit_er <= 3 else 0.0,
+                            })
+
+                        # Win determination — requires game decisions block
+                        # decisions.winner.id matches the winning pitcher's person.id
+                        decisions = game.get("decisions", {})
+                        winner_id = (decisions.get("winner") or {}).get("id")
+                        if winner_id and info.get("id") == winner_id:
+                            if name not in extra:
+                                extra[name] = {}
+                            extra[name]["wins"] = 1.0
     except Exception as exc:
         logger.warning("[ESPN] MLB gamelog supplement failed: %s", exc)
     return extra
