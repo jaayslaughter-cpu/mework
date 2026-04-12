@@ -4961,6 +4961,14 @@ def run_grading_tasklet() -> None:
     except Exception as _streak_settle_err:
         logger.warning("[GradingTasklet] Streak settlement failed (non-fatal): %s", _streak_settle_err)
 
+    # ── Secondary isotonic calibration rebuild ────────────────────────────
+    try:
+        from isotonic_calibrator import rebuild_isotonic_calibration as _rebuild_iso  # noqa: PLC0415
+        _rebuild_iso()
+        logger.info("[Grading] Isotonic calibration rebuild complete.")
+    except Exception as _iso_err:
+        logger.warning("[Grading] Isotonic calibration rebuild failed: %s", _iso_err)
+
     # ── Void stale OPEN bets from postponed/suspended games ────────────────────
     # After 7 days without grading, mark VOID so they don't pollute the ledger.
     try:
