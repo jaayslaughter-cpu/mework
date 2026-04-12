@@ -165,7 +165,7 @@ class PropEdge:
     # team_total_runs: Implied team run total derived from the game O/U + moneyline.
     # pa_average: Batter's rolling 14-day PA mean — the book's likely volume anchor.
     lineup_position: int = 5
-    team_total_runs: float = 4.38  # FIX: 2024 MLB actual R/G (was 4.5)
+    team_total_runs: float = 4.30  # FG 2025: R/G actual (was 4.38)
     pa_average: float = 3.8
 
     # --- GetawayAgent metadata ---
@@ -1954,7 +1954,7 @@ class ExecutionSquad:
             pitcher_time_to_plate=float(merged.get("pitcher_time_to_plate", 1.30)),
             # --- LineupAgent ---
             lineup_position=int(merged.get("lineup_position", 5)),
-            team_total_runs=float(merged.get("team_total_runs", 4.38)),
+            team_total_runs=float(merged.get("team_total_runs", 4.30)),
             pa_average=float(merged.get("pa_average", 3.8)),
             # --- GetawayAgent ---
             hours_rest=float(merged.get("hours_rest", 24.0)),

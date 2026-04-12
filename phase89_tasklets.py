@@ -2415,7 +2415,7 @@ class _StackSmithAgent(_BaseAgent):
         if prop_type not in self._BATTER_TYPES:
             return None
         # Stack signal: opposing pitcher has high ERA or low K rate
-        era   = float(prop.get("era", 4.20) or 4.20)
+        era   = float(prop.get("era", 4.08) or 4.08)
         k_rate = float(prop.get("k_rate", 0.22) or 0.22)
         # Only stack against pitchers with ERA > 4.5 or K-rate < 0.20
         if era <= 4.50 and k_rate >= 0.20:

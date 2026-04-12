@@ -42,7 +42,7 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
 }
 
 # FIX: Updated to 2025 MLB actuals — used as normalization denominators in _fg_adj
-_LG = {"csw":0.275,"swstr":0.110,"k_bb":0.130,"xfip":4.15,"siera":4.15,
+_LG = {"csw":0.275,"swstr":0.110,"k_bb":0.130,"xfip":4.08,"siera":4.08,
        "wrc":100.0,"woba":0.308,"iso":0.160,"hr_fb":0.119,"o_sw":0.316,"k_pct":0.222}
 _FG_CAP = 0.030
 

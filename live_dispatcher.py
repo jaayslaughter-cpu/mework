@@ -2441,8 +2441,8 @@ class LiveDispatcher:
                 # xwOBA > 0.312 (above avg, FIX: was 0.320) = confirmed quality contact -> +hit prob
                 if prop_type in ("hits", "hits_runs_rbis") and side == "Over":
                     sc_xwoba = float(chosen_entry.get("sc_xwoba", 0.0) or 0.0)
-                    if sc_xwoba > 0.312:  # FIX: true 2024 avg wOBA (was 0.320)
-                        prob = min(0.80, prob + (sc_xwoba - 0.312) * 0.12)  # FIX: center 0.320→0.312
+                    if sc_xwoba > 0.308:  # FG 2025: wOBA 0.308
+                        prob = min(0.80, prob + (sc_xwoba - 0.308) * 0.12)  # FG 2025: center 0.308
 
                 # Phase 37: barrel rate boost for HR/TB props
                 # Barrel% > 8% (above avg) = elite hard contact -> +power prop prob

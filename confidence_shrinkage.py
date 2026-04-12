@@ -420,7 +420,7 @@ def log5_blend(
     """
     eps = 1e-9
     if league_rate is None:
-        league_rate = LEAGUE_RATES.get(outcome, 0.223)
+        league_rate = LEAGUE_RATES.get(outcome, 0.222)
 
     b = max(eps, min(1.0, batter_rate))
     p = max(eps, min(1.0, pitcher_rate))

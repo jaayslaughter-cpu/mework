@@ -545,9 +545,9 @@ class MarcelLayer:
                     _mapped = {}
                     for _n, _s in _minimal_pitchers.items():
                         _mapped[_n] = {
-                            "k_pct":  _s.get("strikeoutRate", 0.223) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.223),
-                            "bb_pct": _s.get("walkRate",      0.086) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.086),
-                            "era":    _s.get("earnedRunAverage", 4.20),
+                            "k_pct":  _s.get("strikeoutRate", 0.222) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.222),
+                            "bb_pct": _s.get("walkRate",      0.084) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.084),
+                            "era":    _s.get("earnedRunAverage", 4.08),
                             "whip":   _s.get("whip", 1.28),
                             "_source": "statsapi_fallback",
                         }
