@@ -23,17 +23,7 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# Payout multipliers by number of legs — Underdog PowerPlay defaults.
-# These are the confirmed multipliers from the Dual-Platform Directive.
-# FIX: 5-leg multiplier was 10.0 — should be 20.0 (confirmed Underdog STANDARD)
-# Was inconsistent with calibration_layer._UD_MULTIPLIERS which correctly had 20.0
-_UD_POWERPLAY_MULT: dict[int, float] = {
-    2: 3.5,
-    3: 6.0,
-    4: 10.0,
-    5: 20.0,
-}
-_DEFAULT_PAYOUT_MULTIPLIER = 3.5   # fallback if leg count not in table
+_DEFAULT_PAYOUT_MULTIPLIER = 2.0   # 2× on winning FLEX parlay
 
 
 # ---------------------------------------------------------------------------
@@ -90,19 +80,18 @@ def _name_match(a: str, b: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PROP_STAT_KEY: dict[str, str | None] = {
-    # Batter props
-    "hits":             "hits",
-    "rbis":             "rbis",
-    "runs":             "runs",
-    "total_bases":      "total_bases",
-    "hits_runs_rbis":   "hits_runs_rbis",
-    "fantasy_hitter":   None,   # fantasy points — push (no single stat key)
-    # Pitcher props
-    "strikeouts":       "strikeouts",
-    "earned_runs":      "earned_runs",
-    "hits_allowed":     "hits_allowed",
-    "pitching_outs":    "pitching_outs",  # derived from innings_pitched in espn_scraper.py
-    "fantasy_pitcher":  None,
+    "hits":           "hits",
+    "home_runs":      "home_runs",
+    "rbis":           "rbis",
+    "runs":           "runs",
+    "total_bases":    "total_bases",
+    "stolen_bases":   "stolen_bases",
+    "hits_runs_rbis": "hits_runs_rbis",
+    "strikeouts":     "strikeouts",
+    "earned_runs":    "earned_runs",
+    "fantasy_hitter": None,     # fantasy points — push (no single stat key)
+    "fantasy_pitcher": None,
+    "walks":          "base_on_balls",
 }
 
 
@@ -180,10 +169,10 @@ def settle_leg(leg: dict, player_stats: dict[str, dict]) -> LegResult:
 def settle_parlay(
     parlay_id:    int,
     agent_name:   str,
+    date:         str,
     stake:        float,
     legs_data:    list[dict],
     player_stats: dict[str, dict],
-    date:         str = "",
 ) -> ParlayResult:
     """
     Settle a complete parlay.
@@ -192,7 +181,7 @@ def settle_parlay(
       - Any LOSS = parlay LOSS, units_profit = -stake
       - All PUSH = parlay PUSH, units_profit = 0
       - All non-push legs WIN = parlay WIN,
-            units_profit = stake × multiplier - stake (per-leg lookup)
+            units_profit = stake × _DEFAULT_PAYOUT_MULTIPLIER - stake
       - Mixed WIN/PUSH (no losses) = parlay WIN on the winning legs
     """
     if not legs_data:
@@ -215,10 +204,8 @@ def settle_parlay(
         units_profit = 0.0
     else:
         # At least one WIN, no losses
-        outcome    = "WIN"
-        num_legs   = len(legs_data)
-        multiplier = _UD_POWERPLAY_MULT.get(num_legs, _DEFAULT_PAYOUT_MULTIPLIER)
-        units_profit = stake * multiplier - stake
+        outcome      = "WIN"
+        units_profit = stake * _DEFAULT_PAYOUT_MULTIPLIER - stake
 
     return ParlayResult(
         parlay_id=parlay_id,

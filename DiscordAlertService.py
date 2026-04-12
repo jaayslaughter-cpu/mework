@@ -33,30 +33,30 @@ import requests
 
 logger = logging.getLogger("propiq.discord")
 
-# ── Exported constant (imported by live_dispatcher.py) ────────────────────
+# ── Exported constant (imported by live_dispatcher.py) ────────────────────────
 MAX_STAKE_USD: float = 20.0   # Tier 5 ceiling ($20/unit)
 
-# ── Colour palette ────────────────────────────────────────────────────────────────────
+# ── Colour palette ────────────────────────────────────────────────────────────
 _COLOUR_GREEN  = 0x2ECC71   # win / online
 _COLOUR_RED    = 0xE74C3C   # loss / warning
 _COLOUR_BLUE   = 0x3498DB   # bet alert
 _COLOUR_GOLD   = 0xF1C40F   # daily recap
 _COLOUR_GREY   = 0x95A5A6   # push / neutral
 
-# ── Fallback webhook (used when DISCORD_WEBHOOK_URL env var is absent) ────────────
+# ── Fallback webhook (used when DISCORD_WEBHOOK_URL env var is absent) ────────
 _FALLBACK_WEBHOOK = (
     "https://discordapp.com/api/webhooks/1484795164961800374/"
     "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
 )
 
-# ── Platform emoji map ────────────────────────────────────────────────────────────────────
+# ── Platform emoji map ────────────────────────────────────────────────────────
 _PLATFORM_EMOJI = {
     "prizepicks": "🏆",
     "underdog":   "🐶",
     "sleeper":    "😴",
 }
 
-# ── Tier badge map ─────────────────────────────────────────────────────────────────────
+# ── Tier badge map ────────────────────────────────────────────────────────────
 _TIER_BADGE = {1: "🌱", 2: "🌿", 3: "⭐", 4: "🔥", 5: "👑"}
 
 
@@ -66,7 +66,7 @@ class DiscordAlertService:
     def __init__(self) -> None:
         self._url: str = os.getenv("DISCORD_WEBHOOK_URL", _FALLBACK_WEBHOOK)
 
-    # ── Internal helper ───────────────────────────────────────────────────────────────
+    # ── Internal helper ───────────────────────────────────────────────────────
 
     def _post(self, payload: dict[str, Any]) -> bool:
         """POST payload to the webhook.  Returns True on success."""
@@ -87,7 +87,7 @@ class DiscordAlertService:
             logger.warning("[Discord] Failed to reach webhook: %s", exc)
             return False
 
-    # ── Public methods ───────────────────────────────────────────────────────────────
+    # ── Public methods ────────────────────────────────────────────────────────
 
     def send_startup_ping(self) -> None:
         """Fire a test message the absolute second the application is ready."""
@@ -161,9 +161,8 @@ class DiscordAlertService:
         results: list[dict],
         total_profit: float,
         date_str: str,
-        tier_updates: list[str] | None = None,
     ) -> None:
-        """Send end-of-day settlement recap with per-bet detail and tier ladder progress."""
+        """Send end-of-day settlement recap."""
         wins   = sum(1 for r in results if r.get("status") == "WIN")
         losses = sum(1 for r in results if r.get("status") == "LOSS")
         pushes = sum(1 for r in results if r.get("status") == "PUSH")
@@ -173,26 +172,14 @@ class DiscordAlertService:
 
         lines: list[str] = []
         for r in results:
-            status   = r.get("status", "")
-            emoji    = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(status, "❓")
+            emoji    = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(r.get("status", ""), "❓")
             pl       = r.get("profit_loss", 0.0)
             pl_sign  = "+" if pl >= 0 else ""
-            # odds_american now included from run_grading_tasklet() results.append()
             odds_raw = r.get("odds_american", -110)
-            odds_str = f"+{odds_raw}" if isinstance(odds_raw, (int, float)) and odds_raw > 0 else str(int(odds_raw))
-            # Show actual stat vs line so it's clear why the bet won/lost
-            actual   = r.get("actual")
-            line_val = r.get("line", "?")
-            if actual is not None:
-                actual_str = f" | Actual **{actual}** vs Line {line_val}"
-            else:
-                actual_str = ""
-            # Show which agent owned this pick
-            agent = r.get("agent", "")
-            agent_tag = f" `[{agent}]`" if agent else ""
+            odds_str = f"+{odds_raw}" if isinstance(odds_raw, int) and odds_raw > 0 else str(odds_raw)
             lines.append(
-                f"{emoji}{agent_tag} **{r.get('player', '?')}** — "
-                f"{r.get('prop_type', '?')} {r.get('side', '?')}{actual_str} | "
+                f"{emoji} **{r.get('player', '?')}** — "
+                f"{r.get('prop_type', '?')} {r.get('side', '?')} | "
                 f"{odds_str} | {pl_sign}{pl:.2f}u"
             )
 
@@ -200,25 +187,16 @@ class DiscordAlertService:
         if len(description) > 3_000:
             description = description[:2_950] + "\n…(truncated)"
 
-        fields = [
-            {"name": "📈 Units",   "value": f"{sign}{total_profit:.2f}u",      "inline": True},
-            {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P", "inline": True},
-        ]
-        # Always show tier ladder progress — promotions AND in-progress streaks
-        if tier_updates:
-            fields.append({
-                "name": "🎅 Tier Ladder",
-                "value": "\n".join(tier_updates),
-                "inline": False,
-            })
-
         self._post({
             "embeds": [{
                 "title": f"📊 PropIQ Daily Recap — {date_str}",
                 "description": description,
                 "color": colour,
-                "fields": fields,
-                "footer": {"text": "Powered by PropIQ Analytics 🤖  |  3 W or 3 L in a row = tier move"},
+                "fields": [
+                    {"name": "📈 Units",   "value": f"{sign}{total_profit:.2f}u",      "inline": True},
+                    {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P", "inline": True},
+                ],
+                "footer": {"text": "Powered by PropIQ Analytics 🤖"},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }]
         })
@@ -273,12 +251,7 @@ class DiscordAlertService:
         platform   = parlay.get("platform", "underdog")
         plat_lower = str(platform).lower()
         plat_emoji = _PLATFORM_EMOJI.get(plat_lower, "🎯")
-        if "prize" in plat_lower:
-            plat_label = "PrizePicks"
-        else:
-            et = parlay.get("entry_type", "FlexPlay")
-            entry_label = "PowerPlay" if et.upper() in ("STANDARD", "POWERPLAY", "POWER") else "FlexPlay"
-            plat_label = f"Underdog Fantasy — {entry_label}"
+        plat_label = "PrizePicks" if "prize" in plat_lower else "Underdog Fantasy"
 
         # --- Season record footer ---
         season = parlay.get("season_stats", {})
@@ -293,14 +266,7 @@ class DiscordAlertService:
         for i, leg in enumerate(legs, 1):
             player    = (leg.get("player_name") or leg.get("player", "?")).title()
             prop_type = leg.get("prop_type", "?").replace("_", " ").title()
-            side_raw  = leg.get("side", "?")
-            leg_plat  = leg.get("platform", platform)
-            # Underdog uses Higher/Lower; translate for display
-            if "underdog" in str(leg_plat).lower() or "underdog" in plat_lower:
-                _s_map = {"over": "Higher", "under": "Lower"}
-                side = _s_map.get(side_raw.lower(), side_raw)
-            else:
-                side = side_raw
+            side      = leg.get("side", "?")
             line      = leg.get("line", "?")
             leg_ev    = leg.get("ev_pct", 0.0)
             model_p   = leg.get("model_prob", 0.0)
@@ -373,9 +339,7 @@ class DiscordAlertService:
         for i, leg in enumerate(legs, 1):
             player    = (leg.get("player_name") or leg.get("player", "?")).title()
             prop_type = leg.get("prop_type", "?").replace("_", " ").title()
-            _side_raw = leg.get("side", "?")
-            _s_map    = {"over": "Higher", "under": "Lower"}
-            side      = _s_map.get(_side_raw.lower(), _side_raw)
+            side      = leg.get("side", "?")
             line      = leg.get("line", "?")
             streak_n  = leg.get("streak_length", leg.get("streak", "?"))
             fields.append({
