@@ -33,13 +33,13 @@ logger = logging.getLogger(__name__)
 # ─── League average constants (2021-2024 MLB) ──────────────────────────────────
 # FIX: All league constants updated to 2025 MLB actuals (FanGraphs + Baseball Reference)
 # Previously several values were overestimates causing systematic OVER bias on hit props
-_LG_HIT_RATE      = 0.204   # FG 2025: H/PA actual (lower BABIP .289, was 0.209 in 2024, now 2025)   # H/PA  (BA × AB/PA: 0.243 × 0.858) — was 0.237 (13% too high)
-_LG_HR_RATE       = 0.033   # FG 2025: HR/PA elevated power env (was 0.032)   # HR/PA (1.24 HR/game ÷ 38.5 PA/game) — was 0.034
-_LG_K_RATE        = 0.222   # FG 2025: 22.2% K/PA (confirmed VSiN Feb 2026, was 0.223)   # K/PA (batter strikeout rate, FG 2024) — was 0.226
+_LG_HIT_RATE      = 0.204   # FG 2025: H/PA actual (lower BABIP .289, was 0.209 in 2024, now 2025) 
+_LG_HR_RATE       = 0.033   # FG 2025: HR/PA elevated power env (was 0.032) 
+_LG_K_RATE        = 0.222   # FG 2025: 22.2% K/PA (confirmed VSiN Feb 2026, was 0.223) 
 _LG_PITCHER_K9    = 8.7     # average K/9 for starters — unchanged (FG 2025: ~8.7)
 _LG_STARTER_IP    = 5.2     # average innings before bullpen (FG 2025) — was 5.5 (5.8% too high)
-_LG_BULLPEN_ERA   = 4.00    # FG 2025: league bullpen ERA (was 4.05 in 2024, now 2025)    # league average bullpen ERA (FG 2025) — was 4.10
-_LG_TEAM_TOTAL    = 4.30    # FG 2025: R/G actual (was 4.38 in 2024, now 2025)    # average runs per team per game (BR 2024) — was 4.5
+_LG_BULLPEN_ERA   = 4.00    # FG 2025: league bullpen ERA (was 4.05 in 2024, now 2025)  
+_LG_TEAM_TOTAL    = 4.30    # FG 2025: R/G actual (was 4.38 in 2024, now 2025)  
 
 # Empirical PA-per-game by lineup slot (2021-2024 MLB)
 # Includes home bottom-9 not always played + late-game pinch-hit effects
@@ -50,8 +50,6 @@ _PA_BY_SLOT: Dict[int, float] = {
     5: 4.31, 6: 4.19, 7: 4.07, 8: 3.92, 9: 3.72,
 }
 _PA_UNKNOWN_SLOT = 4.20  # fallback for unconfirmed lineups
-
-# PA that fall within starter phase (before bullpen enters ~inning 6)
 # FIX: Corrected using true avg 5.2 IP × 4.30 BF/IP = 22.36 total starter BF
 # Distributed by slot: slot 1 sees starter ~3.1 PA, slot 9 ~2.4 PA
 _STARTER_PA_BY_SLOT: Dict[int, float] = {
@@ -78,9 +76,6 @@ class SimResult:
     starter_prob: Optional[float] = None     # P(over) vs starter phase only
     bullpen_prob: Optional[float] = None     # P(over) vs bullpen phase only
     prop:         Optional[dict]  = None     # reference to source prop (for Bernoulli Drama penalty)
-
-
-# ─── Internal helpers ──────────────────────────────────────────────────────────
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(v or 0.0)))
@@ -141,12 +136,11 @@ def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     whip    = _safe(prop, "_whip",   1.30)
 
     # Batter skill inputs
-    woba    = _safe(prop, "_woba",     0.308)  # FG 2025: wOBA actual (was 0.312)  # FIX: 2024 actual (was 0.320)
+    woba    = _safe(prop, "_woba",     0.308)  # FG 2025: wOBA actual (was 0.312)
     wrc_p   = _safe(prop, "_wrc_plus", 100.0)
     whiff_h = _safe(prop, "_pitch_whiff_vs_hand", 0.25)
 
     # Base hit rate adjusted by pitcher
-    # WHIP correlates with BABIP + HR allowed; normalise around 1.30
     pitcher_hit_factor = _clamp(1.30 / max(whip, 0.50), 0.70, 1.40)
 
     # Batter wOBA adjustment: 0.312 = average (2024 MLB); scale ±20%
@@ -183,8 +177,6 @@ def _hr_prob_per_pa(prop: dict, phase: str = "starter") -> float:
 
     iso_factor  = _clamp(iso / 0.150, 0.30, 2.20)   # ISO 0.30 = 2×
     temp_factor = _clamp(1.0 + (temp - 72.0) * 0.003, 0.85, 1.20)  # +3% per 10°F above 72
-
-    # Wind boost: >10 mph out adds variance, +5% per extra 5 mph
     wind_factor = 1.0
     if not is_dome and wind > 10:
         wind_factor = _clamp(1.0 + (wind - 10) * 0.005, 1.0, 1.25)
@@ -202,7 +194,7 @@ def _k_prob_per_pa_vs_starter(prop: dict) -> float:
     """P(strikeout) per plate appearance for the BATTER against starter."""
     k_pct   = _safe(prop, "_k_pct",  0.225)
     csw     = _safe(prop, "_csw_pct", 0.28)
-    o_swing = _safe(prop, "_o_swing", 0.316)  # FG 2025: O-Swing actual (was 0.318)  # FIX: 2024 actual (was 0.310)
+    o_swing = _safe(prop, "_o_swing", 0.316)  # FG 2025: O-Swing actual (was 0.318)
 
     # Pitcher K% is the dominant signal
     k_factor = _clamp(k_pct / 0.225, 0.50, 1.80)
@@ -273,7 +265,6 @@ def _hits_phase_prob(pa: float, p_hit: float, line: float) -> float:
 def _simulate_pitcher_strikeouts(prop: dict, line: float, n_sims: int) -> SimResult:
     """Monte Carlo simulation for pitcher Ks prop."""
     # Pitcher faces ~27 outs * (1/(1-k_pct-bb_pct)) batters per 9 innings
-    # But we model expected batters faced in starter window
     k_pct   = _safe(prop, "_k_pct",  0.225)
     bb_pct  = _safe(prop, "_bb_pct", 0.080)
     ip_mean = _safe(prop, "_starter_ip_projection", _LG_STARTER_IP)  # optional; may be 0
@@ -281,11 +272,8 @@ def _simulate_pitcher_strikeouts(prop: dict, line: float, n_sims: int) -> SimRes
         ip_mean = _LG_STARTER_IP
 
     # Batters faced per inning: MLB average ~4.30 (FanGraphs 2022-2024 starters)
-    # Formula: 3 outs + hits-in-play + walks + HBP per inning
     # BF/IP = 3.0 + 3.0 * (bb_pct + BABIP + HBP_rate)
-    # With BABIP≈0.30, HBP≈0.01, extra base events ≈ 0.04 → effective constant = 0.35
     # This yields 4.29 at avg bb_pct=0.08, matching MLB observed 4.30 BF/IP
-    # FIX: was 0.30 (gave 4.14) → corrected to 0.35 (gives 4.29)
     bf_per_ip = 3.0 + 3.0 * (bb_pct + 0.35)
     mean_bf   = ip_mean * bf_per_ip
 
@@ -578,7 +566,6 @@ def inject_team_total(prop: dict, hub: dict) -> None:
             try:
                 hml = int(home_ml)
                 # Correct implied probability:
-                # Negative ML (favourite): abs(ml) / (abs(ml) + 100)
                 # Positive ML (underdog):  100 / (ml + 100)
                 home_win = (abs(hml) / (abs(hml) + 100)) if hml < 0 else (100 / (hml + 100))
                 away_win = 1.0 - home_win

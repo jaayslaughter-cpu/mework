@@ -34,8 +34,6 @@ except ImportError:
     def _simulate_prop(prop, n_sims=10_000): return None   # noqa: E704
     def _variance_penalty(result): return 1.0              # noqa: E704
     def _inject_team_total(prop, hub): pass                # noqa: E704
-
-# ── Lock-Time Gate (Step 3 upgrade: prevent lookahead bias) ───────────────────
 try:
     from lock_time_gate import (
         should_skip_prop      as _should_skip_prop,
@@ -50,8 +48,6 @@ except ImportError:
     def _stamp_prop(prop, game_times): return prop                                 # noqa: E704
     def _fetch_game_times_today(): return {}                                       # noqa: E704
     def _data_is_contaminated(prop, ts, game_times): return False                 # noqa: E704
-
-# ── CLV Feedback Engine (Step 2 upgrade: per-edge-tag adaptive thresholds) ────
 try:
     from clv_feedback_engine import (
         get_threshold       as _get_ev_threshold,
@@ -66,8 +62,6 @@ except ImportError:
     def _rebuild_ev_thresholds(): return {}                          # noqa: E704
     def _load_ev_thresholds(): return {}                             # noqa: E704
     def _clv_discord_summary(): return ""                            # noqa: E704
-
-# WagerBrain-enhanced odds math (bookmaker_margin, kelly_criterion, true_odds_ev)
 try:
     from odds_math import (
         bookmaker_margin   as _bookmaker_margin,
@@ -244,24 +238,18 @@ class _NullRedis:
 
 # logger defined at top of file
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
 OPENING_DAY        = datetime.date(2026, 3, 26)
 SPRING_TRAINING_WT = 0.30          # ST stats count 30 % until Opening Day
-
-# Data TTLs (seconds) — 4 scraper groups
 TTL_PHYSICS  = 900    # 15 min
 TTL_CONTEXT  = 600    # 10 min
 TTL_MARKET   = 300    #  5 min
 TTL_DFS      = 480    #  8 min
 TTL_HUB      = 600    # 10 min — master hub key
-
-# ── Per-agent daily send gate (in-memory, resets at midnight) ────────────────
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
 MIN_CONFIDENCE    = 6
-MIN_PROB          = 0.57   # Phase 121: minimum XGBoost model probability (57%)          # plays below 6/10 are never sent to Discord (matches live_dispatcher conf gate)
+MIN_PROB          = 0.57   # Phase 121: minimum XGBoost model probability (57%)        
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -330,8 +318,6 @@ KELLY_FRACTION  = 0.25    # Quarter-Kelly
 MAX_UNIT_CAP    = 0.05    # 5 % bankroll cap per bet
 MIN_EV_THRESH     = 0.03   # 3% minimum edge to queue a bet (ratio scale, e.g. 0.085)
 MIN_EV_THRESH_PCT = 3.0    # same threshold in percent scale (e.g. 8.5) — used by Group B agents
-
-# Capital allocation bounds (14-day ROI → multiplier)
 CAP_FLOOR = 0.5
 CAP_CEIL  = 2.0
 
@@ -932,7 +918,6 @@ def _fetch_sleeper_props_direct() -> list[dict]:
         logger.debug("[DataHub] Sleeper primary endpoint failed: %s", _exc)
 
     # Secondary: Sleeper public player projections — parse as prop lines
-    # Excluded props: home_runs, stolen_bases, walks, walks_allowed (Phase 112 + 118)
     try:
         _today_sl = _today_pt()
         resp3 = _resilient_get(
@@ -1096,7 +1081,6 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                     except Exception:
                         pass
                     # FIX: Real-time Discord alert when quota drops below threshold
-                    # bug_checker only runs at 10 AM — this catches mid-day quota burns
                     # Dedup: alert fires at most once per hour via Redis TTL key
                     try:
                         _remaining_int = int(remaining)
@@ -1155,7 +1139,6 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
             logger.info("[OddsAPI→DraftEdge] %d batters, %d pitchers loaded",
                         len(batters), len(pitchers) if pitchers is not None else 0)
             # Return as a marker list so callers know DraftEdge is the source
-            # _get_sharp_consensus uses hub.market.odds but gracefully returns None
             # when no bookmaker entries exist — agents still fire via _model_prob
             return [{"source": "draftedge", "batters": batters.to_dict("records"),
                      "pitchers": pitchers.to_dict("records") if pitchers is not None else []}]
@@ -1163,7 +1146,6 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
         logger.info("[OddsAPI→DraftEdge] Not available (%s)", e)
 
     # ── Tier 3: TheRundown — real sportsbook K prop lines (market_id=19) ────
-    # Free 100 requests/day with key. Covers pitcher_strikeouts for all MLB games.
     _rundown_key = os.getenv("RUNDOWN_API_KEY", "a455831fa40a562b43d7f7830f6ab467fa38074d46d078e0d47de324b46bea79")
     if _rundown_key:
         try:
@@ -1299,8 +1281,6 @@ _capital_multipliers: dict[str, float] = {name: 1.0 for name in AGENT_NAMES}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-
-# MLB stadium coordinates for Open-Meteo weather fetch
 _STADIUM_COORDS: dict[str, tuple[float, float]] = {
     "Angels Stadium":           (33.8003, -117.8827),
     "Chase Field":              (33.4455, -112.0667),
@@ -1493,7 +1473,6 @@ def _refresh_sample_counts() -> None:
         if existing_raw:
             existing = json.loads(existing_raw)
             # Merge: only update keys where we have new data; don't overwrite
-            # XGBoost-written counts that may be higher (retrain uses more rows)
             for k, v in counts.items():
                 existing[k] = max(existing.get(k, 0), v)
             counts = existing
@@ -1590,7 +1569,6 @@ def _ensure_bet_ledger() -> None:
             except Exception:
                 conn.rollback()
             # FIX GAP 2: add UNIQUE constraint to prevent duplicate grading
-            # ON CONFLICT DO NOTHING was a no-op without this — same pick could be
             # inserted twice in overlapping cycles, causing inflated ROI numbers.
             try:
                 cur.execute(
@@ -1638,8 +1616,6 @@ def run_data_hub_tasklet() -> None:
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
     r = _redis()
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
-
-    # ── Pre-match gate: fetch today's game states ──────────────────────────
     game_states: dict[str, str] = {}
     try:
         today = _today_pt().strftime("%Y-%m-%d")
@@ -1656,7 +1632,6 @@ def run_data_hub_tasklet() -> None:
         return state not in ("InProgress", "Live", "Final", "F/OT", "Completed")
 
     # ── Pre-warm FanGraphs cache before agents run ───────────────────────────
-    # FG data is lazy-loaded on first get_pitcher/get_batter call.
     # Pre-warming here (once per DataHub cycle) avoids cold-start delay in agents.
     try:
         from fangraphs_layer import _load as _fg_load, _loaded as _fg_loaded  # noqa: PLC0415
@@ -1915,9 +1890,7 @@ class _BaseAgent:
     # shared helpers
     def _model_prob(self, player: str, prop_type: str, prop: dict | None = None, **_ignored) -> float:
         # ── Step 1: Try distribution-based simulation engine first ────────────
-        # The simulation engine returns a proper outcome distribution and
         # derives P(over) from it.  This replaces the single-scalar approach.
-        # Falls back to XGBoost / base_rate if sim engine unavailable.
         if _SIM_ENGINE_AVAILABLE and prop:
             try:
                 _inject_team_total(prop, self.hub)
@@ -1925,13 +1898,11 @@ class _BaseAgent:
                 if sim and sim.prob_over > 0.0:
                     raw = sim.prob_over * 100.0
                     # Apply variance penalty: wide distribution → reduce confidence
-                    # For pitcher props: uses Bernoulli Drama% (verified vs BotM outputs)
                     # For batter props: uses Monte Carlo std/mean coefficient of variation
                     pen = _variance_penalty(sim)
                     # Shift probability toward 50% by penalty factor
                     raw = 50.0 + (raw - 50.0) * pen
                     # Bernoulli tier adjustment: S-tier pitcher gets +4pp, D-tier -5pp
-                    # Meltdown gate: structural run damage → suppress regardless of EV
                     _b_adj  = float(prop.get("_bernoulli_prob_adj", 0.0) or 0.0)
                     _b_melt = float(prop.get("_bernoulli_meltdown", 0.0) or 0.0)
                     if _b_adj != 0.0:
@@ -1957,7 +1928,6 @@ class _BaseAgent:
             try:
                 import xgboost as xgb  # noqa: PLC0415
                 import numpy as np     # noqa: PLC0415
-                # Build live feature vector from the actual prop (not zeros)
                 _live_prop = prop or {"prop_type": prop_type}
                 feats_list = self._build_feature_vector(_live_prop)
                 # Apply dropped_features mask from last backtest
@@ -2004,8 +1974,6 @@ class _BaseAgent:
                     return round(max(5.0, min(95.0, _gp_res["final_prob"] * 100.0)), 2)
             except Exception:
                 pass  # fall through to base_rate_model
-
-        # Fallback: base_rate_model (calibrated historical rates + FanGraphs + context signals)
         if _BASE_RATE_AVAILABLE and prop:
             _side = str(prop.get("side", "OVER")).upper()
             # Use player-specific rate if enrichment computed one
@@ -2016,7 +1984,6 @@ class _BaseAgent:
             raw_p += float(prop.get("_predict_plus_adj", 0.0)) * 100.0
             raw_p += float(prop.get("_park_factor_adj",  0.0)) * 100.0
             # Game-level environment nudge (game_over_prob / game_home_win_prob
-            # written to prop by prop_enrichment_layer Step 9)
             _gop = float(prop.get("game_over_prob",      0.50) or 0.50)
             _gwp = float(prop.get("game_home_win_prob",  0.50) or 0.50)
             _pt_lower = str(prop_type).lower()
@@ -2079,7 +2046,6 @@ class _BaseAgent:
 
 
     # ─────────────────────────────────────────────────────────────────────
-    # Feature vector (23 signals) — identical schema at INSERT and predict
     # ─────────────────────────────────────────────────────────────────────
     FEATURE_DIM = 27  # 27-element vector — bump when adding columns; old models padded automatically
 
@@ -2114,7 +2080,6 @@ class _BaseAgent:
                                   prop.get("swstr_pct", 0.25))))
         else:
             # Batter signals (FanGraphs) mapped into the same 5 slots
-            # Prop-type-aware: TB props use xbh_per_game (#1 feature, 45% importance)
             # Source: baseball-models feature importance (gmalbert/baseball-predictions)
             _is_tb_prop = _pt_raw in {"total_bases", "home_runs", "hits_runs_rbis",
                                        "fantasy_hitter", "fantasy_score"}
@@ -2123,7 +2088,6 @@ class _BaseAgent:
             k_rate  = _clamp(float(prop.get("wrc_plus", 100.0) or 100.0) / 200.0)
 
             # slot 1: xbh_per_game for TB/power props (45% feature importance for TB)
-            #         ISO for all other batter props
             if _is_tb_prop:
                 _xbh = float(prop.get("xbh_per_game", 0.50) or 0.50)
                 bb_rate = _clamp(_xbh / 1.50)   # 0=0, 0.50=avg(0.33), 1.0=elite(0.67)
@@ -2131,7 +2095,6 @@ class _BaseAgent:
                 bb_rate = _clamp(float(prop.get("iso", 0.155) or 0.155) / 0.35)
 
             # slot 2: SLG for TB/power props (16% feature importance)
-            #         BABIP for all other batter props
             if _is_tb_prop:
                 _slg = float(prop.get("slg", 0.405) or 0.405)
                 era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.405=avg(0.39), 0.650=elite(1.0)
@@ -2170,8 +2133,6 @@ class _BaseAgent:
         impl_prob   = _clamp((_sb_implied if _sb_implied > 0.30 else _ud_implied) / 100.0)
         # Also encode sharp-book line gap as a feature (negative = DFS line favorable for Over)
         sb_line_gap = _clamp(((prop.get("sb_line_gap", 0.0) or 0.0) + 2.0) / 4.0)  # -2 to +2 range
-
-        # ── Prop type encoding ────────────────────────────────────────
         _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0,
                    "home_runs": 1, "hr": 1,
                    "hits": 2, "hits_allowed": 2,
@@ -2201,7 +2162,6 @@ class _BaseAgent:
         conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
 
         # ── Enrichment signal slots (Phase 97) ───────────────────────────────
-        # These 7 signals were computed by prop_enrichment_layer and attached to
         # every prop but never fed to XGBoost — now they are.  Normalised [0,1].
         form_adj      = _clamp((float(prop.get("_form_adj",            0.0) or 0.0) + 0.20) / 0.40)  # hot/cold streak
         cv_nudge      = _clamp((float(prop.get("_cv_nudge",            0.0) or 0.0) + 0.15) / 0.30)  # CV consistency
@@ -2209,7 +2169,6 @@ class _BaseAgent:
         marcel_adj    = _clamp((float(prop.get("_marcel_adj",          0.0) or 0.0) + 0.02) / 0.04)  # Marcel ±1.8pp
         predict_plus  = _clamp((float(prop.get("_predict_plus_adj",    0.0) or 0.0) + 0.08) / 0.16)  # Predict+ arsenal
         ps_prob       = _clamp(float(prop.get("_player_specific_prob", 0.0) or 0.0))                  # Poisson/binomial rate
-        # Batting order position: leadoff=0.111 (1/9), cleanup=0.444 (4/9),
         # last=1.0 (9/9), unknown=0.0.  More predictive than has_enrich binary.
         bat_order     = _clamp(float(prop.get("_batting_order_slot", 0) or 0) / 9.0)
 
@@ -2237,7 +2196,6 @@ class _BaseAgent:
     def _build_bet(self, prop: dict, side: str, model_prob: float,
                    implied_prob: float, ev_pct: float) -> dict:
         # ── Phase 91 Step 4: collect post-model adjustments, apply with
-        #    correlation dampening to prevent stacked-signal inflation ──────
         _prop_type  = prop.get("prop_type", "")
         pitcher_id  = prop.get("mlbam_id") or prop.get("player_id")
         _post_adjs: list[tuple[str, float]] = []
@@ -2285,9 +2243,7 @@ class _BaseAgent:
                     model_prob = round(max(3.0, min(97.0, model_prob + delta)), 4)
 
         # ── Phase 91 Step 5: Thin-data shrinkage ─────────────────────────────
-        # If this prop-type has few settled training rows, shrink model_prob
         # toward the market implied probability. Proven prop-types pass through
-        # at full strength; cold-start prop-types are heavily dampened.
         if _SHRINKAGE_AVAILABLE:
             try:
                 from confidence_shrinkage import shrink_toward_market as _shrink_toward_market  # noqa: PLC0415
@@ -2309,9 +2265,7 @@ class _BaseAgent:
                 logger.debug("[ThinData] Shrinkage error: %s", _se)
 
         # ── Phase 91 Step 6: Market line validation ───────────────────────────
-        # After shrinkage, check how far model_prob departs from the sportsbook's
         # implied probability.  Divergence >20pp → soft-cap (likely data error).
-        # Divergence 12-20pp → WIDE flag (monitor).  Logs + stamps prop for audit.
         if _MARKET_VALIDATOR_AVAILABLE:
             try:
                 _market_implied_pct = implied_prob
@@ -2329,7 +2283,6 @@ class _BaseAgent:
                 logger.debug("[MarketValidator] Error: %s", _mve)
 
         # ── Recalculate ev_pct from final model_prob (shrinkage + cap may have changed it) ──
-        # ev_pct was computed from raw model_p before _build_bet(); recalculate
         # so Kelly / confidence downstream reflect the actual adjusted probability.
         try:
             _side_american = (
@@ -2550,7 +2503,6 @@ class _UmpireAgent(_BaseAgent):
             return None
 
         # UmpireAgent only needs K props — umpires just confirm game is happening
-        # If we got umpires from MLB API we know games are scheduled
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
 
         # Apply umpire K-rate modifier if we have umpire data
@@ -2665,8 +2617,6 @@ class _LineValueAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         steam     = False
         steam_side = "OVER"  # default; overridden when side is determinable
-
-        # Primary: Action Network sharp_report — uses rlm_signal (AN schema key)
         sharp = self.hub.get("market", {}).get("sharp_report", [])
         for rec in sharp:
             if isinstance(rec, dict) and player.lower() in str(rec).lower():
@@ -2682,7 +2632,6 @@ class _LineValueAgent(_BaseAgent):
                     break
 
         # Fallback: SBD public betting — extreme ticket% = steam proxy
-        # FIX: determine side from which bucket triggered (over vs under)
         if not steam:
             pub = self.hub.get("market", {}).get("public_betting", {})
             for rec in (pub.get("prop_df", []) if isinstance(pub, dict) else []):
@@ -2747,15 +2696,12 @@ class _BullpenAgent(_BaseAgent):
             return None
 
         # Get fatigue for opposing team (batter faces opponent's bullpen).
-        # Hub stores {"fatigue_score": float, "boost": float} per team.
         opp_team    = prop.get("opposing_team", "")
         _raw_entry  = fatigue_map.get(opp_team, fatigue_map.get(team, -1))
         if isinstance(_raw_entry, dict):
             fatigue = float(_raw_entry.get("fatigue_score", 2.0))
         else:
             fatigue = float(_raw_entry)  # legacy scalar or -1 sentinel
-
-        # If not in hub, fall back to neutral (BullpenFatigueScorer needs full
         # pitching_logs DataFrame + target_date which aren't available here)
         if fatigue < 0:
             fatigue = 2  # neutral — no fatigue data available this cycle
@@ -2780,7 +2726,6 @@ class _BullpenAgent(_BaseAgent):
 class _WeatherAgent(_BaseAgent):
     name = "WeatherAgent"
     # Note: apply_thermal_correction() from calibration_layer used for HR/total props.
-    # Temp data arrives via hub["context"]["weather"] → WeatherAgent enriches game totals.
 
     def evaluate(self, prop: dict) -> dict | None:
         """Wind/park/temperature combos for power hitter props.
@@ -2856,8 +2801,6 @@ class _SteamAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         rlm       = False
         fade_side = "OVER"  # default: sharp money on Over
-
-        # Primary: Action Network RLM flag — uses rlm_signal (actual AN schema key)
         sharp = self.hub.get("market", {}).get("sharp_report", [])
         for rec in sharp:
             if isinstance(rec, dict) and player.lower() in str(rec).lower():
@@ -3071,8 +3014,6 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
        - all different teams      → always allowed
     """
     from collections import Counter  # noqa: PLC0415
-
-    # Rule 1 — duplicate player
     players = [lg.get("player", "") for lg in legs]
     if len(set(players)) < len(players):
         return True
@@ -3132,16 +3073,13 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
             except Exception:
                 pass
         # Defensive: always restore original confidence so compare_prop cannot
-        # silently drop it, preventing p_conf from defaulting to 5 and blocking
         # the MIN_CONFIDENCE=6 gate for non-EVHunter agents (Bug #15b).
         if "confidence" not in lg:
             lg = {**lg, "confidence": _orig_conf}
         enriched_legs.append(lg)
 
     # ── Step 2: decide ONE platform for the whole parlay ─────────────────────
-    # Priority 1 — Underdog Streaks rules (Phase 112):
     #   • No active streak (count == 0):  need 2 legs BOTH clearing pick-2 hurdle (0.5774)
-    #   • Active streak (count >= 2):     need 1 leg clearing pick-1 hurdle (0.5336)
     #   • Max streak: 11 (1000x)
 
     _ud_streak_count = 0
@@ -3178,7 +3116,6 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         entry_type_forced = "STREAKS"
     else:
         # Priority 2 — tiebreaker: PrizePicks wins only when EVERY leg
-        #              independently voted PrizePicks (line_comparator returns
         #              PrizePicks on tied lines).  Any Underdog vote → Underdog.
         pp_votes = sum(
             1 for lg in enriched_legs
@@ -3319,7 +3256,6 @@ class _StackSmithAgent(_BaseAgent):
             return None
 
         # Stack signal: look up the OPPOSING pitcher from projected_starters
-        # (prop is a batter prop — it carries batter stats, not pitcher stats)
         opp_team = prop.get("opposing_team", "")
         era    = 4.08  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
         k_rate = 0.22
@@ -3371,7 +3307,6 @@ class _ChalkBusterAgent(_BaseAgent):
         prop_type  = prop.get("prop_type", "").lower()
 
         # SBD returns {"game_df": [...], "prop_df": [...]} — scan prop_df rows
-        # for a player match rather than expecting a player-keyed dict.
         pub_over   = 50.0
         _prop_records = pub.get("prop_df", []) if isinstance(pub, dict) else []
         _player_lc    = player.lower()
@@ -3397,7 +3332,6 @@ class _ChalkBusterAgent(_BaseAgent):
             under_prob = 100.0 - model_prob
             ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= MIN_EV_THRESH_PCT:  # FIX PR#276: percent-scale gate (was _get_ev_threshold()=0.03 ratio — always passed)
-                # FIX: pass under_prob (not model_prob) so bet_ledger stores P(UNDER)
                 # and Brier/XGBoost retraining uses the correct outcome probability.
                 return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct)
         return None
@@ -3437,9 +3371,7 @@ class _SharpFadeAgent(_BaseAgent):
                 return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
 
         # ── Path 2: game-level RLM from Action Network ────────────────────────
-        # If no player-level entry, use game-level ticket%/money% divergence.
         # Only fires on batter props (hits, TB, RBIs, runs, h+r+rbi) where
-        # the game total direction implies a scoring environment mismatch.
         an_sentiment = market.get("an_game_sentiment", {})
         team = prop.get("_team", prop.get("team", "")).lower()
         game_ctx = an_sentiment.get(team, {})
@@ -3458,7 +3390,6 @@ class _SharpFadeAgent(_BaseAgent):
             return None
 
         # Sharp money on UNDER game total → batter props less favorable (LOWER)
-        # Sharp money on OVER game total  → batter props more favorable (HIGHER)
         sharp_side = "OVER" if rlm_dir == "over" else "UNDER"
 
         over_t  = game_ctx.get("over_ticket_pct", 50)
@@ -3507,7 +3438,6 @@ class _LineDriftAgent(_BaseAgent):
 
     # Minimum drift between sharp implied and platform implied to consider firing
     DRIFT_MIN: float = 4.0    # 4 percentage points (both sides in 0-100 scale)
-    # Line gap bonus: if DFS line is 0.25+ lower than sportsbook line → small EV bonus
     LINE_GAP_BONUS: float = 1.5   # added to ev_pct when gap favors Over
 
     _EXCLUDED = {"stolen_bases", "home_runs", "walks", "walks_allowed"}
@@ -3527,8 +3457,6 @@ class _LineDriftAgent(_BaseAgent):
         sharp_pct: float = sharp_implied * 100.0          # e.g. 55.0
         over_odds        = prop.get("over_american", -115)
         platform_pct: float = _american_to_implied(over_odds)  # e.g. 53.49 (already 0-100)
-
-        # Core drift signal: sharp books vs DFS platform — both percentage scale
         drift: float = sharp_pct - platform_pct
         if drift < self.DRIFT_MIN:
             return None
@@ -3837,9 +3765,7 @@ def run_agent_tasklet() -> bool:
         return
 
     # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
-    # Avoids burning API quota, writing empty bet_ledger rows, and spamming logs
     # at 3 AM when there are no games. Uses hub game_states (set by DataHubTasklet)
-    # rather than a hardcoded clock check so rain delays and doubleheaders are handled.
     _gs = hub.get("game_states", {})
     _active_states = {"Scheduled", "InProgress", "Live", "Pre-Game", "Warmup", "Delayed"}
     _has_active_games = any(s in _active_states for s in _gs.values())
@@ -3863,7 +3789,6 @@ def run_agent_tasklet() -> bool:
         return
 
     # Enrich all props with FanGraphs, weather, Bayesian, CV, form, park context
-    # This populates the fields _build_feature_vector() reads (k_rate, shadow_whiff, etc.)
     import datetime as _dt
     props = _enrich_props(props, hub, season=_today_pt().year)
 
@@ -3971,7 +3896,6 @@ def run_agent_tasklet() -> bool:
         return
 
     # ── Cross-agent dedup — remove identical leg sets regardless of which agent built them
-    # Fingerprint = frozenset of (player, prop_type, side) tuples across all legs
     def _parlay_fingerprint(p: dict) -> frozenset:
         return frozenset(
             (lg.get("player", lg.get("player_name", "")),
@@ -4023,16 +3947,12 @@ def run_agent_tasklet() -> bool:
         r.ltrim("bet_queue", 0, 499)
 
     # bet_ledger INSERT moved: now fires only at send-time with discord_sent=TRUE baked in
-
-    # ── Per-agent daily gate — each agent sends AT MOST ONE play per calendar day ──
     # Uses in-memory dict _AGENT_SENT_TODAY (agent → "YYYY-MM-DD") as primary
-    # gate so it works with or without Redis.  Redis is also written as a
     # cross-process backup (e.g. multiple Railway replicas).
     today_str  = _today_pt().isoformat()   # Pacific Time date
     r_dedup    = _redis()
 
     # ── DB-backed dedup preload — survives crash + Redis cold restart ──────────
-    # On cycle start, restore _AGENT_SENT_TODAY from bet_ledger for today so
     # a fresh restart never re-sends picks that were already Discord-sent today.
     try:
         _pg = _pg_conn()
@@ -4056,10 +3976,7 @@ def run_agent_tasklet() -> bool:
     except Exception as _dbe:
         logger.debug("[AgentTasklet] dedup preload skipped: %s", _dbe)
     _DAY_TTL   = 25 * 3600   # 25 h — expires safely after midnight
-
-    # ── One play per agent per day — hard gate ───────────────────────────────────────
     # Claim the slot IMMEDIATELY when iterating so that multiple parlays from
-    # the same agent in a single 30-second cycle cannot all slip through before
     # any lock is written.  Only the highest-EV parlay per agent advances.
     best_per_agent: dict = {}   # agent_name -> (ev, parlay, r_daily_key)
     _blocked_sent_today: list = []   # tracks which agents hit the daily gate (for split logging)
@@ -4073,9 +3990,7 @@ def run_agent_tasklet() -> bool:
             continue
 
         # Redis gate (secondary — cross-process guard)
-        # FIX PR#277: Use atomic SET NX instead of non-atomic exists()+setex().
         # Multiple Railway replicas running simultaneously all pass exists()=False
-        # before any replica writes the key → race condition → duplicate dispatches.
         # SET NX is atomic: only ONE replica gets True; all others skip immediately.
         r_daily_key = f"agent_sent:{agent_name}:{today_str}"
         try:
@@ -4086,8 +4001,6 @@ def run_agent_tasklet() -> bool:
                 continue
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
-
-        # Confidence gate — MIN_CONFIDENCE minimum, nothing lower reaches Discord
         play_conf = parlay.get("confidence", 0)
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
@@ -4095,7 +4008,6 @@ def run_agent_tasklet() -> bool:
             continue
 
         # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
-        # MIN_PROB is stored as fraction (0.57); model_prob is stored as percentage (57.0)
         _legs = parlay.get("legs", [])
         _min_prob_pct = MIN_PROB * 100  # 57.0
         _low_legs = [
@@ -4120,9 +4032,7 @@ def run_agent_tasklet() -> bool:
     if _ev_dupes > 0:
         logger.info("[AgentTasklet] Dropped %d parlay(s) — lower-EV duplicate within cycle.", _ev_dupes)
     # ── Cross-agent direction dedup ─────────────────────────────────────────
-    # Highest-EV agent locks direction for each (player, stat) pair this cycle.
     # Any other agent wanting the opposite direction is dropped — prevents two
-    # agents sending contradictory picks (e.g. one UNDER and one OVER on the
     # same prop) to Discord in the same cycle.
     _cycle_dir:    dict = {}   # (player_key, stat_key) → side string
     _cycle_locker: dict = {}   # (player_key, stat_key) → agent_name that locked it
@@ -4168,15 +4078,11 @@ def run_agent_tasklet() -> bool:
 
     for agent_name, (_ev, parlay, r_daily_key) in best_per_agent.items():
         # ── Atomically claim this agent slot BEFORE any DB/Discord work ───────
-        # FIX PR#277: Atomic Redis SET NX replaces the non-atomic exists()+setex()
         # pattern in the evaluation loop above.  Here we do the actual cross-
-        # replica lock: only the first replica to execute SET NX wins the slot.
         # All other replicas (or restart cycles) get False and skip immediately.
-        # Order: atomic Redis claim → in-memory → DB → Discord.
         _redis_claimed = False
         try:
             # set(key, val, ex=TTL, nx=True) returns True if key was set (we won),
-            # None/False if key already existed (another replica claimed it).
             _result = r_dedup.set(r_daily_key, "1", ex=_DAY_TTL, nx=True)
             _redis_claimed = bool(_result)
             if not _redis_claimed:
@@ -4233,7 +4139,6 @@ def run_agent_tasklet() -> bool:
 
         try:
             discord_alert.send_parlay_alert(parlay)      # 4. Discord (fires last)
-            # FIX GAP 1: flip discord_sent=TRUE only after Discord confirms receipt
             # Prevents ghost grades where DB has a row but subscriber never saw the pick
             try:
                 _pg3 = _pg_conn()
@@ -4257,7 +4162,6 @@ def run_agent_tasklet() -> bool:
                 logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
 
             # Record parlay in propiq_season_record so nightly_recap.py can settle it
-            # Without this, recap always shows "No parlays sent today" even when plays fire
             try:
                 from season_record import record_parlay as _record_parlay  # noqa: PLC0415
                 _legs_for_record = [
@@ -4284,7 +4188,6 @@ def run_agent_tasklet() -> bool:
                             agent_name, today_str)
             except Exception as _sr_err:
                 # FIX GAP 3: surface this clearly — nightly_recap depends on season_record
-                # If this fails, recap shows "No parlays sent today" even when picks fired.
                 # Common cause: DATABASE_URL not set at Railway SERVICE level (vs project).
                 logger.error(
                     "[AgentTasklet] season_record.record_parlay FAILED for %s: %s — "
@@ -4515,7 +4418,6 @@ def run_backtest_tasklet() -> None:
                        "Retraining queued.", accuracy, ACCURACY_THRESHOLD)
 
     # ── Step 2: Rebuild edge thresholds from settled bet history ──────────────
-    # After every weekly retrain, update per-tag EV thresholds so edge types
     # with proven win-rates lower their bar and noisy edge types raise theirs.
     try:
         new_thresholds = _rebuild_ev_thresholds()
@@ -4540,12 +4442,9 @@ def run_grading_tasklet() -> None:
     SportsData.io replaced — was returning 403 on all calls.
     """
     # GradingTasklet runs at 2:00 AM PT — grades YESTERDAY's bets so all West Coast
-    # games (ending ~10:30 PM PT) have complete ESPN boxscores available.
     _yesterday = (_today_pt() - datetime.timedelta(days=1))
     today      = _yesterday.strftime("%Y-%m-%d")   # used as grade_date throughout
     espn_date  = _yesterday.strftime("%Y%m%d")     # ESPN format
-
-    # Use ESPN box score scraper (same source as nightly_recap.py)
     try:
         from espn_scraper import get_all_player_stats  # noqa: PLC0415
         raw_stats = get_all_player_stats(espn_date)
@@ -4558,7 +4457,6 @@ def run_grading_tasklet() -> None:
         return
 
     # Build stat_lookup keyed by player name (ESPN returns lowercase keys)
-    # Map ESPN stat dict to the format _get_stat() expects
     stat_lookup: dict[str, dict] = {}
     for name_lower, espn in raw_stats.items():
         # Normalise to title case for _get_stat key matching
@@ -4588,14 +4486,12 @@ def run_grading_tasklet() -> None:
             "Wins":              espn.get("wins",            0.0),
             "QualityStart":      espn.get("quality_start",   0.0),
             # PitchingOuts = direct outs count from MLB API (authoritative)
-            # Falls back to InningsPitched conversion in _get_stat if missing
             "PitchingOuts":      espn.get("pitching_outs",   0.0),
         }
         stat_lookup[display_name] = mapped
         stat_lookup[name_lower]   = mapped   # lowercase index
         stat_lookup[_ascii_name]  = mapped   # accent-stripped index (Acuña → Acuna)
         stat_lookup[_ascii_name.lower()] = mapped   # accent-stripped lowercase
-        # Hyphen-normalized keys (ESPN uses "Crow-Armstrong"; PP/UD may store "Crow Armstrong")
         _dn_nohyphen = display_name.replace("-", " ")
         stat_lookup[_dn_nohyphen]         = mapped
         stat_lookup[_dn_nohyphen.lower()]  = mapped
@@ -4645,8 +4541,6 @@ def run_grading_tasklet() -> None:
                 # FIX: use actual stake (units_wagered $5-$20) not kelly_units (~0.03 fraction)
                 _stake_units    = float(row_data[13]) if len(row_data) > 13 and row_data[13] else float(abs(units) or 1.0)
                 _stored_feats   = row_data[14] if len(row_data) > 14 else None  # existing features_json
-
-                # Grade by mlbam_id when available — accent-safe, always unique
                 # mlbam_id must be fetched from bet_ledger (stored at bet time)
                 _bid_mlbam = None
                 try:
@@ -4661,9 +4555,7 @@ def run_grading_tasklet() -> None:
                     if _ud2.category(c) != "Mn"
                 )
                 # Primary: grade by mlbam_id (accent-safe, always unique)
-                # stat_lookup is name-keyed (ESPN doesn't embed mlbam_id).
                 # Use MLB Stats API to resolve mlbam_id -> canonical name,
-                # then look up that name in stat_lookup.
                 _stats_by_id = {}
                 if _grade_mlbam:
                     try:
@@ -4740,15 +4632,12 @@ def run_grading_tasklet() -> None:
 
                 closing_odds = _fetch_closing_odds(player, ptype, side) or odds
                 # CLV = model edge over closing line (both in decimal 0-1 scale)
-                # CLV = model edge over closing line, both in percentage scale
                 clv = round(float(model_prob or 50) - _american_to_implied(int(closing_odds or -110)), 4)
 
                 # actual_outcome: 1=WIN, 0=LOSS (used by XGBoost retraining)
                 actual_outcome = 1 if status == "WIN" else 0 if status == "LOSS" else None
                 # FIX: refresh features_json at grade time with actual player data.
-                # At bet time features_json may have contained FanGraphs defaults
                 # (season start, 403s, early enrichment).  At 2AM grading the player's
-                # real game stats are available — rebuild feature vector so XGBoost
                 # trains on accurate data, not stale proxies.
                 _refreshed_feats_json = None
                 try:
@@ -4771,7 +4660,6 @@ def run_grading_tasklet() -> None:
                         try:
                             _sf = json.loads(_stored_feats)
                             # slots 0-9 are player stats / weather — keep from enrichment
-                            # slots 11-18 are bet quality / market signals — keep stored values
                         except Exception:
                             pass
                     _refreshed_feats = _BaseAgent._build_feature_vector(_grade_prop, {
@@ -4864,8 +4752,6 @@ def run_grading_tasklet() -> None:
     except Exception as _streak_upd_err:
         logger.debug("[GradingTasklet] Streak state update error: %s", _streak_upd_err)
     # ── End streak state update ──────────────────────────────────────────────
-
-    # Sync results into propiq_season_record so /propiq/record endpoint has data
     try:
         conn2 = _pg_conn()
         with conn2.cursor() as cur2:
@@ -4913,9 +4799,7 @@ def run_grading_tasklet() -> None:
         logger.debug("[GradingTasklet] Season record sync failed: %s", _sync_err)
 
     # ── Phase 89: Update agent tier ladder + build progress messages ──────
-    # Requirements: need 3 consecutive W or L before tier moves.
     # Progress is shown in Discord after every result so user always sees
-    # where each agent stands (e.g. "2/3 wins → Tier 2").
     _TIER_UP_DOLLARS   = {1: 8, 2: 12, 3: 16, 4: 20}
     _TIER_DOWN_DOLLARS = {2: 5, 3: 8,  4: 12, 5: 16}
     _tier_progress: list[str] = []
@@ -4976,7 +4860,6 @@ def run_grading_tasklet() -> None:
     if results:
         try:
             from drift_monitor import record_brier  # noqa: PLC0415
-            # Brier score: mean((model_prob/100 - outcome)^2) across graded bets
             # Fetch actual model_prob from bet_ledger for accurate Brier score
             _brier_probs = {}
             try:
@@ -5012,10 +4895,7 @@ def run_grading_tasklet() -> None:
                     logger.info("[GradingTasklet] Brier score recorded: %.4f", brier)
         except Exception as _brier_err:
             logger.warning("[GradingTasklet] Brier record failed: %s", _brier_err)  # FIX: was debug
-
-    # ── FIX: Update calibration map nightly after grading ────────────────────
     # Previously calibration_map.json only updated on Sunday XGBoost retrain.
-    # Now it updates every night once MIN_SAMPLE (20) graded rows exist in Postgres.
     # Probabilities start being corrected after ~3-4 days instead of up to 7 days.
     try:
         from calibrate_model import generate_calibration_map_from_db  # noqa: PLC0415
@@ -5032,9 +4912,7 @@ def run_grading_tasklet() -> None:
         logger.warning("[GradingTasklet] Calibration map update failed: %s", _cal_map_err)
 
     # ── Void stale OPEN bets from postponed/suspended games ────────────────────
-    # Bets on postponed games never get boxscores → stay OPEN forever.
     # After 7 days without grading, mark VOID so they don't pollute the ledger.
-    # VOID rows are excluded from ROI/Brier calculations but preserved for audit.
     try:
         _void_conn = _pg_conn()
         with _void_conn.cursor() as _vc:
@@ -5054,9 +4932,7 @@ def run_grading_tasklet() -> None:
         logger.debug("[GradingTasklet] Stale OPEN void sweep failed: %s", _void_err)
 
     # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
-    # Exports all graded bet_ledger rows (WIN/LOSS/PUSH) to a dated Parquet file.
     # Postgres is the primary store; Parquet is the backup.  If DB is wiped, we
-    # can restore from /app/data/retraining_YYYY-MM-DD.parquet files.
     # XGBoostTasklet reads from Postgres; the Parquet files are a safety net only.
     try:
         import pandas as _pd  # noqa: PLC0415
@@ -5156,9 +5032,7 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
     field = mapping.get(prop_key)
 
     # ── Pitching outs ──────────────────────────────────────────────────────────
-    # PRIMARY: MLB Stats API pit['outs'] — exact integer total outs on mound
     # Examples: 13 outs=4.1 IP, 20 outs=6.2 IP, 9 outs=3.0 IP
-    # Every out counts: Ks, groundouts, flyouts, CS, pickoffs
     if field == "__pitching_outs__":
         po = stats.get("PitchingOuts")
         if po is not None and float(po) > 0:
@@ -5337,7 +5211,6 @@ def run_xgboost_tasklet() -> None:
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
-    # weight = e^(-0.01 × days_ago)
     # Last week ≈ 0.93 | 30 days ≈ 0.74 | 90 days ≈ 0.41 | Opening Day ≈ 0.16
     now_utc = datetime.datetime.utcnow()
     sample_weights = np.array([
@@ -5372,7 +5245,6 @@ def run_xgboost_tasklet() -> None:
     model_path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     # Save as XGBoost native JSON (matches _load_xgb_model() which uses xgb.Booster().load_model())
-    # pickle.dump would save as sklearn wrapper — incompatible with xgb.Booster.load_model()
     try:
         model.get_booster().save_model(model_path)
         logger.info("[XGBoostTasklet] Saved model as XGBoost JSON to %s", model_path)
@@ -5394,7 +5266,6 @@ def run_xgboost_tasklet() -> None:
     }))
 
     # ── Phase 91 Step 5: Cache per-prop-type sample counts for thin-data shrinkage ──
-    # Agents read this at bet-evaluation time to know how much to trust the model
     # for prop types with few settled training rows.
     try:
         _sc_conn = _pg_conn()

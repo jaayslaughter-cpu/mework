@@ -53,12 +53,12 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/2.0)"}
 # ---------------------------------------------------------------------------
 
 MLB_AVGS = {
-    "K_Rate":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026)   # FIX: FG 2024 (was 0.224)
-    "BB_Rate": 0.084,   # FG 2025: 8.4%  (confirmed VSiN Feb 2026)   # FIX: FG 2024 (was 0.085)
+    "K_Rate":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
+    "BB_Rate": 0.084,   # FG 2025: 8.4%  (confirmed VSiN Feb 2026) 
     "1B_Rate": 0.143,
     "2B_Rate": 0.047,
     "3B_Rate": 0.004,
-    "HR_Rate": 0.033,   # FG 2025: elevated power environment   # FIX: 2024 actual (was 0.030)
+    "HR_Rate": 0.033,   # FG 2025: elevated power environment 
 }
 
 # ---------------------------------------------------------------------------
@@ -364,9 +364,7 @@ def simulate_half_inning(
         return year_val * yw + season_val * sw
 
     # Helper: Odds Ratio matchup combination (Log5 method)
-    # More accurate than simple averaging — accounts for interaction between
     # high-K pitcher vs low-K batter (and vice versa) relative to league avg.
-    # Formula: (p*b/L) / ((p*b/L) + ((1-p)*(1-b)/(1-L)))
     # Source: Bill James Log5 / PropMatchupEngine odds_ratio
     def csf(bv: float, pv: float, avg: float) -> float:
         bv = avg if (bv is None or bv != bv or bv <= 0) else bv   # nan/zero guard
