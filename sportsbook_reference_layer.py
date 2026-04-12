@@ -46,8 +46,9 @@ logger = logging.getLogger("propiq.sb_ref")
 # Set ODDS_API_KEY and ODDS_API_KEY_2 in Railway environment variables
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 _ODDS_KEY_FALLBACKS = [
-    os.getenv("ODDS_API_KEY",   ""),   # primary key — set in Railway env vars
-    os.getenv("ODDS_API_KEY_2", ""),   # secondary key — set in Railway env vars
+    os.getenv("ODDS_API_KEY",   ""),   # primary key
+    os.getenv("ODDS_API_KEY_2", ""),   # secondary key
+    os.getenv("ODDS_API_KEY_3", ""),   # tertiary key
 ]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 SPORT         = "baseball_mlb"
