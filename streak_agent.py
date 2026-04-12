@@ -5,9 +5,7 @@ PropIQ — 19th Agent: StreakAgent
 
 Underdog Fantasy "Streaks" format — 11 consecutive correct picks to win.
 
-Entry tiers:
-  $1  entry → $1,000  prize
-  $5  entry → $5,000  prize
+Entry:
   $10 entry → $10,000 prize
 
 Rules enforced:
@@ -43,7 +41,7 @@ Discord alerts:
   • Streak milestones  : 5/11 and 8/11 celebration pings
 
 Standalone run:
-  python streak_agent.py [--date 2026-04-01] [--dry-run] [--entry 1|5|10]
+  python streak_agent.py [--date 2026-04-01] [--dry-run] [--entry 10]
 """
 
 from __future__ import annotations
@@ -136,13 +134,13 @@ STREAK_MIN_SIGNALS = 2      # NEW: at least 2/17 agents must agree before a pick
 STREAK_TOTAL_WINS = 11     # picks needed to win
 STREAK_WINDOW_DAYS = 10    # calendar days to complete the streak
 
-# Entry tiers: entry_key → (stake_usd, prize_usd)
+# Entry: $10 entry → $10,000 prize
 ENTRY_TIERS: dict[int, tuple[float, float]] = {
     1:  (1.0,  1_000.0),
     5:  (5.0,  5_000.0),
     10: (10.0, 10_000.0),
 }
-DEFAULT_ENTRY = 1   # $1 entry → $1,000 prize
+DEFAULT_ENTRY = 10   # $10 entry → $10,000 prize
 
 DISCORD_WEBHOOK = os.getenv(
     "DISCORD_WEBHOOK_URL",
@@ -537,7 +535,7 @@ def select_streak_pick(
       1. Filter: conf ≥ STREAK_CONF_MIN, prob ≥ STREAK_PROB_MIN, ev ≥ STREAK_EV_MIN
       2. Team diversity: if pick_number ≤ 2 and prior_pick_team is set,
          exclude candidates from that same team
-      3. Rank: primary = confidence desc, tiebreak = signal_count desc
+      3. Rank: primary = implied_prob desc, tiebreak = confidence desc
 
     Returns None if no candidate qualifies (system skips the day rather than
     forcing a marginal pick — streak integrity over volume).
@@ -639,7 +637,7 @@ def ensure_streak_tables() -> None:
     ddl = """
     CREATE TABLE IF NOT EXISTS streak_state (
         id              SERIAL PRIMARY KEY,
-        entry_amount    INTEGER NOT NULL DEFAULT 1,
+        entry_amount    INTEGER NOT NULL DEFAULT 10,
         current_pick    INTEGER NOT NULL DEFAULT 0,
         wins_in_row     INTEGER NOT NULL DEFAULT 0,
         status          TEXT    NOT NULL DEFAULT 'ACTIVE',
@@ -685,7 +683,7 @@ def get_or_create_active_streak(entry_amount: int = DEFAULT_ENTRY) -> dict | Non
     Return the current ACTIVE streak state dict, or create one if none exists.
     Returns None on DB error or when Postgres is unavailable (local dev).
     """
-    if not _PG_AVAILABLE or not os.getenv("DATABASE_URL", os.getenv("POSTGRES_URL", "")):  # FIX: DATABASE_URL primary
+    if not _PG_AVAILABLE or not os.getenv("DATABASE_URL", os.getenv("POSTGRES_URL", "")):
         logger.info("[Streak] Postgres unavailable — skipping streak state (local dev mode)")
         return None
     try:
@@ -865,12 +863,12 @@ def post_pick_alert(
     line_compare_note: str = "",
 ) -> None:
     """Post the 8:00 AM PT pick announcement to Discord."""
-    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
+    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (10.0, 10_000.0))
     remaining  = STREAK_TOTAL_WINS - wins_in_row - 1   # after this pick
     prize_tier = _PRIZE_EMOJI.get(entry_amount, "💰")
 
     prop_label = _PROP_LABELS.get(pick.prop_type, pick.prop_type.replace("_", " ").title())
-    direction  = "OVER 📈" if pick.side == "Over" else "UNDER 📉"
+    direction  = "HIGHER 📈" if pick.side == "Over" else "LOWER 📉"
     team_str   = f" ({pick.team})" if pick.team else ""
 
     # Confidence bar
@@ -976,7 +974,7 @@ def post_start_picks_alert(
     notes: list | None = None,
 ) -> None:
     """Post the combined 2-pick announcement for a fresh streak start."""
-    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
+    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (10.0, 10_000.0))
     prize_tier  = _PRIZE_EMOJI.get(entry_amount, "💰")
     season_rate = f"{season_wins}/{season_picks}" if season_picks else "0/0"
     notes       = notes or ["", ""]
@@ -984,7 +982,7 @@ def post_start_picks_alert(
     fields = []
     for i, pick in enumerate(picks, start=1):
         prop_label = _PROP_LABELS.get(pick.prop_type, pick.prop_type.replace("_", " ").title())
-        direction  = "OVER 📈" if pick.side == "Over" else "UNDER 📉"
+        direction  = "HIGHER 📈" if pick.side == "Over" else "LOWER 📉"
         team_str   = f" ({pick.team})" if pick.team else ""
         note       = notes[i - 1] if i - 1 < len(notes) else ""
         note_str   = f"\n📌 {note}" if note and "Not found" not in note else ""
@@ -1018,7 +1016,7 @@ def post_start_picks_alert(
             "name": "📋 HOW TO ENTER — Start Your Streak",
             "value": (
                 "**Step 1:** Open Underdog Fantasy → tap **Streaks** tab\n"
-                "**Step 2:** Tap **'Start New Streak'** → choose your entry ($1/$5/$10)\n"
+                "**Step 2:** Tap **'Start New Streak'** → select **$10 entry**\n"
                 "**Step 3:** Add **Pick 1** — find the player, tap Higher or Lower\n"
                 "**Step 4:** Add **Pick 2** — must be from a **different team**\n"
                 "**Step 5:** Tap **Submit** ✅\n"
@@ -1027,7 +1025,7 @@ def post_start_picks_alert(
                 "🔄 If either pick **ties or voids** → full entry **refunded**\n"
                 "❌ Picks 1–2 can be **cancelled** shortly after submission\n"
                 "⏱️ You have **10 days** after each settled pick to add the next\n"
-                "🏆 Win all 11 → **$1,000 / $5,000 / $10,000** base payout\n"
+                "🏆 Win all 11 → **$10,000** payout\n"
                 "💡 Max 3 active streaks at a time"
             ),
             "inline": False,
@@ -1070,8 +1068,9 @@ def post_settlement_alert(
     streak_status: str,   # ACTIVE / WON / LOST / VOIDED
 ) -> None:
     """Post the 2 AM settlement result to Discord."""
-    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
+    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (10.0, 10_000.0))
     prop_label = _PROP_LABELS.get(prop_type, prop_type.replace("_", " ").title())
+    direction_label = "Higher 📈" if direction == "Over" else "Lower 📉"
 
     outcome_emoji = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖", "VOID": "🔄"}.get(outcome, "❓")
     colour = {
@@ -1108,7 +1107,7 @@ def post_settlement_alert(
             {
                 "name": f"📋 {player_name}",
                 "value": (
-                    f"{direction} **{line}** {prop_label}\n"
+                    f"{direction_label} **{line}** {prop_label}\n"
                     f"Actual: **{actual}** | Result: **{outcome}**"
                 ),
                 "inline": False,
@@ -1136,7 +1135,7 @@ def post_milestone_alert(pick_number: int, wins_in_row: int, entry_amount: int) 
     """Post a milestone celebration at picks 5/11 and 8/11."""
     if wins_in_row not in (5, 8):
         return
-    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
+    stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (10.0, 10_000.0))
     remaining = STREAK_TOTAL_WINS - wins_in_row
 
     milestone_msg = {
@@ -1331,7 +1330,6 @@ def settle_streak_picks(game_date: str) -> None:
                 # Update streak state
                 if outcome == "WIN":
                     # Re-read wins_in_row to avoid stale batch reads
-                    # (both fresh-start picks graded same cycle both see wins_in_row=0)
                     cur.execute(
                         "SELECT wins_in_row FROM streak_state WHERE id=%s FOR UPDATE",
                         (streak_id,),
@@ -1411,11 +1409,8 @@ def settle_streak_picks(game_date: str) -> None:
             post_milestone_alert(pick_number, updated_wins, entry_amount)
 
         if updated_status in ("WON", "LOST"):
-            # Auto-create new streak if WON (chain into next streak)
-            # LOST: next run of run_streak_pick() will auto-create a fresh one
             if updated_status == "WON":
                 logger.info("[Streak] 🏆 Streak #%d WON — auto-creating next streak.", streak_id)
-                # New streak auto-created on next morning's dispatcher run
 
     conn.close()
 
@@ -1482,8 +1477,6 @@ def run_streak_pick(
     pick_number  = wins_in_row + 1    # next pick needed
 
     # FIX: is_fresh_start must check actual pick count from DB, not state columns.
-    # wins_in_row and current_pick can be out of sync (e.g. current_pick=1 but
-    # pick never graded). Authoritative check: zero picks recorded for this streak.
     try:
         _fs_conn = _pg_conn()
         with _fs_conn.cursor() as _fc:
@@ -1671,10 +1664,8 @@ def run_streak_pick(
     )
 
     _line_comparison_note = _apply_line_comp(pick)
-    # Phase 92 line comparison already applied above via _apply_line_comp()
     if _LINE_COMP_AVAILABLE:
         try:
-            # Fetch both platforms fresh for the streak (small overhead, once/day)
             _ud_props = fetch_underdog_props_with_teams()
             _pp_resp  = requests.get(
                 "https://partner-api.prizepicks.com/projections",
@@ -1719,14 +1710,13 @@ def run_streak_pick(
                               _ud_lookup, _pp_lookup)
             _line_comparison_note = _comp.get("note", "")
 
-            # If PrizePicks has a better line, update the pick's platform + line
             if _comp.get("platform") == "PrizePicks" and _comp.get("line") is not None:
                 logger.info("[Streak] Better line on PrizePicks: %s (was UD %.1f)",
                             _line_comparison_note, pick.line)
                 pick.platform = "PrizePicks"
                 pick.line     = _comp["line"]
             elif _comp.get("platform") == "Underdog" and _comp.get("line") is not None:
-                pick.line = _comp["line"]   # confirm UD line from live fetch
+                pick.line = _comp["line"]
         except Exception as _lce:
             logger.debug("[Streak] Line comparison error: %s", _lce)
 
