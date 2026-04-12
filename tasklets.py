@@ -450,7 +450,7 @@ def _get_sample_count(prop_type: str) -> int:
     or by run_data_hub_tasklet() via _refresh_sample_counts(), the real per-
     prop-type counts take over.
     """
-    _COLD_START_SAMPLES = 100   # floor when Redis key absent entirely
+    _COLD_START_SAMPLES = 250   # floor when Redis key absent — raised from 100 (gave 0.28 thin_conf → shrinkage death spiral)
     try:
         raw = _redis().get("xgb_sample_counts")
         if raw:
