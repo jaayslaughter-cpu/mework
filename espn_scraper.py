@@ -368,12 +368,26 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
     for name_lower, extra in mlb_extra.items():
         if name_lower in all_stats:
             p = all_stats[name_lower]
+            # Always overwrite with authoritative MLB Stats API values
             p["doubles"]  = extra.get("doubles",  0.0)
             p["triples"]  = extra.get("triples",  0.0)
             if extra.get("total_bases", 0) > 0:
                 p["total_bases"] = extra["total_bases"]
             if "pitching_outs" in extra:
                 p["pitching_outs"] = extra["pitching_outs"]
+            # FIX: merge fields needed for fantasy scoring that ESPN doesn't provide
+            if "hit_by_pitch" in extra:
+                p["hit_by_pitch"]    = extra["hit_by_pitch"]
+            if "caught_stealing" in extra:
+                p["caught_stealing"] = extra["caught_stealing"]
+            if "stolen_bases" in extra:
+                p["stolen_bases"]    = extra["stolen_bases"]
+            if "wins" in extra:
+                p["wins"]            = extra["wins"]
+            if "quality_start" in extra:
+                p["quality_start"]   = extra["quality_start"]
+            if "earned_runs" in extra:
+                p["earned_runs"]     = extra["earned_runs"]
             supplemented += 1
     logger.info("[ESPN] MLB gamelog supplement: %d/%d players enriched with 2B/3B/TB",
                 supplemented, len(all_stats))
