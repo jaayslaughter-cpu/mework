@@ -4676,12 +4676,12 @@ def run_grading_tasklet() -> None:
                 cur.execute(
                     """
                     UPDATE bet_ledger
-                    SET status = %s, profit_loss = %s, actual_result = %s,
+                    SET status = %s, result = %s, profit_loss = %s, actual_result = %s,
                         clv = %s, graded_at = NOW(), actual_outcome = %s,
                         features_json = COALESCE(%s, features_json)
                     WHERE id = %s
                     """,
-                    (status, round(pl, 4), actual, round(clv, 2),
+                    (status, status, round(pl, 4), actual, round(clv, 2),
                      actual_outcome, _refreshed_feats_json, bid),
                 )
 
