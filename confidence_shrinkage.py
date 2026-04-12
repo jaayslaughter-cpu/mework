@@ -527,11 +527,11 @@ def shrink_toward_market(
     market_prob = market_implied_pct / 100.0
 
     thin_conf      = sample_size_confidence(n_samples)
-    depth_conf     = _season_depth_score(games_played)
     agreement_conf = _model_market_agreement(model_prob, market_prob)
 
     # Combined confidence (alpha scales aggressiveness)
-    confidence = max(0.09, min(1.0, thin_conf * depth_conf * agreement_conf * alpha))
+    # depth_conf removed — season depth already handled by Bayesian shrinkage; double-penalty was crushing all picks
+    confidence = max(0.09, min(1.0, thin_conf * agreement_conf * alpha))
 
     adjusted = shrink_prob(model_prob, market_prob, confidence)
     return round(adjusted * 100.0, 2), round(confidence, 3)
