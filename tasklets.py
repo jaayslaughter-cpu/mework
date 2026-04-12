@@ -2730,7 +2730,7 @@ class _BullpenAgent(_BaseAgent):
     name = "BullpenAgent"
     # Canonical hitter stat set — populated via _norm_stat() at ingestion
     _HITTER_STATS = {"home_runs", "rbis", "hits", "total_bases", "hits_runs_rbis",
-                     "stolen_bases", "singles", "walks", "runs", "fantasy_score"}
+                     "stolen_bases", "walks", "runs", "fantasy_score"}
 
     def evaluate(self, prop: dict) -> dict | None:
         """Targets hitter props when opposing bullpen is fatigued (0-4 scale).
@@ -3321,7 +3321,7 @@ class _StackSmithAgent(_BaseAgent):
         # Stack signal: look up the OPPOSING pitcher from projected_starters
         # (prop is a batter prop — it carries batter stats, not pitcher stats)
         opp_team = prop.get("opposing_team", "")
-        era    = 4.15  # FIX: 2024 league ERA (was 4.20)
+        era    = 4.08  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
         k_rate = 0.22
 
         starters = self.hub.get("context", {}).get("projected_starters", [])
@@ -3449,7 +3449,7 @@ class _SharpFadeAgent(_BaseAgent):
 
         # Only apply to batter props — game total RLM doesn't inform pitcher Ks
         _BATTER_PROPS = {"hits", "total_bases", "rbis", "runs", "hits_runs_rbis",
-                         "fantasy_score", "singles"}
+                         "fantasy_score"}
         if prop_type not in _BATTER_PROPS:
             return None
 
@@ -3871,8 +3871,7 @@ def run_agent_tasklet() -> bool:
     _EXCLUDED_PROP_TYPES = {
         "stolen_bases", "home_runs", "sb", "hr",
         "walks", "bb", "bases_on_balls",
-        "walks_allowed",
-        "doubles", "triples", "singles",   # Phase 118 directive
+        "walks_allowed", "singles", "doubles", "triples",
     }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 

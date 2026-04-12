@@ -41,8 +41,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # League average baselines (2024)
-_LEAGUE_O_SWING  = 0.318  # FIX: FG 2024 (was 0.310)
-_LEAGUE_K_PCT    = 0.223  # FIX: FG 2024 (was 0.230)
+_LEAGUE_O_SWING  = 0.316  # FG 2025: O-Swing% (was 0.318 in 2024)
+_LEAGUE_K_PCT    = 0.222  # FG 2025: 22.2% K% (confirmed VSiN Feb 2026)
 _LEAGUE_Z_CONTACT = 0.850
 
 # Chase thresholds

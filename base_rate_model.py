@@ -41,9 +41,9 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "fantasy_pitcher":[(15.0,0.78),(20.0,0.58),(25.0,0.40),(30.0,0.25),(35.0,0.14),(40.0,0.07),(50.0,0.02)],
 }
 
-# FIX: Updated to 2024 MLB actuals — used as normalization denominators in _fg_adj
+# FIX: Updated to 2025 MLB actuals — used as normalization denominators in _fg_adj
 _LG = {"csw":0.275,"swstr":0.110,"k_bb":0.130,"xfip":4.15,"siera":4.15,
-       "wrc":100.0,"woba":0.312,"iso":0.158,"hr_fb":0.118,"o_sw":0.318,"k_pct":0.223}
+       "wrc":100.0,"woba":0.308,"iso":0.160,"hr_fb":0.119,"o_sw":0.316,"k_pct":0.222}
 _FG_CAP = 0.030
 
 def _interp(rates, line):

@@ -53,19 +53,19 @@ logger = logging.getLogger("propiq.confidence")
 # Adapted from baseball-sims/src/simulation/constants.py
 # ---------------------------------------------------------------------------
 
-# FIX: Updated to 2024 MLB actuals
+# FIX: Updated to 2025 MLB actuals
 LEAGUE_RATES = {
-    "K":   0.223,   # FG 2024: 22.3% (was 0.224)
-    "BB":  0.086,   # FG 2024: 8.6%  (was 0.085)
+    "K":   0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026)   # FG 2025: 22.3% (was 0.224)
+    "BB":  0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026)   # FG 2025: 8.6%  (was 0.085)
     "HBP": 0.011,
-    "HR":  0.032,   # 2024: 1.24 HR/game ÷ 38.5 PA (was 0.030)
+    "HR":  0.033,   # FG 2025: elevated power   # 2025: 1.24 HR/game ÷ 38.5 PA (was 0.030)
     "3B":  0.004,
     "2B":  0.047,
     "1B":  0.143,
     "OUT": 0.454,   # adjusted to sum = 1.0
 }
 
-# wOBA linear weights (2024 FanGraphs)
+# wOBA linear weights (2025 FanGraphs)
 WOBA_WEIGHTS = {
     "BB":  0.696,
     "HBP": 0.726,
@@ -74,7 +74,7 @@ WOBA_WEIGHTS = {
     "3B":  1.569,
     "HR":  2.004,
 }
-LEAGUE_WOBA = 0.312   # FIX: FG 2024 actual (was 0.310)
+LEAGUE_WOBA = 0.308   # FG 2025: ~.308 (was 0.312)   # FIX: FG 2025 actual (was 0.310)
 
 # ---------------------------------------------------------------------------
 # Season depth: maps games played this season → confidence in data

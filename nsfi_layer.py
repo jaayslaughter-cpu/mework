@@ -48,17 +48,17 @@ _MLBAPI = "https://statsapi.mlb.com/api/v1"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/2.0)"}
 
 # ---------------------------------------------------------------------------
-# 2024 MLB league averages (per PA)
-# Source: Baseball Reference 2024 season totals
+# 2025 MLB league averages (per PA)
+# Source: Baseball Reference 2025 season totals
 # ---------------------------------------------------------------------------
 
 MLB_AVGS = {
-    "K_Rate":  0.223,   # FIX: FG 2024 (was 0.224)
-    "BB_Rate": 0.086,   # FIX: FG 2024 (was 0.085)
+    "K_Rate":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026)   # FIX: FG 2024 (was 0.224)
+    "BB_Rate": 0.084,   # FG 2025: 8.4%  (confirmed VSiN Feb 2026)   # FIX: FG 2024 (was 0.085)
     "1B_Rate": 0.143,
     "2B_Rate": 0.047,
     "3B_Rate": 0.004,
-    "HR_Rate": 0.032,   # FIX: 2024 actual (was 0.030)
+    "HR_Rate": 0.033,   # FG 2025: elevated power environment   # FIX: 2024 actual (was 0.030)
 }
 
 # ---------------------------------------------------------------------------
