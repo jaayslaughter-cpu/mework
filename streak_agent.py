@@ -1158,13 +1158,16 @@ def post_milestone_alert(pick_number: int, wins_in_row: int, entry_amount: int) 
 # ---------------------------------------------------------------------------
 
 _PROP_TO_ESPN_STAT: dict[str, str] = {
-    "hits":           "hits",
-    "rbis":           "RBIs",
-    "runs":           "runs",
-    "total_bases":    "totalBases",
-    "hits_runs_rbis": "hits",        # composite: H+R+RBI computed manually
-    "strikeouts":     "strikeouts",  # pitcher Ks
-    "earned_runs":    "earnedRuns",
+    "hits":            "hits",
+    "rbis":            "RBIs",
+    "runs":            "runs",
+    "total_bases":     "totalBases",
+    "hits_runs_rbis":  "hits",        # composite: H+R+RBI computed manually above
+    "strikeouts":      "strikeouts",  # pitcher Ks
+    "earned_runs":     "earnedRuns",
+    "pitching_outs":   "outsPitched",  # pitcher outs recorded (ESPN label)
+    "hits_allowed":    "hits",         # pitcher stat — hits allowed
+    "walks_allowed":   "walks",
 }
 
 
@@ -1284,8 +1287,32 @@ def settle_streak_picks(game_date: str) -> None:
         conn.close()
         return
 
-    # Fetch ESPN stats once
-    stat_lookup = fetch_espn_boxscore_stats(game_date)
+    # Fetch ESPN stats — prefer the richer espn_scraper.get_all_player_stats
+    # which uses the game summary endpoint + MLB Stats API supplement (doubles, pitching_outs, etc.)
+    # Fall back to local fetch_espn_boxscore_stats if import fails.
+    stat_lookup: dict = {}
+    try:
+        from espn_scraper import get_all_player_stats as _espn_full  # noqa: PLC0415
+        # get_all_player_stats expects YYYYMMDD format
+        _date_fmt = game_date.replace("-", "")
+        raw = _espn_full(_date_fmt)
+        # Remap: raw is keyed lowercase player name → {hits, runs, rbi, pitching_outs, ...}
+        # _grade_pick expects keys matching _PROP_TO_ESPN_STAT labels OR direct stat names
+        for _name_lc, _espn in raw.items():
+            stat_lookup[_name_lc] = {
+                "hits":        _espn.get("hits",          0.0),
+                "runs":        _espn.get("runs",          0.0),
+                "RBIs":        _espn.get("rbis", _espn.get("rbi", 0.0)),
+                "totalBases":  _espn.get("total_bases",   0.0),
+                "strikeouts":  _espn.get("strikeouts",    0.0),
+                "earnedRuns":  _espn.get("earned_runs",   0.0),
+                "outsPitched": _espn.get("pitching_outs", 0.0),
+                "walks":       _espn.get("base_on_balls", 0.0),
+            }
+        logger.info("[Streak] Settlement using espn_scraper stats for %d players", len(stat_lookup))
+    except Exception as _esp_err:
+        logger.warning("[Streak] espn_scraper import failed — falling back to scoreboard: %s", _esp_err)
+        stat_lookup = fetch_espn_boxscore_stats(game_date)
 
     lost_streaks: set[int] = set()   # streak IDs that auto-reset this batch
 
