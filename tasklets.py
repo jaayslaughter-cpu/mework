@@ -149,7 +149,7 @@ except ImportError:
         s2 = str(s).lower().replace(" ","_").replace("-","_").strip()
         result = m.get(s2, s2)
         # Block removed prop types even if they slip through via raw string match
-        _BLOCKED = {"stolen_bases","home_runs","walks","walks_allowed","doubles","triples"}
+        _BLOCKED = {"stolen_bases","home_runs","walks","walks_allowed","doubles","triples","singles"}
         return result if result not in _BLOCKED else ""
     ABS_FRAMING_WEIGHT = 0.20
     class SteamMonitor:
@@ -3311,7 +3311,7 @@ class _StackSmithAgent(_BaseAgent):
     """
     name = "StackSmithAgent"
 
-    _BATTER_TYPES = {"hits", "total_bases", "home_runs", "rbis", "runs_scored", "singles"}
+    _BATTER_TYPES = {"hits", "total_bases", "home_runs", "rbis", "runs_scored"}
 
     def evaluate(self, prop: dict) -> dict | None:
         prop_type = prop.get("prop_type", "").lower()
@@ -3872,6 +3872,7 @@ def run_agent_tasklet() -> bool:
         "stolen_bases", "home_runs", "sb", "hr",
         "walks", "bb", "bases_on_balls",
         "walks_allowed",
+        "doubles", "triples", "singles",   # Phase 118 directive
     }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 
@@ -3890,6 +3891,12 @@ def run_agent_tasklet() -> bool:
             logger.info("[LockGate] Dropped %d props (game Live/Final).", dropped)
 
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
+    # Log breakdown by prop type so we can see what's available
+    _type_counts = {}
+    for _p in props:
+        _t = _p.get("prop_type", "unknown")
+        _type_counts[_t] = _type_counts.get(_t, 0) + 1
+    logger.info("[AgentTasklet] Prop breakdown: %s", dict(sorted(_type_counts.items())))
 
     all_parlays: list[dict] = []
 
@@ -4219,7 +4226,7 @@ def run_agent_tasklet() -> bool:
                     )
             _pg2.commit()
             _pg2.close()
-            logger.info("[AgentTasklet] discord_sent=TRUE inserted %d legs for %s.",
+            logger.info("[AgentTasklet] Inserted %d legs for %s (discord_sent=FALSE pending send).",
                         len(parlay.get("legs", [])), agent_name)
         except Exception as _dbe2:
             logger.warning("[AgentTasklet] bet_ledger send-time INSERT failed for %s: %s — "
@@ -4242,8 +4249,11 @@ def run_agent_tasklet() -> bool:
                         """,
                         (agent_name, _today_pt().isoformat()),
                     )
+                    _flipped = _c3.rowcount
                 _pg3.commit()
                 _pg3.close()
+                logger.info("[AgentTasklet] ✅ Pick saved: %s — %d leg(s) discord_sent=TRUE in bet_ledger.",
+                            agent_name, _flipped)
             except Exception as _flip_err:
                 logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
 
@@ -4297,6 +4307,8 @@ def run_agent_tasklet() -> bool:
                 "Best slip: %s | %d legs | combined EV=%.1f%%",
                 len(all_parlays), active_agents,
                 best["agent"], best["leg_count"], best["combined_ev_pct"])
+    logger.info("[AgentTasklet] === DISPATCH SUMMARY: %d picks sent, saved to bet_ledger, confirmed on Discord ===",
+                len(best_per_agent))
     return True  # FIX: signals orchestrator that picks were actually sent
 
 
@@ -4616,6 +4628,8 @@ def run_grading_tasklet() -> None:
         logger.warning("[GradingTasklet] Postgres read error: %s", e)
         return
 
+    logger.info("[GradingTasklet] Found %d OPEN discord_sent=TRUE rows to grade for %s.",
+                len(open_bets), today)
     if not open_bets:
         logger.info("[GradingTasklet] No open bets for %s.", today)
         return
@@ -4784,6 +4798,8 @@ def run_grading_tasklet() -> None:
                      actual_outcome, _refreshed_feats_json, bid),
                 )
 
+                logger.info("[GradingTasklet] Graded: %s %s %.1f %s → actual=%.1f → %s (P/L: %+.2f)",
+                            player, ptype, line, side, actual, status, round(pl, 4))
                 results.append({
                     "id": bid, "player": player, "prop_type": ptype,
                     "line": line, "side": side, "actual": actual,
@@ -5015,6 +5031,28 @@ def run_grading_tasklet() -> None:
             logger.info("[GradingTasklet] No WIN/LOSS rows this cycle — calibration map unchanged.")
     except Exception as _cal_map_err:
         logger.warning("[GradingTasklet] Calibration map update failed: %s", _cal_map_err)
+
+    # ── Void stale OPEN bets from postponed/suspended games ────────────────────
+    # Bets on postponed games never get boxscores → stay OPEN forever.
+    # After 7 days without grading, mark VOID so they don't pollute the ledger.
+    # VOID rows are excluded from ROI/Brier calculations but preserved for audit.
+    try:
+        _void_conn = _pg_conn()
+        with _void_conn.cursor() as _vc:
+            _vc.execute("""
+                UPDATE bet_ledger
+                   SET status = 'VOID', graded_at = NOW()
+                 WHERE status = 'OPEN'
+                   AND discord_sent = TRUE
+                   AND bet_date <= CURRENT_DATE - INTERVAL '7 days'
+            """)
+            _voided = _vc.rowcount
+        _void_conn.commit()
+        _void_conn.close()
+        if _voided > 0:
+            logger.info("[GradingTasklet] Voided %d stale OPEN bets (postponed/no boxscore >7 days).", _voided)
+    except Exception as _void_err:
+        logger.debug("[GradingTasklet] Stale OPEN void sweep failed: %s", _void_err)
 
     # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
     # Exports all graded bet_ledger rows (WIN/LOSS/PUSH) to a dated Parquet file.

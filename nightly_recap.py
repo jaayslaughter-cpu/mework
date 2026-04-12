@@ -263,6 +263,7 @@ def run(settle_date: Optional[str] = None) -> None:
 
     # 1. Fetch all PENDING parlays across all dates (rollover-aware)
     pending = get_all_pending_parlays()
+    logger.info("[Recap] Found %d PENDING parlays in propiq_season_record for settlement.", len(pending))
     # FIX: filter out legacy live_dispatcher agents (ArsenalAgent, OmegaStack, etc.)
     # that were written to season_record before the system was migrated to AgentTasklet
     _phantom_count = len([p for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS])

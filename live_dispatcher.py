@@ -2151,35 +2151,9 @@ class LiveDispatcher:
 
         logger.info("Dispatch complete -- %d parlays sent for %s", sent, date)
 
-        # ── StreakAgent (19th agent) -- runs after the main 18-agent dispatch ──
-        # Single best pick per day for Underdog Streaks format (11 consecutive
-        # correct picks -> $1K/$5K/$10K prize). Confidence gate >= 8/10.
-        try:
-            from streak_agent import run_streak_pick
-            streak_entry = int(os.getenv("STREAK_ENTRY_AMOUNT", "1"))
-            streak_result = run_streak_pick(
-                date_str     = date,
-                entry_amount = streak_entry,
-                dry_run      = self.dry_run,
-            )
-            if streak_result:
-                logger.info(
-                    "[StreakAgent] Pick #%d/%d sent -- %s %s %.1f %s "
-                    "| conf=%.1f | prob=%.1f%%",
-                    streak_result["pick_number"], 11,
-                    streak_result["player_name"],
-                    streak_result["prop_type"],
-                    streak_result["line"],
-                    streak_result["direction"],
-                    streak_result["confidence"],
-                    streak_result["probability"] * 100,
-                )
-            else:
-                logger.info("[StreakAgent] No qualifying pick today (conf >= 8.0 gate not met).")
-        except ImportError:
-            logger.debug("[StreakAgent] streak_agent.py not found -- skipping.")
-        except Exception as _streak_err:
-            logger.warning("[StreakAgent] Error during streak pick: %s", _streak_err)
+        # StreakAgent runs independently via orchestrator job_streak at 8:00 AM PT.
+        # It is NOT called here — already_picked_today guards against double-picks,
+        # but the 8 AM job owns all streak dispatch (Pick-2 fresh start + Pick-1 Add).
 
         # Phase 35: flush decision log buffer (batch write all leg decisions)
         if _DL_AVAILABLE:

@@ -1440,8 +1440,28 @@ def run_streak_pick(
     wins_in_row  = streak["wins_in_row"]
     current_pick = streak["current_pick"]
     pick_number  = wins_in_row + 1    # next pick needed
-    # True when the streak is brand-new (no picks recorded yet)
-    is_fresh_start = (wins_in_row == 0 and current_pick == 0)
+
+    # FIX: is_fresh_start must check actual pick count from DB, not state columns.
+    # wins_in_row and current_pick can be out of sync (e.g. current_pick=1 but
+    # pick never graded). Authoritative check: zero picks recorded for this streak.
+    try:
+        _fs_conn = _pg_conn()
+        with _fs_conn.cursor() as _fc:
+            _fc.execute(
+                "SELECT COUNT(*) FROM streak_picks WHERE streak_id = %s",
+                (streak_id,)
+            )
+            _pick_count = _fc.fetchone()[0]
+        _fs_conn.close()
+        is_fresh_start = (_pick_count == 0)
+    except Exception as _fs_err:
+        logger.warning("[Streak] is_fresh_start DB check failed: %s — using state columns", _fs_err)
+        is_fresh_start = (wins_in_row == 0 and current_pick == 0)
+
+    logger.info(
+        "[Streak] State: streak_id=%d wins=%d current_pick=%d pick_number=%d is_fresh_start=%s",
+        streak_id, wins_in_row, current_pick, pick_number, is_fresh_start,
+    )
 
     # Already picked today?
     if already_picked_today(streak_id, date):
