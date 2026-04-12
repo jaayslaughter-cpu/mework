@@ -65,6 +65,16 @@ def _save_brier_pg(score: float) -> None:
         _ensure_brier_table()
         conn = _get_brier_conn()
         cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS brier_ledger (
+                id          SERIAL PRIMARY KEY,
+                agent_name  TEXT NOT NULL,
+                brier_score FLOAT NOT NULL,
+                n_samples   INT NOT NULL,
+                graded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.commit()
         cur.execute(
             "INSERT INTO brier_ledger (brier_score) VALUES (%s)",
             (score,),
