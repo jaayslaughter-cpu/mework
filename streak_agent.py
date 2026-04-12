@@ -869,7 +869,7 @@ def post_pick_alert(
     prize_tier = _PRIZE_EMOJI.get(entry_amount, "💰")
 
     prop_label = _PROP_LABELS.get(pick.prop_type, pick.prop_type.replace("_", " ").title())
-    direction  = "OVER 📈" if pick.side == "Over" else "UNDER 📉"
+    direction  = "HIGHER 📈" if pick.side == "Over" else "LOWER 📉"
     team_str   = f" ({pick.team})" if pick.team else ""
 
     # Confidence bar
@@ -889,9 +889,22 @@ def post_pick_alert(
     _note_str = f"\n📌 {line_compare_note}" if line_compare_note and "Not found" not in line_compare_note else ""
 
     embed = {
-        "title": f"🔥 StreakAgent — Pick {pick_number}/{STREAK_TOTAL_WINS}",
+        "title": f"🔥 StreakAgent — Pick {pick_number}/11 · Add This Now",
         "color": 0xF39C12,   # amber — streak in progress
         "fields": [
+            {
+                "name": f"📋 HOW TO ENTER — Pick {pick_number} of 11",
+                "value": (
+                    "**Step 1:** Open **Underdog Fantasy** → tap **Streaks** tab\n"
+                    "**Step 2:** Find your active streak → tap **'Add Pick'**\n"
+                    f"**Step 3:** Find **{pick.player_name}** → select "
+                    f"**{'Higher' if pick.side == 'Over' else 'Lower'}** "
+                    f"({pick.line} {_PROP_LABELS.get(pick.prop_type, pick.prop_type.replace('_',' ').title())})\n"
+                    "**Step 4:** Tap **'Submit'**\n"
+                    f"✅ This is the **highest-confidence pick** available today"
+                ),
+                "inline": False,
+            },
             {
                 "name": f"🎯 {pick.player_name}{team_str}",
                 "value": (
@@ -914,7 +927,7 @@ def post_pick_alert(
                 "name": "🎯 Confidence",
                 "value": (
                     f"`{conf_bar}` **{pick.confidence:.1f}/10**\n"
-                    f"_(gate: {STREAK_CONF_MIN}/10)_"
+                    f"_(gate: {STREAK_CONF_MIN}/10 · #{pick_number} of 11 picks needed)_"
                 ),
                 "inline": True,
             },
@@ -965,10 +978,27 @@ def post_start_picks_alert(
     season_rate = f"{season_wins}/{season_picks}" if season_picks else "0/0"
     notes       = notes or ["", ""]
 
-    fields = []
+    fields = [
+        {
+            "name": "📋 HOW TO ENTER — Pick-2 Slip",
+            "value": (
+                "**Step 1:** Open **Underdog Fantasy** → tap **Streaks** tab\n"
+                "**Step 2:** Tap **'Start New Streak'**\n"
+                f"**Step 3:** Find **{picks[0].player_name}** → select "
+                f"**{'Higher' if picks[0].side == 'Over' else 'Lower'}** "
+                f"({picks[0].line} {_PROP_LABELS.get(picks[0].prop_type, picks[0].prop_type.replace('_',' ').title())})\n"
+                f"**Step 4:** Find **{picks[1].player_name}** → select "
+                f"**{'Higher' if picks[1].side == 'Over' else 'Lower'}** "
+                f"({picks[1].line} {_PROP_LABELS.get(picks[1].prop_type, picks[1].prop_type.replace('_',' ').title())})\n"
+                "**Step 5:** Tap **'Submit Pick-2'**\n"
+                "⚠️ **Both must win** to advance to Pick 3 and start your streak at 2/11"
+            ),
+            "inline": False,
+        },
+    ]
     for i, pick in enumerate(picks, start=1):
         prop_label = _PROP_LABELS.get(pick.prop_type, pick.prop_type.replace("_", " ").title())
-        direction  = "OVER 📈" if pick.side == "Over" else "UNDER 📉"
+        direction  = "HIGHER 📈" if pick.side == "Over" else "LOWER 📉"
         team_str   = f" ({pick.team})" if pick.team else ""
         note       = notes[i - 1] if i - 1 < len(notes) else ""
         note_str   = f"\n📌 {note}" if note and "Not found" not in note else ""
@@ -1001,10 +1031,11 @@ def post_start_picks_alert(
     ]
 
     embed = {
-        "title": "🔥 StreakAgent — FRESH START (Picks 1 & 2)",
+        "title": "🔥 StreakAgent — START YOUR STREAK (Picks 1 & 2)",
         "description": (
-            "New streak begins! Picks 1 & 2 are from **different teams**.\n"
-            "All 11 must be correct — any wrong pick **auto-resets** to Pick 1."
+            "New streak begins! Enter these as a **Pick-2 slip** on Underdog Streaks.\n"
+            "Picks are from **different teams**. **Both must win** to start your streak at 2/11.\n"
+            "Any loss resets back to Pick 1 — choose wisely! 🎯"
         ),
         "color":     0x2ECC71,   # green — new streak
         "fields":    fields,
@@ -1036,6 +1067,7 @@ def post_settlement_alert(
     streak_status: str,   # ACTIVE / WON / LOST / VOIDED
 ) -> None:
     """Post the 2 AM settlement result to Discord."""
+    direction_label = "Higher 📈" if direction == "Over" else ("Lower 📉" if direction == "Under" else direction)
     stake_usd, prize_usd = ENTRY_TIERS.get(entry_amount, (1.0, 1_000.0))
     prop_label = _PROP_LABELS.get(prop_type, prop_type.replace("_", " ").title())
 
@@ -1068,7 +1100,7 @@ def post_settlement_alert(
             {
                 "name": f"📋 {player_name}",
                 "value": (
-                    f"{direction} **{line}** {prop_label}\n"
+                    f"{direction_label} **{line}** {prop_label}\n"
                     f"Actual: **{actual}** | Result: **{outcome}**"
                 ),
                 "inline": False,
