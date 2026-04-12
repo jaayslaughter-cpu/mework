@@ -3299,7 +3299,7 @@ class _StackSmithAgent(_BaseAgent):
             try:
                 from fangraphs_layer import get_pitcher as _fg_sp  # noqa: PLC0415
                 _sp_fg = _fg_sp(opp_sp.get("full_name", "")) or {}
-                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.20)) or 4.20)
+                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.08)) or 4.08)
                 k_rate = float(_sp_fg.get("k_rate", _sp_fg.get("k_pct",  0.22)) or 0.22)
             except Exception:
                 pass
