@@ -88,7 +88,8 @@ _MID_TIER_STATS = {
 _VOLATILE_STATS = {
     "hr_fb_pct", "iso", "sc_xslg", "sc_barrel_rate", "era",
     "babip", "sc_hard_hit_rate", "sc_exit_velo",
-    "home_runs", "total_bases", "rbis", "earned_runs", "hits_allowed",
+    "total_bases", "rbis", "earned_runs", "hits_allowed",
+    "h_rate", "hits", "tb_rate",
 }
 
 
@@ -291,6 +292,28 @@ def shrink_split(
 # High-level: apply shrinkage to a prop dict's rates
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# PROP_TO_RATE: maps allowed prop types to their enrichment rate field
+# Banned props (home_runs, walks, singles, doubles, triples,
+# stolen_bases, walks_allowed) are intentionally excluded.
+# ---------------------------------------------------------------------------
+PROP_TO_RATE: dict[str, str] = {
+    # Batter props
+    "hits":            "h_rate",
+    "total_bases":     "tb_rate",
+    "rbis":            "woba",
+    "runs":            "wrc_plus",
+    "hits_runs_rbis":  "woba",
+    "fantasy_hitter":  "woba",
+    # Pitcher props
+    "strikeouts":      "k_rate",
+    "pitching_outs":   "k_rate",
+    "earned_runs":     "era",
+    "hits_allowed":    "h_rate",
+    "fantasy_pitcher": "k_rate",
+}
+
+
 _STAT_FIELDS_PITCHER = [
     ("k_rate",   "k_rate",   "strikeouts"),
     ("k_pct",    "k_pct",    "strikeouts"),
@@ -311,6 +334,8 @@ _STAT_FIELDS_BATTER = [
     ("hr_fb_pct","hr_fb_pct","hr_fb_pct"),
     ("k_pct",    "k_pct",    "k_rate"),
     ("o_swing",  "o_swing",  "o_swing"),
+    ("h_rate",   "h_rate",   "h_rate"),
+    ("tb_rate",  "tb_rate",  "tb_rate"),
 ]
 
 
@@ -360,7 +385,10 @@ def apply_shrinkage_to_prop(
             "sc_barrel_rate":  0.077,    # 2025 MLB barrel%
             "iso":             0.159,    # 2025 MLB ISO
             "hr_fb_pct":       0.125,    # 2025 MLB HR/FB%
-            "o_swing":         0.318,    # 2025 MLB O-swing%
+            "o_swing":         0.316,    # 2025 MLB O-swing%
+            "h_rate":          0.204,    # 2025 H/PA (not H/BIP) — 2025 actual
+            "hits":            0.204,    # same
+            "tb_rate":         0.350,    # 2025 TB/PA approx
         }
     except ImportError:
         _LEAGUE_FALLBACKS = {}
