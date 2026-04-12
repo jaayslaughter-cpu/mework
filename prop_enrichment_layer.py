@@ -1064,6 +1064,21 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                         prop["_batting_order_slot"] = _slot
                     break
 
+        # ── Bayesian shrinkage — regress player rates toward 2025 priors ─────────
+        # Early-season data is thin; shrink toward league/prior to avoid overreacting.
+        # Uses season_ip (pitchers) or _split_pa (batters) as sample size proxy.
+        try:
+            from bayesian_shrinkage import apply_shrinkage_to_prop as _shrink  # noqa: PLC0415
+            _n_sample = float(
+                prop.get("season_ip", 0) * 3          # pitchers: IP×3 ≈ BF proxy
+                or prop.get("_split_pa", 0)             # batters: PA from splits
+                or 0
+            )
+            if _n_sample > 0:
+                prop = _shrink(prop, is_pitcher=is_pitcher_prop, n_current=_n_sample)
+        except Exception as _shr_err:
+            logger.debug("[Enrichment] Bayesian shrinkage skipped: %s", _shr_err)
+
         # ── Bernoulli suppression model (pitcher props only) ─────────────────────
         # from the pitcher's cumulative season IP and DivR line.
         if is_pitcher_prop:
@@ -1125,13 +1140,18 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     0.25
                 )
         else:
-            # Batter keys
+            # Batter keys — use platoon splits when available (overrides season stats)
+            # woba_vs_hand / k_pct_vs_hand are set by _get_mlbapi_batter_splits
+            _woba_src = prop.get("woba_vs_hand")   or prop.get("woba",    0.308)
+            _iso_src  = prop.get("iso_vs_hand")    or prop.get("iso",     0.160)
+            _k_src    = prop.get("k_pct_vs_hand")  or prop.get("k_pct",   0.222)
+            _bb_src   = prop.get("bb_pct_vs_hand") or prop.get("bb_pct",  0.084)
             prop.setdefault("_wrc_plus", prop.get("wrc_plus", 100.0))
-            prop.setdefault("_woba",     prop.get("woba",     0.312))  # FIX: 0.320→0.312 (2024 actual)
-            prop.setdefault("_iso",      prop.get("iso",      0.160))  # FIX: 0.155→0.158 (2024 actual)
-            prop.setdefault("_o_swing",  prop.get("o_swing",  0.318))  # FIX: 0.310→0.318 (2024 actual)
-            prop.setdefault("_k_pct",    prop.get("k_pct",    0.222))  # FIX: 0.224→0.223 (2024 actual)
-            prop.setdefault("_bb_pct",   prop.get("bb_pct",   0.084))  # FIX: 0.085→0.086 (2024 actual)
+            prop.setdefault("_woba",     _woba_src)
+            prop.setdefault("_iso",      _iso_src)
+            prop.setdefault("_o_swing",  prop.get("o_swing",  0.316))
+            prop.setdefault("_k_pct",    _k_src)
+            prop.setdefault("_bb_pct",   _bb_src)
         if team not in _weather_cache:
             _weather_cache[team] = _get_weather(team, hub)
         prop.update(_weather_cache[team])

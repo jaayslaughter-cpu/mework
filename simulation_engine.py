@@ -131,7 +131,7 @@ def _get_starter_pa_fraction(prop: dict, mean_pa: float) -> float:
 def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     """P(hit) per plate appearance against the starting pitcher."""
     # Pitcher skill inputs
-    k_pct   = _safe(prop, "_k_pct",  0.225)   # pitcher K% (higher = fewer hits)
+    k_pct   = _safe(prop, "_k_pct",  0.222)   # FG 2025: 22.2% pitcher K% (was 0.225)
     bb_pct  = _safe(prop, "_bb_pct", 0.080)
     whip    = _safe(prop, "_whip",   1.30)
 
@@ -144,7 +144,7 @@ def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     pitcher_hit_factor = _clamp(1.30 / max(whip, 0.50), 0.70, 1.40)
 
     # Batter wOBA adjustment: 0.312 = average (2024 MLB); scale ±20%
-    batter_hit_factor  = _clamp(woba / 0.320, 0.70, 1.45)
+    batter_hit_factor  = _clamp(woba / 0.308, 0.70, 1.45)   # FG 2025: center 0.308
 
     # Whiff rate: higher whiff → more Ks → fewer balls in play
     whiff_factor = _clamp(1.0 - (whiff_h - 0.25) * 1.5, 0.60, 1.20)
@@ -159,7 +159,7 @@ def _hit_prob_per_pa_vs_bullpen(prop: dict) -> float:
     Elite bullpen (ERA 2.5) → fewer hits; weak bullpen (ERA 5.5) → more.
     """
     bp_era    = _safe(prop, "_bullpen_era", _LG_BULLPEN_ERA)
-    batter_hit_factor = _clamp(_safe(prop, "_woba", 0.320) / 0.320, 0.70, 1.45)
+    batter_hit_factor = _clamp(_safe(prop, "_woba", 0.308) / 0.308, 0.70, 1.45)  # FG 2025
 
     # Bullpen ERA factor: 4.1 = average; below = good bullpen (fewer hits), above = weak
     era_factor = _clamp(bp_era / _LG_BULLPEN_ERA, 0.70, 1.50)
@@ -170,12 +170,12 @@ def _hit_prob_per_pa_vs_bullpen(prop: dict) -> float:
 
 def _hr_prob_per_pa(prop: dict, phase: str = "starter") -> float:
     """P(home run) per plate appearance. Phase = 'starter' or 'bullpen'."""
-    iso     = _safe(prop, "_iso",    0.150)
+    iso     = _safe(prop, "_iso",    0.160)   # FG 2025: ISO 0.160 (was 0.150)
     temp    = _safe(prop, "_temp_f", 72.0)
     wind    = _safe(prop, "_wind_speed", 5.0)
     is_dome = bool(prop.get("_is_dome"))
 
-    iso_factor  = _clamp(iso / 0.150, 0.30, 2.20)   # ISO 0.30 = 2×
+    iso_factor  = _clamp(iso / 0.160, 0.30, 2.20)   # FG 2025: normalized to 0.160
     temp_factor = _clamp(1.0 + (temp - 72.0) * 0.003, 0.85, 1.20)  # +3% per 10°F above 72
     wind_factor = 1.0
     if not is_dome and wind > 10:
@@ -192,7 +192,7 @@ def _hr_prob_per_pa(prop: dict, phase: str = "starter") -> float:
 
 def _k_prob_per_pa_vs_starter(prop: dict) -> float:
     """P(strikeout) per plate appearance for the BATTER against starter."""
-    k_pct   = _safe(prop, "_k_pct",  0.225)
+    k_pct   = _safe(prop, "_k_pct",  0.222)  # FG 2025
     csw     = _safe(prop, "_csw_pct", 0.28)
     o_swing = _safe(prop, "_o_swing", 0.316)  # FG 2025: O-Swing actual (was 0.318)
 
@@ -265,7 +265,7 @@ def _hits_phase_prob(pa: float, p_hit: float, line: float) -> float:
 def _simulate_pitcher_strikeouts(prop: dict, line: float, n_sims: int) -> SimResult:
     """Monte Carlo simulation for pitcher Ks prop."""
     # Pitcher faces ~27 outs * (1/(1-k_pct-bb_pct)) batters per 9 innings
-    k_pct   = _safe(prop, "_k_pct",  0.225)
+    k_pct   = _safe(prop, "_k_pct",  0.222)  # FG 2025
     bb_pct  = _safe(prop, "_bb_pct", 0.080)
     ip_mean = _safe(prop, "_starter_ip_projection", _LG_STARTER_IP)  # optional; may be 0
     if ip_mean < 1.0:

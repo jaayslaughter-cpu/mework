@@ -47,9 +47,9 @@ def _ensure_brier_table() -> None:
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS brier_ledger (
-                id SERIAL PRIMARY KEY,
-                recorded_at TIMESTAMPTZ DEFAULT NOW(),
-                brier_score FLOAT NOT NULL
+                id          SERIAL PRIMARY KEY,
+                brier_score FLOAT NOT NULL,
+                graded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
         conn.commit()

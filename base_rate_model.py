@@ -64,8 +64,8 @@ def _fg_adj(prop_type, prop, flip):
                     +(float(prop.get("swstr_pct",_LG["swstr"])or _LG["swstr"])-_LG["swstr"])/0.030*0.008
                     +(float(prop.get("k_bb_pct",_LG["k_bb"])or _LG["k_bb"])-_LG["k_bb"])/0.050*0.006)
     elif pt in {"earned_runs","fantasy_pitcher"}:
-        adj += flip*((4.20-float(prop.get("xfip",_LG["xfip"])or _LG["xfip"]))/0.70*0.015
-                    +(4.20-float(prop.get("siera",_LG["siera"])or _LG["siera"]))/0.70*0.008)
+        adj += flip*((4.08-float(prop.get("xfip",_LG["xfip"])or _LG["xfip"]))/0.70*0.015
+                    +(4.08-float(prop.get("siera",_LG["siera"])or _LG["siera"]))/0.70*0.008)
     elif pt in {"hits","hits_runs_rbis"}:
         adj += flip*((float(prop.get("wrc_plus",_LG["wrc"])or _LG["wrc"])-_LG["wrc"])/30.0*0.015
                     +(float(prop.get("woba",_LG["woba"])or _LG["woba"])-_LG["woba"])/0.060*0.010)
