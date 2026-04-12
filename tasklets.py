@@ -3182,6 +3182,14 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         mult        = _PP_MULTS.get(n, 3.0)
         combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
 
+    # Read tier stake from agent_unit_sizing (falls back to $5 floor)
+    _tier_stake = 5.0
+    try:
+        from agent_unit_sizing import get_unit as _get_unit  # noqa: PLC0415
+        _tier_stake = _get_unit(agent_name)
+    except Exception:
+        pass
+
     return [{
         "agent":           agent_name,
         "agent_name":      agent_name,
@@ -3190,7 +3198,8 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         "entry_type":      entry_type,
         "combined_ev_pct": combined_ev,
         "ev_pct":          combined_ev,
-        "stake":           10.0,
+        "stake":           _tier_stake,
+        "unit_dollars":    _tier_stake,
         "confidence":      p_conf,
         "platform":        parlay_platform,
         "season_stats":    {},
@@ -3715,9 +3724,9 @@ def _get_props(hub: dict) -> list[dict]:
                 "player_id":        _pp_pitcher.get("mlbam_id"),
                 "opposing_team":    _pp_pitcher.get("opposing_team", ""),
                 "_context_lineups": hub.get("context", {}).get("lineups", []),
-                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.22)),
-                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.08)),
-                "era":              _fg_pitcher.get("era",    4.0),
+                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.222)),
+                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.084)),
+                "era":              _fg_pitcher.get("era",    4.08),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
         if props:
@@ -4943,6 +4952,14 @@ def run_grading_tasklet() -> None:
             logger.info("[GradingTasklet] No WIN/LOSS rows this cycle — calibration map unchanged.")
     except Exception as _cal_map_err:
         logger.warning("[GradingTasklet] Calibration map update failed: %s", _cal_map_err)
+
+    # ── Streak settlement — grade PENDING streak picks for yesterday ────────────
+    try:
+        from streak_agent import settle_streak_picks as _settle_streak  # noqa: PLC0415
+        _settle_streak(today)   # today = yesterday's PT date (set at top of grading tasklet)
+        logger.info("[GradingTasklet] Streak picks settled for %s.", today)
+    except Exception as _streak_settle_err:
+        logger.warning("[GradingTasklet] Streak settlement failed (non-fatal): %s", _streak_settle_err)
 
     # ── Void stale OPEN bets from postponed/suspended games ────────────────────
     # After 7 days without grading, mark VOID so they don't pollute the ledger.
