@@ -327,7 +327,6 @@ MIN_EV_THRESH     = 0.03   # 3% minimum edge to queue a bet (ratio scale, e.g. 0
 MIN_EV_THRESH_PCT = 3.0    # same threshold in percent scale (e.g. 8.5) — used by Group B agents
 CAP_FLOOR = 0.5
 CAP_CEIL  = 2.0
-_MAX_LEGS_PER_TEAM = 3  # Team concentration cap: max legs per team per parlay
 
 # ── Railway-safe service connections ─────────────────────────────────────────
 
@@ -373,6 +372,82 @@ def _pg_conn():
         user=os.getenv("POSTGRES_USER", "propiq"),
         password=os.getenv("POSTGRES_PASSWORD", "propiq"),
     )
+
+def _get_agent_roi(agent_name: str) -> float | None:
+    """
+    Fetch the most recent 30-day ROI for an agent from agent_diagnostics table.
+    Returns None if table doesn't exist or no data (fail-open).
+    """
+    import psycopg2
+    _DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:baPrVnFBbEDgEPtiusCMjHHjyPZMyBbD@postgres.railway.internal:5432/railway")
+    try:
+        conn = psycopg2.connect(_DB_URL)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT roi_30d FROM agent_diagnostics
+            WHERE agent_name = %s
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+            """,
+            (agent_name,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return float(row[0])
+        return None
+    except Exception as e:
+        logger.debug("[DynThresh] Could not read agent ROI for %s: %s", agent_name, e)
+        return None
+
+
+def _dynamic_gates(agent_name: str, base_prob: float = 0.57, base_conf: float = 6.0) -> tuple[float, float]:
+    """
+    Adjust MIN_PROB and MIN_CONF based on the agent's 30-day ROI.
+
+    ROI bands:
+      > +5%:        reward hot agent  → prob -0.01, conf -0.25
+      0% to +5%:    neutral           → no change
+      -10% to 0%:   mild underperf    → no change (freeze will handle extreme cases)
+      -20% to -10%: caution           → prob +0.01, conf +0.25
+      < -20%:       significant       → prob +0.02, conf +0.50
+
+    Caps: prob never < 0.52 or > 0.65. conf never < 5.5 or > 7.5.
+    Fail-open: if ROI unavailable, return base values unchanged.
+    """
+    roi = _get_agent_roi(agent_name)
+    if roi is None:
+        return base_prob, base_conf
+
+    if roi > 5.0:
+        adj_prob = base_prob - 0.01
+        adj_conf = base_conf - 0.25
+    elif roi > 0.0:
+        adj_prob = base_prob
+        adj_conf = base_conf
+    elif roi > -10.0:
+        adj_prob = base_prob
+        adj_conf = base_conf
+    elif roi > -20.0:
+        adj_prob = base_prob + 0.01
+        adj_conf = base_conf + 0.25
+    else:
+        adj_prob = base_prob + 0.02
+        adj_conf = base_conf + 0.50
+
+    # Apply caps
+    adj_prob = max(0.52, min(0.65, adj_prob))
+    adj_conf = max(5.5, min(7.5, adj_conf))
+
+    if adj_prob != base_prob or adj_conf != base_conf:
+        logger.info(
+            "[DynThresh] %s ROI=%.1f%% → prob %.2f→%.2f conf %.1f→%.1f",
+            agent_name, roi, base_prob, adj_prob, base_conf, adj_conf
+        )
+
+    return adj_prob, adj_conf
 
 
 def _kafka_producer():
@@ -3073,16 +3148,6 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
     return False
 
 
-def _team_concentration_ok(legs: list[dict], max_per_team: int = _MAX_LEGS_PER_TEAM) -> bool:
-    """Return True if no single team has more than max_per_team legs."""
-    from collections import Counter  # noqa: PLC0415
-    teams = [leg.get("team", "") for leg in legs if leg.get("team")]
-    if not teams:
-        return True  # can't check — pass through
-    counts = Counter(teams)
-    return max(counts.values()) <= max_per_team
-
-
 def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agent") -> list[dict]:
     avg_conf = round(sum(lg.get("confidence", 5) for lg in legs) / max(len(legs), 1), 1)
 
@@ -3244,15 +3309,10 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
             if _are_legs_correlated(two):
                 continue
 
-            # NEW: Team concentration cap
-            if not _team_concentration_ok(two):
-                logger.warning("[%s] Legs dropped — team concentration > %d", agent_name, _MAX_LEGS_PER_TEAM)
-                continue
-
             if max_legs >= 3:
                 for k in range(j + 1, len(top)):
                     three = two + [top[k]]
-                    if not _are_legs_correlated(three) and _team_concentration_ok(three):
+                    if not _are_legs_correlated(three):
                         key = "|".join(sorted(
                             f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
                             for lg in three
@@ -4070,15 +4130,18 @@ def run_agent_tasklet() -> bool:
                 continue
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
+        # Dynamic threshold adjustment based on 30-day ROI
+        dyn_prob, dyn_conf = _dynamic_gates(agent_name)
+
         play_conf = parlay.get("confidence", 0)
-        if play_conf < MIN_CONFIDENCE:
-            logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
-                         agent_name, play_conf, MIN_CONFIDENCE)
+        if play_conf < dyn_conf:
+            logger.info("[AgentTasklet] %s confidence %.1f < min %.1f — dropped.",
+                         agent_name, play_conf, dyn_conf)
             continue
 
-        # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
+        # Probability gate — every leg must have model_prob >= dyn_prob
         _legs = parlay.get("legs", [])
-        _min_prob_pct = MIN_PROB * 100  # 57.0
+        _min_prob_pct = dyn_prob * 100
         _low_legs = [
             lg.get("player", lg.get("player_name", "?"))
             for lg in _legs
