@@ -79,16 +79,18 @@ def _norm(name: str) -> str:
 # Step 1 — Build lookup maps from DataHub hub (free, no API calls)
 # ---------------------------------------------------------------------------
 
-def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
+def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict, dict]:
     """
     Returns:
         player_to_team        {player_name_lower: team_name}
         player_to_opponent    {player_name_lower: opposing_team}
         player_to_mlbam       {player_name_lower: mlbam_id}
+        player_to_pitcher_hand {player_name_lower: "L" or "R"}  ← NEW
     """
     p2team:  dict[str, str] = {}
     p2opp:   dict[str, str] = {}
     p2mlbam: dict[str, int] = {}
+    p2hand:  dict[str, str] = {}   # batter_name → opposing pitcher hand
 
     ctx = hub.get("context", {})
 
@@ -104,13 +106,17 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
         if pid:
             p2mlbam[name] = int(pid)
 
-    # From projected starters (adds opposing_team for pitchers)
-    team_to_opp: dict[str, str] = {}
+    # From projected starters (adds opposing_team for pitchers + pitcher hand)
+    team_to_opp:  dict[str, str] = {}
+    team_to_hand: dict[str, str] = {}  # batting_team → opposing pitcher throws
+
     for s in ctx.get("projected_starters", []):
         name = _norm(s.get("full_name", ""))
         team = s.get("team", "")
         opp  = s.get("opponent", "")
         pid  = s.get("player_id")
+        hand = str(s.get("pitcher_hand", "") or s.get("throws", "") or "").upper().strip()
+
         if name:
             if team:
                 p2team[name] = team
@@ -119,17 +125,21 @@ def _build_lookup_maps(hub: dict) -> tuple[dict, dict, dict]:
             if pid:
                 try: p2mlbam[name] = int(pid)
                 except (ValueError, TypeError): pass
-        # Build bidirectional team→opponent map from any game we see
         if team and opp:
             team_to_opp[team] = opp
             team_to_opp[opp]  = team
+        # pitcher's hand faces the opposing team's batters
+        if opp and hand in ("L", "R"):
+            team_to_hand[opp] = hand   # batters on opp team face this hand
 
-    # Wire batters to their opponents using the team→opponent map
+    # Wire batters to their opponents and the opposing pitcher's hand
     for batter_name, batter_team in list(p2team.items()):
         if batter_name not in p2opp and batter_team in team_to_opp:
             p2opp[batter_name] = team_to_opp[batter_team]
+        if batter_team in team_to_hand:
+            p2hand[batter_name] = team_to_hand[batter_team]
 
-    return p2team, p2opp, p2mlbam
+    return p2team, p2opp, p2mlbam, p2hand
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +314,86 @@ def _get_mlbapi_batter(player_name: str, player_id: int | None) -> dict:
     except Exception as _e:
         logger.debug("[Enrichment] mlbapi batter fallback failed for %s: %s", player_name, _e)
     _mlbapi_batter_cache[cache_key] = {}
+    return {}
+
+
+
+_mlbapi_split_cache: dict[str, dict] = {}
+
+def _get_mlbapi_batter_splits(player_id: int | None, pitcher_hand: str) -> dict:
+    """
+    Fetch batter vs-hand splits from MLB Stats API.
+    Returns woba_vs_hand, babip_vs_hand, iso_vs_hand, k_pct_vs_hand,
+    bb_pct_vs_hand, slg_vs_hand when available.
+
+    pitcher_hand: "L" or "R"
+    Falls back to empty dict — caller uses season stats.
+    """
+    if not player_id or not pitcher_hand:
+        return {}
+    hand = pitcher_hand.upper().strip()
+    if hand not in ("L", "R"):
+        return {}
+
+    cache_key = f"{player_id}_{hand}"
+    if cache_key in _mlbapi_split_cache:
+        return _mlbapi_split_cache[cache_key]
+
+    # MLB Stats API sitCodes: vl = vs LHP, vr = vs RHP
+    site_code = "vl" if hand == "L" else "vr"
+    try:
+        import requests as _req
+        import datetime as _dt
+        season = _dt.date.today().year
+        resp = _req.get(
+            f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats",
+            params={
+                "stats": "statSplits",
+                "group": "hitting",
+                "season": str(season),
+                "sitCodes": site_code,
+            },
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            _mlbapi_split_cache[cache_key] = {}
+            return {}
+
+        for sg in resp.json().get("stats", []):
+            for split in sg.get("splits", []):
+                s  = split.get("stat", {})
+                pa = max(float(s.get("plateAppearances", 0) or 0), 1)
+                if pa < 10:   # too small a sample — skip
+                    continue
+                ab  = max(float(s.get("atBats",      1) or 1), 1)
+                h   = float(s.get("hits",            0) or 0)
+                so  = float(s.get("strikeOuts",      0) or 0)
+                bb  = float(s.get("baseOnBalls",     0) or 0)
+                avg = round(h / ab, 3)
+                obp = round(float(s.get("obp", 0) or (h + bb) / pa), 3)
+                slg = round(float(s.get("slg", 0) or 0), 3)
+                babip = round(float(s.get("babip", 0) or avg), 3)
+                iso  = round(slg - avg, 3) if slg > avg else 0.160
+                woba = round(float(s.get("obp", 0) or 0) * 0.90 + slg * 0.10, 3)  # simplified wOBA proxy
+                k_pct  = round(so / pa, 4)
+                bb_pct = round(bb / pa, 4)
+                result = {
+                    "woba_vs_hand":   woba  if woba  > 0 else None,
+                    "babip_vs_hand":  babip if babip > 0 else None,
+                    "iso_vs_hand":    iso   if iso   > 0 else None,
+                    "k_pct_vs_hand":  k_pct  if k_pct  > 0 else None,
+                    "bb_pct_vs_hand": bb_pct if bb_pct > 0 else None,
+                    "slg_vs_hand":    slg   if slg   > 0 else None,
+                    "_split_pa":      int(pa),
+                    "_pitcher_hand":  hand,
+                }
+                _mlbapi_split_cache[cache_key] = result
+                return result
+
+    except Exception as _e:
+        logger.debug("[Enrichment] batter splits failed for %s vs %s: %s", player_id, hand, _e)
+
+    _mlbapi_split_cache[cache_key] = {}
     return {}
 
 
@@ -694,6 +784,33 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
 
     return None
 
+def _compute_arsenal_k_sig(prop: dict) -> float:
+    """
+    Arsenal K-Signature: reliability-weighted whiff/command score for pitcher K props.
+    Range 0.0–1.0.  > 0.35 = elite K upside;  < 0.15 = fade K props.
+
+    Formula derived from baseball_simulator_v2 WeightedRBFSimilarity:
+      - sc_whiff_rate:        weight 0.45  (fastest-stabilizing, ABS era king)
+      - sc_shadow_whiff_rate: weight 0.30  (edge-of-zone — real break-out signal)
+      - csw_pct (normalized): weight 0.25  (command + contact quality)
+
+    When shadow_whiff not available: whiff 0.65, csw_norm 0.35.
+    """
+    whiff  = float(prop.get("sc_whiff_rate")        or prop.get("swstr_pct") or 0.0)
+    shadow = float(prop.get("sc_shadow_whiff_rate")  or 0.0)
+    csw    = float(prop.get("csw_pct")               or 0.275)
+
+    # Normalize CSW: 0.275 is league average → deviation ×2.5 maps to ~same scale as whiff
+    csw_norm = (csw - 0.275) * 2.5 + 0.275
+
+    if shadow > 0.0:
+        sig = whiff * 0.45 + shadow * 0.30 + csw_norm * 0.25
+    else:
+        sig = whiff * 0.65 + csw_norm * 0.35
+
+    return round(max(0.0, min(1.0, sig)), 4)
+
+
 def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> list[dict]:
     """
     Enrich a list of raw Underdog/PrizePicks prop dicts with all analytics
@@ -730,7 +847,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
 
     # Run Statcast enrichment — provides player-specific barrel/whiff/xwOBA
     # so we defer to after the lookup maps are built.
-    p2team, p2opp, p2mlbam = _build_lookup_maps(hub)
+    p2team, p2opp, p2mlbam, p2hand = _build_lookup_maps(hub)
 
     # ── Per-player FanGraphs cache (avoid re-fetching same player) ────────────
     _fg_pitcher_cache: dict[str, dict] = {}
@@ -758,6 +875,11 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         if not prop.get("player_id") and pn in p2mlbam:
             prop["player_id"] = p2mlbam[pn]
             prop["mlbam_id"]  = p2mlbam[pn]
+
+        # ── Platoon split (batter vs opposing pitcher hand) ─────────────────────
+        pitcher_hand = p2hand.get(pn, "")
+        if pitcher_hand:
+            prop["_pitcher_hand"] = pitcher_hand
 
         # ── Player-specific base rate override ────────────────────────────────
         # Set on prop so generate_pick and _model_prob can use it
@@ -876,6 +998,31 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     "k_pct":       fg.get("k_pct",      0.222),
                     "bb_pct":      fg.get("bb_pct",     0.084),
                 })
+                # ── Platoon splits overlay ──────────────────────────────────────────
+                # Override season stats with vs-hand splits when pitcher hand is known
+                # and split has enough PA (checked inside _get_mlbapi_batter_splits)
+                if pitcher_hand and prop.get("player_id"):
+                    _splits = _get_mlbapi_batter_splits(
+                        prop.get("player_id") or prop.get("mlbam_id"),
+                        pitcher_hand,
+                    )
+                    if _splits:
+                        # Stamp split values — these override season stats in _player_specific_rate
+                        prop["woba_vs_hand"]   = _splits.get("woba_vs_hand")   or prop.get("woba")
+                        prop["babip_vs_hand"]  = _splits.get("babip_vs_hand")  or prop.get("babip")
+                        prop["iso_vs_hand"]    = _splits.get("iso_vs_hand")    or prop.get("iso")
+                        prop["k_pct_vs_hand"]  = _splits.get("k_pct_vs_hand")  or prop.get("k_pct")
+                        prop["bb_pct_vs_hand"] = _splits.get("bb_pct_vs_hand") or prop.get("bb_pct")
+                        prop["_split_pa"]      = _splits.get("_split_pa", 0)
+                        prop["_pitcher_hand"]  = pitcher_hand
+                        logger.debug(
+                            "[Enrichment] %s platoon split vs %sHP: woba=%.3f babip=%.3f iso=%.3f (PA=%d)",
+                            player, pitcher_hand,
+                            prop["woba_vs_hand"] or 0,
+                            prop["babip_vs_hand"] or 0,
+                            prop["iso_vs_hand"] or 0,
+                            prop["_split_pa"],
+                        )
             else:
                 # FIX: FanGraphs 403 — use statsapi.mlb.com 2026 season stats (free, no key).
                 _player_id = prop.get("player_id") or prop.get("mlbam_id")
@@ -925,6 +1072,20 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 prop = _enrich_prop_with_bernoulli(prop) if False else _enrich_bl(prop)
             except Exception as _bl_err:
                 logger.debug("[Enrichment] Bernoulli layer skipped: %s", _bl_err)
+
+        # ── Arsenal K-Signature (pitcher K props only) ──────────────────────────
+        if is_pitcher_prop and prop_type == "strikeouts":
+            prop["_arsenal_k_sig"] = _compute_arsenal_k_sig(prop)
+            # Apply K-sig nudge: elite (>0.35) → +3pp; below avg (<0.15) → -3pp
+            _k_sig = prop["_arsenal_k_sig"]
+            if _k_sig > 0.01:   # only when we have real signal
+                _k_sig_nudge = (_k_sig - 0.25) / 0.10 * 0.03   # ±3pp per 0.10 above/below avg
+                _k_sig_nudge = max(-0.04, min(0.04, _k_sig_nudge))
+                prop["_arsenal_k_sig_nudge"] = round(_k_sig_nudge, 4)
+                logger.debug(
+                    "[Enrichment] %s arsenal_k_sig=%.3f → nudge=%.3f",
+                    player, _k_sig, _k_sig_nudge,
+                )
 
         # ── FIX: Bridge enrichment keys → simulation engine underscore-prefixed keys ──
         # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
@@ -1017,17 +1178,28 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         base_prob = float(prop.get("implied_prob", 52.4))
         prop["_bayesian_nudge"] = _get_bayesian_nudge(prop, base_prob)
 
+        # ── Reliability weights (used by nudge stack to dampen low-sample signals) ─
+        try:
+            from reliability_weights import get_feature_weights as _get_fw
+            prop["_feature_weights"] = _get_fw(prop)
+        except Exception:
+            pass
+
         enriched_count += 1
 
     # ── Statcast batch enrichment (needs mlbam_ids attached above) ─────────────
     props = _get_statcast(props)
     sc_hits = sum(1 for p in props if p.get("sc_xwoba") or p.get("sc_whiff_rate"))
 
+    _platoon_hits = sum(1 for p in props if p.get("_pitcher_hand") and p.get("woba_vs_hand"))
+    _arsenal_hits = sum(1 for p in props if p.get("_arsenal_k_sig", 0) > 0)
     logger.info(
         "[Enrichment] %d props enriched | FanGraphs: %d | Statcast: %d | "
+        "Platoon splits: %d | Arsenal K-sig: %d | "
         "Marcel/PP wired | SB reference wired | "
         "chase: %d teams | weather: %d stadiums",
         enriched_count, fg_hits, sc_hits,
+        _platoon_hits, _arsenal_hits,
         len(_chase_cache), len(_weather_cache),
     )
     return props
