@@ -63,14 +63,14 @@ logger = logging.getLogger("propiq.marcel")
 # FIX: Updated to 2025 MLB actuals (FanGraphs leaderboards)
 _LEAGUE_AVG: dict = {
     # Batter rates
-    "batter_k_pct":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
-    "batter_bb_pct": 0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
+    "batter_k_pct":  0.223,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
+    "batter_bb_pct": 0.087,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
     "batter_hr_pa":  0.033,   # FG 2025: elevated power 
     "batter_woba":   0.308,   # FG 2025: ~.308 (was 0.312) 
-    "batter_iso":    0.160,   # FG 2025: elevated power (was 0.158) 
+    "batter_iso":    0.156,   # FG 2025: elevated power (was 0.158) 
     # Pitcher rates (rates *allowed*)
-    "pitcher_k_pct":  0.222,  # FG 2025: 22.2% (confirmed)
-    "pitcher_bb_pct": 0.084,  # FG 2025: 8.4% (confirmed)
+    "pitcher_k_pct":  0.223,  # FG 2025: 22.2% (confirmed)
+    "pitcher_bb_pct": 0.087,  # FG 2025: 8.4% (confirmed)
     "pitcher_hr9":    1.28,   # FG 2025: ~1.28 HR/9 (was 1.30)
 }
 
@@ -545,9 +545,9 @@ class MarcelLayer:
                     _mapped = {}
                     for _n, _s in _minimal_pitchers.items():
                         _mapped[_n] = {
-                            "k_pct":  _s.get("strikeoutRate", 0.222) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.222),
-                            "bb_pct": _s.get("walkRate",      0.084) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.084),
-                            "era":    _s.get("earnedRunAverage", 4.08),
+                            "k_pct":  _s.get("strikeoutRate", 0.223) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.223),
+                            "bb_pct": _s.get("walkRate",      0.087) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.087),
+                            "era":    _s.get("earnedRunAverage", 4.06),
                             "whip":   _s.get("whip", 1.28),
                             "_source": "statsapi_fallback",
                         }

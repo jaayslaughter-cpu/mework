@@ -371,9 +371,9 @@ def apply_shrinkage_to_prop(
     try:
         from confidence_shrinkage import LEAGUE_RATES, LEAGUE_WOBA
         _LEAGUE_FALLBACKS = {
-            "k_rate":          LEAGUE_RATES.get("K",  0.222),
-            "k_pct":           LEAGUE_RATES.get("K",  0.222),
-            "bb_pct":          LEAGUE_RATES.get("BB", 0.084),
+            "k_rate":          LEAGUE_RATES.get("K",  0.223),
+            "k_pct":           LEAGUE_RATES.get("K",  0.223),
+            "bb_pct":          LEAGUE_RATES.get("BB", 0.087),
             "csw_pct":         0.284,    # 2025 MLB average CSW%
             "era":             4.12,     # 2025 MLB ERA
             "xfip":            4.10,
