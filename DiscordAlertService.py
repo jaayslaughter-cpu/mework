@@ -12,7 +12,7 @@ Public API
 ----------
   send_startup_ping()
   send_bet_alert(bet: dict)
-  send_daily_recap(results, profit, date_str, tier_updates=None)
+  send_daily_recap(results, profit, date_str)
   send_parlay_alert(parlay: dict)
 
 Usage
@@ -33,29 +33,31 @@ import requests
 
 logger = logging.getLogger("propiq.discord")
 
-MAX_STAKE_USD: float = 20.0
+# ── Exported constant (imported by live_dispatcher.py) ────────────────────
+MAX_STAKE_USD: float = 20.0   # Tier 5 ceiling ($20/unit)
 
-_COLOUR_GREEN  = 0x2ECC71
-_COLOUR_RED    = 0xE74C3C
-_COLOUR_BLUE   = 0x3498DB
-_COLOUR_GOLD   = 0xF1C40F
-_COLOUR_GREY   = 0x95A5A6
+# ── Colour palette ────────────────────────────────────────────────────────────────────
+_COLOUR_GREEN  = 0x2ECC71   # win / online
+_COLOUR_RED    = 0xE74C3C   # loss / warning
+_COLOUR_BLUE   = 0x3498DB   # bet alert
+_COLOUR_GOLD   = 0xF1C40F   # daily recap
+_COLOUR_GREY   = 0x95A5A6   # push / neutral
 
+# ── Fallback webhook (used when DISCORD_WEBHOOK_URL env var is absent) ────────────
 _FALLBACK_WEBHOOK = (
     "https://discordapp.com/api/webhooks/1484795164961800374/"
     "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
 )
 
+# ── Platform emoji map ────────────────────────────────────────────────────────────────────
 _PLATFORM_EMOJI = {
     "prizepicks": "🏆",
     "underdog":   "🐶",
     "sleeper":    "😴",
 }
 
+# ── Tier badge map ─────────────────────────────────────────────────────────────────────
 _TIER_BADGE = {1: "🌱", 2: "🌿", 3: "⭐", 4: "🔥", 5: "👑"}
-
-# Higher/Lower translation for Underdog legs (Zip #4)
-_UD_SIDE_LABEL = {"over": "Higher", "under": "Lower"}
 
 
 class DiscordAlertService:
@@ -64,11 +66,16 @@ class DiscordAlertService:
     def __init__(self) -> None:
         self._url: str = os.getenv("DISCORD_WEBHOOK_URL", _FALLBACK_WEBHOOK)
 
+    # ── Internal helper ───────────────────────────────────────────────────────────────
+
     def _post(self, payload: dict[str, Any]) -> bool:
+        """POST payload to the webhook.  Returns True on success."""
         url = os.getenv("DISCORD_WEBHOOK_URL", self._url) or _FALLBACK_WEBHOOK
         try:
             resp = requests.post(
-                url, json=payload, timeout=10,
+                url,
+                json=payload,
+                timeout=10,
                 headers={"Content-Type": "application/json"},
             )
             if resp.status_code in (200, 204):
@@ -80,7 +87,10 @@ class DiscordAlertService:
             logger.warning("[Discord] Failed to reach webhook: %s", exc)
             return False
 
+    # ── Public methods ───────────────────────────────────────────────────────────────
+
     def send_startup_ping(self) -> None:
+        """Fire a test message the absolute second the application is ready."""
         ok = self._post({
             "embeds": [{
                 "title": "✅ PropIQ Engine Online: Webhook Connected!",
@@ -97,6 +107,7 @@ class DiscordAlertService:
             logger.info("[Discord] Startup ping sent successfully.")
 
     def send_bet_alert(self, bet: dict) -> None:
+        """Send a formatted embed for a single queued bet."""
         player    = bet.get("player", "Unknown")
         prop_type = bet.get("prop_type", "")
         line      = bet.get("line", "")
@@ -152,7 +163,7 @@ class DiscordAlertService:
         date_str: str,
         tier_updates: list[str] | None = None,
     ) -> None:
-        """Send end-of-day settlement recap. tier_updates param added in Zip #4."""
+        """Send end-of-day settlement recap with per-bet detail and tier ladder progress."""
         wins   = sum(1 for r in results if r.get("status") == "WIN")
         losses = sum(1 for r in results if r.get("status") == "LOSS")
         pushes = sum(1 for r in results if r.get("status") == "PUSH")
@@ -162,20 +173,27 @@ class DiscordAlertService:
 
         lines: list[str] = []
         for r in results:
-            emoji    = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(r.get("status", ""), "❓")
+            status   = r.get("status", "")
+            emoji    = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(status, "❓")
             pl       = r.get("profit_loss", 0.0)
             pl_sign  = "+" if pl >= 0 else ""
+            # odds_american now included from run_grading_tasklet() results.append()
             odds_raw = r.get("odds_american", -110)
-            odds_str = f"+{odds_raw}" if isinstance(odds_raw, int) and odds_raw > 0 else str(odds_raw)
-            actual   = r.get("actual_stat", "")
-            line_val = r.get("line", "")
-            agent_tag = r.get("agent", "")
-            stat_vs_line = f" | actual: {actual} vs {line_val}" if actual != "" else ""
-            agent_str    = f" [{agent_tag}]" if agent_tag else ""
+            odds_str = f"+{odds_raw}" if isinstance(odds_raw, (int, float)) and odds_raw > 0 else str(int(odds_raw))
+            # Show actual stat vs line so it's clear why the bet won/lost
+            actual   = r.get("actual")
+            line_val = r.get("line", "?")
+            if actual is not None:
+                actual_str = f" | Actual **{actual}** vs Line {line_val}"
+            else:
+                actual_str = ""
+            # Show which agent owned this pick
+            agent = r.get("agent", "")
+            agent_tag = f" `[{agent}]`" if agent else ""
             lines.append(
-                f"{emoji} **{r.get('player', '?')}** — "
-                f"{r.get('prop_type', '?')} {r.get('side', '?')} | "
-                f"{odds_str} | {pl_sign}{pl:.2f}u{stat_vs_line}{agent_str}"
+                f"{emoji}{agent_tag} **{r.get('player', '?')}** — "
+                f"{r.get('prop_type', '?')} {r.get('side', '?')}{actual_str} | "
+                f"{odds_str} | {pl_sign}{pl:.2f}u"
             )
 
         description = "\n".join(lines) or "_No graded bets._"
@@ -186,10 +204,10 @@ class DiscordAlertService:
             {"name": "📈 Units",   "value": f"{sign}{total_profit:.2f}u",      "inline": True},
             {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P", "inline": True},
         ]
-
+        # Always show tier ladder progress — promotions AND in-progress streaks
         if tier_updates:
             fields.append({
-                "name": "🎖️ Tier Updates",
+                "name": "🎅 Tier Ladder",
                 "value": "\n".join(tier_updates),
                 "inline": False,
             })
@@ -200,7 +218,7 @@ class DiscordAlertService:
                 "description": description,
                 "color": colour,
                 "fields": fields,
-                "footer": {"text": "Powered by PropIQ Analytics 🤖"},
+                "footer": {"text": "Powered by PropIQ Analytics 🤖  |  3 W or 3 L in a row = tier move"},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }]
         })
@@ -208,6 +226,30 @@ class DiscordAlertService:
                     date_str, sign, total_profit, wins, losses, pushes)
 
     def send_parlay_alert(self, parlay: dict) -> None:
+        """
+        Send a formatted Discord embed for a DFS parlay slip.
+        Called by live_dispatcher.py for each agent parlay.
+
+        Expected parlay dict keys (from live_dispatcher.py build_parlay()):
+            agent_name      str   — e.g. "EVHunter"
+            legs            list  — list of leg dicts
+            confidence      float — 0–10 score
+            ev_pct          float — average EV% across legs
+            stake           float — dollar stake from agent tier ($5–$20)
+            tier            int   — agent tier 1–5 (optional, derived from stake)
+            platform        str   — "prizepicks" or "underdog"
+            season_stats    dict  — {wins, losses, pushes, roi} (optional)
+
+        Each leg dict keys:
+            player_name     str
+            prop_type       str
+            side            str   — "Over" or "Under"
+            line            float
+            ev_pct          float
+            model_prob      float (0–1)
+            platform        str
+        """
+        # --- Parlay-level fields ---
         agent_name  = parlay.get("agent_name") or parlay.get("agent", "Unknown Agent")
         legs        = parlay.get("legs", [])
         confidence  = parlay.get("confidence", 0.0)
@@ -218,19 +260,27 @@ class DiscordAlertService:
         if not legs:
             return
 
+        # Derive tier badge from stake amount
         stake_to_tier = {5.0: 1, 8.0: 2, 12.0: 3, 16.0: 4, 20.0: 5}
         tier = parlay.get("tier", stake_to_tier.get(float(stake), 1))
         tier_badge = _TIER_BADGE.get(tier, "🌱")
 
+        # Confidence bar  ████░░░░░░  (10 blocks)
         filled   = max(0, min(10, round(confidence)))
         conf_bar = "█" * filled + "░" * (10 - filled)
 
+        # Platform
         platform   = parlay.get("platform", "underdog")
         plat_lower = str(platform).lower()
         plat_emoji = _PLATFORM_EMOJI.get(plat_lower, "🎯")
-        plat_label = "PrizePicks" if "prize" in plat_lower else "Underdog Fantasy"
-        is_underdog = "underdog" in plat_lower
+        if "prize" in plat_lower:
+            plat_label = "PrizePicks"
+        else:
+            et = parlay.get("entry_type", "FlexPlay")
+            entry_label = "PowerPlay" if et.upper() in ("STANDARD", "POWERPLAY", "POWER") else "FlexPlay"
+            plat_label = f"Underdog Fantasy — {entry_label}"
 
+        # --- Season record footer ---
         season = parlay.get("season_stats", {})
         s_wins   = season.get("wins", 0)
         s_losses = season.get("losses", 0)
@@ -238,30 +288,33 @@ class DiscordAlertService:
         s_roi    = season.get("roi_pct", season.get("roi", 0.0))
         season_str = f"{agent_name} Season: {s_wins}W-{s_losses}L-{s_pushes}P | ROI {s_roi:+.1f}%"
 
+        # --- Leg fields ---
         fields: list[dict] = []
         for i, leg in enumerate(legs, 1):
             player    = (leg.get("player_name") or leg.get("player", "?")).title()
             prop_type = leg.get("prop_type", "?").replace("_", " ").title()
             side_raw  = leg.get("side", "?")
+            leg_plat  = leg.get("platform", platform)
+            # Underdog uses Higher/Lower; translate for display
+            if "underdog" in str(leg_plat).lower() or "underdog" in plat_lower:
+                _s_map = {"over": "Higher", "under": "Lower"}
+                side = _s_map.get(side_raw.lower(), side_raw)
+            else:
+                side = side_raw
             line      = leg.get("line", "?")
             leg_ev    = leg.get("ev_pct", 0.0)
             model_p   = leg.get("model_prob", 0.0)
+            # model_prob may be 0-1 or 0-100
             if isinstance(model_p, float) and model_p <= 1.0:
                 model_p *= 100.0
             leg_plat  = leg.get("platform", platform)
             lp_lower  = str(leg_plat).lower()
             lp_emoji  = _PLATFORM_EMOJI.get(lp_lower, "🎯")
 
-            # Higher/Lower translation for Underdog legs (Zip #4)
-            if is_underdog or "underdog" in lp_lower:
-                side_display = _UD_SIDE_LABEL.get(side_raw.lower(), side_raw)
-            else:
-                side_display = side_raw
-
             fields.append({
                 "name": f"Leg {i} — {player}",
                 "value": (
-                    f"**{prop_type} {side_display} {line}**  {lp_emoji}\n"
+                    f"**{prop_type} {side} {line}**  {lp_emoji}\n"
                     f"Model: `{model_p:.1f}%`  |  EV: `+{leg_ev:.1f}%`"
                 ),
                 "inline": False,
@@ -277,6 +330,7 @@ class DiscordAlertService:
             "inline": False,
         })
 
+        # Colour by confidence
         if confidence >= 8.5:
             color = _COLOUR_GOLD
         elif confidence >= 7.0:
@@ -301,6 +355,10 @@ class DiscordAlertService:
                     agent_name, leg_count, ev_pct, stake, tier_badge, tier)
 
     def send_parlay_alert_streak(self, parlay: dict) -> None:
+        """
+        Streak-specific Discord embed with Underdog Streaks branding.
+        Same field contract as send_parlay_alert() above.
+        """
         agent_name = parlay.get("agent_name", "StreakAgent")
         legs       = parlay.get("legs", [])
         confidence = parlay.get("confidence", 0.0)
@@ -315,14 +373,15 @@ class DiscordAlertService:
         for i, leg in enumerate(legs, 1):
             player    = (leg.get("player_name") or leg.get("player", "?")).title()
             prop_type = leg.get("prop_type", "?").replace("_", " ").title()
-            side_raw  = leg.get("side", "?")
+            _side_raw = leg.get("side", "?")
+            _s_map    = {"over": "Higher", "under": "Lower"}
+            side      = _s_map.get(_side_raw.lower(), _side_raw)
             line      = leg.get("line", "?")
             streak_n  = leg.get("streak_length", leg.get("streak", "?"))
-            side_display = _UD_SIDE_LABEL.get(side_raw.lower(), side_raw)
             fields.append({
                 "name": f"Leg {i} — {player}",
                 "value": (
-                    f"**{prop_type} {side_display} {line}**\n"
+                    f"**{prop_type} {side} {line}**\n"
                     f"Streak: `{streak_n} consecutive`"
                 ),
                 "inline": False,

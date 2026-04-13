@@ -16,7 +16,6 @@ import pytz
 logger = logging.getLogger(__name__)
 
 # ── Banned prop types — must NEVER appear in sent bets ───────────────────────
-# Zip #4: added 'singles' (was leaking through filter)
 BANNED_PROPS = {"stolen_bases", "home_runs", "walks", "walks_allowed", "doubles", "triples", "singles"}
 
 # ── Discord ───────────────────────────────────────────────────────────────────
@@ -119,7 +118,7 @@ def _check_datahub() -> tuple[str, str, str]:
 
 
 def _check_dispatch_fired() -> tuple[str, str, str]:
-    """Check bet_ledger for a record from today (PT) that was actually sent to Discord."""
+    """Check bet_ledger for a record from today (PT)."""
     try:
         import psycopg2  # type: ignore
         url = os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL", ""))
@@ -128,7 +127,6 @@ def _check_dispatch_fired() -> tuple[str, str, str]:
         today = _pt_today()
         conn = psycopg2.connect(url)
         cur = conn.cursor()
-        # Zip #4 fix: use bet_date column + discord_sent flag instead of AT TIME ZONE
         cur.execute(
             "SELECT COUNT(*) FROM bet_ledger WHERE bet_date = %s AND discord_sent = TRUE",
             (today,),
@@ -136,8 +134,8 @@ def _check_dispatch_fired() -> tuple[str, str, str]:
         count = cur.fetchone()[0]
         conn.close()
         if count == 0:
-            return "Dispatch", "warn", f"No bets dispatched to Discord for {today} — dispatch may not have fired or all fell below gate"
-        return "Dispatch", "ok", f"{count} bet record(s) sent to Discord for {today}"
+            return "Dispatch", "warn", f"No bets recorded for {today} — dispatch may not have fired or all fell below gate"
+        return "Dispatch", "ok", f"{count} discord_sent bet(s) for {today}"
     except Exception as exc:
         return "Dispatch", "warn", f"Could not query bet_ledger: {exc}"
 
@@ -191,6 +189,8 @@ def _check_draftedge() -> tuple[str, str, str]:
 
 
 def _check_odds_api_quota() -> tuple[str, str, str]:
+    """Read Odds API quota from Redis (cached by _odds_api_get after each DataHub cycle).
+    Does NOT make a live API call — zero quota cost."""
     try:
         import redis  # type: ignore
         url = os.getenv("REDIS_URL", os.getenv("REDIS_PRIVATE_URL", ""))
@@ -211,13 +211,15 @@ def _check_odds_api_quota() -> tuple[str, str, str]:
 
 
 def _check_sbref_cache() -> tuple[str, str, str]:
+    """Check sportsbook reference disk cache (/tmp/sb_ref_YYYY-MM-DD.json).
+    sportsbook_reference_layer._CACHE_DIR = '/tmp' — this matches that path."""
     try:
         today = datetime.now(_PT).strftime("%Y-%m-%d")
         cache_path = f"/tmp/sb_ref_{today}.json"
         if not os.path.exists(cache_path):
             return "SB Reference", "warn", f"Cache file not found for {today} — fetch may not have run"
         size_kb = os.path.getsize(cache_path) // 1024
-        import json as _json_
+        import json as _json_  # noqa: PLC0415
         with open(cache_path) as f:
             data = _json_.load(f)
         count = len(data)
@@ -229,6 +231,7 @@ def _check_sbref_cache() -> tuple[str, str, str]:
 
 
 def _check_streak_state() -> tuple[str, str, str]:
+    """Check ud_streak_state and recent restart count."""
     try:
         import psycopg2  # type: ignore
         url = os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL", ""))
@@ -236,10 +239,12 @@ def _check_streak_state() -> tuple[str, str, str]:
             return "Streak State", "warn", "Cannot check — no DB URL"
         conn = psycopg2.connect(url)
         cur = conn.cursor()
+        # Active streaks
         cur.execute("SELECT COUNT(*), MAX(current_count) FROM ud_streak_state WHERE current_count > 0")
         row = cur.fetchone()
         active_count = row[0] or 0
         max_count = row[1] or 0
+        # Restarts in last 7 days (resets = count went to 0)
         seven_days_ago = (datetime.now(_PT) - timedelta(days=7)).strftime("%Y-%m-%d")
         cur.execute(
             "SELECT COUNT(*) FROM ud_streak_state "
@@ -256,6 +261,7 @@ def _check_streak_state() -> tuple[str, str, str]:
 
 
 def _check_action_network_cookie() -> tuple[str, str, str]:
+    """Check that ACTION_NETWORK_COOKIE is set — required for SharpFadeAgent PRO path."""
     token = os.getenv("ACTION_NETWORK_COOKIE", "").strip()
     if not token:
         return (
@@ -274,6 +280,7 @@ def _check_action_network_cookie() -> tuple[str, str, str]:
 
 
 def _check_pythonunbuffered() -> tuple[str, str, str]:
+    """Check PYTHONUNBUFFERED is set — required for Railway log streaming."""
     val = os.getenv("PYTHONUNBUFFERED", "").strip()
     if val != "1":
         return (
@@ -300,13 +307,13 @@ def _post_discord_embed(results: list[tuple[str, str, str]]) -> None:
     warnings = [r for r in results if r[1] == "warn"]
 
     if failures:
-        color = 0xED4245
+        color = 0xED4245   # red
         title = "🔴 PropIQ Health Check — ACTION REQUIRED"
     elif warnings:
-        color = 0xFEE75C
+        color = 0xFEE75C   # yellow/orange
         title = "🟡 PropIQ Health Check — Warnings"
     else:
-        color = 0x57F287
+        color = 0x57F287   # green
         title = "🟢 PropIQ Health Check — All Clear"
 
     STATUS_EMOJI = {"ok": "✅", "warn": "⚠️", "fail": "❌"}

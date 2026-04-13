@@ -23,14 +23,17 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# Per-leg payout multipliers for Underdog PowerPlay (Zip #4 fix — was flat 2.0x)
+# Payout multipliers by number of legs — Underdog PowerPlay defaults.
+# These are the confirmed multipliers from the Dual-Platform Directive.
+# FIX: 5-leg multiplier was 10.0 — should be 20.0 (confirmed Underdog STANDARD)
+# Was inconsistent with calibration_layer._UD_MULTIPLIERS which correctly had 20.0
 _UD_POWERPLAY_MULT: dict[int, float] = {
     2: 3.5,
     3: 6.0,
     4: 10.0,
     5: 20.0,
 }
-_DEFAULT_PAYOUT_MULTIPLIER = 3.5   # fallback for leg counts outside the table
+_DEFAULT_PAYOUT_MULTIPLIER = 3.5   # fallback if leg count not in table
 
 
 # ---------------------------------------------------------------------------
@@ -70,15 +73,30 @@ def _name_match(a: str, b: str) -> bool:
 
     Tries exact match first, then last-name + first-initial fallback to
     handle ESPN vs PrizePicks/Underdog name discrepancies.
+    Also strips accents (Acuña → Acuna) and hyphens for multi-part names.
     """
-    a = a.lower().strip()
-    b = b.lower().strip()
+    import unicodedata as _ud
+
+    def _norm(s: str) -> str:
+        s = _ud.normalize("NFD", s.lower().strip())
+        s = "".join(c for c in s if _ud.category(c) != "Mn")
+        return s.replace("-", " ").replace(".", "").replace("'", "")
+
+    a = _norm(a)
+    b = _norm(b)
     if a == b:
         return True
     a_parts = a.split()
     b_parts = b.split()
     if a_parts and b_parts:
-        return a_parts[-1] == b_parts[-1] and a_parts[0][0] == b_parts[0][0]
+        # Last name match + first initial match
+        if a_parts[-1] == b_parts[-1] and a_parts[0][:1] == b_parts[0][:1]:
+            return True
+        # Handle last-name only partial (e.g. "Acuna" in "Ronald Acuna Jr")
+        if len(a_parts) == 1 and a_parts[0] in b_parts:
+            return True
+        if len(b_parts) == 1 and b_parts[0] in a_parts:
+            return True
     return False
 
 
@@ -87,18 +105,19 @@ def _name_match(a: str, b: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PROP_STAT_KEY: dict[str, str | None] = {
-    "hits":           "hits",
-    "home_runs":      "home_runs",
-    "rbis":           "rbis",
-    "runs":           "runs",
-    "total_bases":    "total_bases",
-    "stolen_bases":   "stolen_bases",
-    "hits_runs_rbis": "hits_runs_rbis",
-    "strikeouts":     "strikeouts",
-    "earned_runs":    "earned_runs",
-    "fantasy_hitter": None,     # fantasy points — push (no single stat key)
-    "fantasy_pitcher": None,
-    "walks":          "base_on_balls",
+    # Batter props
+    "hits":             "hits",
+    "rbis":             "rbis",
+    "runs":             "runs",
+    "total_bases":      "total_bases",
+    "hits_runs_rbis":   "hits_runs_rbis",
+    "fantasy_hitter":   None,   # fantasy points — push (no single stat key)
+    # Pitcher props
+    "strikeouts":       "strikeouts",
+    "earned_runs":      "earned_runs",
+    "hits_allowed":     "hits_allowed",
+    "pitching_outs":    "pitching_outs",  # derived from innings_pitched in espn_scraper.py
+    "fantasy_pitcher":  None,
 }
 
 
@@ -176,10 +195,10 @@ def settle_leg(leg: dict, player_stats: dict[str, dict]) -> LegResult:
 def settle_parlay(
     parlay_id:    int,
     agent_name:   str,
-    date:         str,
     stake:        float,
     legs_data:    list[dict],
     player_stats: dict[str, dict],
+    date:         str = "",
 ) -> ParlayResult:
     """
     Settle a complete parlay.
@@ -188,7 +207,7 @@ def settle_parlay(
       - Any LOSS = parlay LOSS, units_profit = -stake
       - All PUSH = parlay PUSH, units_profit = 0
       - All non-push legs WIN = parlay WIN,
-            units_profit = stake × payout_multiplier(leg_count) - stake
+            units_profit = stake × multiplier - stake (per-leg lookup)
       - Mixed WIN/PUSH (no losses) = parlay WIN on the winning legs
     """
     if not legs_data:
@@ -210,11 +229,11 @@ def settle_parlay(
         outcome      = "PUSH"
         units_profit = 0.0
     else:
-        # At least one WIN, no losses — use per-leg payout table
-        winning_legs = wins  # pushes are ignored (effectively dropped from slip)
-        payout_mult = _UD_POWERPLAY_MULT.get(winning_legs, _DEFAULT_PAYOUT_MULTIPLIER)
-        outcome      = "WIN"
-        units_profit = stake * payout_mult - stake
+        # At least one WIN, no losses
+        outcome    = "WIN"
+        num_legs   = len(legs_data)
+        multiplier = _UD_POWERPLAY_MULT.get(num_legs, _DEFAULT_PAYOUT_MULTIPLIER)
+        units_profit = stake * multiplier - stake
 
     return ParlayResult(
         parlay_id=parlay_id,

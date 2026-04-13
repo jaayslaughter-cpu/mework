@@ -48,26 +48,26 @@ MAX_NUDGE = 0.025            # Hard cap — Bayes cannot swing a pick by more th
 # These are the "population hyperparameters" that anchor partial pooling —
 # a 50 PA rookie gets pulled strongly toward these; a 600 PA vet less so.
 # alpha / (alpha + beta) = league mean rate
-# Zip #4 corrections: h_rate was H/BIP not H/PA (19% overconfident on hit props)
 LEAGUE_PRIORS = {
-    "k_rate":  {"alpha": 22.2, "beta": 77.8},   # ~22.2% K rate per PA
-    "h_rate":  {"alpha": 20.4, "beta": 79.6},   # ~20.4% H rate per PA (was 24.2 — H/BIP error)
-    "hr_rate": {"alpha":  3.3, "beta": 96.7},   # ~3.3%  HR rate per PA
-    "tb_rate": {"alpha": 35.0, "beta": 65.0},   # ~35.0% TB rate per PA
-    "bb_rate": {"alpha":  8.4, "beta": 91.6},   # ~8.4%  BB rate per PA
+    "k_rate":  {"alpha": 22.2, "beta": 77.8},   # FG 2025: 22.2% K/PA
+    "h_rate":  {"alpha": 20.4, "beta": 79.6},   # FG 2025: 20.4% H/PA actual (was 24.2% — was H/BIP not H/PA)
+    "hr_rate": {"alpha":  3.3, "beta": 96.7},   # FG 2025: 3.3% HR/PA (elevated power season)
+    "tb_rate": {"alpha": 35.0, "beta": 65.0},   # FG 2025: ~35.0% TB/PA actual
+    "bb_rate": {"alpha":  8.4, "beta": 91.6},   # FG 2025: 8.4% BB/PA confirmed
 }
 
 # Maps prop type strings from dispatcher to rate keys above
-# Zip #4: removed 'singles' and 'home_runs' (banned props — must not appear)
 PROP_TO_RATE = {
     "strikeouts":       "k_rate",
     "hits":             "h_rate",
+    # "home_runs": banned prop — not evaluated
     "total_bases":      "tb_rate",
-    "hits+runs+rbi":    "h_rate",
-    "hits_runs_rbis":   "h_rate",   # normalized form used by calibration_layer._norm_stat
+    "hits+runs+rbi":    "woba_rate",
+    "hits_runs_rbis":   "woba_rate",   # composite — use woba as proxy
     "walks":            "bb_rate",
     "runs":             "h_rate",
     "rbis":             "h_rate",
+    # "singles": banned prop — not evaluated
 }
 
 # Estimated PAs per game per prop type (used in Monte Carlo simulation)
@@ -431,7 +431,7 @@ if __name__ == "__main__":
         {"player": "Freddie Freeman",
          "prop_type": "hits", "line": 1.5, "implied_prob": 0.54},
         {"player": "Aaron Judge",
-         "prop_type": "total_bases", "line": 1.5, "implied_prob": 0.52},
+         "prop_type": "home_runs", "line": 0.5, "implied_prob": 0.32},
     ]
 
     result = apply_bayesian_layer(

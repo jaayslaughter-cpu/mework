@@ -702,11 +702,6 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
             "money_pct":        over_m,
             "rlm_signal":       rlm,
             "rlm_direction":    rlm_dir,
-            # LineValueAgent SBD-fallback compat aliases
-            "under_pct":        under_t,
-            "over_pct":         over_t,
-            "prop_over_bets_pct":  over_t,
-            "prop_under_bets_pct": under_t,
             "source":           "action_network_pro",
         })
 
