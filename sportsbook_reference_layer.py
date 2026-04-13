@@ -317,12 +317,10 @@ def _build_reference_from_draftedge() -> dict[tuple, dict]:
                 name = str(row.get("player_name", "")).strip().lower()
                 if not name:
                     continue
-                # FIX PR#314: use internal prop_type keys ("hits"/"runs"/"rbis")
-                # so enrich_props_with_sportsbook() lookups match (_RAW_STAT_TO_PROP maps to these)
-                for prop_type, pct_col, line_diff in [
-                    ("hits",  "hit_pct",  1.5),
-                    ("runs",  "run_pct",  0.5),
-                    ("rbis",  "rbi_pct",  0.5),
+                for prop_type, pct_col, line_default in [
+                    ("batter_hits",          "hit_pct",  1.5),
+                    ("batter_runs_scored",    "run_pct",  0.5),
+                    ("batter_rbis",           "rbi_pct",  0.5),
                 ]:
                     prob = float(row.get(pct_col, 0) or 0)
                     if prob <= 0:
@@ -331,14 +329,14 @@ def _build_reference_from_draftedge() -> dict[tuple, dict]:
                         "sb_implied_prob":       round(prob, 4),
                         "sb_implied_prob_over":  round(prob, 4),
                         "sb_implied_prob_under": round(1 - prob, 4),
-                        "sb_line":               line_diff,
+                        "sb_line":               line_default,
                         "bookmakers":            ["draftedge"],
                     }
                     reference[(name, prop_type, "under")] = {
                         "sb_implied_prob":       round(1 - prob, 4),
                         "sb_implied_prob_over":  round(prob, 4),
                         "sb_implied_prob_under": round(1 - prob, 4),
-                        "sb_line":               line_diff,
+                        "sb_line":               line_default,
                         "bookmakers":            ["draftedge"],
                     }
 
@@ -595,11 +593,28 @@ def enrich_props_with_sportsbook(
 
         player_norm = _normalize_name(player)
 
+        # Map internal prop_type to Odds API / DraftEdge market key
+        # DraftEdge stores "batter_hits" not "hits", etc.
+        _PT_TO_MKT = {
+            "hits":        "batter_hits",
+            "runs":        "batter_runs_scored",
+            "rbis":        "batter_rbis",
+            "rbi":         "batter_rbis",
+            "total_bases": "batter_total_bases",
+            "strikeouts":  "pitcher_strikeouts",
+        }
+        market_key = _PT_TO_MKT.get(prop_type, prop_type)
+
         # Try both sides and attach results
         side_probs: dict[str, dict] = {}
         for side in ("Over", "Under"):
-            ref_key = (player_norm, prop_type, side)
-            ref     = reference.get(ref_key)
+            # Try internal prop_type, then market key, then lowercase side variants
+            ref = (
+                reference.get((player_norm, prop_type, side))
+                or reference.get((player_norm, market_key, side))
+                or reference.get((player_norm, prop_type, side.lower()))
+                or reference.get((player_norm, market_key, side.lower()))
+            )
 
             # Last-name fallback
             if not ref:
@@ -607,7 +622,7 @@ def enrich_props_with_sportsbook(
                 last_name = parts[-1] if parts else ""
                 candidates = _last_name_idx.get(last_name, set())
                 for cand in candidates:
-                    if cand[1] == prop_type and cand[2] == side:
+                    if cand[1] in (prop_type, market_key) and cand[2].lower() == side.lower():
                         ref = reference.get(cand)
                         break
 

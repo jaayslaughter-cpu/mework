@@ -373,82 +373,6 @@ def _pg_conn():
         password=os.getenv("POSTGRES_PASSWORD", "propiq"),
     )
 
-def _get_agent_roi(agent_name: str) -> float | None:
-    """
-    Fetch the most recent 30-day ROI for an agent from agent_diagnostics table.
-    Returns None if table doesn't exist or no data (fail-open).
-    """
-    import psycopg2
-    _DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:baPrVnFBbEDgEPtiusCMjHHjyPZMyBbD@postgres.railway.internal:5432/railway")
-    try:
-        conn = psycopg2.connect(_DB_URL)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT roi_30d FROM agent_diagnostics
-            WHERE agent_name = %s
-            ORDER BY snapshot_date DESC
-            LIMIT 1
-            """,
-            (agent_name,)
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if row:
-            return float(row[0])
-        return None
-    except Exception as e:
-        logger.debug("[DynThresh] Could not read agent ROI for %s: %s", agent_name, e)
-        return None
-
-
-def _dynamic_gates(agent_name: str, base_prob: float = 0.57, base_conf: float = 6.0) -> tuple[float, float]:
-    """
-    Adjust MIN_PROB and MIN_CONF based on the agent's 30-day ROI.
-
-    ROI bands:
-      > +5%:        reward hot agent  → prob -0.01, conf -0.25
-      0% to +5%:    neutral           → no change
-      -10% to 0%:   mild underperf    → no change (freeze will handle extreme cases)
-      -20% to -10%: caution           → prob +0.01, conf +0.25
-      < -20%:       significant       → prob +0.02, conf +0.50
-
-    Caps: prob never < 0.52 or > 0.65. conf never < 5.5 or > 7.5.
-    Fail-open: if ROI unavailable, return base values unchanged.
-    """
-    roi = _get_agent_roi(agent_name)
-    if roi is None:
-        return base_prob, base_conf
-
-    if roi > 5.0:
-        adj_prob = base_prob - 0.01
-        adj_conf = base_conf - 0.25
-    elif roi > 0.0:
-        adj_prob = base_prob
-        adj_conf = base_conf
-    elif roi > -10.0:
-        adj_prob = base_prob
-        adj_conf = base_conf
-    elif roi > -20.0:
-        adj_prob = base_prob + 0.01
-        adj_conf = base_conf + 0.25
-    else:
-        adj_prob = base_prob + 0.02
-        adj_conf = base_conf + 0.50
-
-    # Apply caps
-    adj_prob = max(0.52, min(0.65, adj_prob))
-    adj_conf = max(5.5, min(7.5, adj_conf))
-
-    if adj_prob != base_prob or adj_conf != base_conf:
-        logger.info(
-            "[DynThresh] %s ROI=%.1f%% → prob %.2f→%.2f conf %.1f→%.1f",
-            agent_name, roi, base_prob, adj_prob, base_conf, adj_conf
-        )
-
-    return adj_prob, adj_conf
-
 
 def _kafka_producer():
     """Return a confluent-kafka Producer, or None if Kafka is unavailable."""
@@ -2135,7 +2059,6 @@ class _BaseAgent:
                 ("form_adj",        float(prop.get("_form_adj",            0.0)) * 100.0),
                 ("park_factor",     float(prop.get("_park_factor_adj",     0.0)) * 100.0),
                 ("arsenal_k_sig",   float(prop.get("_arsenal_k_sig_nudge", 0.0)) * 100.0 * _fw.get("csw_pct", 1.0)),
-                ("rolling_window",  float(prop.get("_rolling_adj",         0.0)) * 100.0),
                 ("game_env",        _game_env_nudge),
                 ("streak",          _streak_nudge),
                 ("last_10",         _last10_nudge),
@@ -2485,8 +2408,8 @@ class _BaseAgent:
     @staticmethod
     def _confidence(ev_pct: float) -> int:
         # ev_pct is stored as percentage (3–20 range) in _build_bet
-        # FIX PR#314: lowered thresholds — confidence=6 now starts at >=3% EV (was >=5%)
-        # A realistic -115 prop with 3-5% EV should not be silently dropped.
+        # Thresholds calibrated so MIN_CONFIDENCE=6 passes picks with ≥3% EV
+        # (previously required ≥5% which blocked most agents below -115 odds)
         if ev_pct >= 15: return 9
         if ev_pct >= 10: return 8
         if ev_pct >= 7:  return 7
@@ -3077,10 +3000,26 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
             .replace("  ", " ")
         )
 
+        # Map internal prop_type ("hits") to Odds API market key ("batter_hits")
+        # DraftEdge fallback stores by market key, Odds API also uses market keys
+        _PT_TO_MARKET = {
+            "hits":         "batter_hits",
+            "runs":         "batter_runs_scored",
+            "rbis":         "batter_rbis",
+            "rbi":          "batter_rbis",
+            "total_bases":  "batter_total_bases",
+            "strikeouts":   "pitcher_strikeouts",
+            "earned_runs":  "pitcher_earned_runs",
+        }
+        market_key = _PT_TO_MARKET.get(prop_type, prop_type)
+
         # Direct full-name lookup — try both "Over" (Odds API) and "over" (DraftEdge)
+        # Try internal prop_type first, then mapped market key
         ref = (
             reference.get((player_norm, prop_type, "Over"))
             or reference.get((player_norm, prop_type, "over"))
+            or reference.get((player_norm, market_key, "Over"))
+            or reference.get((player_norm, market_key, "over"))
         )
         if ref:
             return round(ref["sb_implied_prob"] * 100.0, 2)
@@ -3089,9 +3028,10 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
         parts = player_norm.split()
         last = parts[-1] if parts else ""
         for (pn, pt, side), data in reference.items():
-            # Accept both "Over" (Odds API) and "over" (DraftEdge) casing
-            if side.lower() == "over" and pt == prop_type and pn.split()[-1:] == [last]:
-                return round(data["sb_implied_prob"] * 100.0, 2)
+            if side.lower() == "over" and pn.split()[-1:] == [last]:
+                # Match on either the internal prop_type or the market key form
+                if pt in (prop_type, market_key):
+                    return round(data["sb_implied_prob"] * 100.0, 2)
 
         return None
     except Exception:
@@ -3351,14 +3291,14 @@ class _CorrelatedParlayAgent(_BaseAgent):
         # Pitcher strikeout correlation: high K-lineup + chase-heavy opponent
         if prop_type in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
             chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
-            if chase_adj < 0.015:  # FIX PR#314: was 0.03 — lowered to match F5Agent gate
+            if chase_adj < 0.015:  # opponent has above-league-avg chase rate (was 0.03)
                 return None
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds)
         ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct * 100)
         return None
 
 
@@ -3411,7 +3351,7 @@ class _StackSmithAgent(_BaseAgent):
         implied    = _american_to_implied(over_odds)
         ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct * 100)
         return None
 
 
@@ -3454,7 +3394,7 @@ class _ChalkBusterAgent(_BaseAgent):
             ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= MIN_EV_THRESH_PCT:  # FIX PR#276: percent-scale gate (was _get_ev_threshold()=0.03 ratio — always passed)
                 # and Brier/XGBoost retraining uses the correct outcome probability.
-                return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct)
+                return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct * 100)
         return None
 
 
@@ -3489,7 +3429,7 @@ class _SharpFadeAgent(_BaseAgent):
             prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
             ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-                return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+                return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct * 100)
 
         # ── Path 2: game-level RLM from Action Network ────────────────────────
         # Only fires on batter props (hits, TB, RBIs, runs, h+r+rbi) where
@@ -3530,7 +3470,7 @@ class _SharpFadeAgent(_BaseAgent):
 
         ev_threshold = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
         if ev_pct >= ev_threshold + 1.5:  # require +1.5pp extra EV for game-level signal
-            return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct)
+            return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct * 100)
 
         return None
 
@@ -3595,7 +3535,7 @@ class _LineDriftAgent(_BaseAgent):
         )
 
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, "OVER", model_prob, implied_pct, ev_pct)
+            return self._build_bet(prop, "OVER", model_prob, implied_pct, ev_pct * 100)
         return None
 
 
@@ -3614,7 +3554,7 @@ class _LineupChaseAgent(_BaseAgent):
         if prop_type not in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
             return None
         chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
-        if chase_adj < 0.02:  # FIX PR#314: was 0.04 (_MAX_ADJ ceiling) — essentially never fired
+        if chase_adj < 0.02:  # above-average chase lineup (was 0.04 = unreachable max)
             return None
         model_prob  = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         model_prob  = min(95.0, model_prob + chase_adj * 120)
@@ -3622,7 +3562,7 @@ class _LineupChaseAgent(_BaseAgent):
         implied     = _american_to_implied(over_odds)
         ev_pct      = (model_prob / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct)
+            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct * 100)
         return None
 
 
@@ -3653,7 +3593,7 @@ class _PropCycleAgent(_BaseAgent):
         prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct      = (prob_side / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, side, model_prob, implied, ev_pct)
+            return self._build_bet(prop, side, model_prob, implied, ev_pct * 100)
         return None
 
 
@@ -3686,7 +3626,7 @@ class _UnderDogAgent(_BaseAgent):
         prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, side, model_prob, implied, ev_pct)
+            return self._build_bet(prop, side, model_prob, implied, ev_pct * 100)
         return None
 
 
@@ -3946,16 +3886,6 @@ def run_agent_tasklet() -> bool:
     all_parlays: list[dict] = []
 
     for cls in _AGENT_CLASSES:
-        # ── Freeze gate: skip agents with 20+ consecutive negative-ROI days ──
-        _agent_class_name = getattr(cls, "name", cls.__name__)
-        try:
-            from agent_diagnostics import get_frozen_agents as _get_frozen  # noqa: PLC0415
-            _frozen_set = _get_frozen()
-            if _agent_class_name in _frozen_set:
-                logger.info("[Dispatch] %s is FROZEN — skipping this cycle.", _agent_class_name)
-                continue
-        except Exception:
-            pass  # fail-open — never skip an agent due to diagnostics error
         agent      = cls(hub, model)
         agent_hits: list[dict] = []
 
@@ -4132,18 +4062,15 @@ def run_agent_tasklet() -> bool:
                 continue
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
-        # Dynamic threshold adjustment based on 30-day ROI
-        dyn_prob, dyn_conf = _dynamic_gates(agent_name)
-
         play_conf = parlay.get("confidence", 0)
-        if play_conf < dyn_conf:
-            logger.info("[AgentTasklet] %s confidence %.1f < min %.1f — dropped.",
-                         agent_name, play_conf, dyn_conf)
+        if play_conf < MIN_CONFIDENCE:
+            logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
+                         agent_name, play_conf, MIN_CONFIDENCE)
             continue
 
-        # Probability gate — every leg must have model_prob >= dyn_prob
+        # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
         _legs = parlay.get("legs", [])
-        _min_prob_pct = dyn_prob * 100
+        _min_prob_pct = MIN_PROB * 100  # 57.0
         _low_legs = [
             lg.get("player", lg.get("player_name", "?"))
             for lg in _legs
@@ -4810,12 +4737,12 @@ def run_grading_tasklet() -> None:
                 cur.execute(
                     """
                     UPDATE bet_ledger
-                    SET status = %s, result = %s, profit_loss = %s, actual_result = %s,
+                    SET status = %s, profit_loss = %s, actual_result = %s,
                         clv = %s, graded_at = NOW(), actual_outcome = %s,
                         features_json = COALESCE(%s, features_json)
                     WHERE id = %s
                     """,
-                    (status, status, round(pl, 4), actual, round(clv, 2),
+                    (status, round(pl, 4), actual, round(clv, 2),
                      actual_outcome, _refreshed_feats_json, bid),
                 )
 
@@ -5053,14 +4980,6 @@ def run_grading_tasklet() -> None:
     except Exception as _streak_settle_err:
         logger.warning("[GradingTasklet] Streak settlement failed (non-fatal): %s", _streak_settle_err)
 
-    # ── Secondary isotonic calibration rebuild ────────────────────────────
-    try:
-        from isotonic_calibrator import rebuild_isotonic_calibration as _rebuild_iso  # noqa: PLC0415
-        _rebuild_iso()
-        logger.info("[Grading] Isotonic calibration rebuild complete.")
-    except Exception as _iso_err:
-        logger.warning("[Grading] Isotonic calibration rebuild failed: %s", _iso_err)
-
     # ── Void stale OPEN bets from postponed/suspended games ────────────────────
     # After 7 days without grading, mark VOID so they don't pollute the ledger.
     try:
@@ -5081,15 +5000,7 @@ def run_grading_tasklet() -> None:
     except Exception as _void_err:
         logger.debug("[GradingTasklet] Stale OPEN void sweep failed: %s", _void_err)
 
-        # ── Per-agent nightly diagnostics ────────────────────────────────────────
-        try:
-            from agent_diagnostics import run_agent_diagnostics as _run_diag  # noqa: PLC0415
-            _run_diag()
-            logger.info("[Grading] Agent diagnostics completed.")
-        except Exception as _diag_err:
-            logger.warning("[Grading] Agent diagnostics failed: %s", _diag_err)
-
-        # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
+    # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
     # Postgres is the primary store; Parquet is the backup.  If DB is wiped, we
     # XGBoostTasklet reads from Postgres; the Parquet files are a safety net only.
     try:

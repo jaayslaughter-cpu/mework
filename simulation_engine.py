@@ -49,7 +49,7 @@ _PA_BY_SLOT: Dict[int, float] = {
     1: 4.76, 2: 4.65, 3: 4.53, 4: 4.45,
     5: 4.31, 6: 4.19, 7: 4.07, 8: 3.92, 9: 3.72,
 }
-_PA_UNKNOWN_SLOT = 4.20  # fallback for unconfirmed lineups
+_PA_UNKNOWN_SLOT = 4.20  # batting slot fallback — not an ERA value, keep as-is
 # FIX: Corrected using true avg 5.2 IP × 4.30 BF/IP = 22.36 total starter BF
 # Distributed by slot: slot 1 sees starter ~3.1 PA, slot 9 ~2.4 PA
 _STARTER_PA_BY_SLOT: Dict[int, float] = {
