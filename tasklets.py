@@ -1946,6 +1946,10 @@ class _BaseAgent:
                     prop["_sim_edge_reasons"] = sim.edge_reasons
                     prop["_sim_starter_prob"] = sim.starter_prob
                     prop["_sim_bullpen_prob"]  = sim.bullpen_prob
+                    # Apply rolling window HOT/COLD trend (±3pp from rolling_window_layer)
+                    _rolling_adj_val = float(prop.get("_rolling_adj", 0.0) or 0.0)
+                    if _rolling_adj_val:
+                        raw = raw + (_rolling_adj_val * 100.0)
                     return round(max(5.0, min(95.0, raw)), 2)
             except Exception as _sim_err:
                 logger.debug("[BaseAgent._model_prob] SimEngine error: %s", _sim_err)
@@ -3885,7 +3889,21 @@ def run_agent_tasklet() -> bool:
 
     all_parlays: list[dict] = []
 
+    # Fetch frozen agents once (fail-open — DB error → dispatch normally)
+    try:
+        from agent_diagnostics import get_frozen_agents as _get_frozen  # noqa: PLC0415
+        _frozen_agents: set = _get_frozen()
+    except Exception:
+        _frozen_agents = set()
+
     for cls in _AGENT_CLASSES:
+        # ── Freeze gate: skip agents frozen for 20+ consecutive negative-ROI days ──
+        _agent_cls_name = getattr(cls, "name", cls.__name__)
+        if _agent_cls_name in _frozen_agents:
+            logger.info("[Dispatch] %s is FROZEN (20+ neg-ROI days) — skipping this cycle.",
+                        _agent_cls_name)
+            continue
+
         agent      = cls(hub, model)
         agent_hits: list[dict] = []
 
