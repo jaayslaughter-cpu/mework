@@ -192,23 +192,23 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
         "csw_pct":   0.275,   # FG 2025: ~27.5% (was 0.280)
         "swstr_pct": 0.110,   # FG 2025: ~11.0% (unchanged)
         "k_bb_pct":  0.130,   # FG 2025: ~13.0% (unchanged)
-        "xfip":      4.08,    # FG 2025 (was 4.15)  
-        "siera":     4.08,    # FG 2025 (was 4.15)  
-        "fip":       4.08,    # FG 2025 (was 4.15)  
+        "xfip":      4.06,    # FG 2025 (was 4.15)  
+        "siera":     4.06,    # FG 2025 (was 4.15)  
+        "fip":       4.06,    # FG 2025 (was 4.15)  
         "hr_fb_pct": 0.119,   # FG 2025: 11.9% (confirmed VSiN Feb 2026): ~11.8% (was 0.120)
         "lob_pct":   0.720,   # unchanged
-        "babip":     0.289,   # FG 2025: .289 (confirmed VSiN Feb 2026): ~0.298 (was 0.300)
+        "babip":     0.288,   # FG 2025: .289 (confirmed VSiN Feb 2026): ~0.298 (was 0.300)
     },
     "batter": {
         "wrc_plus":    100.0,  # by definition
         "woba":        0.308,  # FG 2025 (was 0.312)
-        "iso":         0.160,  # FG 2025: elevated power (was 0.158)
-        "babip":       0.289,  # FG 2025: .289 (confirmed VSiN Feb 2026)
+        "iso":         0.156,  # FG 2025: elevated power (was 0.158)
+        "babip":       0.288,  # FG 2025: .289 (confirmed VSiN Feb 2026)
         "o_swing":     0.316,  # FG 2025 (was 0.318)
         "z_contact":   0.848,  # FG 2025: ~84.8% (was 0.850)
         "hr_fb_pct":   0.119,  # FG 2025: 11.9% (confirmed VSiN Feb 2026)
-        "k_pct":       0.222,  # FG 2025: 22.2% (confirmed VSiN Feb 2026)
-        "bb_pct":      0.084,  # FG 2025: 8.4% (confirmed VSiN Feb 2026)
+        "k_pct":       0.223,  # FG 2025: 22.2% (confirmed VSiN Feb 2026)
+        "bb_pct":      0.087,  # FG 2025: 8.4% (confirmed VSiN Feb 2026)
         "slg":         0.410,  # FG 2025 (was 0.411)
         "xbh_per_game": 0.50,  # extra base hits per game — #1 feature for TB (45% importance)
     },
@@ -732,15 +732,15 @@ def fangraphs_adjustment(
         elif _in_group(prop_type, "er_props"):
             xfip  = fg.get("xfip",  ld_p["xfip"])
             siera = fg.get("siera", ld_p["siera"])
-            xfip_adj  = (4.08 - xfip)  / 0.70 * 0.015
-            siera_adj = (4.08 - siera) / 0.70 * 0.008
+            xfip_adj  = (4.06 - xfip)  / 0.70 * 0.015
+            siera_adj = (4.06 - siera) / 0.70 * 0.008
             adj += flip * (xfip_adj + siera_adj)
 
         elif _in_group(prop_type, "hits_allow"):
             swstr = fg.get("swstr_pct", ld_p["swstr_pct"])
             babip = fg.get("babip",     ld_p["babip"])
             swstr_adj = (swstr - 0.108) / 0.030 * 0.012
-            babip_adj = (0.289 - babip) / 0.030 * 0.008
+            babip_adj = (0.288 - babip) / 0.030 * 0.008
             adj += flip * swstr_adj
             adj -= babip_adj
 
@@ -756,7 +756,7 @@ def fangraphs_adjustment(
             iso   = fg.get("iso",      ld_b["iso"])
             hr_fb = fg.get("hr_fb_pct", ld_b["hr_fb_pct"])
             wrc   = fg.get("wrc_plus", ld_b["wrc_plus"])
-            iso_adj   = (iso   - 0.160) / 0.070 * 0.014  # FG 2025: center 0.160
+            iso_adj   = (iso   - 0.156) / 0.070 * 0.014  # FG 2025: center 0.156
             hr_fb_adj = (hr_fb - 0.119) / 0.050 * 0.010  # FG 2025: center 0.119
             wrc_adj   = (wrc   - 100.0) / 30.0  * 0.006
             adj += flip * (iso_adj + hr_fb_adj + wrc_adj)
@@ -773,11 +773,11 @@ def fangraphs_adjustment(
             o_swing = fg.get("o_swing", ld_b["o_swing"])
             k_pct   = fg.get("k_pct",   ld_b["k_pct"])
             o_adj = (o_swing - 0.316) / 0.100 * 0.015  # FG 2025: center 0.316
-            k_adj = (k_pct   - 0.222) / 0.050 * 0.012  # FG 2025: center 0.222
+            k_adj = (k_pct   - 0.223) / 0.050 * 0.012  # FG 2025: center 0.223
             adj += flip * (o_adj + k_adj)
 
         elif _in_group(prop_type, "sb_props"):
             bb_pct = fg.get("bb_pct", ld_b["bb_pct"])
-            adj += flip * (bb_pct - 0.084) / 0.030 * 0.010  # FG 2025: center 0.084
+            adj += flip * (bb_pct - 0.087) / 0.030 * 0.010  # FG 2025: center 0.087
 
     return max(-_FG_CAP, min(_FG_CAP, adj))

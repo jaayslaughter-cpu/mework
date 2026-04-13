@@ -151,14 +151,14 @@ def _get_fg_pitcher(name: str) -> dict:
         from fangraphs_layer import get_pitcher  # noqa: PLC0415
         stats = get_pitcher(name) or {}
         return {
-            "k_rate":       stats.get("k_pct",     stats.get("k_rate",   0.222)),
-            "bb_rate":      stats.get("bb_pct",    stats.get("bb_rate",  0.084)),
-            "era":          stats.get("xfip",      stats.get("fip",      4.08)),
+            "k_rate":       stats.get("k_pct",     stats.get("k_rate",   0.223)),
+            "bb_rate":      stats.get("bb_pct",    stats.get("bb_rate",  0.087)),
+            "era":          stats.get("xfip",      stats.get("fip",      4.06)),
             "whip":         stats.get("whip",      1.28),
             "csw_pct":      stats.get("csw_pct",   0.275),
             "swstr_pct":    stats.get("swstr_pct", 0.110),
-            "xfip":         stats.get("xfip",      4.08),
-            "siera":        stats.get("siera",     4.08),
+            "xfip":         stats.get("xfip",      4.06),
+            "siera":        stats.get("siera",     4.06),
             "k_bb_pct":     stats.get("k_bb_pct",  0.139),
         }
     except Exception:
@@ -172,13 +172,13 @@ def _get_fg_batter(name: str) -> dict:
         return {
             "wrc_plus":   stats.get("wrc_plus",  100.0),
             "woba":       stats.get("woba",       0.308),
-            "iso":        stats.get("iso",        0.160),
-            "babip":      stats.get("babip",      0.289),
+            "iso":        stats.get("iso",        0.156),
+            "babip":      stats.get("babip",      0.288),
             "o_swing":    stats.get("o_swing",    0.316),
             "z_contact":  stats.get("z_contact",  0.850),
             "hr_fb_pct":  stats.get("hr_fb_pct",  0.105),
-            "k_pct":      stats.get("k_pct",      0.222),
-            "bb_pct":     stats.get("bb_pct",     0.084),
+            "k_pct":      stats.get("k_pct",      0.223),
+            "bb_pct":     stats.get("bb_pct",     0.087),
         }
     except Exception:
         return {}
@@ -236,9 +236,9 @@ def _get_mlbapi_pitcher(player_name: str, player_id: int | None) -> dict:
             era_val = round(float(s.get("era",  0) or 0), 2) or round(er / ip * 9, 2)
             whip_val = round(float(s.get("whip", 0) or 0), 3) or round((h + bb) / ip, 3)
             result = {
-                "k_rate":    k_rate  if k_rate  > 0 else 0.222,
-                "bb_rate":   bb_rate if bb_rate > 0 else 0.084,
-                "era":       era_val  if era_val  > 0 else 4.08,
+                "k_rate":    k_rate  if k_rate  > 0 else 0.223,
+                "bb_rate":   bb_rate if bb_rate > 0 else 0.087,
+                "era":       era_val  if era_val  > 0 else 4.06,
                 "whip":      whip_val if whip_val > 0 else 1.28,
                 "k_per_start": round(so / gs, 1),
                 # FIX: expose raw season totals for Bernoulli suppression model
@@ -298,15 +298,15 @@ def _get_mlbapi_batter(player_name: str, player_id: int | None) -> dict:
             bb_pct = round(bb / pa, 4)
             # Derive wRC+ proxy: (OBP/lgOBP + SLG/lgSLG - 1) * 100
             wrc_proxy = round(((obp / 0.317) + (slg / 0.407) - 1) * 100, 1) if slg > 0 else 100.0
-            iso = round(slg - avg, 3) if slg > avg else 0.160
+            iso = round(slg - avg, 3) if slg > avg else 0.156
             result = {
                 "wrc_plus":  max(40.0, min(200.0, wrc_proxy)),
-                "babip":     babip  if babip  > 0 else 0.289,
+                "babip":     babip  if babip  > 0 else 0.288,
                 "obp":       obp    if obp    > 0 else 0.315,
                 "slg":       slg    if slg    > 0 else 0.410,
-                "iso":       iso    if iso    > 0 else 0.160,
-                "k_pct":     k_pct  if k_pct  > 0 else 0.222,
-                "bb_pct":    bb_pct if bb_pct > 0 else 0.084,
+                "iso":       iso    if iso    > 0 else 0.156,
+                "k_pct":     k_pct  if k_pct  > 0 else 0.223,
+                "bb_pct":    bb_pct if bb_pct > 0 else 0.087,
                 "_source":   "mlbapi_2026",
             }
             _mlbapi_batter_cache[cache_key] = result
@@ -373,7 +373,7 @@ def _get_mlbapi_batter_splits(player_id: int | None, pitcher_hand: str) -> dict:
                 obp = round(float(s.get("obp", 0) or (h + bb) / pa), 3)
                 slg = round(float(s.get("slg", 0) or 0), 3)
                 babip = round(float(s.get("babip", 0) or avg), 3)
-                iso  = round(slg - avg, 3) if slg > avg else 0.160
+                iso  = round(slg - avg, 3) if slg > avg else 0.156
                 woba = round(float(s.get("obp", 0) or 0) * 0.90 + slg * 0.10, 3)  # simplified wOBA proxy
                 k_pct  = round(so / pa, 4)
                 bb_pct = round(bb / pa, 4)
@@ -412,12 +412,12 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
         _is_pitcher_pt = prop_type in {"strikeouts","pitching_outs","earned_runs",
                                         "hits_allowed","walks_allowed","fantasy_pitcher"}
         if _is_pitcher_pt:
-            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.222)) or 0.222)
+            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.223)) or 0.223)
             player_pa   = 27
         else:
             # Batter props: use wRC+ normalized, BABIP, or hit rate proxy
             _wrc = float(prop.get("wrc_plus", 100.0) or 100.0) / 100.0
-            _h_per_ab = float(prop.get("babip", 0.289) or 0.289)
+            _h_per_ab = float(prop.get("babip", 0.288) or 0.288)
             player_rate = min(0.400, max(0.180, (_wrc * 0.275 + _h_per_ab) / 2))
             player_pa   = 4
         return bayesian_adjustment(
@@ -914,13 +914,13 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             if fg:
                 fg_hits += 1
                 prop.update({
-                    "k_rate":        fg.get("k_rate",    0.222),
-                    "bb_rate":       fg.get("bb_rate",   0.084),
-                    "era":           fg.get("era",       4.08),
+                    "k_rate":        fg.get("k_rate",    0.223),
+                    "bb_rate":       fg.get("bb_rate",   0.087),
+                    "era":           fg.get("era",       4.06),
                     "whip":          fg.get("whip",      1.28),
                     "csw_pct":       fg.get("csw_pct",   0.275),
                     "swstr_pct":     fg.get("swstr_pct", 0.110),
-                    "xfip":          fg.get("xfip",      4.08),
+                    "xfip":          fg.get("xfip",      4.06),
                     "k_bb_pct":      fg.get("k_bb_pct",  0.139),
                 })
                 # FanGraphs doesn't expose raw IP/ER totals — fetch from mlbapi
@@ -945,19 +945,19 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     try:
                         from season_blender import get_blender as _sb  # noqa: PLC0415
                         _bw = _sb()
-                        _s26 = {"k_rate": _mlbapi["k_rate"], "bb_rate": _mlbapi.get("bb_rate", 0.084),
-                                "era": _mlbapi.get("era", 4.08), "whip": _mlbapi.get("whip", 1.28)}
+                        _s26 = {"k_rate": _mlbapi["k_rate"], "bb_rate": _mlbapi.get("bb_rate", 0.087),
+                                "era": _mlbapi.get("era", 4.06), "whip": _mlbapi.get("whip", 1.28)}
                         _s25 = {"k_rate": fg.get("k_rate", 0), "bb_rate": fg.get("bb_rate", 0),
-                                "era": fg.get("xfip", fg.get("era", 4.08)), "whip": fg.get("whip", 1.28)} if fg else {}
+                                "era": fg.get("xfip", fg.get("era", 4.06)), "whip": fg.get("whip", 1.28)} if fg else {}
                         _blend = _bw.blend_pitcher(_s26, _s25) if _s25 else _s26
                         prop.setdefault("k_rate",  _blend.get("k_rate",  _mlbapi["k_rate"]))
-                        prop.setdefault("bb_rate", _blend.get("bb_rate", _mlbapi.get("bb_rate", 0.084)))
-                        prop.setdefault("era",     _blend.get("era",     _mlbapi.get("era",  4.08)))
+                        prop.setdefault("bb_rate", _blend.get("bb_rate", _mlbapi.get("bb_rate", 0.087)))
+                        prop.setdefault("era",     _blend.get("era",     _mlbapi.get("era",  4.06)))
                         prop.setdefault("whip",    _blend.get("whip",    _mlbapi.get("whip", 1.28)))
                     except Exception:
                         prop.setdefault("k_rate",  _mlbapi["k_rate"])
-                        prop.setdefault("bb_rate", _mlbapi.get("bb_rate", 0.084))
-                        prop.setdefault("era",     _mlbapi.get("era",     4.08))
+                        prop.setdefault("bb_rate", _mlbapi.get("bb_rate", 0.087))
+                        prop.setdefault("era",     _mlbapi.get("era",     4.06))
                         prop.setdefault("whip",    _mlbapi.get("whip",    1.28))
                     # Stamp season IP and ER for Bernoulli suppression model
                     if _mlbapi.get("season_ip", 0) > 0:
@@ -991,12 +991,12 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 prop.update({
                     "wrc_plus":    fg.get("wrc_plus",  100.0),
                     "woba":        fg.get("woba",       0.308),
-                    "iso":         fg.get("iso",        0.160),
+                    "iso":         fg.get("iso",        0.156),
                     "o_swing":     fg.get("o_swing",    0.316),
                     "z_contact":   fg.get("z_contact",  0.850),
                     "hr_fb_pct":   fg.get("hr_fb_pct",  0.105),
-                    "k_pct":       fg.get("k_pct",      0.222),
-                    "bb_pct":      fg.get("bb_pct",     0.084),
+                    "k_pct":       fg.get("k_pct",      0.223),
+                    "bb_pct":      fg.get("bb_pct",     0.087),
                 })
                 # ── Platoon splits overlay ──────────────────────────────────────────
                 # Override season stats with vs-hand splits when pitcher hand is known
@@ -1029,10 +1029,10 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _mlbapi_b = _get_mlbapi_batter(player, _player_id)
                 if _mlbapi_b:
                     prop.setdefault("wrc_plus", _mlbapi_b.get("wrc_plus", 100.0))
-                    prop.setdefault("babip",    _mlbapi_b.get("babip",    0.289))
-                    prop.setdefault("iso",      _mlbapi_b.get("iso",      0.160))
-                    prop.setdefault("k_pct",    _mlbapi_b.get("k_pct",    0.222))
-                    prop.setdefault("bb_pct",   _mlbapi_b.get("bb_pct",   0.084))
+                    prop.setdefault("babip",    _mlbapi_b.get("babip",    0.288))
+                    prop.setdefault("iso",      _mlbapi_b.get("iso",      0.156))
+                    prop.setdefault("k_pct",    _mlbapi_b.get("k_pct",    0.223))
+                    prop.setdefault("bb_pct",   _mlbapi_b.get("bb_pct",   0.087))
                     prop.setdefault("slg",      _mlbapi_b.get("slg",      0.410))
                     prop.setdefault("obp",      _mlbapi_b.get("obp",      0.315))
                     logger.debug("[Enrichment] Batter %s using statsapi 2026 fallback", player)
@@ -1113,8 +1113,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
         # regardless of who the player is.  Chase Burns and a AAA call-up were identical.
         if is_pitcher_prop:
-            prop.setdefault("_k_pct",   prop.get("k_rate")  or prop.get("k_pct",  0.222))  # FIX: 0.225→0.223 (2024 actual)
-            prop.setdefault("_bb_pct",  prop.get("bb_rate") or prop.get("bb_pct", 0.084))  # FIX: 0.080→0.086 (2024 actual)
+            prop.setdefault("_k_pct",   prop.get("k_rate")  or prop.get("k_pct",  0.223))  # FIX: 0.225→0.223 (2024 actual)
+            prop.setdefault("_bb_pct",  prop.get("bb_rate") or prop.get("bb_pct", 0.087))  # FIX: 0.080→0.086 (2024 actual)
             prop.setdefault("_whip",    prop.get("whip",    1.28))
             prop.setdefault("_csw_pct", prop.get("csw_pct", 0.275))  # 2025: ~27.5%
             _fg_ip  = prop.get("xfip")   # rough proxy; actual ip/gs not fetched yet
@@ -1150,9 +1150,9 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             # Batter keys — use platoon splits when available (overrides season stats)
             # woba_vs_hand / k_pct_vs_hand are set by _get_mlbapi_batter_splits
             _woba_src = prop.get("woba_vs_hand")   or prop.get("woba",    0.308)
-            _iso_src  = prop.get("iso_vs_hand")    or prop.get("iso",     0.160)
-            _k_src    = prop.get("k_pct_vs_hand")  or prop.get("k_pct",   0.222)
-            _bb_src   = prop.get("bb_pct_vs_hand") or prop.get("bb_pct",  0.084)
+            _iso_src  = prop.get("iso_vs_hand")    or prop.get("iso",     0.156)
+            _k_src    = prop.get("k_pct_vs_hand")  or prop.get("k_pct",   0.223)
+            _bb_src   = prop.get("bb_pct_vs_hand") or prop.get("bb_pct",  0.087)
             prop.setdefault("_wrc_plus", prop.get("wrc_plus", 100.0))
             prop.setdefault("_woba",     _woba_src)
             prop.setdefault("_iso",      _iso_src)
