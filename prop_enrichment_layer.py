@@ -1102,6 +1102,13 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     player, _k_sig, _k_sig_nudge,
                 )
 
+        # ── Rolling window stats (last 15 games) ─────────────────────────────────
+        try:
+            from rolling_window_layer import enrich_prop_with_rolling as _enrich_rw  # noqa: PLC0415
+            prop = _enrich_rw(prop, season=season)
+        except Exception as _rw_err:
+            logger.debug("[Enrichment] Rolling window skipped: %s", _rw_err)
+
         # ── FIX: Bridge enrichment keys → simulation engine underscore-prefixed keys ──
         # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
         # regardless of who the player is.  Chase Burns and a AAA call-up were identical.

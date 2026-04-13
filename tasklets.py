@@ -2314,16 +2314,24 @@ class _BaseAgent:
         # ── Recalculate ev_pct from final model_prob (shrinkage + cap may have changed it) ──
         # so Kelly / confidence downstream reflect the actual adjusted probability.
         try:
-            _side_american = (
-                prop.get("over_american",  prop.get("odds_american", -115))
-                if side == "OVER"
-                else prop.get("under_american", prop.get("odds_american", -115))
-            )
-            _decimal = (
-                (100 / abs(_side_american) + 1) if _side_american < 0
-                else (_side_american / 100 + 1)
-            )
-            _profit  = _decimal - 1
+            _platform = prop.get("platform", "").lower()
+            _is_pickem = _platform in {"underdog", "prizepicks"}
+            if _is_pickem:
+                # UD/PP balanced pick'em lines are true 50/50 (not -110 vig).
+                # Use even money (profit=1.0) so stored ev_pct and XGBoost training
+                # data reflect the actual edge, not a -110 sportsbook overround.
+                _profit = 1.0
+            else:
+                _side_american = (
+                    prop.get("over_american",  prop.get("odds_american", -115))
+                    if side == "OVER"
+                    else prop.get("under_american", prop.get("odds_american", -115))
+                )
+                _decimal = (
+                    (100 / abs(_side_american) + 1) if _side_american < 0
+                    else (_side_american / 100 + 1)
+                )
+                _profit = _decimal - 1
             ev_pct   = round((_profit * (model_prob / 100) - (1 - model_prob / 100)) * 100, 3)
         except Exception:
             pass   # keep original ev_pct on error
