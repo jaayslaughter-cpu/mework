@@ -125,7 +125,12 @@ def extract_key_lines(log_lines: list[str]) -> list[str]:
 
 def build_summary(key_lines: list[str]) -> str:
     """Build a human-readable dispatch summary."""
-    now_pt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=7)
+    try:
+        from zoneinfo import ZoneInfo as _lw_zi
+        now_pt = datetime.datetime.now(_lw_zi("America/Los_Angeles"))
+    except Exception:
+        import datetime as _lw_dt
+        now_pt = _lw_dt.datetime.now(_lw_dt.timezone.utc) - _lw_dt.timedelta(hours=8)
     time_str = now_pt.strftime("%I:%M %p PT")
 
     if not key_lines:

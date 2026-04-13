@@ -98,6 +98,13 @@ except Exception as _rm_exc:
     logger.warning("[RISK] RiskManager not available: %s", _rm_exc)
 
 try:
+    from agent_diagnostics import get_frozen_agents as _get_frozen_agents
+    _FREEZE_AVAILABLE = True
+except Exception:
+    _FREEZE_AVAILABLE = False
+    def _get_frozen_agents() -> set: return set()  # noqa: E704
+
+try:
     from bullpen_fatigue_scorer import build_bullpen_fatigue_scorer as _build_bullpen_scorer
     _BULLPEN_SCORER_AVAILABLE = True
 except ImportError:
@@ -1875,7 +1882,7 @@ def run_data_hub_tasklet() -> None:
 
     # ── Merge all groups into master hub key ───────────────────────────────
     hub: dict[str, Any] = {
-        "ts": datetime.datetime.utcnow().isoformat(),
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "game_states": game_states,
         "spring_training": _is_spring_training(),
     }
@@ -2384,7 +2391,7 @@ class _BaseAgent:
             "checklist":          self._checklist(prop),
             "confidence":         self._confidence(ev_pct),
             "spring_training":    _is_spring_training(),
-            "ts":                 datetime.datetime.utcnow().isoformat(),
+            "ts":                 datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "_features_json":     json.dumps(_feat_vec),
             # Simulation engine outputs (present only when sim ran successfully)
             "sim_mean":           prop.get("_sim_mean"),
@@ -3239,7 +3246,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         "confidence":      p_conf,
         "platform":        parlay_platform,
         "season_stats":    {},
-        "ts":              datetime.datetime.utcnow().isoformat(),
+        "ts":              datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }]
 
 
@@ -3902,8 +3909,17 @@ def run_agent_tasklet() -> bool:
 
     all_parlays: list[dict] = []
 
+    # CRIT-2: Load currently-frozen agents (fail-open — empty set if unavailable)
+    _frozen_agents: set = _get_frozen_agents()
+    if _frozen_agents:
+        logger.info("[AgentTasklet] Frozen agents (skipped this cycle): %s", sorted(_frozen_agents))
+
     for cls in _AGENT_CLASSES:
         agent      = cls(hub, model)
+        # CRIT-2: Skip frozen agents entirely
+        if agent.name in _frozen_agents:
+            logger.info("[AgentTasklet] Skipping frozen agent: %s", agent.name)
+            continue
         agent_hits: list[dict] = []
 
         for prop in props:
@@ -4046,6 +4062,7 @@ def run_agent_tasklet() -> bool:
                 _AGENT_SENT_TODAY.setdefault(_ag, today_str)
                 _preloaded.append(_ag)
         _pg.commit()
+        _pg.close()   # CRIT-1: close dedup preload connection to prevent pool exhaustion
         if _preloaded:
             logger.info(
                 "[AgentTasklet] Dedup preload — these agents already sent today"
@@ -4498,7 +4515,7 @@ def run_backtest_tasklet() -> None:
 
     r = _redis()
     r.setex("backtest_result", 86400, json.dumps({
-        "ts":          datetime.datetime.utcnow().isoformat(),
+        "ts":          datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "accuracy":    round(accuracy, 4),
         "n_samples":   len(rows),
         "dropped_features": dropped,
@@ -4884,7 +4901,7 @@ def run_grading_tasklet() -> None:
                     _status,
                     json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
                                 "pushes": _stats["pushes"]}),
-                    datetime.datetime.utcnow().isoformat(),
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     today, _ag,
                 ))
         conn2.commit()
@@ -5072,6 +5089,22 @@ def run_grading_tasklet() -> None:
         logger.debug("[GradingTasklet] pandas/pyarrow not installed — Parquet archive skipped")
     except Exception as _arc_err:
         logger.warning("[GradingTasklet] Nightly Parquet archive failed: %s", _arc_err)
+
+    # ── Agent diagnostics: 30-day ROI / win rate / Brier per agent + freeze gate ──
+    try:
+        from agent_diagnostics import run_agent_diagnostics as _run_diagnostics  # noqa: PLC0415
+        _run_diagnostics()
+        logger.info("[GradingTasklet] Agent diagnostics snapshot complete.")
+    except Exception as _diag_err:
+        logger.warning("[GradingTasklet] Agent diagnostics failed (non-fatal): %s", _diag_err)
+
+    # ── Isotonic calibration rebuild (HIGH-2: was dead — now wired nightly) ──────
+    try:
+        from isotonic_calibrator import rebuild_isotonic_calibration as _rebuild_iso  # noqa: PLC0415
+        _rebuild_iso()
+        logger.info("[GradingTasklet] Isotonic calibration map rebuilt.")
+    except Exception as _iso_err:
+        logger.warning("[GradingTasklet] Isotonic calibration rebuild failed (non-fatal): %s", _iso_err)
 
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
@@ -5315,7 +5348,7 @@ def run_xgboost_tasklet() -> None:
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
     # Last week ≈ 0.93 | 30 days ≈ 0.74 | 90 days ≈ 0.41 | Opening Day ≈ 0.16
-    now_utc = datetime.datetime.utcnow()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     sample_weights = np.array([
         np.exp(-0.01 * max((now_utc - (
             r[2] if isinstance(r[2], datetime.datetime)
@@ -5359,7 +5392,7 @@ def run_xgboost_tasklet() -> None:
 
     r = _redis()
     r.setex("xgb_meta", 604800, json.dumps({
-        "ts":            datetime.datetime.utcnow().isoformat(),
+        "ts":            datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "accuracy":      round(accuracy, 4),
         "n_train":       len(X_train),
         "n_test":        len(X_test),

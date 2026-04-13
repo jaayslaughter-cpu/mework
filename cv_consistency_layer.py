@@ -39,8 +39,8 @@ try:
     _cv_pt = _cv_pytz.timezone("America/Los_Angeles")
     _cv_today = datetime.now(_cv_pt).strftime("%Y-%m-%d")
 except ImportError:
-    from datetime import timezone, timedelta as _cv_td
-    _cv_today = (datetime.now(timezone.utc) - _cv_td(hours=8)).strftime("%Y-%m-%d")
+    from zoneinfo import ZoneInfo as _cv_zi
+    _cv_today = datetime.now(_cv_zi("America/Los_Angeles")).strftime("%Y-%m-%d")
 CACHE_FILE = f"{CACHE_DIR}/cv_cache_{_cv_today}.json"
 
 # CV tier boundaries → nudge values
