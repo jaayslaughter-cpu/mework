@@ -2121,19 +2121,19 @@ class _BaseAgent:
                 _xbh = float(prop.get("xbh_per_game", 0.50) or 0.50)
                 bb_rate = _clamp(_xbh / 1.50)   # 0=0, 0.50=avg(0.33), 1.0=elite(0.67)
             else:
-                bb_rate = _clamp(float(prop.get("iso", 0.160) or 0.160) / 0.35)
+                bb_rate = _clamp(float(prop.get("iso", 0.156) or 0.156) / 0.35)
 
             # slot 2: SLG for TB/power props (16% feature importance)
             if _is_tb_prop:
                 _slg = float(prop.get("slg", 0.410) or 0.410)
                 era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.410=avg(0.40), 0.650=elite(1.0)
             else:
-                era = _clamp((float(prop.get("babip", 0.289) or 0.289) - 0.200) / 0.200)
+                era = _clamp((float(prop.get("babip", 0.288) or 0.288) - 0.200) / 0.200)
 
             # slot 3: batter bb_pct (plate discipline)
-            whip    = _clamp(float(prop.get("bb_pct", 0.084) or 0.084) / 0.20)
+            whip    = _clamp(float(prop.get("bb_pct", 0.087) or 0.087) / 0.20)
             # slot 4: batter K% (inverse contact — higher K = worse contact)
-            shadow_whiff = _clamp(float(prop.get("k_pct", 0.222) or 0.222) / 0.35)
+            shadow_whiff = _clamp(float(prop.get("k_pct", 0.223) or 0.223) / 0.35)
 
         # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
         zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
@@ -3326,7 +3326,7 @@ class _StackSmithAgent(_BaseAgent):
 
         # Stack signal: look up the OPPOSING pitcher from projected_starters
         opp_team = prop.get("opposing_team", "")
-        era    = 4.08  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
+        era    = 4.06  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
         k_rate = 0.22
 
         starters = self.hub.get("context", {}).get("projected_starters", [])
@@ -3339,7 +3339,7 @@ class _StackSmithAgent(_BaseAgent):
             try:
                 from fangraphs_layer import get_pitcher as _fg_sp  # noqa: PLC0415
                 _sp_fg = _fg_sp(opp_sp.get("full_name", "")) or {}
-                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.08)) or 4.08)
+                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.06)) or 4.06)
                 k_rate = float(_sp_fg.get("k_rate", _sp_fg.get("k_pct",  0.22)) or 0.22)
             except Exception:
                 pass
@@ -3751,9 +3751,9 @@ def _get_props(hub: dict) -> list[dict]:
                 "player_id":        _pp_pitcher.get("mlbam_id"),
                 "opposing_team":    _pp_pitcher.get("opposing_team", ""),
                 "_context_lineups": hub.get("context", {}).get("lineups", []),
-                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.222)),
-                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.084)),
-                "era":              _fg_pitcher.get("era",    4.08),
+                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.223)),
+                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.087)),
+                "era":              _fg_pitcher.get("era",    4.06),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
         if props:

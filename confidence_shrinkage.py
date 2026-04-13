@@ -53,8 +53,8 @@ logger = logging.getLogger("propiq.confidence")
 # Adapted from baseball-sims/src/simulation/constants.py
 # ---------------------------------------------------------------------------
 LEAGUE_RATES = {
-    "K":   0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
-    "BB":  0.084,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
+    "K":   0.223,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
+    "BB":  0.087,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
     "HBP": 0.011,
     "HR":  0.033,   # FG 2025: elevated power 
     "3B":  0.004,
@@ -420,7 +420,7 @@ def log5_blend(
     """
     eps = 1e-9
     if league_rate is None:
-        league_rate = LEAGUE_RATES.get(outcome, 0.222)
+        league_rate = LEAGUE_RATES.get(outcome, 0.223)
 
     b = max(eps, min(1.0, batter_rate))
     p = max(eps, min(1.0, pitcher_rate))
