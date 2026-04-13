@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("propiq.season_blender")
 
@@ -105,7 +106,9 @@ class SeasonBlender:
         self._sp_rate   = starts_per_game
 
     def _days_played(self) -> int:
-        return max(0, (datetime.date.today() - self._opening).days)
+        # Use Pacific Time — Railway runs UTC; during PDT (Apr-Oct) UTC flips
+        # to the next calendar day at 5 PM PT, corrupting blend weights.
+        return max(0, (datetime.datetime.now(ZoneInfo("America/Los_Angeles")).date() - self._opening).days)
 
     def _games_played(self) -> float:
         """Estimated team games played."""
