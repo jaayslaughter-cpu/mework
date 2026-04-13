@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import time
+from zoneinfo import ZoneInfo
 import requests
 import numpy as np
 from typing import Optional
@@ -574,7 +575,7 @@ def fetch_nsfi_predictions_today(
     """
     import datetime
     if date_str is None:
-        date_str = datetime.date.today().isoformat()
+        date_str = datetime.datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
 
     try:
         games = fetch_lineups_and_pitchers(date_str)
