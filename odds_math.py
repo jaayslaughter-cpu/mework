@@ -494,7 +494,7 @@ def basic_arbitrage(
 MIN_EV_THRESHOLD: float = 0.03      # 3% edge vs sharp market
 
 #: Underdog Fantasy standard Pick'em implied probability (no vig).
-UNDERDOG_PICKEM_IMPLIED: float = 0.535
+UNDERDOG_PICKEM_IMPLIED: float = 0.500  # True Pick'em no vig (PR #317 / PR #319)
 
 #: Maximum acceptable bookmaker margin — props above this are skipped.
 MAX_VIG: float = 0.08               # 8% vig ceiling

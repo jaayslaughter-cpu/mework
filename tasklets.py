@@ -89,6 +89,15 @@ except ImportError:
     _MARKET_VALIDATOR_AVAILABLE = False
 
 try:
+    from risk_manager import RiskManager as _RiskManager
+    _risk_manager = _RiskManager()
+    _RISK_MANAGER_AVAILABLE = True
+except Exception as _rm_exc:
+    _risk_manager = None
+    _RISK_MANAGER_AVAILABLE = False
+    logger.warning("[RISK] RiskManager not available: %s", _rm_exc)
+
+try:
     from bullpen_fatigue_scorer import build_bullpen_fatigue_scorer as _build_bullpen_scorer
     _BULLPEN_SCORER_AVAILABLE = True
 except ImportError:
@@ -2121,19 +2130,19 @@ class _BaseAgent:
                 _xbh = float(prop.get("xbh_per_game", 0.50) or 0.50)
                 bb_rate = _clamp(_xbh / 1.50)   # 0=0, 0.50=avg(0.33), 1.0=elite(0.67)
             else:
-                bb_rate = _clamp(float(prop.get("iso", 0.160) or 0.160) / 0.35)
+                bb_rate = _clamp(float(prop.get("iso", 0.156) or 0.156) / 0.35)
 
             # slot 2: SLG for TB/power props (16% feature importance)
             if _is_tb_prop:
                 _slg = float(prop.get("slg", 0.410) or 0.410)
                 era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.410=avg(0.40), 0.650=elite(1.0)
             else:
-                era = _clamp((float(prop.get("babip", 0.289) or 0.289) - 0.200) / 0.200)
+                era = _clamp((float(prop.get("babip", 0.288) or 0.288) - 0.200) / 0.200)
 
             # slot 3: batter bb_pct (plate discipline)
-            whip    = _clamp(float(prop.get("bb_pct", 0.084) or 0.084) / 0.20)
+            whip    = _clamp(float(prop.get("bb_pct", 0.087) or 0.087) / 0.20)
             # slot 4: batter K% (inverse contact — higher K = worse contact)
-            shadow_whiff = _clamp(float(prop.get("k_pct", 0.222) or 0.222) / 0.35)
+            shadow_whiff = _clamp(float(prop.get("k_pct", 0.223) or 0.223) / 0.35)
 
         # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
         zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
@@ -3326,7 +3335,7 @@ class _StackSmithAgent(_BaseAgent):
 
         # Stack signal: look up the OPPOSING pitcher from projected_starters
         opp_team = prop.get("opposing_team", "")
-        era    = 4.08  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
+        era    = 4.06  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
         k_rate = 0.22
 
         starters = self.hub.get("context", {}).get("projected_starters", [])
@@ -3339,7 +3348,7 @@ class _StackSmithAgent(_BaseAgent):
             try:
                 from fangraphs_layer import get_pitcher as _fg_sp  # noqa: PLC0415
                 _sp_fg = _fg_sp(opp_sp.get("full_name", "")) or {}
-                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.08)) or 4.08)
+                era    = float(_sp_fg.get("era",    _sp_fg.get("xfip",   4.06)) or 4.06)
                 k_rate = float(_sp_fg.get("k_rate", _sp_fg.get("k_pct",  0.22)) or 0.22)
             except Exception:
                 pass
@@ -3751,9 +3760,9 @@ def _get_props(hub: dict) -> list[dict]:
                 "player_id":        _pp_pitcher.get("mlbam_id"),
                 "opposing_team":    _pp_pitcher.get("opposing_team", ""),
                 "_context_lineups": hub.get("context", {}).get("lineups", []),
-                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.222)),
-                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.084)),
-                "era":              _fg_pitcher.get("era",    4.08),
+                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.223)),
+                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.087)),
+                "era":              _fg_pitcher.get("era",    4.06),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
         if props:
@@ -4146,6 +4155,16 @@ def run_agent_tasklet() -> bool:
     best_per_agent = _deduped
 
     for agent_name, (_ev, parlay, r_daily_key) in best_per_agent.items():
+        # ── Risk exposure gate (before any claim or DB work) ──────────────────
+        _tier_stake_for_risk = float(parlay.get("stake", parlay.get("unit_dollars", 5.0)))
+        if _risk_manager is not None:
+            try:
+                if not _risk_manager.check_stake(agent_name, _tier_stake_for_risk):
+                    logger.warning("[RISK] %s skipped — daily exposure cap reached.", agent_name)
+                    continue
+            except Exception as _risk_err:
+                logger.warning("[RISK] check_stake failed for %s: %s — continuing.", agent_name, _risk_err)
+
         # ── Atomically claim this agent slot BEFORE any DB/Discord work ───────
         # pattern in the evaluation loop above.  Here we do the actual cross-
         # All other replicas (or restart cycles) get False and skip immediately.
@@ -4229,6 +4248,13 @@ def run_agent_tasklet() -> bool:
                             agent_name, _flipped)
             except Exception as _flip_err:
                 logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
+
+            # ── Record stake in risk_manager daily exposure ────────────────────
+            if _risk_manager is not None:
+                try:
+                    _risk_manager.record_stake(agent_name, _tier_stake_for_risk)
+                except Exception as _rs_err:
+                    logger.warning("[RISK] record_stake failed for %s: %s", agent_name, _rs_err)
 
             # Record parlay in propiq_season_record so nightly_recap.py can settle it
             try:
@@ -5374,6 +5400,45 @@ def run_xgboost_tasklet() -> None:
         logger.info("[XGBoostTasklet] Calibration map rebuilt from bet_ledger.")
     except Exception as _cal_err:
         logger.warning("[XGBoostTasklet] Calibration map rebuild failed: %s", _cal_err)
+
+    # ── Persist feature importances to Postgres ────────────────────────────────────────
+    try:
+        _fi_booster = model.get_booster()
+        _fi_gain    = _fi_booster.get_score(importance_type="gain")
+        _fi_weight  = _fi_booster.get_score(importance_type="weight")
+        _fi_conn    = _pg_conn()
+        with _fi_conn.cursor() as _fi_cur:
+            _fi_cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS xgb_feature_importance (
+                    id                SERIAL PRIMARY KEY,
+                    feature_name      TEXT NOT NULL,
+                    importance_gain   FLOAT,
+                    importance_weight FLOAT,
+                    model_accuracy    FLOAT,
+                    trained_at        TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            _fi_cur.execute(
+                "DELETE FROM xgb_feature_importance WHERE trained_at < NOW() - INTERVAL '90 days'"
+            )
+            _fi_all = set(list(_fi_gain.keys()) + list(_fi_weight.keys()))
+            for _fname in _fi_all:
+                _fi_cur.execute(
+                    """
+                    INSERT INTO xgb_feature_importance
+                        (feature_name, importance_gain, importance_weight, model_accuracy)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (_fname, _fi_gain.get(_fname), _fi_weight.get(_fname), round(accuracy, 4)),
+                )
+        _fi_conn.commit()
+        _fi_conn.close()
+        logger.info("[XGBoostTasklet] Saved %d feature importances to xgb_feature_importance.",
+                    len(_fi_all))
+    except Exception as _fi_err:
+        logger.warning("[XGBoostTasklet] Feature importance persist failed: %s", _fi_err)
 
     # ── Hot-reload: update the global model so live agents use it immediately ──
     try:
