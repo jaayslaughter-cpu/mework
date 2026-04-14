@@ -437,12 +437,14 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
 # Step 4 — CV consistency nudge
 # ---------------------------------------------------------------------------
 
+_cv_cache: dict = {}  # Module-level CV nudge cache (reset per-cycle)
+
 def _get_cv_nudge(player_id: int | None, prop_type: str, season: int) -> float:
     if not player_id:
         return 0.0
     try:
         from cv_consistency_layer import get_player_cv_nudge  # noqa: PLC0415
-        return float(get_player_cv_nudge(player_id, prop_type, season) or 0.0)
+        return float(get_player_cv_nudge(player_id, prop_type, season, _cv_cache) or 0.0)
     except Exception:
         return 0.0
 
@@ -849,6 +851,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     # so we defer to after the lookup maps are built.
     p2team, p2opp, p2mlbam, p2hand = _build_lookup_maps(hub)
 
+    # ── Pre-attach mlbam_ids so statcast can batch-fetch ──────────────────────
+    for _p in props:
+        _pn = _norm(_p.get("player", ""))
+        if not _p.get("mlbam_id") and _pn in p2mlbam:
+            _p["mlbam_id"] = p2mlbam[_pn]
+
+    # ── Statcast batch enrichment (needs mlbam_ids) ───────────────────────────
+    props = _get_statcast(props)
+
     # ── Per-player FanGraphs cache (avoid re-fetching same player) ────────────
     _fg_pitcher_cache: dict[str, dict] = {}
     _fg_batter_cache:  dict[str, dict] = {}
@@ -985,7 +996,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     _batter_blender = _SB()
                     _mlbapi_b2 = _get_mlbapi_batter(player, prop.get("player_id") or prop.get("mlbam_id"))
                     if _mlbapi_b2:
-                        fg = _batter_blender.blend_batter(player, fg, _mlbapi_b2)
+                        fg = _batter_blender.blend_batter(fg, _mlbapi_b2)
                 except Exception:
                     pass
                 prop.update({
@@ -1214,8 +1225,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
 
         enriched_count += 1
 
-    # ── Statcast batch enrichment (needs mlbam_ids attached above) ─────────────
-    props = _get_statcast(props)
+    # ── Statcast batch enrichment ── (moved above main loop; mlbam_ids pre-attached)
+    # props = _get_statcast(props)  # NOTE: now called before per-prop loop
     sc_hits = sum(1 for p in props if p.get("sc_xwoba") or p.get("sc_whiff_rate"))
 
     _platoon_hits = sum(1 for p in props if p.get("_pitcher_hand") and p.get("woba_vs_hand"))
