@@ -336,8 +336,9 @@ def _simulate_hitter_total_bases(prop: dict, line: float, n_sims: int) -> SimRes
 
 
 def _simulate_generic(prop: dict, line: float, n_sims: int) -> SimResult:
-    """Fallback simulation using implied_prob directly with Poisson draws.
-    Used for RBI, runs, fantasy score props where skill breakdown isn't modeled.
+    """Fallback simulation using Poisson draws calibrated to the prop line.
+    Used for RBI, runs, ER, pitching_outs, hits_allowed, fantasy score,
+    and other props where specific skill breakdown isn't modeled.
     """
     implied_p = _safe(prop, "implied_prob", 52.4) / 100.0
     nudge     = (_safe(prop, "_bayesian_nudge", 0.0) +
@@ -345,8 +346,35 @@ def _simulate_generic(prop: dict, line: float, n_sims: int) -> SimResult:
                  _safe(prop, "_form_adj",        0.0))
     model_p   = _clamp(implied_p + nudge)
 
-    # Use a Bernoulli draw — simple but honest for complex props
-    counts = [1 if random.random() < model_p else 0 for _ in range(n_sims)]
+    # Calibrate Poisson λ so that P(X ≥ ceil(line)) ≈ model_p.
+    # Binary search: find λ that matches the model-implied over probability.
+    target = math.ceil(line)
+    lo, hi = 0.01, max(line * 4, 5.0)
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        # Poisson CDF: P(X < target) = sum_{k=0}^{target-1} e^{-λ} λ^k / k!
+        cdf = 0.0
+        for k in range(target):
+            cdf += (mid ** k * math.exp(-mid)) / math.factorial(k)
+        p_over = 1.0 - cdf
+        if p_over < model_p:
+            lo = mid
+        else:
+            hi = mid
+    lam = (lo + hi) / 2.0
+
+    # Poisson draws using Knuth's algorithm (no scipy dependency)
+    counts = []
+    for _ in range(n_sims):
+        L = math.exp(-lam)
+        k = 0
+        p = 1.0
+        while True:
+            p *= random.random()
+            if p <= L:
+                break
+            k += 1
+        counts.append(k)
     return _build_result(counts, line, prop=prop)
 
 

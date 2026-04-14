@@ -2954,12 +2954,13 @@ class _MLEdgeAgent(_BaseAgent):
         divergence = abs(model_prob - implied)
         if divergence < 8.0:
             return None
-        side   = "OVER" if model_prob > implied else "UNDER"
-        odds   = over_odds if side == "OVER" else prop.get("under_american", -110)
-        imp    = _american_to_implied(odds)
-        ev_pct = (model_prob / 100 - imp / 100) / (imp / 100)
+        side      = "OVER" if model_prob > implied else "UNDER"
+        odds      = over_odds if side == "OVER" else prop.get("under_american", -110)
+        imp       = _american_to_implied(odds)
+        prob_side = model_prob if side == "OVER" else (100.0 - model_prob)
+        ev_pct    = (prob_side / 100 - imp / 100) / (imp / 100)
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, side, model_prob, imp, ev_pct * 100)
+            return self._build_bet(prop, side, prob_side, imp, ev_pct * 100)
         return None
 
 
@@ -3346,7 +3347,7 @@ class _StackSmithAgent(_BaseAgent):
     """
     name = "StackSmithAgent"
 
-    _BATTER_TYPES = {"hits", "total_bases", "home_runs", "rbis", "runs_scored"}
+    _BATTER_TYPES = {"hits", "total_bases", "rbis", "runs", "runs_scored", "hits_runs_rbis", "fantasy_score"}
 
     def evaluate(self, prop: dict) -> dict | None:
         prop_type = prop.get("prop_type", "").lower()
@@ -3466,7 +3467,7 @@ class _SharpFadeAgent(_BaseAgent):
             prob_side  = (100.0 - model_prob) if sharp_side == "UNDER" else model_prob
             ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-                return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct * 100)
+                return self._build_bet(prop, sharp_side, prob_side, implied, ev_pct * 100)
 
         # ── Path 2: game-level RLM from Action Network ────────────────────────
         # Only fires on batter props (hits, TB, RBIs, runs, h+r+rbi) where
@@ -3507,7 +3508,7 @@ class _SharpFadeAgent(_BaseAgent):
 
         ev_threshold = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
         if ev_pct >= ev_threshold + 1.5:  # require +1.5pp extra EV for game-level signal
-            return self._build_bet(prop, sharp_side, model_prob, implied, ev_pct * 100)
+            return self._build_bet(prop, sharp_side, adjusted_prob, implied, ev_pct * 100)
 
         return None
 
@@ -3630,7 +3631,7 @@ class _PropCycleAgent(_BaseAgent):
         prob_side   = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct      = (prob_side / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, side, model_prob, implied, ev_pct * 100)
+            return self._build_bet(prop, side, prob_side, implied, ev_pct * 100)
         return None
 
 
@@ -3663,7 +3664,7 @@ class _UnderDogAgent(_BaseAgent):
         prob_side  = model_prob if side == "OVER" else (100.0 - model_prob)
         ev_pct     = (prob_side / 100 - implied / 100) / (implied / 100) * 100
         if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, side, model_prob, implied, ev_pct * 100)
+            return self._build_bet(prop, side, prob_side, implied, ev_pct * 100)
         return None
 
 
