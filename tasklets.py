@@ -265,7 +265,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
 MIN_CONFIDENCE    = 6
-MIN_PROB          = 0.57   # Phase 121: minimum XGBoost model probability (57%)        
+MIN_PROB          = 0.52   # Temp cold-start: lowered from 0.57 until April 20 XGBoost retrain (Phase 121 gate restores post-retrain)        
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
