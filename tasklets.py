@@ -2022,21 +2022,34 @@ class _BaseAgent:
             _ps_prob = prop.get("_player_specific_prob")
             raw_p = float(_ps_prob) * 100.0 if _ps_prob else _base_rate_prob(prop, _side)
             # Layer Marcel, Predict+, and park factor adjustments
-            raw_p += float(prop.get("_marcel_adj",       0.0)) * 100.0
-            raw_p += float(prop.get("_predict_plus_adj", 0.0)) * 100.0
-            raw_p += float(prop.get("_park_factor_adj",  0.0)) * 100.0
             # Game-level environment nudge (game_over_prob / game_home_win_prob
             _gop = float(prop.get("game_over_prob",      0.50) or 0.50)
             _gwp = float(prop.get("game_home_win_prob",  0.50) or 0.50)
             _pt_lower = str(prop_type).lower()
+            _game_env_nudge = 0.0
             if _pt_lower in ("total_bases", "home_runs", "rbis", "rbi",
                              "runs", "earned_runs", "hits"):
                 # High-scoring game env → boost over props; low-scoring → suppress
-                raw_p += (_gop - 0.50) * 6.0   # ±3pp max at 100% confidence
+                _game_env_nudge += (_gop - 0.50) * 6.0   # ±3pp max at 100% confidence
             if _pt_lower in ("rbis", "rbi", "runs") and _gwp > 0.58:
-                raw_p += 1.0  # home team winning → slightly better RBI/run env
-            raw_p += float(prop.get("_streak_adj",  0.0)) * 100.0
-            raw_p += float(prop.get("_last10_adj",  0.0)) * 100.0
+                _game_env_nudge += 1.0  # home team winning → slightly better RBI/run env
+            # PR #322: collect adjustments and dampen to prevent overconfidence stacking
+            _br_adjs = [
+                ("marcel",       float(prop.get("_marcel_adj",       0.0)) * 100.0),
+                ("predict_plus", float(prop.get("_predict_plus_adj", 0.0)) * 100.0),
+                ("park_factor",  float(prop.get("_park_factor_adj",  0.0)) * 100.0),
+                ("game_env",     _game_env_nudge),
+                ("streak",       float(prop.get("_streak_adj",       0.0)) * 100.0),
+                ("last10",       float(prop.get("_last10_adj",       0.0)) * 100.0),
+            ]
+            _br_adjs = [(n, d) for n, d in _br_adjs if abs(d) >= 0.10]
+            if _br_adjs:
+                try:
+                    from adjustment_dampener import dampen_adjustments as _dampen_br  # noqa: PLC0415
+                    raw_p = _dampen_br(raw_p, _br_adjs, log_tag=prop.get("player", ""))
+                except Exception:
+                    for _, d in _br_adjs:
+                        raw_p += d
             # Brier calibration governor
             if _DRIFT_MONITOR_AVAILABLE:
                 try:
