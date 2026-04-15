@@ -33,6 +33,14 @@ def _get_conn():
 def _ensure_table() -> None:
     """Auto-create agent_unit_sizing table if migration hasn't run yet.
     Safe to call on every startup — CREATE TABLE IF NOT EXISTS is idempotent.
+
+    PR #325 — Schema healing:
+    If the table was created by an older migration (V33) that used `stake`
+    instead of `unit_dollars`, the CREATE TABLE above is a no-op (table
+    already exists) and unit_dollars is still missing. The ALTER TABLE block
+    below heals the live DB in-process, eliminating the 1,000+/day
+    "column unit_dollars does not exist" Postgres errors without requiring
+    a manual console fix or Flyway migration runner.
     """
     try:
         conn = _get_conn()
@@ -50,6 +58,35 @@ def _ensure_table() -> None:
                 updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
             )
         """)
+
+        # ── PR #325: Schema healing — add unit_dollars if missing ─────────────
+        # ALTER TABLE ... ADD COLUMN IF NOT EXISTS is idempotent; safe to run
+        # every startup. When the column already exists this is a metadata-only
+        # no-op that Postgres resolves in microseconds.
+        cur.execute(
+            "ALTER TABLE agent_unit_sizing "
+            "ADD COLUMN IF NOT EXISTS unit_dollars REAL NOT NULL DEFAULT 5.0"
+        )
+        # Backfill unit_dollars from legacy 'stake' column (V33 schema) if both
+        # exist and unit_dollars is still at the default floor value.
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE  table_name  = 'agent_unit_sizing'
+                      AND  column_name = 'stake'
+                ) THEN
+                    UPDATE agent_unit_sizing
+                    SET    unit_dollars = stake
+                    WHERE  unit_dollars = 5.0
+                      AND  stake IS NOT NULL
+                      AND  stake <> 5.0;
+                END IF;
+            END $$;
+        """)
+        # ── End schema healing ─────────────────────────────────────────────────
+
         # Seed all 17 agents at tier 1 if missing
         _ALL_AGENTS = [
             "EVHunter", "UnderMachine", "UmpireAgent", "F5Agent", "FadeAgent",
