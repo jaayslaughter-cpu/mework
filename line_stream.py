@@ -111,6 +111,7 @@ _PROP_STAT_MAP: dict[str, str] = {
     "pitching outs":  "pitchingOuts",
     "walks allowed":  "baseOnBalls",
     "stolen bases":   "stolenBases",
+    "hitter strikeouts": "strikeouts",
 }
 
 
@@ -512,7 +513,7 @@ def check_parlay_legs_live(
                 })
                 continue
 
-            stat_key = _PROP_STAT_MAP.get(ptype)
+            stat_key = _PROP_STAT_MAP.get(ptype.replace("_", " "))
             if stat_key == "_combo_hrr":
                 current = (
                     float(stats.get("hits", 0))
