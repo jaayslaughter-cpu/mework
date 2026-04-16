@@ -273,7 +273,14 @@ def store_metrics(metrics: dict[str, dict], config_version: str, days: int) -> N
 # ---------------------------------------------------------------------------
 # Discord alert for degraded agents
 # ---------------------------------------------------------------------------
-def _post_calibration_report(metrics: dict[str, dict], cfg: dict, days: int) -> None:
+def _post_calibration_report(
+    metrics: dict[str, dict],
+    cfg: dict,
+    days: int,
+    quiet: bool = False,
+) -> None:
+    """Build calibration table and post to Discord unless quiet=True."""
+    import requests as _req  # noqa: PLC0415
     cal_cfg = cfg.get("calibration", {})
     brier_alert = cal_cfg.get("brier_alert_threshold", 0.05)
     min_n = cal_cfg.get("min_sample_size", 50)
@@ -282,13 +289,35 @@ def _post_calibration_report(metrics: dict[str, dict], cfg: dict, days: int) -> 
         f"{'Agent':<18} {'Brier':>7} {'ECE':>7} {'Win%':>7} {'Legs':>6}",
         "-" * 50,
     ]
+    degraded: list[str] = []
     for agent, m in sorted(metrics.items(), key=lambda x: x[1]["brier"]):
         flag = " ⚠️" if m["brier"] > brier_alert and m["n_legs"] >= min_n else ""
         lines.append(
             f"{agent:<18} {m['brier']:>7.4f} {m['ece']:>7.4f} "
             f"{m['actual_win_rate']:>6.1%} {m['n_legs']:>6}{flag}"
         )
+        if flag:
+            degraded.append(agent)
     lines.append("")
+
+    # Respect quiet flag — grading loop calls run(quiet=True) so only one
+    # drift alert fires (from drift_monitor.record_brier), not two.
+    if quiet or not _DISCORD:
+        return
+
+    description = "```\n" + "\n".join(lines) + "\n```"
+    if degraded:
+        description += f"\n⚠️ Degraded agents: {', '.join(degraded)}"
+    try:
+        _req.post(
+            _DISCORD,
+            json={"embeds": [{"title": f"📊 Calibration Report ({days}d window)",
+                              "description": description,
+                              "color": 0xF4A300}]},
+            timeout=10,
+        )
+    except Exception as _exc:
+        logger.warning("Calibration Discord post failed: %s", _exc)
 
 
 # ---------------------------------------------------------------------------
@@ -315,8 +344,7 @@ def run(days: int = 30, agent_name: str | None = None, quiet: bool = False) -> d
 
     store_metrics(metrics, config_version, days)
 
-    if not quiet:
-        _post_calibration_report(metrics, cfg, days)
+    _post_calibration_report(metrics, cfg, days, quiet=quiet)
 
     return metrics
 

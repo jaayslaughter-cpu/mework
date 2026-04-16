@@ -1272,12 +1272,8 @@ def _load_xgb_model():
         return _XGB_MODEL_CACHE
     path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
     if not os.path.exists(path):
-        # PR #326: Try restoring from Postgres before giving up (survives Railway redeploys)
-        if _restore_model_from_pg(path):
-            logger.info("[XGB] Model restored from Postgres xgb_model_store → %s", path)
-        else:
-            logger.warning("[XGB] Model not found at %s — agents using flat 50%% probability", path)
-            return None
+        logger.warning("[XGB] Model not found at %s — agents using flat 50%% probability", path)
+        return None
     try:
         if path.endswith(".json"):
             import xgboost as xgb  # noqa: PLC0415
@@ -1295,90 +1291,6 @@ def _load_xgb_model():
     except Exception as exc:
         logger.warning("[XGB] Model load failed (%s): %s — using flat 50%%", path, exc)
         return None
-
-
-
-# ── Postgres model persistence (no Railway Volume required) ───────────────────
-# On Hobby plan, Railway wipes /app/api/models on every redeploy.
-# These two helpers store/restore the trained XGBoost model as a bytea blob
-# in Postgres so retrain output survives git pushes with zero infrastructure cost.
-
-def _persist_model_to_pg(model_path: str) -> None:
-    """Save the trained model file to Postgres xgb_model_store as a bytea blob.
-    Called by run_xgboost_tasklet() immediately after saving to disk.
-    Idempotent — upserts on (model_name) so only the latest model is stored.
-    Fails silently: model is always on disk first; Postgres is a durability bonus.
-    """
-    if not os.path.exists(model_path):
-        logger.warning("[XGB] _persist_model_to_pg: file not found at %s", model_path)
-        return
-    try:
-        import psycopg2  # noqa: PLC0415
-        with open(model_path, "rb") as _f:
-            model_bytes = _f.read()
-        conn = _pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS xgb_model_store (
-                    id           SERIAL PRIMARY KEY,
-                    model_name   TEXT    NOT NULL UNIQUE,
-                    model_data   BYTEA   NOT NULL,
-                    model_size   INTEGER,
-                    saved_at     TIMESTAMPTZ DEFAULT NOW()
-                )
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO xgb_model_store (model_name, model_data, model_size)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (model_name) DO UPDATE
-                    SET model_data = EXCLUDED.model_data,
-                        model_size = EXCLUDED.model_size,
-                        saved_at   = NOW()
-                """,
-                ("prop_model_v1", psycopg2.Binary(model_bytes), len(model_bytes)),
-            )
-        conn.commit()
-        conn.close()
-        logger.info(
-            "[XGB] Model persisted to Postgres xgb_model_store (%d bytes).",
-            len(model_bytes),
-        )
-    except Exception as _exc:
-        logger.warning("[XGB] _persist_model_to_pg failed (model still on disk): %s", _exc)
-
-
-def _restore_model_from_pg(model_path: str) -> bool:
-    """Download the model from Postgres xgb_model_store and write it to disk.
-    Called by _load_xgb_model() when the file is missing from disk (e.g. after redeploy).
-    Returns True if restore succeeded, False otherwise.
-    """
-    try:
-        conn = _pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT model_data FROM xgb_model_store WHERE model_name = %s",
-                ("prop_model_v1",),
-            )
-            row = cur.fetchone()
-        conn.close()
-        if not row:
-            logger.info("[XGB] No model found in xgb_model_store — cold start.")
-            return False
-        model_bytes = bytes(row[0])
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        with open(model_path, "wb") as _f:
-            _f.write(model_bytes)
-        logger.info(
-            "[XGB] Model restored from Postgres xgb_model_store → %s (%d bytes).",
-            model_path, len(model_bytes),
-        )
-        return True
-    except Exception as _exc:
-        logger.warning("[XGB] _restore_model_from_pg failed: %s", _exc)
-        return False
 
 
 # ── In-memory state (persisted to Redis) ──────────────────────────────────────
@@ -3347,10 +3259,57 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         "unit_dollars":    _tier_stake,
         "confidence":      p_conf,
         "platform":        parlay_platform,
-        "season_stats":    {},
+        "season_stats":    _fetch_agent_season_stats(agent_name),
         "ts":              datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }]
 
+
+
+def _fetch_agent_season_stats(agent_name: str) -> dict:
+    """
+    Fetch W/L/P count and ROI for *agent_name* from bet_ledger
+    (discord_sent=TRUE rows only — same filter as XGBoost training).
+    Returns a dict compatible with DiscordAlertService.send_parlay_alert().
+    Falls back silently to zeros on any DB error so the pick still sends.
+    """
+    try:
+        _pg = _pg_conn()
+        with _pg.cursor() as _cur:
+            _cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'WIN')  AS wins,
+                    COUNT(*) FILTER (WHERE status = 'LOSS') AS losses,
+                    COUNT(*) FILTER (WHERE status = 'PUSH') AS pushes,
+                    ROUND(
+                        COALESCE(
+                            SUM(CASE WHEN status = 'WIN'  THEN unit_dollars
+                                     WHEN status = 'LOSS' THEN -unit_dollars
+                                     ELSE 0 END)
+                            / NULLIF(SUM(unit_dollars), 0) * 100,
+                        0), 1
+                    ) AS roi_pct
+                FROM bet_ledger
+                WHERE agent_name   = %s
+                  AND discord_sent = TRUE
+                  AND status IN ('WIN', 'LOSS', 'PUSH')
+                """,
+                (agent_name,),
+            )
+            row = _cur.fetchone()
+        _pg.close()
+        if row:
+            return {
+                "wins":    int(row[0] or 0),
+                "losses":  int(row[1] or 0),
+                "pushes":  int(row[2] or 0),
+                "roi_pct": float(row[3] or 0.0),
+            }
+    except Exception as _e:
+        logger.debug(
+            "[AgentTasklet] season_stats fetch failed for %s: %s", agent_name, _e
+        )
+    return {"wins": 0, "losses": 0, "pushes": 0, "roi_pct": 0.0}
 
 def _build_agent_parlays(hits: list[dict], agent_name: str,
                           min_legs: int = 2, max_legs: int = 3,
@@ -5491,9 +5450,6 @@ def run_xgboost_tasklet() -> None:
         with open(model_path.replace(".json", ".pkl"), "wb") as f:
             pickle.dump(model, f)
         logger.info("[XGBoostTasklet] Saved model as pickle (JSON save failed)")
-
-    # PR #326: Persist to Postgres so model survives Railway redeploys (no Volume needed)
-    _persist_model_to_pg(model_path)
 
     r = _redis()
     r.setex("xgb_meta", 604800, json.dumps({
