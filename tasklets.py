@@ -4345,10 +4345,12 @@ def run_agent_tasklet() -> bool:
                             (player_name, prop_type, line, side, odds_american,
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
-                             units_wagered, mlbam_id, entry_type, discord_sent)
+                             units_wagered, mlbam_id, entry_type, discord_sent,
+                             lookahead_safe)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
-                                ABS(%s), %s, %s, FALSE)
+                                ABS(%s), %s, %s, FALSE,
+                                %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -4367,6 +4369,10 @@ def run_agent_tasklet() -> bool:
                             _sl.get("kelly_units") or 0.02,
                             _sl.get("mlbam_id") or _sl.get("player_id"),
                             (parlay.get("entry_type") or "FlexPlay"),
+                            # Fix Gap 2: persist lookahead_safe stamped by _stamp_prop()
+                            # so XGBoost training has an audit trail of pre-game vs in-game picks.
+                            # Default True (safe) if not stamped — conservative for training integrity.
+                            bool(_sl.get("lookahead_safe", True)),
                         ),
                     )
             _pg2.commit()
@@ -4942,11 +4948,24 @@ def run_grading_tasklet() -> None:
                         "kelly_units": 0.02,
                         "implied_prob":52.4,
                     }
-                    # Restore any enrichment signals from stored features if available
+                    # Restore enrichment-only slots from pick-time features_json.
+                    # Slots 20-26 (form/CV/Bayesian/Marcel/Predict+/ps_prob/batting_order)
+                    # cannot be recomputed at 2 AM without re-running the full enrichment
+                    # pipeline. They were stamped at pick time — restore them here so
+                    # XGBoost trains on the real signals, not hardcoded 0.0 defaults.
                     if _stored_feats:
                         try:
                             _sf = json.loads(_stored_feats)
-                            # slots 0-9 are player stats / weather — keep from enrichment
+                            if len(_sf) >= 27:
+                                # Reverse the normalisation applied in _build_feature_vector
+                                # so _grade_prop keys match what _build_feature_vector expects
+                                _grade_prop["_form_adj"]             = (_sf[20] - 0.50) * 0.40
+                                _grade_prop["_cv_nudge"]             = (_sf[21] - 0.50) * 0.30
+                                _grade_prop["_bayesian_nudge"]       = (_sf[22] - 0.50) * 0.30
+                                _grade_prop["_marcel_adj"]           = (_sf[23] - 0.50) * 0.04
+                                _grade_prop["_predict_plus_adj"]     = (_sf[24] - 0.50) * 0.16
+                                _grade_prop["_player_specific_prob"] = float(_sf[25])
+                                _grade_prop["_batting_order_slot"]   = round(float(_sf[26]) * 9)
                         except Exception:
                             pass
                     _refreshed_feats = _BaseAgent._build_feature_vector(_grade_prop, {
