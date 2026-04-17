@@ -49,6 +49,12 @@ _PT = pytz.timezone("America/Los_Angeles")
 
 # ── Odds API config ────────────────────────────────────────────────────────────
 _ODDS_KEY: str = os.getenv("ODDS_API_KEY_2") or os.getenv("ODDS_API_KEY_3") or ""
+if not _ODDS_KEY:
+    log.error(
+        "[SBRef] ODDS_API_KEY_2 / ODDS_API_KEY_3 not set — sportsbook reference layer "
+        "will return empty dicts. Set these in Railway environment variables. "
+        "NEVER hardcode API keys in source code."
+    )
 _BASE_URL = "https://api.the-odds-api.com/v4"
 _BOOKMAKERS = "pinnacle,draftkings,fanduel,betmgm"
 _PRIORITY: dict[str, int] = {"pinnacle": 0, "draftkings": 1, "fanduel": 2, "betmgm": 3}
