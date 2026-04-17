@@ -2168,11 +2168,14 @@ class _BaseAgent:
         # ── Player stats — pitcher OR batter signals depending on prop type ──
         _PITCHER_PT = {"strikeouts","pitching_outs","earned_runs","hits_allowed",
                        "fantasy_pitcher"}
-        _pt_raw     = str(prop.get("prop_type","") or (bet.get("prop_type","") if bet else "")).lower()
-        # FIX Bug 6: "hitter_strikeouts" normalizes to "strikeouts" via _norm_stat but
-        # is a BATTER prop. Preserve the raw stat_type label before normalization to
-        # correctly classify batter K props and use batter (not pitcher) feature slots.
+        # Ref 3: Capture _raw_stat_label BEFORE _pt_raw so it always reflects the
+        # original API field (stat_type / stat) even if prop_type was normalised
+        # earlier in the pipeline. This prevents any future mutation of prop["stat_type"]
+        # from changing the batter/pitcher classification.
         _raw_stat_label = str(prop.get("stat_type", prop.get("stat", "")) or "").lower()
+        _pt_raw         = str(prop.get("prop_type","") or (bet.get("prop_type","") if bet else "")).lower()
+        # "hitter_strikeouts" normalises to "strikeouts" via _norm_stat but is a
+        # BATTER prop — guard with "hitter" not in _raw_stat_label (Bug 6 fix).
         _is_pitcher = (_pt_raw in _PITCHER_PT) and ("hitter" not in _raw_stat_label)
 
         if _is_pitcher:
@@ -3342,9 +3345,15 @@ def _fetch_agent_season_stats(agent_name: str) -> dict:
                     COUNT(*) FILTER (WHERE status = 'PUSH') AS pushes,
                     ROUND(
                         COALESCE(
-                            SUM(CASE WHEN status = 'WIN'  THEN COALESCE(units_wagered, ABS(kelly_units), 1.0)
+                            -- Ref 1: Use actual profit_loss column first; reconstructed
+                            -- WIN/LOSS * units_wagered used only when profit_loss is NULL
+                            -- (rows graded before the column was populated).
+                            SUM(COALESCE(
+                                profit_loss,
+                                CASE WHEN status = 'WIN'  THEN  COALESCE(units_wagered, ABS(kelly_units), 1.0)
                                      WHEN status = 'LOSS' THEN -COALESCE(units_wagered, ABS(kelly_units), 1.0)
-                                     ELSE 0 END)
+                                     ELSE 0 END
+                            ))
                             / NULLIF(SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0)), 0) * 100,
                         0), 1
                     ) AS roi_pct
@@ -4399,11 +4408,20 @@ def run_agent_tasklet() -> bool:
                         _lg_pt        = _leg.get("prop_type", "")
                         _lg_side      = _leg.get("side", "OVER")
                         _lg_model_p   = float(_leg.get("model_prob", 50) or 50)
-                        _lg_close_o   = _fetch_closing_odds(_lg_player, _lg_pt, _lg_side)
-                        if _lg_close_o is not None:
-                            _lg_clv = round(_lg_model_p - _american_to_implied(int(_lg_close_o)), 4)
+                        # Ref 2: Try player-prop feed (hub:dfs) first — returns
+                        # 0.50 for all balanced pick'em lines (all dispatched props).
+                        # Falls back to game-level sharp-book odds only when not found.
+                        _lg_prop_impl = _fetch_prop_implied(_lg_player, _lg_pt, _lg_side)
+                        if _lg_prop_impl is not None:
+                            _lg_clv = round(_lg_model_p / 100.0 - _lg_prop_impl, 4)
                         else:
-                            _lg_clv = None  # market not available — leave NULL for grading tasklet
+                            _lg_close_o = _fetch_closing_odds(_lg_player, _lg_pt, _lg_side)
+                            if _lg_close_o is not None:
+                                _lg_clv = round(
+                                    _lg_model_p / 100.0 - _american_to_implied(int(_lg_close_o)), 4
+                                )
+                            else:
+                                _lg_clv = None  # market not available — leave NULL
                         _send_clv_map[(_lg_player.lower(), _lg_pt, _lg_side)] = _lg_clv
 
                     _c3.execute(
@@ -5447,10 +5465,64 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
     return None
 
+def _fetch_prop_implied(player: str, prop_type: str, side: str) -> float | None:
+    """
+    Ref 2 — CLV from player-prop feed, not game-level moneylines.
+
+    Checks hub:dfs (Underdog / PrizePicks lines) for the player's prop.
+    All dispatched props pass the line_type=='balanced' filter, so the
+    implied probability for a balanced pick'em is exactly 0.50.
+
+    If the prop has explicit American odds in the DFS response (rare —
+    UD sometimes returns non-balanced odds), those are used instead.
+
+    Returns: implied probability as a float in [0, 1], or None if not found.
+    The caller then computes CLV = model_prob/100 - implied_prob.
+    """
+    try:
+        r   = _redis()
+        raw = r.get("hub:dfs")
+        if not raw:
+            return None
+        dfs       = json.loads(raw)
+        player_lc = player.lower()
+        pt_lc     = prop_type.lower()
+        side_up   = side.upper()
+
+        for platform_key in ("underdog", "prizepicks"):
+            for prop in dfs.get(platform_key, []):
+                pname = str(
+                    prop.get("player_name", prop.get("player", "")) or ""
+                ).lower()
+                ptype = str(
+                    prop.get("prop_type", prop.get("stat_type", prop.get("stat", ""))) or ""
+                ).lower().replace("_", " ")
+                if player_lc not in pname and pname not in player_lc:
+                    continue
+                if pt_lc.replace("_", " ") not in ptype and ptype not in pt_lc.replace("_", " "):
+                    continue
+                # Prop matched — check for explicit odds first
+                if side_up in ("OVER", "HIGHER"):
+                    explicit_odds = prop.get("over_odds", prop.get("higher_odds"))
+                else:
+                    explicit_odds = prop.get("under_odds", prop.get("lower_odds"))
+                if explicit_odds is not None:
+                    return _american_to_implied(int(explicit_odds))
+                # Balanced pick'em → exactly 50%
+                return 0.50
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     """
     Best-effort closing line from Redis market cache (hub:market odds list).
     Scans sharp book markets for player name match. Returns American odds int or None.
+
+    NOTE: hub["market"]["odds"] contains game-level moneylines/totals from sharp books.
+    For player props, prefer _fetch_prop_implied() which reads hub:dfs directly.
+    This function is retained as a secondary fallback for non-DFS legs.
     """
     try:
         r   = _redis()
