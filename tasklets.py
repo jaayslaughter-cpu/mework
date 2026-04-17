@@ -1641,6 +1641,109 @@ def _ensure_bet_ledger() -> None:
     except Exception as exc:
         logger.warning("[DB] bet_ledger create failed: %s", exc)
 
+def _ensure_rejection_log() -> None:
+    """Create rejection_log table if it does not exist.  Called on startup."""
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rejection_log (
+                    id          SERIAL PRIMARY KEY,
+                    logged_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    bet_date    DATE        NOT NULL DEFAULT CURRENT_DATE,
+                    agent_name  TEXT,
+                    player      TEXT,
+                    prop_type   TEXT,
+                    side        TEXT,
+                    gate        TEXT        NOT NULL,
+                    details     TEXT
+                )
+            """)
+            # Index so daily summary queries are fast
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS ix_rejection_log_date
+                ON rejection_log (bet_date)
+            """)
+            conn.commit()
+        conn.close()
+        logger.info("[DB] rejection_log table ensured.")
+    except Exception as _e:
+        logger.warning("[DB] _ensure_rejection_log failed (non-fatal): %s", _e)
+
+
+def _log_rejection(
+    agent_name: str,
+    player:     str,
+    prop_type:  str,
+    side:       str,
+    gate:       str,
+    details:    str = "",
+) -> None:
+    """
+    Non-blocking fire-and-forget INSERT into rejection_log.
+    Never raises — a logging failure must never kill a dispatch cycle.
+
+    gate values (canonical):
+      vig_gate          per-leg vig too wide
+      sharp_edge        per-leg edge below MIN_EV_THRESH
+      insufficient_hits agent produced < 2 qualifying legs
+      negative_ev       combined EV < 0%
+      ev_floor          combined EV < +3% floor
+      platform_purity   mixed UD + PP legs in one slip
+      confidence        slip confidence < 6.0
+      min_prob          one or more legs below MIN_PROB (55%)
+      direction_dedup   contradicts a higher-EV agent on same prop
+      risk_cap          daily exposure cap reached
+    """
+    try:
+        _today = _today_pt().isoformat()
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO rejection_log
+                    (bet_date, agent_name, player, prop_type, side, gate, details)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (_today, agent_name or "", player or "", prop_type or "",
+                 side or "", gate, details or ""),
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass   # never let logging break dispatch
+
+
+def get_rejection_summary(date_str: str | None = None) -> dict:
+    """
+    Return gate-level rejection counts for a given date (PT, YYYY-MM-DD).
+    If date_str is None, defaults to today PT.
+    Returns {gate: count, ...} sorted descending by count.
+    Used by dispatch_check to explain zero-pick days.
+    """
+    _date = date_str or _today_pt().isoformat()
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT gate, COUNT(*) as cnt
+                FROM   rejection_log
+                WHERE  bet_date = %s
+                GROUP  BY gate
+                ORDER  BY cnt DESC
+                """,
+                (_date,),
+            )
+            rows = cur.fetchall()
+        conn.close()
+        return {gate: cnt for gate, cnt in rows}
+    except Exception as _e:
+        logger.warning("[RejectionLog] get_rejection_summary failed: %s", _e)
+        return {}
+
+
+
     # ── UD streak state — tracks Underdog Streaks current count ───────────────
     try:
         conn = _pg_conn()
@@ -1669,6 +1772,7 @@ def run_data_hub_tasklet() -> None:
     in-game data and waste API quota.
     """
     _ensure_bet_ledger()       # ensure table exists on every startup
+    _ensure_rejection_log()    # ensure rejection_log table exists on every startup
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
     r = _redis()
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
@@ -4132,6 +4236,9 @@ def run_agent_tasklet() -> bool:
                             _bookmaker_margin(_over_o, _under_o) * 100,
                             _MAX_VIG * 100,
                         )
+                        _log_rejection(agent.name, player, prop_type, "",
+                                       "vig_gate",
+                                       f"margin={_bookmaker_margin(_over_o,_under_o)*100:.1f}% > {_MAX_VIG*100:.1f}%")
                         continue
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
@@ -4142,6 +4249,9 @@ def run_agent_tasklet() -> bool:
                                else prop.get("under_american", -120))
                     edge = _underdog_edge(ud_odds, sharp_prob)
                     if edge < MIN_EV_THRESH * 100:
+                        _log_rejection(agent.name, player, prop_type,
+                                       bet.get("side",""), "sharp_edge",
+                                       f"edge={edge:.1f}% < threshold={MIN_EV_THRESH*100:.1f}%")
                         continue
 
                     # WagerBrain: also compute dollar EV for logging
@@ -4167,6 +4277,8 @@ def run_agent_tasklet() -> bool:
         if len(agent_hits) < 2:
             logger.info("[AgentTasklet] %s — %d hit(s) (need ≥2 for a slip).",
                          agent.name, len(agent_hits))
+            _log_rejection(agent.name, "", "", "", "insufficient_hits",
+                           f"hits={len(agent_hits)} < 2 required")
             continue
 
         agent_parlays = _build_agent_parlays(agent_hits, agent.name)
@@ -4293,6 +4405,8 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < 0:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < 0.",
                         agent_name, _combined_ev_check)
+            _log_rejection(agent_name, "", "", "", "negative_ev",
+                           f"combined_ev={_combined_ev_check:.1f}%")
             continue
         # Minimum combined EV floor: slip must be worth playing, not just positive.
         # With correct multipliers (PP 2-leg=3x, PP 3-leg=5x, UD 2-leg=3x, UD 3-leg=6x)
@@ -4301,6 +4415,8 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < _MIN_COMBINED_EV:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < %.1f%% floor.",
                         agent_name, _combined_ev_check, _MIN_COMBINED_EV)
+            _log_rejection(agent_name, "", "", "", "ev_floor",
+                           f"combined_ev={_combined_ev_check:.1f}% < {_MIN_COMBINED_EV:.1f}% floor")
             continue
         # Platform purity gate: every leg in the final slip must share one platform.
         _legs = parlay.get("legs", [])
@@ -4311,10 +4427,14 @@ def run_agent_tasklet() -> bool:
         if len(_leg_platforms) > 1:
             logger.info("[AgentTasklet] %s dropped — mixed platforms in slip: %s",
                         agent_name, _leg_platforms)
+            _log_rejection(agent_name, "", "", "", "platform_purity",
+                           f"platforms={sorted(_leg_platforms)}")
             continue
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
+            _log_rejection(agent_name, "", "", "", "confidence",
+                           f"conf={play_conf:.1f} < {MIN_CONFIDENCE:.0f}")
             continue
 
         # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
@@ -4328,6 +4448,8 @@ def run_agent_tasklet() -> bool:
         if _low_legs:
             logger.info("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
                          agent_name, _min_prob_pct, _low_legs)
+            _log_rejection(agent_name, ",".join(_low_legs), "", "", "min_prob",
+                           f"below {_min_prob_pct:.0f}%: {_low_legs}")
             continue
 
         # Keep only the single highest-EV parlay per agent this cycle
@@ -4367,6 +4489,8 @@ def run_agent_tasklet() -> bool:
                 "[AgentTasklet] %s dropped — direction conflict on '%s %s' "                "(%s already locked %s, this agent wants %s)",
                 _ag, _cp, _cs, _clocker, _clocked, _cwant
             )
+            _log_rejection(_ag, _cp, _cs, _cwant, "direction_dedup",
+                           f"locked={_clocked} by {_clocker}")
         else:
             for _leg in _legs_d:
                 _pkey = (_leg.get("player") or _leg.get("player_name", "")).strip().lower()
@@ -4393,6 +4517,8 @@ def run_agent_tasklet() -> bool:
             try:
                 if not _risk_manager.check_stake(agent_name, _tier_stake_for_risk):
                     logger.warning("[RISK] %s skipped — daily exposure cap reached.", agent_name)
+                    _log_rejection(agent_name, "", "", "", "risk_cap",
+                                   f"stake={_tier_stake_for_risk}")
                     continue
             except Exception as _risk_err:
                 logger.warning("[RISK] check_stake failed for %s: %s — continuing.", agent_name, _risk_err)
