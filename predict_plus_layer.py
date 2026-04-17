@@ -386,6 +386,7 @@ class PredictPlusLayer:
     # ── cache I/O ──────────────────────────────────────────────────────────
 
     def _load_cache(self) -> bool:
+        # L2: disk cache
         if os.path.exists(self._cache_path):
             try:
                 with open(self._cache_path) as f:
@@ -393,21 +394,49 @@ class PredictPlusLayer:
                 self._cache  = {str(k): float(v) for k, v in raw.items()}
                 self._loaded = True
                 logger.info(
-                    "[PredictPlus] Cache loaded: %d pitchers (%s)",
+                    "[PredictPlus] Cache loaded from disk: %d pitchers (%s)",
                     len(self._cache), os.path.basename(self._cache_path),
                 )
                 return True
             except Exception as exc:
-                logger.warning("[PredictPlus] Cache load failed: %s", exc)
+                logger.warning("[PredictPlus] Disk cache load failed: %s", exc)
+        # L3: Postgres fallback — H-7 fix: survives Railway redeploys
+        try:
+            from layer_cache_helper import pg_cache_get  # noqa: PLC0415
+            pg_key = os.path.basename(self._cache_path)
+            raw = pg_cache_get("predict_plus", pg_key)
+            if raw and isinstance(raw, dict):
+                self._cache  = {str(k): float(v) for k, v in raw.items()}
+                self._loaded = True
+                logger.info(
+                    "[PredictPlus] Cache loaded from Postgres: %d pitchers", len(self._cache)
+                )
+                # Restore disk cache for next call
+                try:
+                    with open(self._cache_path, "w") as f:
+                        json.dump(raw, f, indent=2)
+                except Exception:
+                    pass
+                return True
+        except Exception as exc:
+            logger.debug("[PredictPlus] Postgres cache load failed: %s", exc)
         return False
 
     def _save_cache(self) -> None:
+        # L2: disk cache
         try:
             with open(self._cache_path, "w") as f:
                 json.dump(self._cache, f, indent=2)
             logger.info("[PredictPlus] Cache saved (%d pitchers)", len(self._cache))
         except Exception as exc:
-            logger.warning("[PredictPlus] Cache save failed: %s", exc)
+            logger.warning("[PredictPlus] Disk cache save failed: %s", exc)
+        # L3: Postgres — H-7 fix
+        try:
+            from layer_cache_helper import pg_cache_set  # noqa: PLC0415
+            pg_key = os.path.basename(self._cache_path)
+            pg_cache_set("predict_plus", pg_key, self._cache)
+        except Exception as exc:
+            logger.debug("[PredictPlus] Postgres cache save failed: %s", exc)
 
     # ── public API ─────────────────────────────────────────────────────────
 

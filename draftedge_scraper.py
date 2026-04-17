@@ -450,18 +450,72 @@ def _pg_save_cache(kind: str, df: pd.DataFrame) -> None:
         log.warning("[DE] Postgres cache save failed for %s: %s", kind, exc)
 
 
+def _pg_fetch_count(kind: str, today: str) -> int:
+    """Read today's live fetch count from Postgres draftedge_fetch_log (H-6 fix)."""
+    db_url = _os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return 0
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS draftedge_fetch_log (
+                kind        VARCHAR(20) NOT NULL,
+                fetch_date  DATE        NOT NULL,
+                count       INTEGER     NOT NULL DEFAULT 0,
+                PRIMARY KEY (kind, fetch_date)
+            )
+        """)
+        conn.commit()
+        cur.execute("SELECT count FROM draftedge_fetch_log WHERE kind=%s AND fetch_date=%s", (kind, today))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        return row[0] if row else 0
+    except Exception as exc:
+        log.debug("[DE] pg_fetch_count error: %s", exc)
+        return 0
+
+
+def _pg_increment_fetch(kind: str, today: str) -> None:
+    """Atomically increment today's fetch count in Postgres (H-6 fix)."""
+    db_url = _os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO draftedge_fetch_log (kind, fetch_date, count)
+            VALUES (%s, %s, 1)
+            ON CONFLICT (kind, fetch_date) DO UPDATE
+                SET count = draftedge_fetch_log.count + 1
+        """, (kind, today))
+        conn.commit()
+        cur.close(); conn.close()
+    except Exception as exc:
+        log.debug("[DE] pg_increment_fetch error: %s", exc)
+
+
 def _check_fetch_cap(kind: str) -> bool:
-    """Return True if we're still under the daily fetch cap."""
+    """
+    Return True if still under the daily fetch cap.
+
+    H-6 fix: count persisted in Postgres so Railway restarts cannot reset it.
+    A rapid deploy sequence without this fix would spam DraftEdge's anti-bot
+    system (Sucuri) and risk a 24-hour IP ban.
+    """
     today = str(datetime.now(_ZI("America/Los_Angeles")).date())
-    key = f"{kind}_{today}"
-    count = _fetch_count_today.get(key, 0)
+    mem_key   = f"{kind}_{today}"
+    mem_count = _fetch_count_today.get(mem_key, 0)
+    pg_count  = _pg_fetch_count(kind, today)   # authoritative cross-restart count
+    count = max(mem_count, pg_count)
     if count >= DAILY_FETCH_CAP:
-        log.warning(
-            "Daily fetch cap (%d) reached for %s — returning cache",
-            DAILY_FETCH_CAP, kind,
-        )
+        log.warning("Daily fetch cap (%d) reached for %s — returning cache", DAILY_FETCH_CAP, kind)
         return False
-    _fetch_count_today[key] = count + 1
+    _fetch_count_today[mem_key] = count + 1
+    _pg_increment_fetch(kind, today)
     return True
 
 

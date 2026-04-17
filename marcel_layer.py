@@ -452,6 +452,7 @@ class MarcelLayer:
     # ── cache I/O ──────────────────────────────────────────────────────────
 
     def _load_cache(self) -> bool:
+        # L2: disk cache
         if os.path.exists(self._cache_path):
             try:
                 with open(self._cache_path) as f:
@@ -460,26 +461,57 @@ class MarcelLayer:
                 self._pitchers = data.get("pitchers", {})
                 self._loaded   = True
                 logger.info(
-                    "[Marcel] Cache loaded: %d batters, %d pitchers (%s)",
+                    "[Marcel] Cache loaded from disk: %d batters, %d pitchers (%s)",
                     len(self._batters), len(self._pitchers),
                     os.path.basename(self._cache_path),
                 )
                 return True
             except Exception as exc:
-                logger.warning("[Marcel] Cache load failed: %s", exc)
+                logger.warning("[Marcel] Disk cache load failed: %s", exc)
+        # L3: Postgres fallback — H-7 fix: survives Railway redeploys
+        try:
+            from layer_cache_helper import pg_cache_get  # noqa: PLC0415
+            pg_key = os.path.basename(self._cache_path)
+            data = pg_cache_get("marcel", pg_key)
+            if data and isinstance(data, dict):
+                self._batters  = data.get("batters",  {})
+                self._pitchers = data.get("pitchers", {})
+                self._loaded   = True
+                logger.info(
+                    "[Marcel] Cache loaded from Postgres: %d batters, %d pitchers",
+                    len(self._batters), len(self._pitchers),
+                )
+                # Restore disk cache for next call
+                try:
+                    with open(self._cache_path, "w") as f:
+                        json.dump(data, f)
+                except Exception:
+                    pass
+                return True
+        except Exception as exc:
+            logger.debug("[Marcel] Postgres cache load failed: %s", exc)
         return False
+
     def _save_cache(self) -> None:
-        """Persist projections to weekly cache file."""
+        """Persist projections to weekly cache file + Postgres (H-7 fix)."""
+        data = {"batters": self._batters, "pitchers": self._pitchers}
         try:
             with open(self._cache_path, "w") as f:
-                json.dump({"batters": self._batters, "pitchers": self._pitchers}, f)
+                json.dump(data, f)
             logger.info(
                 "[Marcel] Cache saved: %d batters, %d pitchers → %s",
                 len(self._batters), len(self._pitchers),
                 os.path.basename(self._cache_path),
             )
         except Exception as exc:
-            logger.warning("[Marcel] Cache save failed: %s", exc)
+            logger.warning("[Marcel] Disk cache save failed: %s", exc)
+        # H-7: dual-write to Postgres
+        try:
+            from layer_cache_helper import pg_cache_set  # noqa: PLC0415
+            pg_key = os.path.basename(self._cache_path)
+            pg_cache_set("marcel", pg_key, data)
+        except Exception as exc:
+            logger.debug("[Marcel] Postgres cache save failed: %s", exc)
 
     def prefetch(self) -> None:
         """
