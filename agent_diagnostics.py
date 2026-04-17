@@ -112,7 +112,7 @@ def _compute_agent_metrics(conn, agent_name: str, today) -> dict:
             SELECT
                 result,
                 COALESCE(profit_loss, 0.0)  AS pl,
-                COALESCE(stake,        5.0)  AS stake,
+                COALESCE(units_wagered, ABS(kelly_units), 1.0)  AS stake,  -- PR #338: bet_ledger has no 'stake' col
                 COALESCE(model_prob,  50.0)  AS mp,
                 CASE WHEN result = 'WIN'  THEN 1
                      WHEN result = 'LOSS' THEN 0
@@ -163,7 +163,7 @@ def _negative_roi_streak(conn, agent_name: str, today) -> int:
             SELECT
                 bet_date,
                 SUM(COALESCE(profit_loss, 0.0))  AS daily_pl,
-                SUM(COALESCE(stake,        5.0))  AS daily_stk
+                SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0))  AS daily_stk  -- PR #338
             FROM bet_ledger
             WHERE agent_name   = %s
               AND discord_sent = TRUE
