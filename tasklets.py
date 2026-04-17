@@ -4027,10 +4027,10 @@ def run_agent_tasklet() -> bool:
     logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
                 _entry_now.hour, _entry_now.minute)
 
-    # ── Send-window clock gate — only dispatch picks 9:00–10:00 AM PT ──────────
+    # ── Send-window clock gate — only dispatch picks 11:00 AM–12:00 PM PT ────────
     _pt_now = _entry_now
-    if not (9 <= _pt_now.hour < 10):
-        logger.info("[AgentTasklet] Outside 9–10 AM PT send window (%02d:%02d PT) — skipping cycle.",
+    if not (11 <= _pt_now.hour < 12):
+        logger.info("[AgentTasklet] Outside 11 AM–12 PM PT send window (%02d:%02d PT) — skipping cycle.",
                     _pt_now.hour, _pt_now.minute)
         return
 
@@ -4807,53 +4807,6 @@ def run_backtest_tasklet() -> None:
 # 5. GradingTasklet  (nightly 1:05 AM)
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# H-1 fix: fuzzy player-name matcher for GradingTasklet
-# ---------------------------------------------------------------------------
-def _grading_name_match(a: str, b: str) -> bool:
-    """
-    Return True if two player name strings refer to the same player.
-
-    Handles the ESPN displayName abbreviation problem:
-      - "C. Burnes"    ↔  "Corbin Burnes"    (first-initial + last)
-      - "R. Acuna Jr." ↔  "Ronald Acuña Jr." (accent-strip + suffix)
-      - "Crow-Armstrong" ↔ "Armstrong"        (hyphen / multi-part last name)
-    """
-    import unicodedata as _udg
-    _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
-
-    def _norm(s: str) -> list[str]:
-        s = _udg.normalize("NFD", s.lower().strip())
-        s = "".join(c for c in s if _udg.category(c) != "Mn")
-        parts = s.replace("-", " ").replace(".", "").replace("'", "").split()
-        return [p for p in parts if p not in _SUFFIXES]
-
-    if not a or not b:
-        return False
-    a_p = _norm(a)
-    b_p = _norm(b)
-    if not a_p or not b_p:
-        return False
-    # Exact (after normalisation)
-    if a_p == b_p:
-        return True
-    # Last name + first initial
-    if a_p[-1] == b_p[-1] and a_p[0][:1] == b_p[0][:1]:
-        return True
-    # Single-token (nickname / last-name-only) contained in the other
-    if len(a_p) == 1 and a_p[0] in b_p:
-        return True
-    if len(b_p) == 1 and b_p[0] in a_p:
-        return True
-    # Hyphenated / multi-part last name: shorter is suffix of longer
-    # e.g. ["crow","armstrong"] ends ["brett","crow","armstrong"]
-    short, long = (a_p, b_p) if len(a_p) <= len(b_p) else (b_p, a_p)
-    if len(short) >= 2 and long[-len(short):] == short:
-        return True
-    return False
-
-
 def run_grading_tasklet() -> None:
     """
     Fetch final boxscores via ESPN (free, no key), grade open bets,
@@ -4918,16 +4871,6 @@ def run_grading_tasklet() -> None:
         _ascii_nohyphen = _ascii_name.replace("-", " ")
         stat_lookup[_ascii_nohyphen]          = mapped
         stat_lookup[_ascii_nohyphen.lower()]  = mapped
-
-    # H-1 fix: one entry per ESPN player for fuzzy fallback scan
-    _grading_players: list[tuple[str, dict]] = []
-    _seen_grading_dn: set[str] = set()
-    for _nl2, _espn2 in raw_stats.items():
-        _dn2 = _espn2.get("full_name", _nl2.title())
-        if _dn2 not in _seen_grading_dn:
-            _seen_grading_dn.add(_dn2)
-            _grading_players.append((_dn2, stat_lookup.get(_dn2, stat_lookup.get(_nl2, {}))))
-
 
     open_bets: list[tuple] = []
     try:
@@ -5005,8 +4948,10 @@ def run_grading_tasklet() -> None:
                         pass
                 _pn_nohyphen = player.replace("-", " ")
                 _pn_norm_nohyphen = _pn_norm.replace("-", " ")
-                # Fast-path: direct dict lookups (exact, accent, hyphen variants)
-                _fast_stats = (
+                # Last-name-only fallback: "Crow-Armstrong" → "Armstrong"
+                _pn_lastname = player.strip().split()[-1] if player.strip() else ""
+                _pn_lastname_lower = _pn_lastname.lower()
+                stats = (
                     _stats_by_id
                     or stat_lookup.get(player)
                     or stat_lookup.get(_pn_norm)
@@ -5016,31 +4961,13 @@ def run_grading_tasklet() -> None:
                     or stat_lookup.get(_pn_nohyphen.lower())
                     or stat_lookup.get(_pn_norm_nohyphen)
                     or stat_lookup.get(_pn_norm_nohyphen.lower())
-                )
-                if _fast_stats:
-                    stats = _fast_stats
-                else:
-                    # H-1 fix: fuzzy scan — catches "C. Burnes" ↔ "Corbin Burnes"
-                    # and other abbreviated ESPN displayName ↔ full UD/PP name mismatches.
-                    # Iterates _grading_players (one entry per ESPN player, deduped)
-                    # so no false positives from duplicate stat_lookup keys.
-                    _fuzzy_hit = next(
-                        ((espn_name, v) for espn_name, v in _grading_players
-                         if _grading_name_match(player, espn_name)),
-                        None,
+                    # Last-name-only: last resort to catch spacing/suffix variants
+                    or next(
+                        (v for k, v in stat_lookup.items()
+                         if _pn_lastname_lower and k.split()[-1].lower() == _pn_lastname_lower),
+                        {}
                     )
-                    if _fuzzy_hit:
-                        _fz_espn_name, stats = _fuzzy_hit
-                        logger.debug(
-                            "[GradingTasklet] H-1 fuzzy match: '%s' → '%s'",
-                            player, _fz_espn_name,
-                        )
-                    else:
-                        stats = {}
-                        logger.debug(
-                            "[GradingTasklet] No stats match for '%s' — skipping (bet stays OPEN)",
-                            player,
-                        )
+                )
                 actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:

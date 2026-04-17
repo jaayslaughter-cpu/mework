@@ -219,11 +219,11 @@ async def job_agents():
     loop = asyncio.get_event_loop()
 
     # ── Post-window duplicate guard ─────────────────────────────────────────────
-    # If it's after 10 AM PT (outside the dispatch window) AND dispatch already
+    # If it's after 12 PM PT (outside the dispatch window) AND dispatch already
     # ran today (dispatch_date_log has today's date), skip entirely.
-    # Prevents Railway restarts at noon from re-sending already-sent picks.
+    # Prevents Railway restarts from re-sending already-sent picks.
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
-    if _pt_ck.hour >= 10:
+    if _pt_ck.hour >= 12:
         try:
             import psycopg2 as _pg2  # noqa: PLC0415
             _db_url = os.environ.get("DATABASE_URL")
@@ -239,7 +239,7 @@ async def job_agents():
                 _dg_conn.close()
                 if _already_ran:
                     logger.debug(
-                        "[orchestrator] Post-window cycle at %02d:%02d PT — dispatch already ran today. Skipping.",
+                        "[orchestrator] Post-window cycle at %02d:%02d PT — dispatch already ran today (after 12 PM). Skipping.",
                         _pt_ck.hour, _pt_ck.minute,
                     )
                     return
@@ -313,7 +313,7 @@ async def job_bug_checker():
     await _safe_run("BugChecker", run_bug_checker)
 
 async def job_log_watcher():
-    """8:10 AM PT daily — hits Railway log API, emails/SMSs dispatch summary."""
+    """10:10 AM PT daily — hits Railway log API, emails/SMSs dispatch summary."""
     try:
         from log_watcher import main as _log_watcher_main  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, _log_watcher_main)
@@ -322,19 +322,7 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 8:00 AM PT, before the main dispatch window.
-    PR #340: Also pre-warms the sportsbook prop reference here so the first
-    Odds API fetch happens at 8 AM, not inside the 9 AM DataHub loop.
-    All DataHub cycles after this return from memory with zero I/O.
-    """
-    # PR #340: Pre-warm sportsbook reference at 8 AM (first fetch of the day)
-    try:
-        from sportsbook_reference_layer import build_sportsbook_reference as _sb_warm  # noqa: PLC0415
-        _sb_count = len(_sb_warm())
-        logger.info("[StreakAgent] Sportsbook reference pre-warmed: %d entries.", _sb_count)
-    except Exception as _sb_exc:
-        logger.warning("[StreakAgent] Sportsbook reference pre-warm failed: %s", _sb_exc)
-
+    """Streak pick — runs at 10:00 AM PT, before the main 11 AM dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
@@ -355,7 +343,7 @@ async def lifespan(_app: FastAPI):
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
     scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
-    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")
+    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, timezone="America/Los_Angeles"), id="xgboost")
 
     # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(
@@ -378,17 +366,17 @@ async def lifespan(_app: FastAPI):
         id="bug_checker",
     )
 
-    # ── Streak pick — 8:00 AM PT (before main dispatch window) ─────────────
+    # ── Streak pick — 10:00 AM PT (before main 11 AM dispatch window) ────────
     scheduler.add_job(
         job_streak,
-        CronTrigger(hour=8, minute=0, timezone="America/Los_Angeles"),
+        CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
         id="streak",
     )
 
-    # ── Log watcher summary — 8:10 AM PT (after dispatch window opens) ───────
+    # ── Log watcher summary — 10:10 AM PT (after streak, before main dispatch) ─
     scheduler.add_job(
         job_log_watcher,
-        CronTrigger(hour=8, minute=10, timezone="America/Los_Angeles"),
+        CronTrigger(hour=10, minute=10, timezone="America/Los_Angeles"),
         id="log_watcher",
     )
 
@@ -404,28 +392,13 @@ async def lifespan(_app: FastAPI):
     # Discord startup ping — guarded: at most once per PT calendar day
     _startup_ping_if_needed()
 
-    # ── PR #341: Auto-rebuild calibration map from bet_ledger if identity ──────
-    # Touch the map once so _CAL_MAP_IS_IDENTITY gets set on first import.
-    # If the map is still a pass-through identity, rebuild from settled bet_ledger rows.
-    try:
-        from calibration_layer import apply_isotonic_calibration as _touch_cal  # noqa: PLC0415
-        _touch_cal(0.55)
-        from calibration_layer import _CAL_MAP_IS_IDENTITY  # noqa: PLC0415
-        if _CAL_MAP_IS_IDENTITY:
-            logger.info("[startup] calibration_map.json is identity — rebuilding from bet_ledger")
-            from calibrate_model import generate_calibration_map_from_db as _rebuild_cal  # noqa: PLC0415
-            _rebuild_cal()
-            logger.info("[startup] Calibration map rebuilt from settled bets.")
-    except Exception as _cal_err:
-        logger.warning("[startup] Calibration auto-rebuild skipped: %s", _cal_err)
-
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
 
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2:30AM"
+        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2AM"
     )
     yield
 
