@@ -4474,16 +4474,26 @@ def run_agent_tasklet() -> bool:
                     # has cycled dozens of times so closing_odds always returns None.
                     # We compute and persist CLV here while opening-line data is fresh.
                     _send_clv_map: dict = {}
+                    # Pull sharp_report once — used as CLV fallback for all legs
+                    _sr_for_clv = (hub.get("market") or {}).get("sharp_report", [])
                     for _leg in parlay.get("legs", []):
                         _lg_player    = _leg.get("player") or _leg.get("player_name", "")
                         _lg_pt        = _leg.get("prop_type", "")
                         _lg_side      = _leg.get("side", "OVER")
                         _lg_model_p   = float(_leg.get("model_prob", 50) or 50)
+                        # Primary: Odds API closing line (game-level markets; rarely
+                        # contains player props but kept for completeness)
                         _lg_close_o   = _fetch_closing_odds(_lg_player, _lg_pt, _lg_side)
                         if _lg_close_o is not None:
                             _lg_clv = round(_lg_model_p - _american_to_implied(int(_lg_close_o)), 4)
                         else:
-                            _lg_clv = None  # market not available — leave NULL for grading tasklet
+                            # Fallback: Action Network sharp_report money% as market
+                            # implied probability — money% = where sharp dollars sit,
+                            # the best proxy at 9 AM without a separate prop-odds call.
+                            _sr_implied = _clv_from_sharp_report(
+                                _lg_player, _lg_pt, _lg_side, _sr_for_clv
+                            )
+                            _lg_clv = round(_lg_model_p - _sr_implied, 4) if _sr_implied is not None else None
                         _send_clv_map[(_lg_player.lower(), _lg_pt, _lg_side)] = _lg_clv
 
                     _c3.execute(
@@ -5560,6 +5570,64 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
                                     return int(price)
     except Exception:
         pass
+    return None
+
+
+def _clv_from_sharp_report(
+    player: str,
+    prop_type: str,
+    side: str,
+    sharp_report: list,
+) -> float | None:
+    """
+    Derive send-time CLV market implied-probability from Action Network
+    sharp_report money%.
+
+    sharp_report entries (built by action_network_layer.fetch_mlb_prop_projections):
+        player          str   full name
+        prop_type       str   PropIQ canonical (e.g. 'strikeouts', 'hits')
+        over_money_pct  int   % of dollar volume on Over/Higher side (0–100)
+        under_money_pct int   % of dollar volume on Under/Lower side (0–100)
+        money_pct       int   alias → over_money_pct
+
+    Money% reflects where sharp dollars sit — the best proxy for market-
+    implied probability available at 9 AM send-time without needing a
+    separate prop-odds API call.  Returned on the 0–100 scale so it
+    subtracts directly from model_prob (also 0–100) to yield CLV in pp.
+
+    Returns None when no matching (player, prop_type) entry is found.
+    """
+    if not sharp_report:
+        return None
+
+    player_lc    = player.lower().strip()
+    prop_type_lc = prop_type.lower().strip()
+    side_up      = side.upper()
+
+    for rec in sharp_report:
+        if not isinstance(rec, dict):
+            continue
+        rec_player = str(rec.get("player", "")).lower().strip()
+        rec_pt     = str(rec.get("prop_type", "")).lower().strip()
+
+        # Fuzzy name match: either name is a substring of the other
+        if not (player_lc in rec_player or rec_player in player_lc):
+            continue
+        if rec_pt != prop_type_lc:
+            continue
+
+        # Correct-side money%
+        if side_up in ("OVER", "HIGHER"):
+            mkt_implied = float(rec.get("over_money_pct", rec.get("money_pct", 0)) or 0)
+        else:  # UNDER / LOWER
+            mkt_implied = float(rec.get("under_money_pct", 0) or 0)
+            if mkt_implied == 0:
+                # Derive from over_money_pct when under_money_pct not stored
+                over_m = float(rec.get("over_money_pct", rec.get("money_pct", 50)) or 50)
+                mkt_implied = 100.0 - over_m
+
+        return round(mkt_implied, 4) if mkt_implied > 0 else None
+
     return None
 
 
