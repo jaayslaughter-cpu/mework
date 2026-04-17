@@ -156,11 +156,24 @@ class SavantFetcher:
         """
         Returns {mlbam_id: {sc_xwoba, sc_xba, sc_xslg, sc_barrel_rate,
                              sc_hard_hit_rate, sc_avg_launch_speed, sc_xiso}}
+        L1: in-memory  L2: /tmp disk parquet  L3: Postgres layer_cache
         """
+        import datetime as _dt
         year = self._today_year()
+        pg_key = f"savant_batter_expected_{_dt.date.today().isoformat()}"
+        # ── L3: Postgres snapshot cache ───────────────────────────────────────
+        try:
+            from layer_cache_helper import pg_cache_get as _pg_get, pg_cache_set as _pg_set
+            _cached = _pg_get(pg_key)
+            if _cached:
+                logger.info("[Savant] Postgres hit → batter snapshot %s", pg_key)
+                return {int(k): v for k, v in _cached.items()}
+        except Exception as _pge:
+            _pg_get = _pg_set = None  # type: ignore
+            logger.debug("[Savant] Postgres cache unavailable: %s", _pge)
         url = (
             f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-            f"?type=batter&year={year}&position=&team=&min=10&csv=true"
+            f"?type=batter&year={year}&position=&team=&min=1&csv=true"
         )
         df = self._csv_to_df(url, f"savant_batter_expected_{year}")
         # If current year returns empty (early season), fall back to prior year
@@ -169,7 +182,7 @@ class SavantFetcher:
             logger.info("[Savant] %d batter data empty — falling back to %d", year, prior_year)
             url_prior = (
                 f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-                f"?type=batter&year={prior_year}&position=&team=&min=q&csv=true"
+                f"?type=batter&year={prior_year}&position=&team=&min=1&csv=true"
             )
             df = self._csv_to_df(url_prior, f"savant_batter_expected_{prior_year}")
         if df is None or df.empty:
@@ -200,6 +213,12 @@ class SavantFetcher:
             }
 
         logger.info("[Savant] Batter expected stats: %d players", len(result))
+        # ── L3: Persist to Postgres ───────────────────────────────────────────
+        try:
+            from layer_cache_helper import pg_cache_set as _ps
+            _ps(pg_key, {str(k): v for k, v in result.items()}, ttl_days=1)
+        except Exception:
+            pass
         return result
 
     def fetch_pitcher_stats(self) -> dict[int, dict[str, float]]:
@@ -209,13 +228,26 @@ class SavantFetcher:
 
         Uses statcast_leaderboard for whiff% and expected_statistics for
         contact quality metrics.
+        L1: in-memory  L2: /tmp disk parquet  L3: Postgres layer_cache
         """
+        import datetime as _dt
+        pg_key = f"savant_pitcher_stats_{_dt.date.today().isoformat()}"
+        # ── L3: Postgres snapshot cache ───────────────────────────────────────
+        try:
+            from layer_cache_helper import pg_cache_get as _pg_get, pg_cache_set as _pg_set
+            _cached = _pg_get(pg_key)
+            if _cached:
+                logger.info("[Savant] Postgres hit → pitcher snapshot %s", pg_key)
+                return {int(k): v for k, v in _cached.items()}
+        except Exception as _pge:
+            _pg_get = _pg_set = None  # type: ignore
+            logger.debug("[Savant] Postgres cache unavailable: %s", _pge)
         year = self._today_year()
 
         # Primary: expected stats (contact quality allowed)
         url_exp = (
             f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-            f"?type=pitcher&year={year}&position=&team=&min=10&csv=true"
+            f"?type=pitcher&year={year}&position=&team=&min=1&csv=true"
         )
         df_exp = self._csv_to_df(url_exp, f"savant_pitcher_expected_{year}")
         # Fall back to prior year if current season is empty (early April)
@@ -224,14 +256,14 @@ class SavantFetcher:
             logger.info("[Savant] %d pitcher data empty — falling back to %d", year, prior_year)
             df_exp = self._csv_to_df(
                 f"https://baseballsavant.mlb.com/leaderboard/expected_statistics"
-                f"?type=pitcher&year={prior_year}&position=&team=&min=q&csv=true",
+                f"?type=pitcher&year={prior_year}&position=&team=&min=1&csv=true",
                 f"savant_pitcher_expected_{prior_year}"
             )
 
         # Secondary: statcast leaderboard (whiff%)
         url_ldr = (
             f"https://baseballsavant.mlb.com/statcast_leaderboard"
-            f"?year={year}&abs=&player_type=pitcher&min_pitches=50&csv=true"
+            f"?year={year}&abs=&player_type=pitcher&min_pitches=1&csv=true"
         )
         df_ldr = self._csv_to_df(url_ldr, f"savant_pitcher_leaderboard_{year}")
 
@@ -280,6 +312,12 @@ class SavantFetcher:
                     }
 
         logger.info("[Savant] Pitcher Statcast stats: %d players", len(result))
+        # ── L3: Persist to Postgres ───────────────────────────────────────────
+        try:
+            from layer_cache_helper import pg_cache_set as _ps
+            _ps(pg_key, {str(k): v for k, v in result.items()}, ttl_days=1)
+        except Exception:
+            pass
         return result
 
 
@@ -376,6 +414,38 @@ def enrich_props_with_statcast(
         "[Savant] %s: %d/%d props enriched with Statcast features",
         player_type, matched, len(props),
     )
+    # ── MLB Stats API proxy fallback: fill Statcast zeros ────────────────────
+    # When Baseball Savant is unreachable / early-season filter misses players,
+    # use already-enriched FanGraphs / MLB Stats API fields as proxies.
+    # These are clearly labelled _sc_proxy so agents can weight appropriately.
+    _PITCHER_PT = {"strikeouts", "pitching_outs", "earned_runs",
+                   "hits_allowed", "walks_allowed", "fantasy_pitcher"}
+    for _p in enriched:
+        if _p.get("prop_type", "") in _PITCHER_PT:
+            # k_rate → sc_whiff_rate proxy (r≈0.85, consistent with ABS era research)
+            if not _p.get("sc_whiff_rate") and float(_p.get("k_rate", 0) or 0) > 0:
+                _p["sc_whiff_rate"] = round(float(_p["k_rate"]) * 0.85, 4)
+                _p["_sc_whiff_proxy"] = True
+            # ERA → hard-hit% proxy (ERA 3.0→28%, ERA 6.0→40%)
+            if not _p.get("sc_hard_hit_rate") and float(_p.get("era", 0) or 0) > 0:
+                _era = float(_p["era"])
+                _p["sc_hard_hit_rate"] = round(min(0.45, max(0.26, 0.26 + (_era - 3.0) * 0.04)), 4)
+                _p["_sc_hh_proxy"] = True
+        else:
+            # woba ≈ xwoba in season-long samples (r≈0.97 correlation)
+            if not _p.get("sc_xwoba") and float(_p.get("woba", 0) or 0) > 0:
+                _p["sc_xwoba"] = round(float(_p["woba"]), 4)
+                _p["_sc_xwoba_proxy"] = True
+            # slg ≈ xslg (slightly less accurate but directionally correct)
+            if not _p.get("sc_xslg") and float(_p.get("slg", 0) or 0) > 0:
+                _p["sc_xslg"] = round(float(_p["slg"]), 4)
+                _p["_sc_xslg_proxy"] = True
+            # iso ≈ xiso
+            if not _p.get("sc_xiso") and float(_p.get("iso", 0) or 0) > 0:
+                _p["sc_xiso"] = round(float(_p["iso"]), 4)
+    _proxy_count = sum(1 for _p in enriched if _p.get("_sc_whiff_proxy") or _p.get("_sc_xwoba_proxy"))
+    if _proxy_count:
+        logger.info("[Savant] %d props filled with MLB Stats API proxy values", _proxy_count)
     return enriched
 
 

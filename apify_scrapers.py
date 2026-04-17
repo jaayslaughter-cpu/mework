@@ -96,6 +96,15 @@ DELIVERY_SLOW_THRESHOLD: float = 1.40          # seconds
 
 CURRENT_SEASON: int = datetime.now(timezone.utc).year
 
+# ── MLB-ONLY SPORT GUARD ──────────────────────────────────────────────────────
+# PropIQ evaluates MLB player props exclusively.
+# This constant is referenced by every URL-generating class below.
+# DO NOT change to "nba", "nfl", or any other sport — the Apify actors and
+# RotoWire page functions are wired for baseball HTML structure only.
+_SPORT = "mlb"
+_SPORT_LABEL = "baseball"          # used in rotowire.com/baseball/ paths
+assert _SPORT == "mlb", f"Sport guard tripped! _SPORT={_SPORT!r} — this file is MLB-only."
+
 
 # ===========================================================================
 # 1. Redis Enrichment Cache
@@ -187,6 +196,34 @@ class RedisEnrichmentCache:
 
     def fatigue(self, team_abbr: str, game_date: str) -> Optional[Dict[str, Any]]:
         return self.get(f"propiq:fatigue:{team_abbr}:{game_date}")
+
+    def injury(self, player_slug: str) -> Optional[Dict[str, Any]]:
+        """Return injury/status dict or ``None`` if not in cache.
+
+        Key: ``propiq:injury:{player_slug}``  TTL 900 s.
+        Fields: name, team, status (e.g. "IL-10"), desc, date.
+        """
+        return self.get(f"propiq:injury:{player_slug}")
+
+    def prop_line(
+        self, player_slug: str, prop_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return retail prop line dict or ``None``.
+
+        Key: ``propiq:prop_line:{player_slug}:{prop_type}``  TTL 300 s.
+        Fields: player, prop_type, line, odds_over, odds_under, book.
+        """
+        return self.get(f"propiq:prop_line:{player_slug}:{prop_type}")
+
+    def rw_proj(
+        self, player_slug: str, prop_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return RotoWire projection vs market line or ``None``.
+
+        Key: ``propiq:rw_proj:{player_slug}:{prop_type}``  TTL 1800 s.
+        Fields: player, prop_type, rw_projection, market_line, edge_pct, avg_per_game.
+        """
+        return self.get(f"propiq:rw_proj:{player_slug}:{prop_type}")
 
 
 # ===========================================================================
@@ -647,9 +684,105 @@ async function pageFunction(context) {
         });
     }
 
+    // ── Injury News ────────────────────────────────────────────────────
+    if (url.includes('news.php')) {
+        // RotoWire news feed — each injury note is a .news-feed__item block
+        $('.news-feed__item, .player-news__item, [class*="news-item"]').each((_, el) => {
+            const name   = $(el).find('[class*="player-name"], [class*="news__name"], a').first().text().trim();
+            const team   = $(el).find('[class*="team-abbr"], [class*="news__team"]').first().text().trim();
+            const status = $(el).find('[class*="injury-tag"], [class*="status"], [class*="news__tag"]').first().text().trim();
+            const desc   = $(el).find('[class*="news__desc"], p').first().text().trim().substring(0, 280);
+            const date_  = $(el).find('[class*="date"], time').first().text().trim();
+            if (name) items.push({ type: 'injury', name, team, status, desc, date: date_ });
+        });
+        // Fallback: plain table rows
+        if (items.filter(i => i.type === 'injury').length === 0) {
+            $('table tbody tr').each((_, row) => {
+                const cells = $(row).find('td');
+                if (cells.length < 3) return;
+                items.push({
+                    type:   'injury',
+                    name:   $(cells[0]).text().trim(),
+                    team:   $(cells[1]).text().trim(),
+                    status: $(cells[2]).text().trim(),
+                    desc:   cells.length > 3 ? $(cells[3]).text().trim() : '',
+                    date:   cells.length > 4 ? $(cells[4]).text().trim() : '',
+                });
+            });
+        }
+    }
+
     return items;
 }
 """
+
+_ROTOWIRE_BETTING_PAGE_FN = """
+async function pageFunction(context) {
+    const { page, request } = context;
+    const url = request.url;
+    const items = [];
+
+    // Wait for JS-rendered table rows to hydrate
+    await page.waitForSelector('table tbody tr', { timeout: 20000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 1500));
+
+    const rows = await page.$$eval('table tbody tr', trs =>
+        trs.map(tr => Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim()))
+    ).catch(() => []);
+
+    if (url.includes('player-props-plus-proj')) {
+        // Columns (typical): Player | Opp | Avg/G | RW Projection | Line | Edge%
+        let currentPropType = 'strikeouts';
+        const headers = await page.$$eval(
+            'h3, h4, [class*="category"], [class*="section-header"]',
+            els => els.map(e => ({ text: e.innerText.trim(), tag: e.tagName }))
+        ).catch(() => []);
+        rows.forEach(cells => {
+            if (cells.length < 4) return;
+            items.push({
+                type:          'prop_projection',
+                player:        cells[0] || '',
+                opponent:      cells[1] || '',
+                avg_per_game:  cells[2] || '',
+                rw_projection: cells[3] || '',
+                market_line:   cells[4] || '',
+                edge_pct:      cells[5] || '',
+                prop_type:     currentPropType,
+            });
+        });
+    } else if (url.includes('player-props')) {
+        // Columns: Player | Opponent | Line | Over Odds | Under Odds
+        const bookParam = url.includes('book=') ? url.split('book=')[1].split('&')[0] : 'draftkings';
+        // Capture section headers (prop category labels) for prop_type tagging
+        const headers = await page.$$eval(
+            'h2, h3, [class*="props-section"], [class*="category-title"]',
+            els => els.map(e => e.innerText.trim().toLowerCase())
+        ).catch(() => []);
+        const propTypeMap = {
+            'strikeout': 'pitcher_strikeouts', 'earned run': 'earned_runs',
+            'total base': 'total_bases', 'run scored': 'runs_scored',
+            'hit': 'hits', 'rbi': 'rbis', 'home run': 'home_runs',
+        };
+        let currentPropType = 'pitcher_strikeouts';
+        rows.forEach(cells => {
+            if (cells.length < 4) return;
+            items.push({
+                type:       'prop_line',
+                book:       bookParam,
+                player:     cells[0] || '',
+                opponent:   cells[1] || '',
+                prop_type:  currentPropType,
+                line:       cells[2] || '',
+                odds_over:  cells[3] || '',
+                odds_under: cells.length > 4 ? cells[4] || '' : '',
+            });
+        });
+    }
+
+    return items;
+}
+"""
+
 
 _ROTOWIRE_UNDERDOG_PAGE_FN = """
 async function pageFunction(context) {
@@ -681,7 +814,10 @@ class RotoWireScraper:
         "second_half": "https://www.rotowire.com/baseball/stats-second-half.php",
         "underdog_picks": "https://www.rotowire.com/picks/underdog/",
         "prizepicks": "https://www.rotowire.com/picks/prizepicks/",
-        "sleeper": "https://www.rotowire.com/picks/sleeper/",
+        "dk_picks": "https://www.rotowire.com/picks/draftkings/",
+        "injuries": "https://www.rotowire.com/baseball/news.php?injuries=all",
+        "prop_lines": "https://www.rotowire.com/betting/mlb/player-props.php",
+        "prop_projections": "https://www.rotowire.com/betting/mlb/player-props-plus-proj.php",
     }
 
     def __init__(
@@ -859,6 +995,142 @@ class RotoWireScraper:
         logger.info("RotoWireScraper: PA averages written for %d players", count)
         return count
 
+    # ------------------------------------------------------------------
+    def refresh_injuries(self) -> int:
+        """Scrape RotoWire injury/IL news and write to Redis.
+
+        Key: ``propiq:injury:{player_slug}``  TTL 900 s (15 min).
+        Dict keys: name, team, status, desc, date.
+
+        Returns:
+            Number of injury records written.
+        """
+        items = self._apify.scrape(
+            CHEERIO_ACTOR,
+            [self.URLS["injuries"]],
+            _ROTOWIRE_PAGE_FN,
+        )
+        count = 0
+        for item in items:
+            if item.get("type") != "injury":
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            slug = name.replace(" ", "_").lower()
+            data: Dict[str, Any] = {
+                "name":   name,
+                "team":   str(item.get("team") or "").strip(),
+                "status": str(item.get("status") or "").strip(),
+                "desc":   str(item.get("desc") or "").strip()[:280],
+                "date":   str(item.get("date") or "").strip(),
+            }
+            self._cache.set(f"propiq:injury:{slug}", data, ttl=900)
+            count += 1
+        logger.info("RotoWireScraper: %d injury records written", count)
+        return count
+
+    # ------------------------------------------------------------------
+    def refresh_prop_lines(
+        self,
+        book: str = "draftkings",
+        prop_types: Optional[List[str]] = None,
+    ) -> int:
+        """Scrape RotoWire retail prop lines (JS-rendered via Puppeteer).
+
+        Fetches ``/betting/mlb/player-props.php?book={book}`` and caches
+        per-player retail odds so ``LineValueAgent`` can compare sharp
+        consensus against exact DK/FD lines.
+
+        Args:
+            book: Sportsbook slug — draftkings | fanduel | mgm | caesars.
+            prop_types: Optional whitelist; all types scraped if ``None``.
+
+        Returns:
+            Number of prop line records written.
+
+        TTL: 300 s (5 min) — lines move frequently inside 60 min of game time.
+        """
+        url = f"{self.URLS['prop_lines']}?book={book}"
+        items = self._apify.scrape(PUPPETEER_ACTOR, [url], _ROTOWIRE_BETTING_PAGE_FN)
+        count = 0
+        for item in items:
+            if item.get("type") != "prop_line":
+                continue
+            player = str(item.get("player") or "").strip()
+            prop_type = str(item.get("prop_type") or "").strip()
+            if not player or not prop_type:
+                continue
+            if prop_types and prop_type not in prop_types:
+                continue
+            slug = player.replace(" ", "_").lower()
+            data: Dict[str, Any] = {
+                "player":     player,
+                "prop_type":  prop_type,
+                "line":       _safe_float(item.get("line")),
+                "odds_over":  _parse_american_odds(str(item.get("odds_over") or "-110")),
+                "odds_under": _parse_american_odds(str(item.get("odds_under") or "-110")),
+                "book":       str(item.get("book") or book),
+                "opponent":   str(item.get("opponent") or "").strip(),
+            }
+            self._cache.set(f"propiq:prop_line:{slug}:{prop_type}", data, ttl=300)
+            count += 1
+        logger.info(
+            "RotoWireScraper: %d prop line records written (book=%s)", count, book
+        )
+        return count
+
+    # ------------------------------------------------------------------
+    def refresh_prop_projections(
+        self,
+        prop_types: Optional[List[str]] = None,
+    ) -> int:
+        """Scrape RotoWire prop projections vs market lines (JS-rendered).
+
+        ``/betting/mlb/player-props-plus-proj.php`` gives both the RotoWire
+        statistical projection AND the current market line for K, ER, TB,
+        and Runs props — a ready-made edge signal.
+
+        Args:
+            prop_types: Optional whitelist; all types scraped if ``None``.
+
+        Returns:
+            Number of projection records written.
+
+        TTL: 1800 s (30 min) — projections update ~2 h before first pitch.
+        """
+        items = self._apify.scrape(
+            PUPPETEER_ACTOR,
+            [self.URLS["prop_projections"]],
+            _ROTOWIRE_BETTING_PAGE_FN,
+        )
+        count = 0
+        for item in items:
+            if item.get("type") != "prop_projection":
+                continue
+            player = str(item.get("player") or "").strip()
+            prop_type = str(item.get("prop_type") or "strikeouts").strip()
+            if not player:
+                continue
+            if prop_types and prop_type not in prop_types:
+                continue
+            slug = player.replace(" ", "_").lower()
+            data: Dict[str, Any] = {
+                "player":        player,
+                "prop_type":     prop_type,
+                "avg_per_game":  _safe_float(item.get("avg_per_game")),
+                "rw_projection": _safe_float(item.get("rw_projection")),
+                "market_line":   _safe_float(item.get("market_line")),
+                "edge_pct":      _safe_float(item.get("edge_pct")),
+                "opponent":      str(item.get("opponent") or "").strip(),
+            }
+            self._cache.set(f"propiq:rw_proj:{slug}:{prop_type}", data, ttl=1800)
+            count += 1
+        logger.info(
+            "RotoWireScraper: %d prop projection records written", count
+        )
+        return count
+
 
 # ===========================================================================
 # 7. Action Network Scraper  (public betting, sharp report, live odds)
@@ -934,10 +1206,13 @@ class ActionNetworkScraper:
     """
 
     URLS = {
-        "public_betting": "https://www.actionnetwork.com/mlb/public-betting",
-        "sharp_report": "https://www.actionnetwork.com/mlb/sharp-report",
-        "odds": "https://www.actionnetwork.com/mlb/odds",
-        "prop_projections": "https://www.actionnetwork.com/mlb/prop-projections",
+        # NOTE: These Apify-based scrapers are DEPRECATED for the main pipeline.
+        # action_network_layer.py uses cookie-auth directly (faster, no Apify cost).
+        # These remain for legacy compatibility but are NOT called by EnrichmentService.
+        "public_betting":    f"https://www.actionnetwork.com/{_SPORT}/public-betting",
+        "sharp_report":      f"https://www.actionnetwork.com/{_SPORT}/sharp-report",
+        "odds":              f"https://www.actionnetwork.com/{_SPORT}/odds",
+        "prop_projections":  f"https://www.actionnetwork.com/{_SPORT}/prop-projections",
     }
 
     def __init__(
@@ -1312,6 +1587,14 @@ class DataEnricher:
         pa_avg = self._cache.pa_avg(player_id) or self._cache.pa_avg(name_key) or 3.8
         enrichment["pa_average"] = float(pa_avg)
 
+        # ── Injury / Late Scratch detection ─────────────────────────────
+        inj = self._cache.injury(name_key) or {}
+        enrichment["injury_status"] = str(inj.get("status", "")).strip()
+        enrichment["is_injured"] = bool(
+            enrichment["injury_status"]
+            and enrichment["injury_status"].upper() not in {"GTD", "ACTIVE", ""}
+        )
+
         # ── GetawayAgent fields ────────────────────────────────────────
         sched = self._cache.schedule(team_abbr) or {}
         enrichment["hours_rest"] = float(sched.get("hours_rest", 24.0))
@@ -1343,6 +1626,35 @@ class DataEnricher:
         enrichment["odds_under"] = float(odds.get("odds_under", -110.0))
 
         return enrichment
+
+    # ------------------------------------------------------------------
+    def get_prop_line(
+        self,
+        player_name: str,
+        prop_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached retail prop line dict or ``None``.
+
+        Convenience wrapper over ``RedisEnrichmentCache.prop_line()``.
+        Useful for ``LineValueAgent`` / ``EVHunter`` to pull a second
+        retail odds source for vig comparison.
+        """
+        slug = player_name.replace(" ", "_").lower()
+        return self._cache.prop_line(slug, prop_type)
+
+    def get_rw_proj(
+        self,
+        player_name: str,
+        prop_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached RotoWire projection vs market comparison dict or ``None``.
+
+        Dict keys: rw_projection, market_line, edge_pct, avg_per_game.
+        Agents can use ``rw_projection`` as a second model signal alongside
+        the XGBoost probability from the ML pipeline.
+        """
+        slug = player_name.replace(" ", "_").lower()
+        return self._cache.rw_proj(slug, prop_type)
 
 
 # ===========================================================================
@@ -1376,6 +1688,9 @@ class EnrichmentService:
         self._arsenal_scraper = ArsenalScraper(self._savant, self._cache)
         self._catcher_scraper = CatcherMetricsScraper(self._savant, self._cache)
         self._rotowire_scraper = RotoWireScraper(self._apify, self._cache)
+        # Action Network via Apify is DEPRECATED — action_network_layer.py handles
+        # sharp report / CLV data via cookie-auth (ACTION_NETWORK_COOKIE env var).
+        # self._action_scraper kept for legacy callers but NOT invoked by run_full_enrichment.
         self._action_scraper = ActionNetworkScraper(self._apify, self._cache)
         self._schedule_scraper = SportsDataScheduleScraper(
             api_key=sportsdata_key, cache=self._cache
@@ -1411,6 +1726,8 @@ class EnrichmentService:
         summary["starters"] = self._rotowire_scraper.refresh_starters(today)
         summary["wrc_splits"] = self._rotowire_scraper.refresh_wrc_splits()
         summary["dfs_pa_avg"] = self._rotowire_scraper.refresh_dfs_pa_avg()
+        summary["injuries"] = self._rotowire_scraper.refresh_injuries()
+        summary["prop_projections"] = self._rotowire_scraper.refresh_prop_projections()
         time.sleep(90)  # 1.5m gap
 
         # T+5m: RotoWire weather + umpires
@@ -1421,9 +1738,15 @@ class EnrichmentService:
 
         # T+8m: Action Network public betting + sharp + odds
         logger.info("EnrichmentService [T+8m]: Action Network...")
-        summary["public_betting"] = self._action_scraper.refresh_public_betting()
-        summary["sharp_report"] = self._action_scraper.refresh_sharp_report()
-        summary["odds"] = self._action_scraper.refresh_odds()
+        # Action Network: cookie-auth layer (not Apify)
+        try:
+            from action_network_layer import ActionNetworkLayer as _ANL2
+            _an2 = _ANL2()
+            _sh2 = _an2.get_sharp_report() if hasattr(_an2, "get_sharp_report") else None
+            summary["action_network"] = len(_sh2) if _sh2 else 0
+        except Exception:
+            summary["action_network"] = 0
+        summary["prop_lines"] = self._rotowire_scraper.refresh_prop_lines()
         time.sleep(60)
 
         # T+12m: SportsData.io schedule
@@ -1445,9 +1768,16 @@ class EnrichmentService:
         summary["lineups"] = self._rotowire_scraper.refresh_lineups(today)
         summary["starters"] = self._rotowire_scraper.refresh_starters(today)
         summary["weather"] = self._rotowire_scraper.refresh_weather(today)
-        summary["public_betting"] = self._action_scraper.refresh_public_betting()
-        summary["sharp_report"] = self._action_scraper.refresh_sharp_report()
-        summary["odds"] = self._action_scraper.refresh_odds()
+        summary["injuries"] = self._rotowire_scraper.refresh_injuries()
+        summary["prop_lines"] = self._rotowire_scraper.refresh_prop_lines()
+        # Action Network: cookie-auth layer (not Apify)
+        try:
+            from action_network_layer import ActionNetworkLayer as _ANL2
+            _an2 = _ANL2()
+            _sh2 = _an2.get_sharp_report() if hasattr(_an2, "get_sharp_report") else None
+            summary["action_network"] = len(_sh2) if _sh2 else 0
+        except Exception:
+            summary["action_network"] = 0
         logger.info("EnrichmentService: fast refresh complete. %s", summary)
         return summary
 
