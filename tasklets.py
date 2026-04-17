@@ -1698,6 +1698,16 @@ def run_data_hub_tasklet() -> None:
 
     # ── Pre-warm FanGraphs cache before agents run ───────────────────────────
     # Pre-warming here (once per DataHub cycle) avoids cold-start delay in agents.
+    # mlb_stats_layer runs first — it uses statsapi.mlb.com which works on Railway.
+    # fangraphs_layer runs second as a supplementary source (usually 403-blocked on Railway,
+    # but populates cache if running locally or if FanGraphs unblocks the IP).
+    try:
+        from mlb_stats_layer import warm_cache as _mlb_warm  # noqa: PLC0415
+        _mlb_warm(hub)        # pass hub so it reuses already-fetched starter/lineup lists
+        logger.info("[DataHub] MLB Stats API cache warm.")
+    except Exception as _mlb_err:
+        logger.warning("[DataHub] mlb_stats_layer warm failed: %s", _mlb_err)
+
     try:
         from fangraphs_layer import _load as _fg_load, _loaded as _fg_loaded  # noqa: PLC0415
         if not _fg_loaded:

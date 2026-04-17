@@ -738,6 +738,13 @@ def park_factor_adjustment(
 
 def get_batter(name: str) -> dict[str, float]:
     """Return FanGraphs batting stats for name. Empty dict if not found."""
+    try:
+        from mlb_stats_layer import get_batter as _mlb_get_batter  # noqa: PLC0415
+        result = _mlb_get_batter(name)
+        if result:
+            return result
+    except Exception:
+        pass
     global _loaded
     if not _loaded:
         _load()
@@ -745,7 +752,24 @@ def get_batter(name: str) -> dict[str, float]:
 
 
 def get_pitcher(name: str) -> dict[str, float]:
-    """Return FanGraphs pitching stats for name. Empty dict if not found."""
+    """
+    Return pitcher stats for name. Empty dict if not found (agents use LEAGUE_DEFAULTS).
+
+    Delegation chain:
+      1. mlb_stats_layer (statsapi.mlb.com — works on Railway, self-updating)
+      2. Local FanGraphs cache (populated only if FanGraphs API was reachable)
+      3. Empty dict → agent falls back to LEAGUE_DEFAULTS
+    """
+    # ── Primary: mlb_stats_layer (Railway-safe, auto-refreshed daily) ─────
+    try:
+        from mlb_stats_layer import get_pitcher as _mlb_get_pitcher  # noqa: PLC0415
+        result = _mlb_get_pitcher(name)
+        if result:
+            return result
+    except Exception:
+        pass  # fall through to FanGraphs cache
+
+    # ── Fallback: FanGraphs cache (populated when API accessible) ─────────
     global _loaded
     if not _loaded:
         _load()
