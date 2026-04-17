@@ -1605,6 +1605,12 @@ def _ensure_bet_ledger() -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
+            # PR #342: track which prediction engine produced each pick
+            try:
+                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS model_source VARCHAR(30)")
+                conn.commit()
+            except Exception:
+                conn.rollback()
             # FIX GAP 2: add UNIQUE constraint to prevent duplicate grading
             # Step 1: remove existing duplicate rows first (keeps lowest id per group)
             # Without this, CREATE UNIQUE INDEX fails if duplicates already exist.
@@ -2148,6 +2154,7 @@ class _BaseAgent:
                     prop["_sim_edge_reasons"] = sim.edge_reasons
                     prop["_sim_starter_prob"] = sim.starter_prob
                     prop["_sim_bullpen_prob"]  = sim.bullpen_prob
+                    prop["_model_source"]     = "simulation_engine"
                     return round(max(5.0, min(95.0, raw)), 2)
             except Exception as _sim_err:
                 logger.debug("[BaseAgent._model_prob] SimEngine error: %s", _sim_err)
@@ -2180,8 +2187,10 @@ class _BaseAgent:
                     prob = float(self.model.predict(dmat)[0])
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
+                    if prop is not None: prop["_model_source"] = "xgboost"
                     return prob * 100
                 else:
+                    if prop is not None: prop["_model_source"] = "xgboost"
                     return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
@@ -2199,6 +2208,7 @@ class _BaseAgent:
                     _prop_override = prop
                 _gp_res = _gp(raw_prop=_prop_override, side=_gp_side, min_edge=-1.0)
                 if _gp_res is not None:
+                    if prop is not None: prop["_model_source"] = "generate_pick"
                     return round(max(5.0, min(95.0, _gp_res["final_prob"] * 100.0)), 2)
             except Exception:
                 pass  # fall through to base_rate_model
@@ -2243,6 +2253,7 @@ class _BaseAgent:
                     raw_p = apply_calibration_governor(raw_p / 100.0, brier) * 100.0
                 except Exception:
                     pass
+            prop["_model_source"] = "heuristic_fallback"
             return round(max(5.0, min(95.0, raw_p)), 2)
 
         # Absolute fallback — no base rate model AND no prop context
@@ -2286,6 +2297,7 @@ class _BaseAgent:
                 except Exception:
                     for _, d in _fb_adjs:
                         raw_p += d
+        if prop is not None: prop["_model_source"] = "heuristic_fallback"
         return round(max(5.0, min(95.0, raw_p)), 2)
 
 
@@ -2602,6 +2614,8 @@ class _BaseAgent:
             # Pass MLBAM ID through for accent-safe grading (Acuña, Peña, etc.)
             "mlbam_id":           prop.get("mlbam_id") or prop.get("player_id"),
             "player_id":          prop.get("player_id") or prop.get("mlbam_id"),
+            # PR #342: tag which prediction engine generated this pick
+            "model_source":       prop.get("_model_source", "heuristic_fallback"),
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
@@ -4624,11 +4638,11 @@ def run_agent_tasklet() -> bool:
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
                              units_wagered, mlbam_id, entry_type, discord_sent,
-                             lookahead_safe)
+                             lookahead_safe, model_source)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
                                 ABS(%s), %s, %s, FALSE,
-                                %s)
+                                %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -4651,6 +4665,7 @@ def run_agent_tasklet() -> bool:
                             # so XGBoost training has an audit trail of pre-game vs in-game picks.
                             # Default True (safe) if not stamped — conservative for training integrity.
                             bool(_sl.get("lookahead_safe", True)),
+                            _sl.get("model_source", "heuristic_fallback"),  # PR #342
                         ),
                     )
             _pg2.commit()
