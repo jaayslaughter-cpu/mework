@@ -1605,12 +1605,6 @@ def _ensure_bet_ledger() -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
-            # PR #342: track which prediction engine produced each pick
-            try:
-                cur.execute("ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS model_source VARCHAR(30)")
-                conn.commit()
-            except Exception:
-                conn.rollback()
             # FIX GAP 2: add UNIQUE constraint to prevent duplicate grading
             # Step 1: remove existing duplicate rows first (keeps lowest id per group)
             # Without this, CREATE UNIQUE INDEX fails if duplicates already exist.
@@ -1647,109 +1641,6 @@ def _ensure_bet_ledger() -> None:
     except Exception as exc:
         logger.warning("[DB] bet_ledger create failed: %s", exc)
 
-def _ensure_rejection_log() -> None:
-    """Create rejection_log table if it does not exist.  Called on startup."""
-    try:
-        conn = _pg_conn()
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS rejection_log (
-                    id          SERIAL PRIMARY KEY,
-                    logged_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    bet_date    DATE        NOT NULL DEFAULT CURRENT_DATE,
-                    agent_name  TEXT,
-                    player      TEXT,
-                    prop_type   TEXT,
-                    side        TEXT,
-                    gate        TEXT        NOT NULL,
-                    details     TEXT
-                )
-            """)
-            # Index so daily summary queries are fast
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS ix_rejection_log_date
-                ON rejection_log (bet_date)
-            """)
-            conn.commit()
-        conn.close()
-        logger.info("[DB] rejection_log table ensured.")
-    except Exception as _e:
-        logger.warning("[DB] _ensure_rejection_log failed (non-fatal): %s", _e)
-
-
-def _log_rejection(
-    agent_name: str,
-    player:     str,
-    prop_type:  str,
-    side:       str,
-    gate:       str,
-    details:    str = "",
-) -> None:
-    """
-    Non-blocking fire-and-forget INSERT into rejection_log.
-    Never raises — a logging failure must never kill a dispatch cycle.
-
-    gate values (canonical):
-      vig_gate          per-leg vig too wide
-      sharp_edge        per-leg edge below MIN_EV_THRESH
-      insufficient_hits agent produced < 2 qualifying legs
-      negative_ev       combined EV < 0%
-      ev_floor          combined EV < +3% floor
-      platform_purity   mixed UD + PP legs in one slip
-      confidence        slip confidence < 6.0
-      min_prob          one or more legs below MIN_PROB (55%)
-      direction_dedup   contradicts a higher-EV agent on same prop
-      risk_cap          daily exposure cap reached
-    """
-    try:
-        _today = _today_pt().isoformat()
-        conn = _pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO rejection_log
-                    (bet_date, agent_name, player, prop_type, side, gate, details)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (_today, agent_name or "", player or "", prop_type or "",
-                 side or "", gate, details or ""),
-            )
-            conn.commit()
-        conn.close()
-    except Exception:
-        pass   # never let logging break dispatch
-
-
-def get_rejection_summary(date_str: str | None = None) -> dict:
-    """
-    Return gate-level rejection counts for a given date (PT, YYYY-MM-DD).
-    If date_str is None, defaults to today PT.
-    Returns {gate: count, ...} sorted descending by count.
-    Used by dispatch_check to explain zero-pick days.
-    """
-    _date = date_str or _today_pt().isoformat()
-    try:
-        conn = _pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT gate, COUNT(*) as cnt
-                FROM   rejection_log
-                WHERE  bet_date = %s
-                GROUP  BY gate
-                ORDER  BY cnt DESC
-                """,
-                (_date,),
-            )
-            rows = cur.fetchall()
-        conn.close()
-        return {gate: cnt for gate, cnt in rows}
-    except Exception as _e:
-        logger.warning("[RejectionLog] get_rejection_summary failed: %s", _e)
-        return {}
-
-
-
     # ── UD streak state — tracks Underdog Streaks current count ───────────────
     try:
         conn = _pg_conn()
@@ -1778,7 +1669,6 @@ def run_data_hub_tasklet() -> None:
     in-game data and waste API quota.
     """
     _ensure_bet_ledger()       # ensure table exists on every startup
-    _ensure_rejection_log()    # ensure rejection_log table exists on every startup
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
     r = _redis()
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
@@ -1817,20 +1707,6 @@ def run_data_hub_tasklet() -> None:
         logger.info("[DataHub] MLB Stats API cache warm.")
     except Exception as _mlb_err:
         logger.warning("[DataHub] mlb_stats_layer warm failed: %s", _mlb_err)
-
-    # ── PR #340: Pre-warm sportsbook prop reference (once per calendar day) ─────
-    # build_sportsbook_reference() is fully self-gated: after the first call it
-    # returns from memory with zero I/O — safe to call every 15-second cycle.
-    # First call of the day (at DataHub startup or 8 AM streak job) hits Odds API.
-    try:
-        from sportsbook_reference_layer import build_sportsbook_reference as _build_sb_ref  # noqa: PLC0415
-        _sb_ref_count = len(_build_sb_ref())
-        if _sb_ref_count:
-            logger.info("[DataHub] Sportsbook prop reference: %d entries.", _sb_ref_count)
-        else:
-            logger.debug("[DataHub] Sportsbook prop reference not yet available.")
-    except Exception as _sb_warm_err:
-        logger.debug("[DataHub] Sportsbook reference warm skipped: %s", _sb_warm_err)
 
     try:
         from fangraphs_layer import _load as _fg_load, _loaded as _fg_loaded  # noqa: PLC0415
@@ -2154,7 +2030,6 @@ class _BaseAgent:
                     prop["_sim_edge_reasons"] = sim.edge_reasons
                     prop["_sim_starter_prob"] = sim.starter_prob
                     prop["_sim_bullpen_prob"]  = sim.bullpen_prob
-                    prop["_model_source"]     = "simulation_engine"
                     return round(max(5.0, min(95.0, raw)), 2)
             except Exception as _sim_err:
                 logger.debug("[BaseAgent._model_prob] SimEngine error: %s", _sim_err)
@@ -2187,10 +2062,8 @@ class _BaseAgent:
                     prob = float(self.model.predict(dmat)[0])
                     if prob > 1.0 or prob < 0.0:
                         prob = 1.0 / (1.0 + np.exp(-prob))
-                    if prop is not None: prop["_model_source"] = "xgboost"
                     return prob * 100
                 else:
-                    if prop is not None: prop["_model_source"] = "xgboost"
                     return float(self.model.predict_proba(feats)[0][1]) * 100
             except Exception:
                 pass
@@ -2208,7 +2081,6 @@ class _BaseAgent:
                     _prop_override = prop
                 _gp_res = _gp(raw_prop=_prop_override, side=_gp_side, min_edge=-1.0)
                 if _gp_res is not None:
-                    if prop is not None: prop["_model_source"] = "generate_pick"
                     return round(max(5.0, min(95.0, _gp_res["final_prob"] * 100.0)), 2)
             except Exception:
                 pass  # fall through to base_rate_model
@@ -2253,7 +2125,6 @@ class _BaseAgent:
                     raw_p = apply_calibration_governor(raw_p / 100.0, brier) * 100.0
                 except Exception:
                     pass
-            prop["_model_source"] = "heuristic_fallback"
             return round(max(5.0, min(95.0, raw_p)), 2)
 
         # Absolute fallback — no base rate model AND no prop context
@@ -2297,7 +2168,6 @@ class _BaseAgent:
                 except Exception:
                     for _, d in _fb_adjs:
                         raw_p += d
-        if prop is not None: prop["_model_source"] = "heuristic_fallback"
         return round(max(5.0, min(95.0, raw_p)), 2)
 
 
@@ -2614,8 +2484,6 @@ class _BaseAgent:
             # Pass MLBAM ID through for accent-safe grading (Acuña, Peña, etc.)
             "mlbam_id":           prop.get("mlbam_id") or prop.get("player_id"),
             "player_id":          prop.get("player_id") or prop.get("mlbam_id"),
-            # PR #342: tag which prediction engine generated this pick
-            "model_source":       prop.get("_model_source", "heuristic_fallback"),
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
@@ -4207,64 +4075,6 @@ def run_agent_tasklet() -> bool:
     }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 
-    # ── PR #340: Stamp sb_implied_prob + sb_line_gap from sportsbook reference ──
-    # build_sportsbook_reference() returns from memory here (DataHub already warmed it).
-    # No API calls. LineDriftAgent reads sb_implied_prob; XGBoost feature slot 19 reads
-    # sb_line_gap. Both were always 0.0 before this PR because the reference file was missing.
-    _PT_TO_MARKET_STAMP = {
-        "hits":                "batter_hits",
-        "runs":                "batter_runs_scored",
-        "rbis":                "batter_rbis",
-        "rbi":                 "batter_rbis",
-        "total_bases":         "batter_total_bases",
-        "strikeouts":          "pitcher_strikeouts",
-        "pitcher_strikeouts":  "pitcher_strikeouts",
-        "earned_runs":         "pitcher_earned_runs",
-        "pitching_outs":       "pitcher_outs",
-        "hitter_strikeouts":   "batter_strikeouts",
-        "runs_scored":         "batter_runs_scored",
-    }
-    try:
-        from sportsbook_reference_layer import build_sportsbook_reference as _build_sb_ref  # noqa: PLC0415
-        _sb_ref = _build_sb_ref()
-        if _sb_ref:
-            _stamped = 0
-            for _p in props:
-                _pname_raw = (_p.get("player_name") or _p.get("player") or "").strip()
-                _pname_norm = (
-                    _pname_raw.lower()
-                    .replace(".", "").replace("'", "").replace("-", " ").replace("  ", " ")
-                )
-                _ptype = (_p.get("prop_type") or _p.get("stat_type") or "").lower()
-                _mkey  = _PT_TO_MARKET_STAMP.get(_ptype, _ptype)
-                # Direct full-name lookup (Over side → gives implied prob for Over)
-                _ref_o = (
-                    _sb_ref.get((_pname_norm, _mkey, "Over"))
-                    or _sb_ref.get((_pname_norm, _ptype, "Over"))
-                )
-                if _ref_o is None:
-                    # Last-name fallback: scan for partial match
-                    _parts = _pname_norm.split()
-                    _last  = _parts[-1] if _parts else ""
-                    if _last:
-                        for (_rn, _rt, _rs), _rd in _sb_ref.items():
-                            if _rs == "Over" and _rt == _mkey and _rn.split()[-1:] == [_last]:
-                                _ref_o = _rd
-                                break
-                if _ref_o:
-                    _p["sb_implied_prob"] = _ref_o["sb_implied_prob"]
-                    _sb_line  = float(_ref_o.get("line") or _p.get("line") or 0)
-                    _ud_line  = float(_p.get("line") or 0)
-                    # sb_line_gap: negative = DFS line easier than sharp book (signal for Over)
-                    _p["sb_line_gap"] = round(_ud_line - _sb_line, 2)
-                    _stamped += 1
-            logger.info("[AgentTasklet] Sportsbook reference stamped on %d/%d props.",
-                        _stamped, len(props))
-        else:
-            logger.debug("[AgentTasklet] Sportsbook reference empty — sb_implied_prob not stamped.")
-    except Exception as _sb_stamp_err:
-        logger.debug("[AgentTasklet] SB reference stamp skipped: %s", _sb_stamp_err)
-
     # ── Step 3: Stamp game_time_utc / game_state / lookahead_safe on each prop ──
     game_times = (hub.get("context") or {}).get("game_times", {})
     if _LOCK_GATE_AVAILABLE and game_times:
@@ -4322,9 +4132,6 @@ def run_agent_tasklet() -> bool:
                             _bookmaker_margin(_over_o, _under_o) * 100,
                             _MAX_VIG * 100,
                         )
-                        _log_rejection(agent.name, player, prop_type, "",
-                                       "vig_gate",
-                                       f"margin={_bookmaker_margin(_over_o,_under_o)*100:.1f}% > {_MAX_VIG*100:.1f}%")
                         continue
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
@@ -4335,9 +4142,6 @@ def run_agent_tasklet() -> bool:
                                else prop.get("under_american", -120))
                     edge = _underdog_edge(ud_odds, sharp_prob)
                     if edge < MIN_EV_THRESH * 100:
-                        _log_rejection(agent.name, player, prop_type,
-                                       bet.get("side",""), "sharp_edge",
-                                       f"edge={edge:.1f}% < threshold={MIN_EV_THRESH*100:.1f}%")
                         continue
 
                     # WagerBrain: also compute dollar EV for logging
@@ -4363,8 +4167,6 @@ def run_agent_tasklet() -> bool:
         if len(agent_hits) < 2:
             logger.info("[AgentTasklet] %s — %d hit(s) (need ≥2 for a slip).",
                          agent.name, len(agent_hits))
-            _log_rejection(agent.name, "", "", "", "insufficient_hits",
-                           f"hits={len(agent_hits)} < 2 required")
             continue
 
         agent_parlays = _build_agent_parlays(agent_hits, agent.name)
@@ -4491,8 +4293,6 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < 0:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < 0.",
                         agent_name, _combined_ev_check)
-            _log_rejection(agent_name, "", "", "", "negative_ev",
-                           f"combined_ev={_combined_ev_check:.1f}%")
             continue
         # Minimum combined EV floor: slip must be worth playing, not just positive.
         # With correct multipliers (PP 2-leg=3x, PP 3-leg=5x, UD 2-leg=3x, UD 3-leg=6x)
@@ -4501,8 +4301,6 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < _MIN_COMBINED_EV:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < %.1f%% floor.",
                         agent_name, _combined_ev_check, _MIN_COMBINED_EV)
-            _log_rejection(agent_name, "", "", "", "ev_floor",
-                           f"combined_ev={_combined_ev_check:.1f}% < {_MIN_COMBINED_EV:.1f}% floor")
             continue
         # Platform purity gate: every leg in the final slip must share one platform.
         _legs = parlay.get("legs", [])
@@ -4513,14 +4311,10 @@ def run_agent_tasklet() -> bool:
         if len(_leg_platforms) > 1:
             logger.info("[AgentTasklet] %s dropped — mixed platforms in slip: %s",
                         agent_name, _leg_platforms)
-            _log_rejection(agent_name, "", "", "", "platform_purity",
-                           f"platforms={sorted(_leg_platforms)}")
             continue
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
-            _log_rejection(agent_name, "", "", "", "confidence",
-                           f"conf={play_conf:.1f} < {MIN_CONFIDENCE:.0f}")
             continue
 
         # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
@@ -4534,8 +4328,6 @@ def run_agent_tasklet() -> bool:
         if _low_legs:
             logger.info("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
                          agent_name, _min_prob_pct, _low_legs)
-            _log_rejection(agent_name, ",".join(_low_legs), "", "", "min_prob",
-                           f"below {_min_prob_pct:.0f}%: {_low_legs}")
             continue
 
         # Keep only the single highest-EV parlay per agent this cycle
@@ -4575,8 +4367,6 @@ def run_agent_tasklet() -> bool:
                 "[AgentTasklet] %s dropped — direction conflict on '%s %s' "                "(%s already locked %s, this agent wants %s)",
                 _ag, _cp, _cs, _clocker, _clocked, _cwant
             )
-            _log_rejection(_ag, _cp, _cs, _cwant, "direction_dedup",
-                           f"locked={_clocked} by {_clocker}")
         else:
             for _leg in _legs_d:
                 _pkey = (_leg.get("player") or _leg.get("player_name", "")).strip().lower()
@@ -4603,8 +4393,6 @@ def run_agent_tasklet() -> bool:
             try:
                 if not _risk_manager.check_stake(agent_name, _tier_stake_for_risk):
                     logger.warning("[RISK] %s skipped — daily exposure cap reached.", agent_name)
-                    _log_rejection(agent_name, "", "", "", "risk_cap",
-                                   f"stake={_tier_stake_for_risk}")
                     continue
             except Exception as _risk_err:
                 logger.warning("[RISK] check_stake failed for %s: %s — continuing.", agent_name, _risk_err)
@@ -4638,11 +4426,11 @@ def run_agent_tasklet() -> bool:
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
                              units_wagered, mlbam_id, entry_type, discord_sent,
-                             lookahead_safe, model_source)
+                             lookahead_safe)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
                                 ABS(%s), %s, %s, FALSE,
-                                %s, %s)
+                                %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -4665,7 +4453,6 @@ def run_agent_tasklet() -> bool:
                             # so XGBoost training has an audit trail of pre-game vs in-game picks.
                             # Default True (safe) if not stamped — conservative for training integrity.
                             bool(_sl.get("lookahead_safe", True)),
-                            _sl.get("model_source", "heuristic_fallback"),  # PR #342
                         ),
                     )
             _pg2.commit()
@@ -5742,54 +5529,9 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
 def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     """
-    PR #340: Returns American odds for player+prop_type+side from the sportsbook
-    prop reference (build_sportsbook_reference).  Replaces the broken hub:market.odds
-    scan which only contained game-level lines and never matched player names.
-
-    Priority: Pinnacle > DraftKings > FanDuel > BetMGM.
-    Returns American odds int or None if no data available.
+    Best-effort closing line from Redis market cache (hub:market odds list).
+    Scans sharp book markets for player name match. Returns American odds int or None.
     """
-    try:
-        from sportsbook_reference_layer import build_sportsbook_reference as _bsr, STAT_TO_MARKET  # noqa: PLC0415
-        ref = _bsr()
-        if not ref:
-            return None
-
-        # Normalise inputs
-        player_norm = (
-            player.lower().strip()
-            .replace(".", "").replace("'", "").replace("-", " ").replace("  ", " ")
-        )
-        mkey       = STAT_TO_MARKET.get(prop_type.lower(), prop_type.lower())
-        side_title = side.title()   # "Over" or "Under"
-
-        # Direct lookup
-        entry = (
-            ref.get((player_norm, mkey, side_title))
-            or ref.get((player_norm, prop_type.lower(), side_title))
-        )
-        if entry is None:
-            # Last-name fallback
-            parts = player_norm.split()
-            last  = parts[-1] if parts else ""
-            if last:
-                for (pn, pt, ps), data in ref.items():
-                    if ps == side_title and pt == mkey and pn.split()[-1:] == [last]:
-                        entry = data
-                        break
-
-        if entry is None:
-            return None
-
-        # Return the American odds for the requested side
-        if side_title == "Over":
-            return entry.get("over_odds")
-        else:
-            return entry.get("under_odds")
-    except Exception:
-        pass
-
-    # Legacy fallback: scan hub:market.odds (game-level only — usually None for props)
     try:
         r   = _redis()
         raw = r.get("hub:market")
@@ -5798,6 +5540,7 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
         market    = json.loads(raw)
         odds_list = market.get("odds", [])
         player_lc = player.lower()
+
         for game in odds_list:
             if not isinstance(game, dict):
                 continue
