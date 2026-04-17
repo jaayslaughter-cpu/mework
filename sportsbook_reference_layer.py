@@ -1,144 +1,104 @@
 """
 sportsbook_reference_layer.py
-==============================
-Layer 7 — Sharp Sportsbook Reference (The Odds API)
+=============================
+Fetches MLB player prop lines from The Odds API once per calendar day.
 
-Fetches live MLB player prop lines from DraftKings, FanDuel, BetMGM and
-strips the vig to produce fair-value implied probabilities. Used as a sharp
-market reference signal to validate DFS prop edges and power LineValueAgent.
+Gate architecture (checked in order, fastest first):
+  1. In-memory dict            — zero I/O, sub-microsecond
+  2. /tmp/sb_ref_{date}.json   — file cache, survives within Railway session
+  3. Postgres sportsbook_props_cache table — survives Railway restarts
+  4. Live Odds API fetch (events → per-event prop odds) — once per day only
 
-Key:  673bf195062e60e666399be40f763545 (override via ODDS_API_KEY env var)
-Quota: ~16 requests per day (1 event list + ~15 per-game prop calls)
+Public interface:
+  build_sportsbook_reference(date_int=None) -> dict
+    Returns {
+      (player_norm, market_key, "Over"|"Under"): {
+        "sb_implied_prob": float,   # vig-stripped, 0–1 range
+        "line": float,
+        "bookmaker": str,
+        "over_odds": int | None,
+        "under_odds": int | None,
+      }
+    }
+    Returns {} gracefully if no data available — never raises.
 
-Markets pulled:
-    pitcher_strikeouts, batter_hits, batter_total_bases,
-    batter_home_runs, batter_rbis, batter_stolen_bases, batter_runs_scored
+Called from:
+  - orchestrator.job_streak()  at 8:00 AM PT  →  first fetch of the day
+  - run_data_hub_tasklet()     warm section    →  free cache hit every 15s
+  - per-prop enrichment stamp  in run_agent_tasklet()  →  free memory hit
 
-Output: enrich_props_with_sportsbook(props) adds to each prop dict:
-    sb_implied_prob       – vig-stripped sharp market probability (Over side)
-    sb_line               – sportsbook consensus line (0.0 if not found)
-    sb_line_gap           – prop["line"] - sb_line (negative = DFS line is
-                            more favorable for Over; positive = DFS harder)
-    sb_bookmakers         – list of bookmakers contributing to consensus
-    sb_implied_prob_over  – vig-stripped Over probability
-    sb_implied_prob_under – vig-stripped Under probability
+DIRECTIVE: No Odds API calls inside the 15-second DataHub loop.
+  The in-memory gate (_fetch_date == date_int) guarantees the API is
+  called exactly once per calendar day regardless of invocation frequency.
 """
-
 from __future__ import annotations
 
 import json
 import logging
 import os
 import time
-from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
+from typing import Optional
 
+import pytz
 import requests
 
-logger = logging.getLogger("propiq.sb_ref")
+log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+_PT = pytz.timezone("America/Los_Angeles")
 
-# Keys loaded from env vars only — no hardcoded fallbacks in repo
-# Set ODDS_API_KEY and ODDS_API_KEY_2 in Railway environment variables
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-_ODDS_KEY_FALLBACKS = [
-    os.getenv("ODDS_API_KEY",   ""),   # primary key
-    os.getenv("ODDS_API_KEY_2", ""),   # secondary key
-    os.getenv("ODDS_API_KEY_3", ""),   # tertiary key
+# ── Odds API config ────────────────────────────────────────────────────────────
+_ODDS_KEY: str = os.getenv("ODDS_API_KEY_2") or os.getenv("ODDS_API_KEY_3") or ""
+_BASE_URL = "https://api.the-odds-api.com/v4"
+_BOOKMAKERS = "pinnacle,draftkings,fanduel,betmgm"
+_PRIORITY: dict[str, int] = {"pinnacle": 0, "draftkings": 1, "fanduel": 2, "betmgm": 3}
+
+# Prop markets to fetch.  Excluded per PropIQ directive:
+#   stolen_bases, home_runs, walks, walks_allowed, doubles, triples, singles
+_MARKETS: list[str] = [
+    "pitcher_strikeouts",
+    "pitcher_hits_allowed",
+    "pitcher_earned_runs",
+    "pitcher_outs",
+    "batter_hits",
+    "batter_total_bases",
+    "batter_rbis",
+    "batter_runs_scored",
+    "batter_strikeouts",   # hitter_strikeouts in PropIQ
 ]
-ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-SPORT         = "baseball_mlb"
+_MARKETS_STR = ",".join(_MARKETS)
 
-# The Odds API market keys → our internal prop_type
-_MARKET_MAP: dict[str, str] = {
-    # batter_home_runs and batter_stolen_bases removed — not approved prop types
-    "pitcher_strikeouts":  "strikeouts",
-    "batter_hits":         "hits",
-    "batter_total_bases":  "total_bases",
-    "batter_rbis":         "rbis",
-    "batter_runs_scored":  "runs",
+# PropIQ internal stat_type  →  Odds API market key
+STAT_TO_MARKET: dict[str, str] = {
+    "strikeouts":          "pitcher_strikeouts",
+    "pitcher_strikeouts":  "pitcher_strikeouts",
+    "hits_allowed":        "pitcher_hits_allowed",
+    "earned_runs":         "pitcher_earned_runs",
+    "pitching_outs":       "pitcher_outs",
+    "hitter_strikeouts":   "batter_strikeouts",
+    "hits":                "batter_hits",
+    "total_bases":         "batter_total_bases",
+    "rbis":                "batter_rbis",
+    "rbi":                 "batter_rbis",
+    "runs":                "batter_runs_scored",
+    "runs_scored":         "batter_runs_scored",
 }
 
-_MARKETS_PARAM = ",".join(_MARKET_MAP.keys())
-
-# Preferred bookmakers — sharpest first (sharp books set market)
-_PREFERRED_BOOKS = [
-    "draftkings", "fanduel", "betmgm", "williamhill_us",
-    "pointsbetus", "betrivers", "unibet_us", "bovada",
-]
-
-# Daily disk cache to avoid burning quota on multiple runs
-_CACHE_DIR = "/tmp"
-
-_REQUEST_HEADERS = {
-    "User-Agent": "PropIQ/1.0",
-    "Accept":     "application/json",
-}
-
-# Jitter between per-game API calls (seconds)
-_CALL_JITTER = 0.25
+# ── In-memory gate ─────────────────────────────────────────────────────────────
+_mem_ref: dict = {}
+_fetch_date: int = 0       # YYYYMMDD int; 0 = not yet fetched this session
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+# ── Utility helpers ────────────────────────────────────────────────────────────
 
-def _cache_path(date: str) -> str:
-    return os.path.join(_CACHE_DIR, f"sb_ref_{date}.json")
+def _today_int() -> int:
+    return int(datetime.now(_PT).strftime("%Y%m%d"))
 
 
-def _load_cache(date: str) -> dict | None:
-    path = _cache_path(date)
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        logger.info("[SB_REF] Cache hit — %d reference entries", len(data))
-        return data
-    except Exception as exc:
-        logger.warning("[SB_REF] Cache load failed: %s", exc)
-        return None
-
-
-def _save_cache(date: str, data: dict) -> None:
-    try:
-        with open(_cache_path(date), "w") as f:
-            json.dump(data, f)
-        logger.info("[SB_REF] Cache saved — %d entries", len(data))
-    except Exception as exc:
-        logger.warning("[SB_REF] Cache save failed: %s", exc)
-
-
-def _strip_vig(over_dec: float, under_dec: float) -> tuple[float, float]:
-    """
-    Two-way vig removal using decimal odds.
-
-    Removes the bookmaker's margin so both sides sum to 1.0.
-    Returns (fair_over_prob, fair_under_prob).
-    """
-    if over_dec <= 1.0 or under_dec <= 1.0:
-        return 0.5, 0.5
-    implied_over  = 1.0 / over_dec
-    implied_under = 1.0 / under_dec
-    overround     = implied_over + implied_under
-    if overround <= 0:
-        return 0.5, 0.5
+def _normalize(name: str) -> str:
+    """Normalise player name for key matching."""
     return (
-        round(implied_over  / overround, 5),
-        round(implied_under / overround, 5),
-    )
-
-
-def _normalize_name(name: str) -> str:
-    """Lowercase and strip punctuation for fuzzy name matching."""
-    return (
-        name.lower()
-        .strip()
+        name.lower().strip()
         .replace(".", "")
         .replace("'", "")
         .replace("-", " ")
@@ -146,512 +106,333 @@ def _normalize_name(name: str) -> str:
     )
 
 
-def _log_quota(response: requests.Response) -> None:
-    """Log remaining API quota from response headers. Post Discord alert when low."""
-    remaining_str = response.headers.get("x-requests-remaining", "")
-    used_str      = response.headers.get("x-requests-used", "?")
-    logger.info("[SB_REF] Quota — used: %s | remaining: %s", used_str, remaining_str or "?")
+def _american_to_implied(odds: int) -> float:
+    """American odds → implied probability (0–1)."""
+    if odds >= 0:
+        return 100.0 / (odds + 100.0)
+    return abs(odds) / (abs(odds) + 100.0)
 
+
+def _vig_strip(over_odds: int, under_odds: int) -> tuple[float, float]:
+    """Return vig-stripped (over_implied, under_implied) as 0–1 floats."""
+    po = _american_to_implied(over_odds)
+    pu = _american_to_implied(under_odds)
+    total = po + pu
+    if total <= 0:
+        return 0.5, 0.5
+    return round(po / total, 6), round(pu / total, 6)
+
+
+def _tmp_path(date_int: int) -> str:
+    return f"/tmp/sb_ref_{date_int}.json"
+
+
+# ── Postgres helpers ───────────────────────────────────────────────────────────
+
+def _pg_conn():
+    import psycopg2
+    return psycopg2.connect(os.getenv("DATABASE_URL", ""))
+
+
+def _ensure_table() -> None:
     try:
-        remaining = int(remaining_str)
-    except (ValueError, TypeError):
-        return  # header absent — no alert possible
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS sportsbook_props_cache (
+                        id          SERIAL PRIMARY KEY,
+                        fetch_date  INTEGER  NOT NULL,
+                        player_name TEXT     NOT NULL,
+                        market_key  TEXT     NOT NULL,
+                        side        TEXT     NOT NULL,
+                        sb_implied  FLOAT    NOT NULL,
+                        line        FLOAT    NOT NULL,
+                        bookmaker   TEXT     NOT NULL,
+                        over_odds   INTEGER,
+                        under_odds  INTEGER,
+                        created_at  TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(fetch_date, player_name, market_key, side, bookmaker)
+                    )
+                """)
+            conn.commit()
+    except Exception as exc:
+        log.warning("[SBRef] _ensure_table failed: %s", exc)
 
-    if remaining >= 200:
-        return  # healthy — no alert needed
 
-    level   = "critical" if remaining < 50 else "warning"
-    color   = 0xE74C3C  if remaining < 50 else 0xF4A300
-    message = (
-        f"🚨 **OddsAPI Quota {level.upper()}** — {remaining} requests remaining!\n"
-        f"Used: {used_str} · Remaining: {remaining}\n"
-        + ("⛔ Sportsbook reference layer will shut down soon." if remaining < 50
-           else "⚠️ Consider reducing refresh frequency.")
-    )
-
-    # Redis dedup — fire at most once per hour per level
+def _pg_load(date_int: int) -> dict:
+    ref: dict = {}
     try:
-        import redis as _redis
-        _r = _redis.from_url(os.getenv("REDIS_URL", ""))
-        _dedup_key = f"oddsapi_quota_alert_{level}"
-        if _r.exists(_dedup_key):
-            return  # already alerted this hour
-        _r.setex(_dedup_key, 3600, "1")
-    except Exception:
-        pass  # Redis unavailable — fire alert anyway (better noisy than silent)
-
-    # Post to Discord
-    try:
-        webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
-        if webhook:
-            requests.post(
-                webhook,
-                json={"embeds": [{"title": f"OddsAPI Quota {level.title()}", "description": message, "color": color}]},
-                headers={"Content-Type": "application/json"},
-                timeout=8,
-            )
-    except Exception as _exc:
-        logger.warning("[SB_REF] Quota Discord alert failed: %s", _exc)
-
-
-# ---------------------------------------------------------------------------
-# API calls
-# ---------------------------------------------------------------------------
-
-def _fetch_events(date: str, api_key: str = "") -> list[dict]:
-    """
-    Fetch today's MLB game event IDs from The Odds API.
-    Consumes 1 API request.
-    """
-    try:
-        resp = requests.get(
-            f"{ODDS_API_BASE}/sports/{SPORT}/events",
-            params={
-                "apiKey":     api_key or ODDS_API_KEY,
-                "dateFormat": "iso",
-            },
-            headers=_REQUEST_HEADERS,
-            timeout=15,
-        )
-        _log_quota(resp)
-        # Fallback key rotation on auth failure
-        if resp.status_code in (401, 403):
-            for fallback_key in _ODDS_KEY_FALLBACKS:
-                resp = requests.get(
-                    f"{ODDS_API_BASE}/sports/{SPORT}/events",
-                    params={"apiKey": fallback_key, "dateFormat": "iso"},
-                    headers=_REQUEST_HEADERS,
-                    timeout=15,
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT player_name, market_key, side, sb_implied, line, "
+                    "bookmaker, over_odds, under_odds "
+                    "FROM sportsbook_props_cache WHERE fetch_date = %s",
+                    (date_int,),
                 )
-                if resp.status_code == 200:
-                    break
-        if resp.status_code != 200:
-            logger.warning(
-                "[SB_REF] Events fetch HTTP %d: %s",
-                resp.status_code, resp.text[:200],
-            )
-            return []
-        events = resp.json()
-        # Build a set of acceptable dates: PT today + PT tomorrow (covers evening games
-        # that cross midnight UTC, e.g. 7 PM PT = 2 AM UTC next day)
-        from zoneinfo import ZoneInfo as _ZI
-        import datetime as _dtmod
-        _pt_now = _dtmod.datetime.now(_ZI("America/Los_Angeles"))
-        _pt_today = _pt_now.date().isoformat()
-        _pt_tomorrow = (_pt_now.date() + _dtmod.timedelta(days=1)).isoformat()
-        _acceptable_dates = {_pt_today, _pt_tomorrow, date}
-        todays = [
-            e for e in events
-            if any(e.get("commence_time", "").startswith(d) for d in _acceptable_dates)
-        ]
-        logger.info(
-            "[SB_REF] %d events today (%s+window) from %d total",
-            len(todays), _pt_today, len(events),
-        )
-        return todays
+                for row in cur.fetchall():
+                    pn, mk, side, si, line, bk, oo, uo = row
+                    k = (pn, mk, side)
+                    # Keep the sharpest / highest-priority bookmaker entry
+                    existing = ref.get(k)
+                    if existing is None or _PRIORITY.get(bk, 99) < _PRIORITY.get(existing["bookmaker"], 99):
+                        ref[k] = {
+                            "sb_implied_prob": float(si),
+                            "line": float(line),
+                            "bookmaker": bk,
+                            "over_odds": oo,
+                            "under_odds": uo,
+                        }
     except Exception as exc:
-        logger.warning("[SB_REF] Events fetch failed: %s", exc)
+        log.warning("[SBRef] PG load failed: %s", exc)
+    return ref
+
+
+def _pg_save(date_int: int, rows: list[dict]) -> None:
+    if not rows:
+        return
+    try:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                for r in rows:
+                    cur.execute(
+                        """
+                        INSERT INTO sportsbook_props_cache
+                            (fetch_date, player_name, market_key, side,
+                             sb_implied, line, bookmaker, over_odds, under_odds)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (fetch_date, player_name, market_key, side, bookmaker)
+                        DO NOTHING
+                        """,
+                        (
+                            date_int,
+                            r["player_name"], r["market_key"], r["side"],
+                            r["sb_implied_prob"], r["line"], r["bookmaker"],
+                            r.get("over_odds"), r.get("under_odds"),
+                        ),
+                    )
+            conn.commit()
+        log.info("[SBRef] Saved %d rows to Postgres for %d", len(rows), date_int)
+    except Exception as exc:
+        log.warning("[SBRef] PG save failed: %s", exc)
+
+
+# ── File cache helpers ─────────────────────────────────────────────────────────
+
+def _file_load(date_int: int) -> dict:
+    path = _tmp_path(date_int)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            raw: dict = json.load(f)
+        # JSON cannot store tuple keys — we serialised them as JSON arrays
+        return {tuple(k): v for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def _file_save(date_int: int, ref: dict) -> None:
+    try:
+        path = _tmp_path(date_int)
+        serialisable = {json.dumps(list(k)): v for k, v in ref.items()}
+        with open(path, "w") as f:
+            json.dump(serialisable, f)
+    except Exception as exc:
+        log.debug("[SBRef] File save failed: %s", exc)
+
+
+# ── Live Odds API fetch ────────────────────────────────────────────────────────
+
+def _fetch_events() -> list[dict]:
+    """Step 1: retrieve today's MLB event IDs."""
+    if not _ODDS_KEY:
+        return []
+    try:
+        resp = requests.get(
+            f"{_BASE_URL}/sports/baseball_mlb/events",
+            params={"apiKey": _ODDS_KEY},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        events: list[dict] = resp.json()
+        log.info("[SBRef] %d MLB events from Odds API", len(events))
+        return events
+    except Exception as exc:
+        log.error("[SBRef] Event fetch failed: %s", exc)
         return []
 
 
-def _fetch_event_odds(event_id: str, api_key: str = "") -> list[dict]:
-    """
-    Fetch player prop odds for a single game event.
-    Consumes 1 API request. Returns list of bookmaker dicts.
+def _fetch_event_props(event_id: str) -> list[dict]:
+    """Step 2: fetch vig-stripped prop odds for one event.
+    Returns a flat list of row dicts ready for _pg_save / reference dict.
     """
     try:
         resp = requests.get(
-            f"{ODDS_API_BASE}/sports/{SPORT}/events/{event_id}/odds",
+            f"{_BASE_URL}/sports/baseball_mlb/events/{event_id}/odds",
             params={
-                "apiKey":     api_key or ODDS_API_KEY,
-                "regions":    "us",
-                "markets":    _MARKETS_PARAM,
-                "oddsFormat": "decimal",
+                "apiKey": _ODDS_KEY,
+                "regions": "us",
+                "markets": _MARKETS_STR,
+                "bookmakers": _BOOKMAKERS,
+                "oddsFormat": "american",
             },
-            headers=_REQUEST_HEADERS,
-            timeout=15,
+            timeout=20,
         )
-        if resp.status_code == 200:
-            logger.debug("[SB_REF] Event %s — %d bookmakers", event_id,
-                         len(resp.json().get("bookmakers", [])))
-            return resp.json().get("bookmakers", [])
-        elif resp.status_code == 422:
-            # No player props available for this game (early-morning, not yet posted)
-            logger.debug("[SB_REF] Event %s — no player props yet", event_id)
+        if resp.status_code == 422:
+            # Prop markets not yet posted for this event — normal early in the day
             return []
-        else:
-            logger.warning(
-                "[SB_REF] Event %s HTTP %d: %s",
-                event_id, resp.status_code, resp.text[:150],
-            )
-            return []
+        resp.raise_for_status()
+        data: dict = resp.json()
     except Exception as exc:
-        logger.warning("[SB_REF] Event %s fetch failed: %s", event_id, exc)
+        log.debug("[SBRef] Props fetch failed for %s: %s", event_id, exc)
         return []
 
+    # Parse outcomes into per-(player, market, bookmaker) rows, then vig-strip
+    rows_by_key: dict[tuple, dict] = {}
+    for bookmaker in data.get("bookmakers", []):
+        bk = bookmaker.get("key", "")
+        for market in bookmaker.get("markets", []):
+            mk = market.get("key", "")
+            if mk not in _MARKETS:
+                continue
 
-# ---------------------------------------------------------------------------
-# Core: build the sportsbook reference lookup
-# ---------------------------------------------------------------------------
-
-
-def _build_reference_from_draftedge() -> dict[tuple, dict]:
-    """
-    Build a sportsbook reference dict from DraftEdge projections.
-    Used when The Odds API is unavailable or quota is exhausted.
-
-    DraftEdge gives per-player probability for hits, HR, K, SB, R, RBI.
-    We convert these to the same (player, prop_type, side) keyed format
-    that enrich_props_with_sportsbook() expects.
-
-    Free, no key, daily parquet cache, zero quota cost.
-    """
-    try:
-        from draftedge_scraper import fetch_all_projections  # noqa: PLC0415
-        data = fetch_all_projections()
-        reference: dict[tuple, dict] = {}
-
-        batters = data.get("batters")
-        if batters is not None and not batters.empty:
-            for _, row in batters.iterrows():
-                name = str(row.get("player_name", "")).strip().lower()
-                if not name:
+            by_player: dict[str, dict] = {}
+            for outcome in market.get("outcomes", []):
+                pname = _normalize(outcome.get("name", ""))
+                desc = (outcome.get("description") or "").title()   # "Over" / "Under"
+                point = outcome.get("point")
+                price = outcome.get("price")
+                if not pname or point is None or desc not in ("Over", "Under"):
                     continue
-                for prop_type, pct_col, line_default in [
-                    ("batter_hits",          "hit_pct",  1.5),
-                    ("batter_runs_scored",    "run_pct",  0.5),
-                    ("batter_rbis",           "rbi_pct",  0.5),
-                ]:
-                    prob = float(row.get(pct_col, 0) or 0)
-                    if prob <= 0:
-                        continue
-                    reference[(name, prop_type, "over")] = {
-                        "sb_implied_prob":       round(prob, 4),
-                        "sb_implied_prob_over":  round(prob, 4),
-                        "sb_implied_prob_under": round(1 - prob, 4),
-                        "sb_line":               line_default,
-                        "bookmakers":            ["draftedge"],
-                    }
-                    reference[(name, prop_type, "under")] = {
-                        "sb_implied_prob":       round(1 - prob, 4),
-                        "sb_implied_prob_over":  round(prob, 4),
-                        "sb_implied_prob_under": round(1 - prob, 4),
-                        "sb_line":               line_default,
-                        "bookmakers":            ["draftedge"],
-                    }
+                if pname not in by_player:
+                    by_player[pname] = {"line": float(point), "over_odds": None, "under_odds": None}
+                if desc == "Over":
+                    by_player[pname]["over_odds"] = int(price) if price is not None else None
+                    by_player[pname]["line"] = float(point)
+                else:
+                    by_player[pname]["under_odds"] = int(price) if price is not None else None
 
-        pitchers = data.get("pitchers")
-        if pitchers is not None and not pitchers.empty:
-            for _, row in pitchers.iterrows():
-                name = str(row.get("player_name", "")).strip().lower()
-                if not name:
-                    continue
-                k_pct = float(row.get("k_pct", 0) or 0)
-                if k_pct > 0:
-                    reference[(name, "pitcher_strikeouts", "over")] = {
-                        "sb_implied_prob":       round(k_pct, 4),
-                        "sb_implied_prob_over":  round(k_pct, 4),
-                        "sb_implied_prob_under": round(1 - k_pct, 4),
-                        "sb_line":               4.5,
-                        "bookmakers":            ["draftedge"],
-                    }
+            for pname, pd in by_player.items():
+                over_o = pd.get("over_odds")
+                under_o = pd.get("under_odds")
+                if over_o is None or under_o is None:
+                    continue  # Need both sides for vig-strip
+                ovi, uvi = _vig_strip(over_o, under_o)
+                line = pd["line"]
+                for side, si in (("Over", ovi), ("Under", uvi)):
+                    rk = (pname, mk, bk, side)
+                    existing = rows_by_key.get(rk)
+                    if existing is None or _PRIORITY.get(bk, 99) < _PRIORITY.get(existing["bookmaker"], 99):
+                        rows_by_key[rk] = {
+                            "player_name": pname,
+                            "market_key":  mk,
+                            "side":        side,
+                            "sb_implied_prob": si,
+                            "line":        line,
+                            "bookmaker":   bk,
+                            "over_odds":   over_o,
+                            "under_odds":  under_o,
+                        }
 
-        logger.info("[SB_REF] DraftEdge fallback: %d prop references built", len(reference))
-        return reference
-
-    except Exception as exc:
-        logger.warning("[SB_REF] DraftEdge fallback failed: %s", exc)
-        return {}
+    return list(rows_by_key.values())
 
 
-def build_sportsbook_reference(date: str | None = None) -> dict[tuple, dict]:
-    """
-    Fetch today's MLB player props.
-
-    Priority chain:
-      1. Disk cache  — free re-use of today's already-fetched data
-      2. The Odds API — real sportsbook lines (only if key set + quota available)
-      3. DraftEdge    — free per-player probability projections, no key needed
-
-    Returns a lookup dict keyed by (player_name_lower, prop_type, side):
-        {
-          "sb_implied_prob": float,  # probability (0-1)
-          "sb_line":         float,  # line value
-          "bookmakers":      list,   # source bookmakers
-        }
-    Returns empty dict on total failure (Layer 7 is always additive/optional).
-    """
-    date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # ── Step 1: Disk cache ─────────────────────────────────────────────────
-    cached = _load_cache(date)
-    if cached is not None:
-        logger.info("[SB_REF] Loaded from cache")
-        return {tuple(json.loads(k)): v for k, v in cached.items()}
-
-    # ── Step 2: The Odds API (only if key is available) ────────────────────
-    _active_keys = [k for k in _ODDS_KEY_FALLBACKS if k]
-    if not _active_keys:
-        logger.info("[SB_REF] No API keys available — using DraftEdge fallback")
-        return _build_reference_from_draftedge()
-    _working_key = _active_keys[0]
-
-    events = _fetch_events(date, api_key=_working_key)
+def _fetch_live(date_int: int) -> dict:
+    """Full live fetch: events → per-event props.  Returns reference dict."""
+    events = _fetch_events()
     if not events:
-        logger.info("[SB_REF] No Odds API events — using DraftEdge fallback")
-        return _build_reference_from_draftedge()
-
-    # ── Step 3: Fetch player props per game ──────────────────────────────
-    # raw_entries: {(player_norm, prop_type, side, line)} → [(fair_prob, bm_title)]
-    raw_entries: dict[tuple, list[tuple[float, str]]] = defaultdict(list)
-
-    for event in events:
-        event_id = event.get("id")
-        if not event_id:
-            continue
-
-        bookmakers = _fetch_event_odds(event_id, api_key=_working_key)
-        time.sleep(_CALL_JITTER)
-
-        for bm in bookmakers:
-            bm_key   = bm.get("key", "")
-            bm_title = bm.get("title", bm_key)
-
-            for market in bm.get("markets", []):
-                market_key = market.get("key", "")
-                prop_type  = _MARKET_MAP.get(market_key)
-                if not prop_type:
-                    continue
-
-                # Group outcomes by player + point to get Over/Under pairs
-                by_player: dict[tuple[str, float], dict[str, float]] = {}
-
-                for outcome in market.get("outcomes", []):
-                    side   = outcome.get("name", "")       # "Over" / "Under"
-                    desc   = outcome.get("description", "")  # player name
-                    point  = float(outcome.get("point") or 0)
-                    price  = float(outcome.get("price") or 0)
-
-                    if not desc or side not in ("Over", "Under"):
-                        continue
-                    if point <= 0 or price <= 1.0:
-                        continue
-
-                    player_norm = _normalize_name(desc)
-                    key         = (player_norm, point)
-                    if key not in by_player:
-                        by_player[key] = {}
-                    by_player[key][side] = price
-
-                # Strip vig and record both sides
-                for (player_norm, point), sides in by_player.items():
-                    over_dec  = sides.get("Over",  0.0)
-                    under_dec = sides.get("Under", 0.0)
-                    if not over_dec or not under_dec:
-                        continue
-
-                    fair_over, fair_under = _strip_vig(over_dec, under_dec)
-                    raw_entries[(player_norm, prop_type, "Over",  point)].append(
-                        (fair_over,  bm_title)
-                    )
-                    raw_entries[(player_norm, prop_type, "Under", point)].append(
-                        (fair_under, bm_title)
-                    )
-
-    if not raw_entries:
-        logger.warning("[SB_REF] No prop outcomes parsed — check market availability")
         return {}
 
-    # ── Step 3: Aggregate across bookmakers ──────────────────────────────
-    # Group by (player, prop_type, side) and pick the most-covered line
-    grouped: dict[tuple[str, str, str], dict[float, list]] = {}
-
-    for (player_norm, prop_type, side, line), entries in raw_entries.items():
-        key = (player_norm, prop_type, side)
-        if key not in grouped:
-            grouped[key] = {}
-        if line not in grouped[key]:
-            grouped[key][line] = []
-        grouped[key][line].extend(entries)
-
-    reference: dict[tuple, dict] = {}
-
-    for (player_norm, prop_type, side), lines_data in grouped.items():
-        # Pick line with the most bookmaker coverage
-        best_line  = max(lines_data.keys(), key=lambda l: len(lines_data[l]))
-        entries    = lines_data[best_line]
-        avg_prob   = sum(p for p, _ in entries) / len(entries)
-        books      = list({bm for _, bm in entries})
-
-        reference[(player_norm, prop_type, side)] = {
-            "sb_implied_prob": round(avg_prob, 4),
-            "sb_line":         best_line,
-            "bookmakers":      books,
-        }
-
-    logger.info(
-        "[SB_REF] Reference built — %d player/prop/side combos from %d events",
-        len(reference), len(events),
-    )
-
-    # ── Cache to disk ─────────────────────────────────────────────────────
-    _save_cache(
-        date,
-        {json.dumps(list(k)): v for k, v in reference.items()},
-    )
-
-    return reference
-
-
-# ---------------------------------------------------------------------------
-# Public interface: enrich raw props list (called from live_dispatcher.py)
-# ---------------------------------------------------------------------------
-
-_RAW_STAT_TO_PROP: dict[str, str] = {
-    # home_runs and stolen_bases removed — not approved prop types
-    "strikeouts":           "strikeouts",
-    "pitcher strikeouts":   "strikeouts",
-    "hits":                 "hits",
-    "rbis":                 "rbis",
-    "rbi":                  "rbis",
-    "total bases":          "total_bases",
-    "total_bases":          "total_bases",
-    "runs":                 "runs",
-    "hits+runs+rbis":       "hits_runs_rbis",
-    "hits + runs + rbis":   "hits_runs_rbis",
-    "earned runs":          "earned_runs",
-    "earned runs allowed":  "earned_runs",
-    "earned_runs":          "earned_runs",
-    "hits_runs_rbis":       "hits_runs_rbis",   # underscored form from UD/PP props
-    "pitching_outs":        "pitching_outs",    # add pitching_outs for completeness
-}
-
-
-def enrich_props_with_sportsbook(
-    props: list[dict],
-    date: str | None = None,
-) -> list[dict]:
-    """
-    Add sportsbook reference fields to each prop dict in-place.
-
-    Fields added per prop:
-        sb_implied_prob       – vig-stripped sportsbook probability (Over side)
-        sb_implied_prob_over  – explicit Over probability
-        sb_implied_prob_under – explicit Under probability
-        sb_line               – sportsbook consensus line
-        sb_line_gap           – prop["line"] - sb_line
-                                Negative = DFS line is lower (favorable for Over)
-                                Positive = DFS line is higher (favorable for Under)
-        sb_bookmakers         – list of contributing bookmakers
-
-    Matching uses normalized player name. Falls back to last-name if no full
-    match found. Unmatched props get 0.0 defaults (Layer 7 is always additive).
-    """
-    if not props:
-        return props
-
-    date      = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    reference = build_sportsbook_reference(date)
-
-    if not reference:
-        logger.warning("[SB_REF] Empty reference — props pass through unchanged")
-        # Set defaults on all props so downstream code can safely read these fields
-        for prop in props:
-            prop.setdefault("sb_implied_prob",       0.0)
-            prop.setdefault("sb_implied_prob_over",  0.0)
-            prop.setdefault("sb_implied_prob_under", 0.0)
-            prop.setdefault("sb_line",               0.0)
-            prop.setdefault("sb_line_gap",           0.0)
-            prop.setdefault("sb_bookmakers",          [])
-        return props
-
-    # Build a last-name index for fallback matching
-    # {last_name → set of (player_norm, prop_type, side)}
-    _last_name_idx: dict[str, set] = defaultdict(set)
-    for (player_norm, prop_type, side) in reference:
-        parts = player_norm.split()
-        if parts:
-            _last_name_idx[parts[-1]].add((player_norm, prop_type, side))
-
-    matched = 0
-    for prop in props:
-        # Initialize defaults
-        prop["sb_implied_prob"]       = 0.0
-        prop["sb_implied_prob_over"]  = 0.0
-        prop["sb_implied_prob_under"] = 0.0
-        prop["sb_line"]               = 0.0
-        prop["sb_line_gap"]           = 0.0
-        prop["sb_bookmakers"]         = []
-
-        raw_stat  = prop.get("stat_type") or prop.get("prop_type", "")
-        player    = prop.get("player_name", "")
-        dfs_line  = float(prop.get("line") or 0)
-        prop_type = _RAW_STAT_TO_PROP.get(raw_stat.strip().lower())
-
-        if not prop_type or not player or dfs_line <= 0:
+    all_rows: list[dict] = []
+    for event in events[:20]:   # Cap at 20 events — full MLB slate
+        eid = event.get("id")
+        if not eid:
             continue
+        rows = _fetch_event_props(eid)
+        all_rows.extend(rows)
+        time.sleep(0.1)         # Courtesy pause — well within Odds API rate limits
 
-        player_norm = _normalize_name(player)
+    log.info("[SBRef] Fetched %d prop lines from Odds API for %d", len(all_rows), date_int)
+    if not all_rows:
+        return {}
 
-        # Map internal prop_type to Odds API / DraftEdge market key
-        # DraftEdge stores "batter_hits" not "hits", etc.
-        _PT_TO_MKT = {
-            "hits":        "batter_hits",
-            "runs":        "batter_runs_scored",
-            "rbis":        "batter_rbis",
-            "rbi":         "batter_rbis",
-            "total_bases": "batter_total_bases",
-            "strikeouts":  "pitcher_strikeouts",
-        }
-        market_key = _PT_TO_MKT.get(prop_type, prop_type)
+    # Build reference dict — best bookmaker wins per (player, market, side) key
+    ref: dict = {}
+    for r in all_rows:
+        k = (r["player_name"], r["market_key"], r["side"])
+        existing = ref.get(k)
+        if existing is None or _PRIORITY.get(r["bookmaker"], 99) < _PRIORITY.get(existing["bookmaker"], 99):
+            ref[k] = {
+                "sb_implied_prob": r["sb_implied_prob"],
+                "line":            r["line"],
+                "bookmaker":       r["bookmaker"],
+                "over_odds":       r["over_odds"],
+                "under_odds":      r["under_odds"],
+            }
+    return ref
 
-        # Try both sides and attach results
-        side_probs: dict[str, dict] = {}
-        for side in ("Over", "Under"):
-            # Try internal prop_type, then market key, then lowercase side variants
-            ref = (
-                reference.get((player_norm, prop_type, side))
-                or reference.get((player_norm, market_key, side))
-                or reference.get((player_norm, prop_type, side.lower()))
-                or reference.get((player_norm, market_key, side.lower()))
-            )
 
-            # Last-name fallback
-            if not ref:
-                parts     = player_norm.split()
-                last_name = parts[-1] if parts else ""
-                candidates = _last_name_idx.get(last_name, set())
-                for cand in candidates:
-                    if cand[1] in (prop_type, market_key) and cand[2].lower() == side.lower():
-                        ref = reference.get(cand)
-                        break
+# ── Public interface ───────────────────────────────────────────────────────────
 
-            if ref:
-                side_probs[side] = ref
+def build_sportsbook_reference(date_int: int | None = None) -> dict:
+    """
+    Return today's sportsbook prop reference dict.
 
-        if not side_probs:
-            continue
+    Gate order: memory → file → Postgres → live Odds API.
+    Safe to call on every DataHub cycle (every 15s) — no I/O after first fetch.
 
-        matched += 1
+    Returns dict keyed by (player_norm, market_key, "Over"|"Under") with:
+        {sb_implied_prob, line, bookmaker, over_odds, under_odds}
+    Returns {} gracefully if no data available.
+    """
+    global _mem_ref, _fetch_date
 
-        # Over fields (primary — most props are bet Over-side)
-        if "Over" in side_probs:
-            over_ref = side_probs["Over"]
-            sb_prob  = over_ref["sb_implied_prob"]
-            sb_line  = over_ref["sb_line"]
-            prop["sb_implied_prob"]      = sb_prob
-            prop["sb_implied_prob_over"] = sb_prob
-            prop["sb_line"]              = sb_line
-            prop["sb_line_gap"]          = round(dfs_line - sb_line, 2)
-            prop["sb_bookmakers"]        = over_ref.get("bookmakers", [])
+    if date_int is None:
+        date_int = _today_int()
 
-        # Under probability (used by UnderMachine / FadeAgent cross-reference)
-        if "Under" in side_probs:
-            prop["sb_implied_prob_under"] = side_probs["Under"]["sb_implied_prob"]
+    # ── 1. Memory (fastest path — zero I/O) ──────────────────────────────────
+    if _fetch_date == date_int and _mem_ref:
+        return _mem_ref
 
-    pct = round(100 * matched / len(props), 1) if props else 0
-    logger.info(
-        "[SB_REF] Enriched %d/%d props (%.1f%% match rate)",
-        matched, len(props), pct,
-    )
-    return props
+    _ensure_table()
+
+    # ── 2. File cache ─────────────────────────────────────────────────────────
+    ref = _file_load(date_int)
+    if ref:
+        _mem_ref = ref
+        _fetch_date = date_int
+        log.info("[SBRef] Loaded %d entries from file cache for %d", len(ref), date_int)
+        return ref
+
+    # ── 3. Postgres cache ─────────────────────────────────────────────────────
+    ref = _pg_load(date_int)
+    if ref:
+        _mem_ref = ref
+        _fetch_date = date_int
+        _file_save(date_int, ref)       # Populate file cache for this session
+        log.info("[SBRef] Loaded %d entries from Postgres for %d", len(ref), date_int)
+        return ref
+
+    # ── 4. Live fetch (once per day) ──────────────────────────────────────────
+    if not _ODDS_KEY:
+        log.warning("[SBRef] No Odds API key configured — sportsbook reference unavailable")
+        _mem_ref = {}
+        _fetch_date = date_int
+        return {}
+
+    ref = _fetch_live(date_int)
+    _mem_ref = ref
+    _fetch_date = date_int
+
+    if ref:
+        _file_save(date_int, ref)
+        flat: list[dict] = []
+        for (pn, mk, side), v in ref.items():
+            flat.append({"player_name": pn, "market_key": mk, "side": side, **v})
+        _pg_save(date_int, flat)
+        log.info("[SBRef] Built and cached %d entries for %d", len(ref), date_int)
+    else:
+        log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
+
+    return _mem_ref

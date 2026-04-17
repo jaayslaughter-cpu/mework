@@ -1812,6 +1812,20 @@ def run_data_hub_tasklet() -> None:
     except Exception as _mlb_err:
         logger.warning("[DataHub] mlb_stats_layer warm failed: %s", _mlb_err)
 
+    # ── PR #340: Pre-warm sportsbook prop reference (once per calendar day) ─────
+    # build_sportsbook_reference() is fully self-gated: after the first call it
+    # returns from memory with zero I/O — safe to call every 15-second cycle.
+    # First call of the day (at DataHub startup or 8 AM streak job) hits Odds API.
+    try:
+        from sportsbook_reference_layer import build_sportsbook_reference as _build_sb_ref  # noqa: PLC0415
+        _sb_ref_count = len(_build_sb_ref())
+        if _sb_ref_count:
+            logger.info("[DataHub] Sportsbook prop reference: %d entries.", _sb_ref_count)
+        else:
+            logger.debug("[DataHub] Sportsbook prop reference not yet available.")
+    except Exception as _sb_warm_err:
+        logger.debug("[DataHub] Sportsbook reference warm skipped: %s", _sb_warm_err)
+
     try:
         from fangraphs_layer import _load as _fg_load, _loaded as _fg_loaded  # noqa: PLC0415
         if not _fg_loaded:
@@ -4179,6 +4193,64 @@ def run_agent_tasklet() -> bool:
     }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 
+    # ── PR #340: Stamp sb_implied_prob + sb_line_gap from sportsbook reference ──
+    # build_sportsbook_reference() returns from memory here (DataHub already warmed it).
+    # No API calls. LineDriftAgent reads sb_implied_prob; XGBoost feature slot 19 reads
+    # sb_line_gap. Both were always 0.0 before this PR because the reference file was missing.
+    _PT_TO_MARKET_STAMP = {
+        "hits":                "batter_hits",
+        "runs":                "batter_runs_scored",
+        "rbis":                "batter_rbis",
+        "rbi":                 "batter_rbis",
+        "total_bases":         "batter_total_bases",
+        "strikeouts":          "pitcher_strikeouts",
+        "pitcher_strikeouts":  "pitcher_strikeouts",
+        "earned_runs":         "pitcher_earned_runs",
+        "pitching_outs":       "pitcher_outs",
+        "hitter_strikeouts":   "batter_strikeouts",
+        "runs_scored":         "batter_runs_scored",
+    }
+    try:
+        from sportsbook_reference_layer import build_sportsbook_reference as _build_sb_ref  # noqa: PLC0415
+        _sb_ref = _build_sb_ref()
+        if _sb_ref:
+            _stamped = 0
+            for _p in props:
+                _pname_raw = (_p.get("player_name") or _p.get("player") or "").strip()
+                _pname_norm = (
+                    _pname_raw.lower()
+                    .replace(".", "").replace("'", "").replace("-", " ").replace("  ", " ")
+                )
+                _ptype = (_p.get("prop_type") or _p.get("stat_type") or "").lower()
+                _mkey  = _PT_TO_MARKET_STAMP.get(_ptype, _ptype)
+                # Direct full-name lookup (Over side → gives implied prob for Over)
+                _ref_o = (
+                    _sb_ref.get((_pname_norm, _mkey, "Over"))
+                    or _sb_ref.get((_pname_norm, _ptype, "Over"))
+                )
+                if _ref_o is None:
+                    # Last-name fallback: scan for partial match
+                    _parts = _pname_norm.split()
+                    _last  = _parts[-1] if _parts else ""
+                    if _last:
+                        for (_rn, _rt, _rs), _rd in _sb_ref.items():
+                            if _rs == "Over" and _rt == _mkey and _rn.split()[-1:] == [_last]:
+                                _ref_o = _rd
+                                break
+                if _ref_o:
+                    _p["sb_implied_prob"] = _ref_o["sb_implied_prob"]
+                    _sb_line  = float(_ref_o.get("line") or _p.get("line") or 0)
+                    _ud_line  = float(_p.get("line") or 0)
+                    # sb_line_gap: negative = DFS line easier than sharp book (signal for Over)
+                    _p["sb_line_gap"] = round(_ud_line - _sb_line, 2)
+                    _stamped += 1
+            logger.info("[AgentTasklet] Sportsbook reference stamped on %d/%d props.",
+                        _stamped, len(props))
+        else:
+            logger.debug("[AgentTasklet] Sportsbook reference empty — sb_implied_prob not stamped.")
+    except Exception as _sb_stamp_err:
+        logger.debug("[AgentTasklet] SB reference stamp skipped: %s", _sb_stamp_err)
+
     # ── Step 3: Stamp game_time_utc / game_state / lookahead_safe on each prop ──
     game_times = (hub.get("context") or {}).get("game_times", {})
     if _LOCK_GATE_AVAILABLE and game_times:
@@ -5655,9 +5727,54 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
 def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     """
-    Best-effort closing line from Redis market cache (hub:market odds list).
-    Scans sharp book markets for player name match. Returns American odds int or None.
+    PR #340: Returns American odds for player+prop_type+side from the sportsbook
+    prop reference (build_sportsbook_reference).  Replaces the broken hub:market.odds
+    scan which only contained game-level lines and never matched player names.
+
+    Priority: Pinnacle > DraftKings > FanDuel > BetMGM.
+    Returns American odds int or None if no data available.
     """
+    try:
+        from sportsbook_reference_layer import build_sportsbook_reference as _bsr, STAT_TO_MARKET  # noqa: PLC0415
+        ref = _bsr()
+        if not ref:
+            return None
+
+        # Normalise inputs
+        player_norm = (
+            player.lower().strip()
+            .replace(".", "").replace("'", "").replace("-", " ").replace("  ", " ")
+        )
+        mkey       = STAT_TO_MARKET.get(prop_type.lower(), prop_type.lower())
+        side_title = side.title()   # "Over" or "Under"
+
+        # Direct lookup
+        entry = (
+            ref.get((player_norm, mkey, side_title))
+            or ref.get((player_norm, prop_type.lower(), side_title))
+        )
+        if entry is None:
+            # Last-name fallback
+            parts = player_norm.split()
+            last  = parts[-1] if parts else ""
+            if last:
+                for (pn, pt, ps), data in ref.items():
+                    if ps == side_title and pt == mkey and pn.split()[-1:] == [last]:
+                        entry = data
+                        break
+
+        if entry is None:
+            return None
+
+        # Return the American odds for the requested side
+        if side_title == "Over":
+            return entry.get("over_odds")
+        else:
+            return entry.get("under_odds")
+    except Exception:
+        pass
+
+    # Legacy fallback: scan hub:market.odds (game-level only — usually None for props)
     try:
         r   = _redis()
         raw = r.get("hub:market")
@@ -5666,7 +5783,6 @@ def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
         market    = json.loads(raw)
         odds_list = market.get("odds", [])
         player_lc = player.lower()
-
         for game in odds_list:
             if not isinstance(game, dict):
                 continue
