@@ -10,12 +10,16 @@ When drift is detected:
   • Discord alert fires with red embed
   • The calibration governor in ``calibration_layer.py`` automatically
     shrinks bet sizes 50 % toward market until scores recover
+
+PR #334: Added daily dedup guard via ``drift_alert_date_log`` Postgres table.
+         Railway startup misfires no longer cause duplicate drift alerts.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -59,22 +63,93 @@ def _ensure_brier_table() -> None:
         logger.warning(f"brier_ledger table ensure failed: {e}")
 
 
+# ── Dedup guard — one alert per calendar day (America/Los_Angeles) ─────────────
+
+def _ensure_drift_alert_log_table() -> None:
+    """Create drift_alert_date_log if it doesn't exist."""
+    try:
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS drift_alert_date_log (
+                alert_date DATE PRIMARY KEY
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        logger.warning("[DriftMonitor] drift_alert_date_log ensure failed: %s", exc)
+
+
+def _drift_alert_already_ran_today() -> bool:
+    """Return True if a drift alert was already sent today (PT)."""
+    try:
+        import pytz  # noqa: PLC0415
+    except ImportError:
+        pytz = None  # type: ignore[assignment]
+
+    try:
+        if pytz:
+            pt = pytz.timezone("America/Los_Angeles")
+            today_pt = datetime.now(pt).date()
+        else:
+            # Fallback: UTC-7 offset (good enough for Railway guard)
+            from datetime import timezone, timedelta  # noqa: PLC0415
+            today_pt = datetime.now(timezone(timedelta(hours=-7))).date()
+
+        _ensure_drift_alert_log_table()
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM drift_alert_date_log WHERE alert_date = %s",
+            (today_pt,),
+        )
+        exists = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return exists
+    except Exception as exc:
+        logger.warning("[DriftMonitor] dedup check failed: %s — allowing send", exc)
+        return False  # fail open: allow send rather than suppress
+
+
+def _record_drift_alert_ran_today() -> None:
+    """Stamp today's PT date so subsequent runs skip the alert."""
+    try:
+        import pytz  # noqa: PLC0415
+    except ImportError:
+        pytz = None  # type: ignore[assignment]
+
+    try:
+        if pytz:
+            pt = pytz.timezone("America/Los_Angeles")
+            today_pt = datetime.now(pt).date()
+        else:
+            from datetime import timezone, timedelta  # noqa: PLC0415
+            today_pt = datetime.now(timezone(timedelta(hours=-7))).date()
+
+        _ensure_drift_alert_log_table()
+        conn = _get_brier_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO drift_alert_date_log (alert_date) VALUES (%s) ON CONFLICT DO NOTHING",
+            (today_pt,),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("[DriftMonitor] Drift alert date logged: %s", today_pt)
+    except Exception as exc:
+        logger.warning("[DriftMonitor] Failed to record alert date: %s", exc)
+
+
 def _save_brier_pg(score: float) -> None:
     """Persist Brier score to Postgres. Falls back to JSON if DB unavailable."""
     try:
         _ensure_brier_table()
         conn = _get_brier_conn()
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS brier_ledger (
-                id          SERIAL PRIMARY KEY,
-                agent_name  TEXT NOT NULL,
-                brier_score FLOAT NOT NULL,
-                n_samples   INT NOT NULL,
-                graded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-        conn.commit()
         cur.execute(
             "INSERT INTO brier_ledger (brier_score) VALUES (%s)",
             (score,),
@@ -140,12 +215,24 @@ def _load_last_brier_json() -> float:
 # ── Drift Check ───────────────────────────────────────────────────────────────
 
 def check_for_model_drift(new_brier: float, old_brier: float) -> bool:
-    """Returns True (and fires Discord alert) if drift is detected."""
+    """Returns True (and fires Discord alert) if drift is detected.
+
+    PR #334: Alert is deduped — only one Discord message per calendar day (PT).
+    Railway startup misfires trigger the same code path but the second call
+    finds today's date already in drift_alert_date_log and skips.
+    """
     if old_brier <= 0:
         return False
     drift_pct = ((new_brier - old_brier) / old_brier) * 100.0
     if drift_pct > DRIFT_THRESHOLD_PCT or new_brier > DRIFT_ABSOLUTE_MAX:
+        # Dedup: only send once per PT calendar day
+        if _drift_alert_already_ran_today():
+            logger.info(
+                "[DriftMonitor] Drift detected but alert already sent today — skipping duplicate"
+            )
+            return True  # still return True so governor stays active
         _send_drift_alert(new_brier, drift_pct)
+        _record_drift_alert_ran_today()
         return True
     return False
 
