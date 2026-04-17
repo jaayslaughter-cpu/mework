@@ -23,17 +23,19 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# Payout multipliers by number of legs — Underdog PowerPlay defaults.
-# These are the confirmed multipliers from the Dual-Platform Directive.
-# FIX: 5-leg multiplier was 10.0 — should be 20.0 (confirmed Underdog STANDARD)
-# Was inconsistent with calibration_layer._UD_MULTIPLIERS which correctly had 20.0
+# PR #333 FIX: 2-leg multiplier corrected to 3.0x (was 3.5x — matches PR #332 platform fix).
+# Confirmed Underdog PowerPlay multipliers:
+#   2-leg  = 3.0x   ← was 3.5x (FIXED)
+#   3-leg  = 6.0x
+#   4-leg  = 10.0x
+#   5-leg  = 20.0x
 _UD_POWERPLAY_MULT: dict[int, float] = {
-    2: 3.5,
+    2: 3.0,
     3: 6.0,
     4: 10.0,
     5: 20.0,
 }
-_DEFAULT_PAYOUT_MULTIPLIER = 3.5   # fallback if leg count not in table
+_DEFAULT_PAYOUT_MULTIPLIER = 3.0   # fallback if leg count not in table
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +91,8 @@ def _name_match(a: str, b: str) -> bool:
     a_parts = a.split()
     b_parts = b.split()
     if a_parts and b_parts:
-        # Last name match + first initial match
         if a_parts[-1] == b_parts[-1] and a_parts[0][:1] == b_parts[0][:1]:
             return True
-        # Handle last-name only partial (e.g. "Acuna" in "Ronald Acuna Jr")
         if len(a_parts) == 1 and a_parts[0] in b_parts:
             return True
         if len(b_parts) == 1 and b_parts[0] in a_parts:
@@ -102,22 +102,32 @@ def _name_match(a: str, b: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Prop-type → ESPN stats key mapping
+# PR #333 FIX: added hitter_strikeouts and fantasy_score
 # ---------------------------------------------------------------------------
 
 _PROP_STAT_KEY: dict[str, str | None] = {
     # Batter props
-    "hits":             "hits",
-    "rbis":             "rbis",
-    "runs":             "runs",
-    "total_bases":      "total_bases",
-    "hits_runs_rbis":   "hits_runs_rbis",
-    "fantasy_hitter":   None,   # fantasy points — push (no single stat key)
+    "hits":               "hits",
+    "rbis":               "rbis",
+    "runs":               "runs",
+    "total_bases":        "total_bases",
+    "hits_runs_rbis":     "hits_runs_rbis",
+    "fantasy_hitter":     None,   # fantasy points — no single stat key → PUSH
+
+    # PR #333: hitter K props now correctly settle against batter strikeout stats.
+    # ESPN box scores report batter Ks under the 'strikeouts' key for position players.
+    "hitter_strikeouts":  "strikeouts",
+
+    # PR #333: fantasy_score wasn't in the map so it silently fell through to PUSH.
+    # Explicitly marking it None makes the intent clear and the log readable.
+    "fantasy_score":      None,   # composite fantasy points — unsettleable → PUSH
+
     # Pitcher props
-    "strikeouts":       "strikeouts",
-    "earned_runs":      "earned_runs",
-    "hits_allowed":     "hits_allowed",
-    "pitching_outs":    "pitching_outs",  # derived from innings_pitched in espn_scraper.py
-    "fantasy_pitcher":  None,
+    "strikeouts":         "strikeouts",
+    "earned_runs":        "earned_runs",
+    "hits_allowed":       "hits_allowed",
+    "pitching_outs":      "pitching_outs",  # derived from innings_pitched in espn_scraper.py
+    "fantasy_pitcher":    None,
 }
 
 
@@ -152,9 +162,24 @@ def settle_leg(leg: dict, player_stats: dict[str, dict]) -> LegResult:
         )
 
     # Map prop type to stat key
-    stat_key = _PROP_STAT_KEY.get(prop_type)
-    if not stat_key:
-        # Unsupported prop (fantasy points, etc.) → PUSH
+    # Use .get with sentinel to distinguish "explicitly None" from "missing key"
+    _sentinel = object()
+    stat_key = _PROP_STAT_KEY.get(prop_type, _sentinel)
+
+    if stat_key is _sentinel:
+        # Prop type not in our map at all — log a warning so we can add it
+        logger.warning(
+            "[Settlement] Unknown prop_type '%s' for %s — PUSH (add to _PROP_STAT_KEY)",
+            prop_type, pname,
+        )
+        return LegResult(
+            player_name=pname, prop_type=prop_type,
+            side=side, line=line, actual=-1.0, outcome="PUSH",
+        )
+
+    if stat_key is None:
+        # Explicitly unsettleable (fantasy_score, fantasy_hitter, etc.)
+        logger.debug("[Settlement] prop_type '%s' is unsettleable — PUSH", prop_type)
         return LegResult(
             player_name=pname, prop_type=prop_type,
             side=side, line=line, actual=-1.0, outcome="PUSH",
