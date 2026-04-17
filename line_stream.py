@@ -99,19 +99,49 @@ _PP_MLB_STAT_TYPES: frozenset[str] = frozenset({
 })
 
 # Prop-type → ESPN stat key for in-game leg survival checks
+# FIX: added hits_runs_rbis composite, fantasy_score, and all normalised
+# variants so live tracking never shows "Unsupported prop" for these types.
 _PROP_STAT_MAP: dict[str, str] = {
-    "hits":           "hits",
-    "home runs":      "homeRuns",
-    "total bases":    "totalBases",
-    "runs":           "runs",
-    "rbi":            "rbi",
-    "hits+runs+rbis": "_combo_hrr",
-    "strikeouts":     "strikeouts",
-    "earned runs":    "earnedRuns",
-    "pitching outs":  "pitchingOuts",
-    "walks allowed":  "baseOnBalls",
-    "stolen bases":   "stolenBases",
-    "hitter strikeouts": "strikeouts",
+    # ── Batter props ─────────────────────────────────────────────────────────
+    "hits":                 "hits",
+    "home runs":            "homeRuns",
+    "home_runs":            "homeRuns",
+    "total bases":          "totalBases",
+    "total_bases":          "totalBases",
+    "runs":                 "runs",
+    "rbi":                  "rbi",
+    "rbis":                 "rbi",
+    # Composite: H + R + RBI — resolved in check_parlay_legs_live
+    "hits+runs+rbis":       "_combo_hrr",
+    "hits_runs_rbis":       "_combo_hrr",
+    "h+r+rbi":              "_combo_hrr",
+    "stolen bases":         "stolenBases",
+    "stolen_bases":         "stolenBases",
+    "hitter strikeouts":    "strikeouts",
+    "hitter_strikeouts":    "strikeouts",
+    # Fantasy score — resolved in check_parlay_legs_live (platform-specific formula)
+    "fantasy score":        "_fantasy_score",
+    "fantasy_score":        "_fantasy_score",
+    "fantasy pts":          "_fantasy_score",
+    "fantasy_pts":          "_fantasy_score",
+    "hitter fantasy score": "_fantasy_score",
+    "hitter_fantasy_score": "_fantasy_score",
+    "pitcher fantasy score":"_fantasy_score",
+    "pitcher_fantasy_score":"_fantasy_score",
+    # ── Pitcher props ─────────────────────────────────────────────────────────
+    "strikeouts":           "strikeouts",
+    "pitcher strikeouts":   "strikeouts",
+    "pitcher_strikeouts":   "strikeouts",
+    "earned runs":          "earnedRuns",
+    "earned_runs":          "earnedRuns",
+    "pitching outs":        "pitchingOuts",
+    "pitching_outs":        "pitchingOuts",
+    "outs recorded":        "pitchingOuts",
+    "outs_recorded":        "pitchingOuts",
+    "walks allowed":        "walksAllowed",
+    "walks_allowed":        "walksAllowed",
+    "hits allowed":         "hitsAllowed",
+    "hits_allowed":         "hitsAllowed",
 }
 
 
@@ -513,20 +543,55 @@ def check_parlay_legs_live(
                 })
                 continue
 
-            stat_key = _PROP_STAT_MAP.get(ptype.replace("_", " "))
+            # Normalise prop type: try with underscores and with spaces
+            stat_key = (
+                _PROP_STAT_MAP.get(ptype)
+                or _PROP_STAT_MAP.get(ptype.replace("_", " "))
+                or _PROP_STAT_MAP.get(ptype.replace(" ", "_"))
+            )
             if stat_key == "_combo_hrr":
+                # H + R + RBI composite
                 current = (
                     float(stats.get("hits", 0))
                     + float(stats.get("runs", 0))
                     + float(stats.get("rbi", 0))
                 )
+            elif stat_key == "_fantasy_score":
+                # FIX: fantasy score is a computed stat — use platform-specific formula.
+                # For in-game live tracking we use the simplified hitter formula
+                # (same stat set ESPN provides in box scores).
+                _h   = float(stats.get("hits",        0))
+                _rn  = float(stats.get("runs",        0))
+                _rbi = float(stats.get("rbi",         0))
+                _hr  = float(stats.get("homeRuns",    0))
+                _sb  = float(stats.get("stolenBases", 0))
+                _bb  = float(stats.get("walks",  stats.get("baseOnBalls", 0)))
+                # Detect pitcher: has inningsPitched and strikeouts but no hits/runs
+                _ip  = float(stats.get("inningsPitched", 0))
+                _k   = float(stats.get("strikeouts", 0))
+                _er  = float(stats.get("earnedRuns", 0))
+                plat = (leg.get("platform") or parlay.get("platform") or "prizepicks").lower()
+                if _ip > 0 and _h == 0 and _rn == 0:
+                    # Pitcher formula (PrizePicks default)
+                    _outs = round(_ip * 3)
+                    if "underdog" in plat:
+                        current = round(_k * 3 + _ip * 3 - _er * 3, 2)
+                    else:
+                        current = round(_k * 3 + _outs * 1 - _er * 3, 2)
+                else:
+                    # Hitter formula
+                    _1b = max(0.0, _h - _hr)
+                    if "underdog" in plat:
+                        current = round(_1b * 3 + _hr * 10 + _rn * 2 + _rbi * 2 + _sb * 4 + _bb * 3, 2)
+                    else:
+                        current = round(_1b * 3 + _hr * 10 + _rn * 2 + _rbi * 2 + _sb * 5 + _bb * 2, 2)
             elif stat_key:
                 current = float(stats.get(stat_key, 0))
             else:
                 leg_statuses.append({
                     **leg,
                     "current": None,
-                    "live_status": "⏳ Unsupported prop",
+                    "live_status": f"⏳ Unsupported prop ({ptype})",
                 })
                 continue
 
