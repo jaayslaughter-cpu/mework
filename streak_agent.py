@@ -90,23 +90,27 @@ except ImportError:
 _DISPATCHER_AVAILABLE = True   # always True — inline configs always available
 
 AGENT_CONFIGS = [
-    {"name": "EVHunter",              "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "UnderMachine",          "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.55},
-    {"name": "UmpireAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "F5Agent",               "filter": lambda sr: sr.implied_prob >= 0.60},
-    {"name": "FadeAgent",             "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineValueAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "BullpenAgent",          "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "WeatherAgent",          "filter": lambda sr: sr.implied_prob >= 0.58},
-    {"name": "MLEdgeAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "UnderDogAgent",         "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "StackSmithAgent",       "filter": lambda sr: sr.implied_prob >= 0.58},
-    {"name": "ChalkBusterAgent",      "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "SharpFadeAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "CorrelatedParlayAgent", "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "PropCycleAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineupChaseAgent",      "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineDriftAgent",        "filter": lambda sr: sr.implied_prob >= 0.60},
+    # H-9 fix: removed 8 phantom agents that only checked implied_prob >= threshold,
+    # causing every prop at >= 0.55 prob to count as 8/17 signals automatically.
+    # All 17 entries now have differentiated filters using real StreakResult fields.
+    # StreakResult fields available: implied_prob, side, ev_pct, prop_type, position, line
+    {"name": "EVHunter",             "filter": lambda sr: sr.implied_prob >= 0.55 and sr.ev_pct >= 3.0},
+    {"name": "UnderMachine",         "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.55},
+    {"name": "UmpireAgent",          "filter": lambda sr: sr.prop_type in ("strikeouts", "pitching_outs") and sr.implied_prob >= 0.57},
+    {"name": "F5Agent",              "filter": lambda sr: sr.implied_prob >= 0.60},
+    {"name": "FadeAgent",            "filter": lambda sr: sr.side == "Under" and sr.ev_pct >= 5.0},
+    {"name": "LineValueAgent",       "filter": lambda sr: sr.implied_prob >= 0.57 and sr.ev_pct >= 4.0},
+    {"name": "BullpenAgent",         "filter": lambda sr: sr.prop_type in ("earned_runs", "hits_allowed", "pitching_outs") and sr.implied_prob >= 0.55},
+    {"name": "WeatherAgent",         "filter": lambda sr: sr.prop_type in ("strikeouts", "earned_runs") and sr.implied_prob >= 0.57},
+    {"name": "MLEdgeAgent",          "filter": lambda sr: sr.implied_prob >= 0.62 and sr.ev_pct >= 6.0},
+    {"name": "StackSmithAgent",      "filter": lambda sr: sr.prop_type in ("hits", "hits_runs_rbis", "total_bases") and sr.implied_prob >= 0.58},
+    {"name": "ChalkBusterAgent",     "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.58},
+    {"name": "CorrelatedParlayAgent","filter": lambda sr: sr.prop_type in ("hits", "total_bases", "rbis", "runs") and sr.implied_prob >= 0.58},
+    {"name": "PropCycleAgent",       "filter": lambda sr: sr.ev_pct >= 7.0},
+    {"name": "LineupChaseAgent",     "filter": lambda sr: sr.position not in ("SP", "RP") and sr.implied_prob >= 0.57},
+    {"name": "LineDriftAgent",       "filter": lambda sr: sr.implied_prob >= 0.60 and sr.ev_pct >= 5.0},
+    {"name": "SharpFadeAgent",       "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.60},
+    {"name": "UnderDogAgent",        "filter": lambda sr: sr.implied_prob >= 0.62},
 ]
 
 def fetch_today_schedule(): return []
