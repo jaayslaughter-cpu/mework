@@ -112,6 +112,7 @@ def _ensure_table() -> None:
 
 def get_unit(agent_name: str) -> float:
     """Return current unit dollar amount for a given agent. Defaults to $5 if missing."""
+    _ensure_table()  # PR #338: heal unit_dollars column before any SELECT
     try:
         conn = _get_conn()
         cur = conn.cursor()
