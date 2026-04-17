@@ -1,6 +1,6 @@
 # PropIQ Python ML Service — production dependencies
 # RabbitMQ (pika) REMOVED — Phase 29 HTTP migration complete
-# pybaseball REMOVED — Phase 96 replaced with direct Baseball Savant + FanGraphs HTTP calls
+pybaseball>=2.2.7  # FanGraphs fallback when direct API is 403-blocked
 
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0

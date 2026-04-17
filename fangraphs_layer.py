@@ -422,7 +422,80 @@ def _load() -> None:
 
         break
     else:
-        logger.error("[FG] Failed to fetch any FanGraphs data — layer disabled")
+        # ── FanGraphs API blocked (403) — fall back to pybaseball ────────────
+        # FanGraphs blocks direct HTTP scraping from server IPs. pybaseball
+        # caches results to /tmp after first fetch, so this only hits the
+        # network once per deployment and is fast on subsequent startups.
+        logger.warning("[FG] FanGraphs direct API blocked — trying pybaseball fallback")
+        _pyb_loaded = False
+        try:
+            import pybaseball as _pyb  # noqa: PLC0415
+            _pyb.cache.enable()
+
+            for _yr in (season, season - 1):
+                try:
+                    _bat_df = _pyb.batting_stats(_yr, qual=20)
+                    _pit_df = _pyb.pitching_stats(_yr, qual=10)
+                except Exception as _pyb_err:
+                    logger.warning("[FG] pybaseball %d failed: %s — trying %d", _yr, _pyb_err, _yr - 1)
+                    continue
+
+                if _bat_df is None or _pit_df is None:
+                    continue
+                if _bat_df.empty and _pit_df.empty:
+                    continue
+
+                # Map pybaseball column names to our schema
+                # pybaseball returns the same FanGraphs columns, just via a different route
+                _bat_rows = _bat_df.to_dict(orient="records") if not _bat_df.empty else []
+                _pit_rows = _pit_df.to_dict(orient="records") if not _pit_df.empty else []
+
+                # pybaseball uses 'Name' column (same as FanGraphs API)
+                _BATTER_CACHE  = _parse_batters(_bat_rows)
+                _PITCHER_CACHE = _parse_pitchers(_pit_rows)
+                _data_year = _yr
+
+                logger.info(
+                    "[FG] pybaseball fallback OK — %d batters  %d pitchers (season=%d)",
+                    len(_BATTER_CACHE), len(_PITCHER_CACHE), _yr,
+                )
+
+                # Blend prior season if we got current season data
+                if _yr == season and not _bat_df.empty:
+                    try:
+                        _prior_bat_df = _pyb.batting_stats(_yr - 1, qual=20)
+                        _prior_pit_df = _pyb.pitching_stats(_yr - 1, qual=10)
+                        prior_bat = _parse_batters(_prior_bat_df.to_dict(orient="records")) if _prior_bat_df is not None else {}
+                        prior_pit = _parse_pitchers(_prior_pit_df.to_dict(orient="records")) if _prior_pit_df is not None else {}
+                        _BATTER_CACHE  = {**prior_bat, **_BATTER_CACHE}
+                        _PITCHER_CACHE = {**prior_pit, **_PITCHER_CACHE}
+                    except Exception:
+                        pass  # blend is best-effort
+
+                # Cache to disk + Postgres so future restarts skip pybaseball entirely
+                try:
+                    with open(cache_path, "w") as _cfh:
+                        json.dump(
+                            {"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE, "season": _yr},
+                            _cfh,
+                        )
+                except Exception:
+                    pass
+                _pg_save_cache(_yr, _BATTER_CACHE, _PITCHER_CACHE)
+                _pyb_loaded = True
+                break
+
+        except ImportError:
+            logger.warning("[FG] pybaseball not installed — pip install pybaseball to enable fallback")
+        except Exception as _pyb_outer:
+            logger.warning("[FG] pybaseball fallback failed: %s", _pyb_outer)
+
+        if not _pyb_loaded:
+            logger.error(
+                "[FG] All data sources failed (FanGraphs 403, pybaseball unavailable). "
+                "All agents will use league-average features (k_rate=0.22, era=4.06). "
+                "Add pybaseball to requirements.txt to enable fallback."
+            )
 
     _loaded = True
 
