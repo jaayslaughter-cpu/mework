@@ -355,7 +355,7 @@ async def lifespan(_app: FastAPI):
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
     scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
-    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, timezone="America/Los_Angeles"), id="xgboost")
+    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")
 
     # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(
@@ -425,7 +425,7 @@ async def lifespan(_app: FastAPI):
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2AM"
+        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2:30AM"
     )
     yield
 
