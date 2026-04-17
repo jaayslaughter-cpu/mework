@@ -260,13 +260,9 @@ def main():
 
     print(summary)
 
-    subject = "PropIQ Dispatch " + (
-        "✅ SENT" if "SENT TO DISCORD" in summary else
-        "❌ NO PROPS"  if "NO PROPS" in summary else
-        "⚠️  CHECK"
-    )
-    send_email(subject, summary)
-    send_sms(summary)
+    # Email/SMS morning summary disabled per user preference.
+    # Summary is printed to Railway logs only (visible in dashboard).
+    # send_email / send_sms calls removed.
 
 
 if __name__ == "__main__":
