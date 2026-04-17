@@ -216,6 +216,23 @@ class RiskManager:
         except Exception as exc:
             logger.error("Failed to write cool-down: %s", exc)
 
+        # H-2 fix: also write to agent_freeze_log — the table that get_frozen_agents() reads.
+        # Without this, cool-downs only appear in agent_cool_down and are invisible to dispatch.
+        try:
+            with _get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO agent_freeze_log (agent_name, freeze_date, freeze_reason, unfreeze_date)
+                        VALUES (%s, CURRENT_DATE, %s, %s)
+                        ON CONFLICT (agent_name) DO UPDATE
+                            SET freeze_reason = EXCLUDED.freeze_reason,
+                                freeze_date    = EXCLUDED.freeze_date,
+                                unfreeze_date  = EXCLUDED.unfreeze_date
+                    """, (agent_name, reason, until.isoformat()))
+                conn.commit()
+        except Exception as exc:
+            logger.warning("apply_cool_down: agent_freeze_log write failed: %s", exc)
+
     def check_and_apply_cool_downs(self, edge_metrics: dict) -> None:
         """
         Called post-settlement with rolling 30-day metrics per agent.
