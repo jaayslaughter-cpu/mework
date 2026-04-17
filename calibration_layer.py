@@ -630,6 +630,18 @@ def get_reliability_score(
 # ── Calibration Map ───────────────────────────────────────────────────────────
 
 _CAL_MAP: Optional[Dict[str, float]] = None
+_CAL_MAP_IS_IDENTITY: bool = False   # set True on first load if map is pass-through identity
+
+
+def _is_identity_map(m: dict) -> bool:
+    """Return True if every mapped value ≈ its key (pass-through identity f(x)=x).
+
+    A genuine calibrated map will have values that differ from keys in the
+    0.40–0.90 range where most model probabilities land.  Identity means no
+    isotonic regression has ever been fitted against real outcomes.
+    """
+    sample = list(m.items())[:20]
+    return all(abs(float(v) - float(k)) < 0.005 for k, v in sample)
 
 
 def apply_isotonic_calibration(raw_prob: float, path: str = "calibration_map.json") -> float:
@@ -638,12 +650,20 @@ def apply_isotonic_calibration(raw_prob: float, path: str = "calibration_map.jso
     Falls back to identity (raw_prob) if map file not found.
     The map is generated weekly by ``calibrate_model.py``.
     """
-    global _CAL_MAP
+    global _CAL_MAP, _CAL_MAP_IS_IDENTITY
     if _CAL_MAP is None:
         try:
             with open(path) as fh:
                 raw = json.load(fh)
             _CAL_MAP = {k: float(v) for k, v in raw.items()}
+            global _CAL_MAP_IS_IDENTITY
+            if _is_identity_map(_CAL_MAP):
+                _CAL_MAP_IS_IDENTITY = True
+                logger.warning(
+                    "WARNING: calibration_map.json is identity — isotonic calibration is "
+                    "disabled. Run generate_calibration_map_from_db() (calibrate_model.py) "
+                    "against bet_ledger to generate a real calibration map."
+                )
         except Exception:
             return raw_prob  # identity fallback
 
