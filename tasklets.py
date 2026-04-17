@@ -1669,6 +1669,15 @@ def run_data_hub_tasklet() -> None:
     except Exception as e:
         logger.warning("[DataHub] Could not fetch game states: %s", e)
 
+    # ── Season weight: blends 2025 full-season stats with 2026 YTD ───────────
+    # Ramps from 0.0 (Opening Day) to 1.0 (game ~80, ~early June).
+    # prop_enrichment_layer and agents read hub["season_weight_2026"] so the
+    # blend is consistent across all data paths and XGBoost training rows.
+    _season_start = OPENING_DAY  # 2026-03-26
+    _days_played  = max(0, (_today_pt() - _season_start).days)
+    _season_weight_2026 = round(min(1.0, _days_played / 80.0), 3)
+    _season_weight_2025 = round(1.0 - _season_weight_2026, 3)
+
     def _is_pre_match(game_id: str) -> bool:
         state = game_states.get(game_id, "Scheduled")
         return state not in ("InProgress", "Live", "Final", "F/OT", "Completed")
@@ -1699,12 +1708,41 @@ def run_data_hub_tasklet() -> None:
             except Exception as _gpe:
                 logger.warning("[DataHub] game_prediction_layer failed: %s", _gpe)
 
+        # FIX Bug 8: fetch real Statcast CSW% / SwStr% / xFIP for today's probable starters
+        # via pybaseball (free, no key). Populates pitch_arsenal so XGBoost feature slots
+        # 4-5 (shadow_whiff, zone_mult) get real data instead of hardcoded 0.25 defaults.
+        _statcast_arsenal: list[dict] = []
+        try:
+            import pybaseball as _pyb  # noqa: PLC0415
+            _pyb.cache.enable()
+            _today_yr = _today_pt().year
+            # Fetch season-to-date pitcher stats (CSW%, SwStr%, xFIP, K%)
+            _fg_pitchers = _pyb.pitching_stats(_today_yr, qual=1)  # qual=1 → any pitcher with ≥1 IP
+            if _fg_pitchers is not None and not _fg_pitchers.empty:
+                _cols_wanted = ["Name", "CSW%", "SwStr%", "xFIP", "K%", "BB%", "WHIP", "ERA"]
+                _cols_avail  = [c for c in _cols_wanted if c in _fg_pitchers.columns]
+                for _, _row in _fg_pitchers[_cols_avail].iterrows():
+                    _entry: dict = {"player": str(_row.get("Name", ""))}
+                    if "CSW%" in _row:   _entry["csw_pct"]   = float(_row["CSW%"]  or 0) / 100
+                    if "SwStr%" in _row: _entry["swstr_pct"] = float(_row["SwStr%"] or 0) / 100
+                    if "xFIP" in _row:   _entry["xfip"]      = float(_row["xFIP"]  or 4.0)
+                    if "K%" in _row:     _entry["k_rate"]    = float(_row["K%"]    or 0) / 100
+                    if "BB%" in _row:    _entry["bb_rate"]   = float(_row["BB%"]   or 0) / 100
+                    if "WHIP" in _row:   _entry["whip"]      = float(_row["WHIP"]  or 1.3)
+                    if "ERA" in _row:    _entry["era"]       = float(_row["ERA"]   or 4.0)
+                    if len(_entry) > 1:
+                        _statcast_arsenal.append(_entry)
+                logger.info("[DataHub] Statcast/FG arsenal: %d pitchers loaded (CSW%%, SwStr%%)",
+                            len(_statcast_arsenal))
+        except Exception as _sc_err:
+            logger.info("[DataHub] pybaseball arsenal fetch skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
+
         physics = {
-            "pitch_arsenal":  [],  # no Statcast actor yet
-            "advanced_stats": [],  # no actor yet
-            "bvp":            [],  # no actor yet
-            "batted_ball":    [],  # no actor yet
-            "second_half":    [],  # no actor yet
+            "pitch_arsenal":  _statcast_arsenal,  # FIX Bug 8: real CSW%/SwStr% from pybaseball
+            "advanced_stats": [],
+            "bvp":            [],
+            "batted_ball":    [],
+            "second_half":    [],
             "game_predictions": _gp_list,
             "nsfi":             _fetch_nsfi(),  # No-Strikeout First Inning predictions
         }
@@ -1885,7 +1923,13 @@ def run_data_hub_tasklet() -> None:
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "game_states": game_states,
         "spring_training": _is_spring_training(),
+        # FIX Bug 3: explicit season blend weights — readable by prop_enrichment_layer
+        # and all agents. Ramps from 2025-dominant (Opening Day) to 2026-dominant (~game 80).
+        "season_weight_2026": _season_weight_2026,
+        "season_weight_2025": _season_weight_2025,
     }
+    logger.info("[DataHub] Season blend: 2026=%.1f%% | 2025=%.1f%% (day %d of season)",
+                _season_weight_2026 * 100, _season_weight_2025 * 100, _days_played)
     for key in (physics_key, context_key, market_key, dfs_key):
         data = _hub_get(r, key)
         if data:
@@ -2124,8 +2168,12 @@ class _BaseAgent:
         # ── Player stats — pitcher OR batter signals depending on prop type ──
         _PITCHER_PT = {"strikeouts","pitching_outs","earned_runs","hits_allowed",
                        "fantasy_pitcher"}
-        _pt_raw     = str(prop.get("prop_type","") or bet.get("prop_type","") if bet else "").lower()
-        _is_pitcher = _pt_raw in _PITCHER_PT
+        _pt_raw     = str(prop.get("prop_type","") or (bet.get("prop_type","") if bet else "")).lower()
+        # FIX Bug 6: "hitter_strikeouts" normalizes to "strikeouts" via _norm_stat but
+        # is a BATTER prop. Preserve the raw stat_type label before normalization to
+        # correctly classify batter K props and use batter (not pitcher) feature slots.
+        _raw_stat_label = str(prop.get("stat_type", prop.get("stat", "")) or "").lower()
+        _is_pitcher = (_pt_raw in _PITCHER_PT) and ("hitter" not in _raw_stat_label)
 
         if _is_pitcher:
             # Pitcher signals (FanGraphs)
@@ -3239,6 +3287,17 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
         mult        = _PP_MULTS.get(n, 3.0)
         combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
 
+    # ── FIX Bug 2: gate negative combined EV before returning the slip ──────
+    # Individual leg EV gates pass at ~52-53% each, but the full parlay
+    # multiplication can produce negative combined EV (e.g. 3 legs at 52%
+    # against 6x → 52%^3 * 6 - 1 = -11%). Never dispatch a negative-EV slip.
+    if combined_ev < 0:
+        logger.info(
+            "[_make_parlay] %s slip dropped — combined_ev %.1f%% < 0 (negative EV after parlay math).",
+            agent_name, combined_ev,
+        )
+        return []
+
     # Read tier stake from agent_unit_sizing (falls back to $5 floor)
     _tier_stake = 5.0
     try:
@@ -3283,10 +3342,10 @@ def _fetch_agent_season_stats(agent_name: str) -> dict:
                     COUNT(*) FILTER (WHERE status = 'PUSH') AS pushes,
                     ROUND(
                         COALESCE(
-                            SUM(CASE WHEN status = 'WIN'  THEN unit_dollars
-                                     WHEN status = 'LOSS' THEN -unit_dollars
+                            SUM(CASE WHEN status = 'WIN'  THEN COALESCE(units_wagered, ABS(kelly_units), 1.0)
+                                     WHEN status = 'LOSS' THEN -COALESCE(units_wagered, ABS(kelly_units), 1.0)
                                      ELSE 0 END)
-                            / NULLIF(SUM(unit_dollars), 0) * 100,
+                            / NULLIF(SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0)), 0) * 100,
                         0), 1
                     ) AS roi_pct
                 FROM bet_ledger
@@ -3403,7 +3462,10 @@ class _StackSmithAgent(_BaseAgent):
 
         # Stack signal: look up the OPPOSING pitcher from projected_starters
         opp_team = prop.get("opposing_team", "")
-        era    = 4.06  # FG 2025: league ERA actual (was 4.15 in 2024, now 2025)
+        # League-average ERA: blend 2025 full-season (4.06) with 2026 YTD (~4.10 early season).
+        # hub["season_weight_2026"] ramps 0→1 over first 80 games — keeps constant current if hub missing.
+        _sw26 = float(self.hub.get("season_weight_2026", 0.25))
+        era    = round(4.06 * (1 - _sw26) + 4.10 * _sw26, 3)  # weighted blend; update 4.10 after retrain
         k_rate = 0.22
 
         starters = self.hub.get("context", {}).get("projected_starters", [])
@@ -3936,7 +3998,12 @@ def run_agent_tasklet() -> bool:
 
     # Enrich all props with FanGraphs, weather, Bayesian, CV, form, park context
     import datetime as _dt
-    props = _enrich_props(props, hub, season=_today_pt().year)
+    props = _enrich_props(
+        props, hub, season=_today_pt().year,
+        # FIX Bug 3 / Bug 8: pass season weights + physics arsenal so
+        # prop_enrichment_layer can blend 2025/2026 FanGraphs stats and
+        # stamp CSW%/SwStr% from pitch_arsenal onto each prop.
+    )
 
     # Phase 112: remove prop types not evaluated (user directive)
     _EXCLUDED_PROP_TYPES = {
@@ -4158,6 +4225,13 @@ def run_agent_tasklet() -> bool:
         except Exception:
             pass   # Redis down — in-memory gate is sufficient
         play_conf = parlay.get("confidence", 0)
+        # FIX Bug 2: also guard here — _make_parlay() now blocks negatives, but
+        # any slip that slips through (e.g. UD math engine path) is caught here.
+        _combined_ev_check = parlay.get("combined_ev_pct", 0)
+        if _combined_ev_check < 0:
+            logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < 0.",
+                        agent_name, _combined_ev_check)
+            continue
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
@@ -4309,6 +4383,23 @@ def run_agent_tasklet() -> bool:
             try:
                 _pg3 = _pg_conn()
                 with _pg3.cursor() as _c3:
+                    # FIX Bug 7: Stamp CLV at send-time using the market odds that are
+                    # live RIGHT NOW. hub:market TTL is 5 min — by 2 AM grade time it
+                    # has cycled dozens of times so closing_odds always returns None.
+                    # We compute and persist CLV here while opening-line data is fresh.
+                    _send_clv_map: dict = {}
+                    for _leg in parlay.get("legs", []):
+                        _lg_player    = _leg.get("player") or _leg.get("player_name", "")
+                        _lg_pt        = _leg.get("prop_type", "")
+                        _lg_side      = _leg.get("side", "OVER")
+                        _lg_model_p   = float(_leg.get("model_prob", 50) or 50)
+                        _lg_close_o   = _fetch_closing_odds(_lg_player, _lg_pt, _lg_side)
+                        if _lg_close_o is not None:
+                            _lg_clv = round(_lg_model_p - _american_to_implied(int(_lg_close_o)), 4)
+                        else:
+                            _lg_clv = None  # market not available — leave NULL for grading tasklet
+                        _send_clv_map[(_lg_player.lower(), _lg_pt, _lg_side)] = _lg_clv
+
                     _c3.execute(
                         """
                         UPDATE bet_ledger
@@ -4320,10 +4411,32 @@ def run_agent_tasklet() -> bool:
                         (agent_name, _today_pt().isoformat()),
                     )
                     _flipped = _c3.rowcount
+
+                    # Write send-time CLV for each leg that had market data
+                    for (_clv_player, _clv_pt, _clv_side), _clv_val in _send_clv_map.items():
+                        if _clv_val is not None:
+                            _c3.execute(
+                                """
+                                UPDATE bet_ledger
+                                   SET clv = %s
+                                 WHERE agent_name    = %s
+                                   AND bet_date      = %s
+                                   AND LOWER(player_name) = %s
+                                   AND prop_type     = %s
+                                   AND side          = %s
+                                   AND discord_sent  = TRUE
+                                   AND clv IS NULL
+                                """,
+                                (_clv_val, agent_name, _today_pt().isoformat(),
+                                 _clv_player, _clv_pt, _clv_side),
+                            )
                 _pg3.commit()
                 _pg3.close()
-                logger.info("[AgentTasklet] ✅ Pick saved: %s — %d leg(s) discord_sent=TRUE in bet_ledger.",
-                            agent_name, _flipped)
+                logger.info("[AgentTasklet] ✅ Pick saved: %s — %d leg(s) discord_sent=TRUE in bet_ledger. "
+                            "Send-time CLV stamped for %d/%d legs.",
+                            agent_name, _flipped,
+                            sum(1 for v in _send_clv_map.values() if v is not None),
+                            len(_send_clv_map))
             except Exception as _flip_err:
                 logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
 
@@ -4650,7 +4763,8 @@ def run_grading_tasklet() -> None:
             "InningsPitched":    espn.get("innings_pitched", 0.0),
             "EarnedRuns":        espn.get("earned_runs",     0.0),
             "HitsAllowed":       espn.get("hits_allowed",    0.0),
-            "WalksAllowed":      espn.get("base_on_balls",   0.0),
+            "WalksAllowed":      espn.get("walks_allowed", espn.get("bb_allowed",
+                                     espn.get("pitcher_walks", 0.0))),  # pitcher BB, not batter BB
             # FIX: add fields needed for correct fantasy scoring and full grading
             "Doubles":           espn.get("doubles",         0.0),
             "Triples":           espn.get("triples",         0.0),
@@ -4930,9 +5044,12 @@ def run_grading_tasklet() -> None:
         with conn2.cursor() as cur2:
             # Upsert a daily summary row per agent
             from collections import defaultdict
-            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0})
+            _agent_results: dict = defaultdict(lambda: {"wins":0,"losses":0,"pushes":0,"profit":0.0,"stake":5.0})
             for r in results:
                 _ag = r.get("agent", "Unknown")
+                # FIX Bug 4: capture actual stake from the result row (graded from units_wagered)
+                _res_stake = float(r.get("units_wagered", r.get("stake", 5.0)) or 5.0)
+                _agent_results[_ag]["stake"] = _res_stake  # last win's stake is fine — same tier
                 if r["status"] == "WIN":
                     _agent_results[_ag]["wins"]   += 1
                     _agent_results[_ag]["profit"] += float(r.get("profit_loss", 0))
