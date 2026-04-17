@@ -404,6 +404,21 @@ async def lifespan(_app: FastAPI):
     # Discord startup ping — guarded: at most once per PT calendar day
     _startup_ping_if_needed()
 
+    # ── PR #341: Auto-rebuild calibration map from bet_ledger if identity ──────
+    # Touch the map once so _CAL_MAP_IS_IDENTITY gets set on first import.
+    # If the map is still a pass-through identity, rebuild from settled bet_ledger rows.
+    try:
+        from calibration_layer import apply_isotonic_calibration as _touch_cal  # noqa: PLC0415
+        _touch_cal(0.55)
+        from calibration_layer import _CAL_MAP_IS_IDENTITY  # noqa: PLC0415
+        if _CAL_MAP_IS_IDENTITY:
+            logger.info("[startup] calibration_map.json is identity — rebuilding from bet_ledger")
+            from calibrate_model import generate_calibration_map_from_db as _rebuild_cal  # noqa: PLC0415
+            _rebuild_cal()
+            logger.info("[startup] Calibration map rebuilt from settled bets.")
+    except Exception as _cal_err:
+        logger.warning("[startup] Calibration auto-rebuild skipped: %s", _cal_err)
+
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
 
