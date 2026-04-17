@@ -163,6 +163,7 @@ except ImportError:
         return result if result not in _BLOCKED else ""
     ABS_FRAMING_WEIGHT = 0.20
     class SteamMonitor:
+        def __init__(self, *a, **kw): pass  # accepts steam_threshold and any future kwargs
         def detect_steam(self, *a, **kw): return False, 0.0
 try:
     from drift_monitor import get_current_brier
@@ -193,17 +194,22 @@ try:
     _GAME_PRED_AVAILABLE = True
 except ImportError:
     _GAME_PRED_AVAILABLE = False
-    def _bookmaker_margin(o, u): return 0.0          # noqa: E704
-    def _kelly_criterion_wb(p, o, kf=0.25, mc=0.05): # noqa: E704
-        b = (o / 100.0) if o > 0 else (100.0 / abs(o))
-        q = 1 - p
-        raw = (b * p - q) / b
-        return min(kf * raw, mc) if raw > 0 else 0.0
-    def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
-    def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
-    def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
-    def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
-    _MAX_VIG = 0.08
+    # Only define odds_math fallbacks here if odds_math itself also failed to load.
+    # Without this guard the real odds_math functions get silently overwritten by stubs
+    # every time game_prediction_layer fails to import (e.g. missing dependency),
+    # even though _ODDS_MATH_AVAILABLE is True and the real functions are already bound.
+    if not _ODDS_MATH_AVAILABLE:
+        def _bookmaker_margin(o, u): return 0.0          # noqa: E704
+        def _kelly_criterion_wb(p, o, kf=0.25, mc=0.05): # noqa: E704
+            b = (o / 100.0) if o > 0 else (100.0 / abs(o))
+            q = 1 - p
+            raw = (b * p - q) / b
+            return min(kf * raw, mc) if raw > 0 else 0.0
+        def _true_odds_ev(stake, profit, prob): return (profit * prob) - (stake * (1 - prob))  # noqa: E704
+        def _prop_ev_dollar(mp, o, s=1.0): return 0.0   # noqa: E704
+        def _is_acceptable_vig(o, u, mv=0.08): return True  # noqa: E704
+        def _elo_win_prob(d): return 1.0 / (10**(-d/400) + 1)  # noqa: E704
+        _MAX_VIG = 0.08
 
 import datetime
 import json
@@ -265,7 +271,15 @@ TTL_HUB      = 600    # 10 min — master hub key
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
 MIN_CONFIDENCE    = 6
-MIN_PROB          = 0.52   # Temp cold-start: lowered from 0.57 until April 20 XGBoost retrain (Phase 121 gate restores post-retrain)        
+# MIN_PROB cold-start schedule:
+#   Apr 16 launch:  0.52  (cold-start — XGBoost not yet trained)
+#   Apr 20 retrain: bump to 0.57 manually after first successful retrain
+#   May 15+:        bump to 0.60 once 200+ settled rows confirmed
+# Currently at 0.55 — intermediate step: negative-EV slips now blocked so we can
+# raise the bar from 52% without losing too many qualifying picks.
+# At 0.55 with correct multipliers: 2-leg PP needs 55%^2 * 3 - 1 = -9.2% → still
+# needs higher prob per leg, but combined_ev gate (+3%) now does the real work.
+MIN_PROB          = 0.55   # raised from 0.52 — combined_ev gate now primary quality control
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -2168,14 +2182,11 @@ class _BaseAgent:
         # ── Player stats — pitcher OR batter signals depending on prop type ──
         _PITCHER_PT = {"strikeouts","pitching_outs","earned_runs","hits_allowed",
                        "fantasy_pitcher"}
-        # Ref 3: Capture _raw_stat_label BEFORE _pt_raw so it always reflects the
-        # original API field (stat_type / stat) even if prop_type was normalised
-        # earlier in the pipeline. This prevents any future mutation of prop["stat_type"]
-        # from changing the batter/pitcher classification.
+        _pt_raw     = str(prop.get("prop_type","") or (bet.get("prop_type","") if bet else "")).lower()
+        # FIX Bug 6: "hitter_strikeouts" normalizes to "strikeouts" via _norm_stat but
+        # is a BATTER prop. Preserve the raw stat_type label before normalization to
+        # correctly classify batter K props and use batter (not pitcher) feature slots.
         _raw_stat_label = str(prop.get("stat_type", prop.get("stat", "")) or "").lower()
-        _pt_raw         = str(prop.get("prop_type","") or (bet.get("prop_type","") if bet else "")).lower()
-        # "hitter_strikeouts" normalises to "strikeouts" via _norm_stat but is a
-        # BATTER prop — guard with "hitter" not in _raw_stat_label (Bug 6 fix).
         _is_pitcher = (_pt_raw in _PITCHER_PT) and ("hitter" not in _raw_stat_label)
 
         if _is_pitcher:
@@ -2265,10 +2276,6 @@ class _BaseAgent:
                 brier = _clamp(_gcb2())
             except Exception:
                 pass
-
-        # ── Confidence encoding ───────────────────────────────────────
-        _conf_map = {"low": 0.0, "medium": 0.33, "high": 0.67, "elite": 1.0}
-        conf_enc = _conf_map.get(str(b.get("confidence") or "medium").lower(), 0.33)
 
         # ── Enrichment signal slots (Phase 97) ───────────────────────────────
         # every prop but never fed to XGBoost — now they are.  Normalised [0,1].
@@ -2470,16 +2477,25 @@ class _BaseAgent:
         }
 
     def _dfs_platforms(self, prop: dict, side: str) -> list[str]:
+        # Platform must match where the prop came from — never mix sources.
+        # If the prop already has a platform tag (set during ingestion), trust it.
+        _src = (prop.get("platform") or "").lower()
+        if "prize" in _src:
+            return ["PrizePicks"]
+        if "underdog" in _src or "ud" in _src:
+            return ["Underdog"]
+        if "sleeper" in _src:
+            return ["Sleeper"]
+        # Fallback: scan hub DFS data to find which platform actually has this prop
         dfs = self.hub.get("dfs", {})
-        matched = []
         for platform in ("prizepicks", "underdog", "sleeper"):
             picks = dfs.get(platform, [])
             for pick in picks:
                 if isinstance(pick, dict):
                     if prop.get("player", "").lower() in str(pick).lower():
-                        matched.append(platform.capitalize())
-                        break
-        return matched or ["PrizePicks"]
+                        return [platform.capitalize()]
+        # Default to Underdog — higher multipliers and more prop types
+        return ["Underdog"]
 
     def _checklist(self, prop: dict) -> dict:
         ctx = self.hub.get("context", {})
@@ -3219,59 +3235,76 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
             lg = {**lg, "confidence": _orig_conf}
         enriched_legs.append(lg)
 
-    # ── Step 2: decide ONE platform for the whole parlay ─────────────────────
-    #   • No active streak (count == 0):  need 2 legs BOTH clearing pick-2 hurdle (0.5774)
-    #   • Max streak: 11 (1000x)
+    # ── Step 2: enforce platform purity + decide entry type ─────────────────
+    # RULE: every leg in a slip must be from the same platform.
+    # Streaks are Underdog-only — PP legs can never qualify for a streak.
+    # If legs from multiple platforms somehow reach here, drop the minority platform.
 
-    _ud_streak_count = 0
-    try:
-        _sc = _pg_conn()
-        with _sc.cursor() as _scc:
-            _scc.execute("SELECT current_count FROM ud_streak_state LIMIT 1")
-            _srow = _scc.fetchone()
-            if _srow:
-                _ud_streak_count = int(_srow[0])
-        _sc.close()
-    except Exception:
-        pass
+    def _leg_platform(lg: dict) -> str:
+        raw = (lg.get("recommended_platform") or lg.get("platform") or "underdog").lower()
+        return "prizepicks" if "prize" in raw else "underdog"
 
-    if _ud_streak_count == 0:
-        _streak_phase       = "pick-2"
-        _streak_legs_needed = 2
-    else:
-        _streak_phase       = "pick-1"
-        _streak_legs_needed = 1
+    _plat_counts: dict = {}
+    for _lg in enriched_legs:
+        _p = _leg_platform(_lg)
+        _plat_counts[_p] = _plat_counts.get(_p, 0) + 1
 
-    _qualifying_streak_legs = [
-        lg for lg in enriched_legs
-        if check_streaks_gate(
-            min(0.95, max(0.05, lg.get("model_prob", 0.0) / 100)),  # Fix 30: default 0 → fails MIN_PROB gate explicitly
-            phase=_streak_phase,
-        )[0]
-    ]
-    has_ud_streak = len(_qualifying_streak_legs) >= _streak_legs_needed
+    # Majority platform wins; ties go to underdog (higher multipliers)
+    if len(_plat_counts) > 1:
+        _dominant = max(_plat_counts, key=lambda k: (_plat_counts[k], k == "underdog"))
+        _dropped  = [_lg for _lg in enriched_legs if _leg_platform(_lg) != _dominant]
+        enriched_legs = [_lg for _lg in enriched_legs if _leg_platform(_lg) == _dominant]
+        if _dropped:
+            logger.info(
+                "[_make_parlay] %s: dropped %d cross-platform leg(s) to enforce %s purity.",
+                agent_name, len(_dropped), _dominant,
+            )
+    parlay_platform = _leg_platform(enriched_legs[0]) if enriched_legs else "underdog"
 
-    if has_ud_streak:
-        enriched_legs     = _qualifying_streak_legs[:_streak_legs_needed]
-        parlay_platform   = "underdog"
-        entry_type_forced = "STREAKS"
-    else:
-        # Priority 2 — tiebreaker: PrizePicks wins only when EVERY leg
-        #              PrizePicks on tied lines).  Any Underdog vote → Underdog.
-        pp_votes = sum(
-            1 for lg in enriched_legs
-            if "prize" in lg.get("recommended_platform", "Underdog").lower()
-        )
-        parlay_platform   = "prizepicks" if pp_votes == len(enriched_legs) else "underdog"
-        entry_type_forced = None
+    if len(enriched_legs) < 2:
+        logger.info("[_make_parlay] %s: not enough same-platform legs after purity filter.", agent_name)
+        return []
+
+    # Streaks are Underdog-only — never assign STREAKS to a PP slip
+    entry_type_forced = None
+    if parlay_platform == "underdog":
+        _ud_streak_count = 0
+        try:
+            _sc = _pg_conn()
+            with _sc.cursor() as _scc:
+                _scc.execute("SELECT current_count FROM ud_streak_state LIMIT 1")
+                _srow = _scc.fetchone()
+                if _srow:
+                    _ud_streak_count = int(_srow[0])
+            _sc.close()
+        except Exception:
+            pass
+
+        if _ud_streak_count == 0:
+            _streak_phase       = "pick-2"
+            _streak_legs_needed = 2
+        else:
+            _streak_phase       = "pick-1"
+            _streak_legs_needed = 1
+
+        _qualifying_streak_legs = [
+            lg for lg in enriched_legs
+            if check_streaks_gate(
+                min(0.95, max(0.05, lg.get("model_prob", 0.0) / 100)),
+                phase=_streak_phase,
+            )[0]
+        ]
+        if len(_qualifying_streak_legs) >= _streak_legs_needed:
+            enriched_legs     = _qualifying_streak_legs[:_streak_legs_needed]
+            entry_type_forced = "STREAKS"
 
     # ── Step 3: build the single parlay ──────────────────────────────────────
     n      = len(enriched_legs)
-    probs  = [min(0.95, max(0.05, l.get("model_prob", 0.0) / 100)) for l in enriched_legs]  # Fix 30: default 0 → fails MIN_PROB gate explicitly
+    probs  = [min(0.95, max(0.05, l.get("model_prob", 0.0) / 100)) for l in enriched_legs]
     p_conf = round(sum(l.get("confidence", 5) for l in enriched_legs) / max(n, 1), 1)
 
     if parlay_platform == "underdog":
-        entry_type  = entry_type_forced or "STANDARD"
+        entry_type  = entry_type_forced or "PowerPlay"
         combined_ev = 0.0
         try:
             from underdog_math_engine import UnderdogMathEngine  # noqa: PLC0415
@@ -3281,12 +3314,14 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
             if not entry_type_forced:
                 entry_type = _eval.recommended_entry_type
         except Exception:
-            _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 20.0}
-            mult = _UD_MULTS.get(n, 3.5)
+            # Correct Underdog PowerPlay multipliers (not 3.5x — that was wrong)
+            _UD_MULTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
+            mult = _UD_MULTS.get(n, 3.0)
             combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
-    else:  # PrizePicks — Power mode
-        entry_type  = "POWER"
-        _PP_MULTS   = {2: 3.0, 3: 6.0, 4: 10.0}
+    else:  # PrizePicks Power Play
+        entry_type  = "Power Play"
+        # Correct PP Power Play multipliers: 2-pick=3x, 3-pick=5x (NOT 6x), 4-pick=10x
+        _PP_MULTS   = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
         mult        = _PP_MULTS.get(n, 3.0)
         combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
 
@@ -3345,15 +3380,9 @@ def _fetch_agent_season_stats(agent_name: str) -> dict:
                     COUNT(*) FILTER (WHERE status = 'PUSH') AS pushes,
                     ROUND(
                         COALESCE(
-                            -- Ref 1: Use actual profit_loss column first; reconstructed
-                            -- WIN/LOSS * units_wagered used only when profit_loss is NULL
-                            -- (rows graded before the column was populated).
-                            SUM(COALESCE(
-                                profit_loss,
-                                CASE WHEN status = 'WIN'  THEN  COALESCE(units_wagered, ABS(kelly_units), 1.0)
+                            SUM(CASE WHEN status = 'WIN'  THEN COALESCE(units_wagered, ABS(kelly_units), 1.0)
                                      WHEN status = 'LOSS' THEN -COALESCE(units_wagered, ABS(kelly_units), 1.0)
-                                     ELSE 0 END
-                            ))
+                                     ELSE 0 END)
                             / NULLIF(SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0)), 0) * 100,
                         0), 1
                     ) AS roi_pct
@@ -3383,49 +3412,64 @@ def _build_agent_parlays(hits: list[dict], agent_name: str,
                           min_legs: int = 2, max_legs: int = 3,
                           max_parlays: int = 3) -> list[dict]:
     """
-    Build 2-leg and 3-leg Underdog slips for one specific agent from its own
-    hit list.  Avoids same-player correlation.  Returns up to max_parlays
-    slips sorted by combined EV descending, each branded with agent_name.
+    Build 2-leg and 3-leg slips for one agent from its hit list.
+    PLATFORM PURITY: hits are split by platform (prizepicks vs underdog) and
+    slips are built within each platform separately. A slip can never mix legs
+    from different platforms. Returns up to max_parlays slips per platform,
+    sorted by combined EV descending.
     """
     if len(hits) < min_legs:
         return []
 
-    top = sorted(hits, key=lambda x: x["ev_pct"], reverse=True)[:10]
-    parlays: list[dict] = []
-    seen: set[str] = set()
+    def _platform_key(hit: dict) -> str:
+        """Normalise to 'prizepicks' or 'underdog'."""
+        raw = (hit.get("recommended_platform") or hit.get("platform") or "underdog").lower()
+        return "prizepicks" if "prize" in raw else "underdog"
 
-    for i in range(len(top)):
-        if len(parlays) >= max_parlays:
-            break
-        for j in range(i + 1, len(top)):
-            if len(parlays) >= max_parlays:
+    # Split hits by platform
+    pp_hits = [h for h in hits if _platform_key(h) == "prizepicks"]
+    ud_hits = [h for h in hits if _platform_key(h) == "underdog"]
+
+    all_parlays: list[dict] = []
+
+    for platform_hits in (pp_hits, ud_hits):
+        if len(platform_hits) < min_legs:
+            continue
+        top = sorted(platform_hits, key=lambda x: x["ev_pct"], reverse=True)[:10]
+        seen: set[str] = set()
+
+        for i in range(len(top)):
+            if len(all_parlays) >= max_parlays * 2:
                 break
-            two = [top[i], top[j]]
-            if _are_legs_correlated(two):
-                continue
+            for j in range(i + 1, len(top)):
+                if len(all_parlays) >= max_parlays * 2:
+                    break
+                two = [top[i], top[j]]
+                if _are_legs_correlated(two):
+                    continue
 
-            if max_legs >= 3:
-                for k in range(j + 1, len(top)):
-                    three = two + [top[k]]
-                    if not _are_legs_correlated(three):
-                        key = "|".join(sorted(
-                            f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
-                            for lg in three
-                        ))
-                        if key not in seen:
-                            seen.add(key)
-                            parlays.extend(_make_parlay(three, agent_name))
-                        break
+                if max_legs >= 3:
+                    for k in range(j + 1, len(top)):
+                        three = two + [top[k]]
+                        if not _are_legs_correlated(three):
+                            key = "|".join(sorted(
+                                f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
+                                for lg in three
+                            ))
+                            if key not in seen:
+                                seen.add(key)
+                                all_parlays.extend(_make_parlay(three, agent_name))
+                            break
 
-            key2 = "|".join(sorted(
-                f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
-                for lg in two
-            ))
-            if key2 not in seen:
-                seen.add(key2)
-                parlays.extend(_make_parlay(two, agent_name))
+                key2 = "|".join(sorted(
+                    f"{lg.get('player','')}:{lg.get('prop_type','')}:{lg.get('side','')}"
+                    for lg in two
+                ))
+                if key2 not in seen:
+                    seen.add(key2)
+                    all_parlays.extend(_make_parlay(two, agent_name))
 
-    return sorted(parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays * 2]
+    return sorted(all_parlays, key=lambda x: x["combined_ev_pct"], reverse=True)[:max_parlays * 2]
 
 
 class _CorrelatedParlayAgent(_BaseAgent):
@@ -3908,17 +3952,20 @@ def _get_props(hub: dict) -> list[dict]:
             logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
             return props
 
-    # 2. Underdog from hub — combined with PrizePicks if both available
+    # 2. Underdog from hub — returned as separate tagged props alongside PP props.
+    # PLATFORM PURITY: both PP and UD props are returned together in the full list,
+    # each tagged with their platform. _make_parlay enforces that every leg in a slip
+    # must share the same platform — no cross-platform mixing allowed.
     ud_props = _extract_underdog_props(hub)
     if ud_props:
         props = []
-        props.extend(ud_props)
+        props.extend(ud_props)  # already tagged platform="underdog"
         logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
 
-        # Add PrizePicks on top (deduped)
+        # Append PP props separately — keep platform tag "prizepicks" intact.
+        # Agents evaluate all props; _make_parlay splits them by platform at slip-build time.
         pp_picks = hub.get("dfs", {}).get("prizepicks", [])
         if pp_picks and isinstance(pp_picks, list):
-            seen = {(p["player"].lower(), p["prop_type"]) for p in props}
             pp_added = 0
             for pick in pp_picks:
                 if not isinstance(pick, dict):
@@ -3928,10 +3975,6 @@ def _get_props(hub: dict) -> list[dict]:
                 line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
                 if not player or not prop_type:
                     continue
-                key = (player.lower(), prop_type)
-                if key in seen:
-                    continue
-                seen.add(key)
                 props.append({
                     "player":         player,
                     "player_name":    player,
@@ -3941,11 +3984,11 @@ def _get_props(hub: dict) -> list[dict]:
                     "under_american": int(pick.get("under_american", pick.get("under_odds", -115)) or -115),
                     "team":           pick.get("player_team", pick.get("team", "")),
                     "venue":          "",
-                    "platform":       "prizepicks",
+                    "platform":       "prizepicks",  # keep tagged — purity enforced downstream
                 })
                 pp_added += 1
             if pp_added:
-                logger.info("[AgentTasklet] PrizePicks: %d props added", pp_added)
+                logger.info("[AgentTasklet] PrizePicks: %d props added (kept separate from UD)", pp_added)
         return props
 
     # No real props available — skip cycle entirely (no synthetic)
@@ -4241,6 +4284,24 @@ def run_agent_tasklet() -> bool:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < 0.",
                         agent_name, _combined_ev_check)
             continue
+        # Minimum combined EV floor: slip must be worth playing, not just positive.
+        # With correct multipliers (PP 2-leg=3x, PP 3-leg=5x, UD 2-leg=3x, UD 3-leg=6x)
+        # a 3% floor means ~58% avg per leg for 2-leg slips, ~56% for 3-leg UD.
+        _MIN_COMBINED_EV = 3.0
+        if _combined_ev_check < _MIN_COMBINED_EV:
+            logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < %.1f%% floor.",
+                        agent_name, _combined_ev_check, _MIN_COMBINED_EV)
+            continue
+        # Platform purity gate: every leg in the final slip must share one platform.
+        _legs = parlay.get("legs", [])
+        _leg_platforms = set()
+        for _lg in _legs:
+            _raw_p = (_lg.get("recommended_platform") or _lg.get("platform") or "").lower()
+            _leg_platforms.add("prizepicks" if "prize" in _raw_p else "underdog")
+        if len(_leg_platforms) > 1:
+            logger.info("[AgentTasklet] %s dropped — mixed platforms in slip: %s",
+                        agent_name, _leg_platforms)
+            continue
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
@@ -4408,20 +4469,11 @@ def run_agent_tasklet() -> bool:
                         _lg_pt        = _leg.get("prop_type", "")
                         _lg_side      = _leg.get("side", "OVER")
                         _lg_model_p   = float(_leg.get("model_prob", 50) or 50)
-                        # Ref 2: Try player-prop feed (hub:dfs) first — returns
-                        # 0.50 for all balanced pick'em lines (all dispatched props).
-                        # Falls back to game-level sharp-book odds only when not found.
-                        _lg_prop_impl = _fetch_prop_implied(_lg_player, _lg_pt, _lg_side)
-                        if _lg_prop_impl is not None:
-                            _lg_clv = round(_lg_model_p / 100.0 - _lg_prop_impl, 4)
+                        _lg_close_o   = _fetch_closing_odds(_lg_player, _lg_pt, _lg_side)
+                        if _lg_close_o is not None:
+                            _lg_clv = round(_lg_model_p - _american_to_implied(int(_lg_close_o)), 4)
                         else:
-                            _lg_close_o = _fetch_closing_odds(_lg_player, _lg_pt, _lg_side)
-                            if _lg_close_o is not None:
-                                _lg_clv = round(
-                                    _lg_model_p / 100.0 - _american_to_implied(int(_lg_close_o)), 4
-                                )
-                            else:
-                                _lg_clv = None  # market not available — leave NULL
+                            _lg_clv = None  # market not available — leave NULL for grading tasklet
                         _send_clv_map[(_lg_player.lower(), _lg_pt, _lg_side)] = _lg_clv
 
                     _c3.execute(
@@ -5465,64 +5517,10 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
     return None
 
-def _fetch_prop_implied(player: str, prop_type: str, side: str) -> float | None:
-    """
-    Ref 2 — CLV from player-prop feed, not game-level moneylines.
-
-    Checks hub:dfs (Underdog / PrizePicks lines) for the player's prop.
-    All dispatched props pass the line_type=='balanced' filter, so the
-    implied probability for a balanced pick'em is exactly 0.50.
-
-    If the prop has explicit American odds in the DFS response (rare —
-    UD sometimes returns non-balanced odds), those are used instead.
-
-    Returns: implied probability as a float in [0, 1], or None if not found.
-    The caller then computes CLV = model_prob/100 - implied_prob.
-    """
-    try:
-        r   = _redis()
-        raw = r.get("hub:dfs")
-        if not raw:
-            return None
-        dfs       = json.loads(raw)
-        player_lc = player.lower()
-        pt_lc     = prop_type.lower()
-        side_up   = side.upper()
-
-        for platform_key in ("underdog", "prizepicks"):
-            for prop in dfs.get(platform_key, []):
-                pname = str(
-                    prop.get("player_name", prop.get("player", "")) or ""
-                ).lower()
-                ptype = str(
-                    prop.get("prop_type", prop.get("stat_type", prop.get("stat", ""))) or ""
-                ).lower().replace("_", " ")
-                if player_lc not in pname and pname not in player_lc:
-                    continue
-                if pt_lc.replace("_", " ") not in ptype and ptype not in pt_lc.replace("_", " "):
-                    continue
-                # Prop matched — check for explicit odds first
-                if side_up in ("OVER", "HIGHER"):
-                    explicit_odds = prop.get("over_odds", prop.get("higher_odds"))
-                else:
-                    explicit_odds = prop.get("under_odds", prop.get("lower_odds"))
-                if explicit_odds is not None:
-                    return _american_to_implied(int(explicit_odds))
-                # Balanced pick'em → exactly 50%
-                return 0.50
-    except Exception:
-        pass
-    return None
-
-
 def _fetch_closing_odds(player: str, prop_type: str, side: str) -> int | None:
     """
     Best-effort closing line from Redis market cache (hub:market odds list).
     Scans sharp book markets for player name match. Returns American odds int or None.
-
-    NOTE: hub["market"]["odds"] contains game-level moneylines/totals from sharp books.
-    For player props, prefer _fetch_prop_implied() which reads hub:dfs directly.
-    This function is retained as a secondary fallback for non-DFS legs.
     """
     try:
         r   = _redis()
