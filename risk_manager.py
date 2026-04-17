@@ -152,7 +152,13 @@ class RiskManager:
         Returns True if this stake fits within:
           - Per-agent daily cap
           - Aggregate daily cap
+
+        H-3 fix: reloads from Postgres on every call. In-memory cache resets to {}
+        on every Railway deploy. Without this reload, an agent that already spent $30
+        against its $30 cap before a deploy could fire again after the deploy restores
+        the in-memory total to $0.
         """
+        self._load_today_exposure()  # H-3: always read from Postgres, never trust stale in-memory state
         agent_cap = self.bankroll * self.max_agent_pct
         aggregate_cap = self.bankroll * self.max_daily_pct
 
