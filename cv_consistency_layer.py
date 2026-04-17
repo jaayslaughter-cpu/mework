@@ -13,7 +13,12 @@ CV thresholds:
 
 Fires after Layer 8 (Marcel + Predict+), before agent claiming phase.
 Uses MLB Stats API game logs — free, no key required.
-Daily cache per player to avoid redundant calls.
+
+Cache hierarchy (H-7 fix):
+  1. In-process dict (zero-cost for same dispatch cycle)
+  2. /tmp disk JSON (fast within same Railway process lifetime)
+  3. Postgres layer_cache table (survives restarts/redeploys)
+  4. Live MLB Stats API fetch
 """
 
 import os
@@ -52,16 +57,15 @@ CV_TIERS = [
 ]
 
 # Map prop_type → (stat_group, stat_key, custom_fn)
-# custom_fn: optional function to compute value from a game log entry (for derived stats)
 PROP_STAT_MAP = {
     # Hitting props
     "hits":          ("hitting", "hits",        None),
     "total_bases":   ("hitting", None,           "calc_total_bases"),
     "rbis":          ("hitting", "rbi",          None),
     "runs":          ("hitting", "runs",         None),
-    "singles":       ("hitting", "hits",         None),  # approximate
+    "singles":       ("hitting", "hits",         None),
     "doubles":       ("hitting", "doubles",      None),
-    "strikeouts":    ("hitting", "strikeOuts",   None),  # batter Ks
+    "strikeouts":    ("hitting", "strikeOuts",   None),
     # Pitching props
     "pitcher_strikeouts": ("pitching", "strikeOuts", None),
     "pitcher_hits":       ("pitching", "hits",        None),
@@ -71,11 +75,35 @@ PROP_STAT_MAP = {
 
 
 # ─────────────────────────────────────────────
-# Cache helpers
+# H-7: Postgres-backed cache (layer_cache table, V37)
+# ─────────────────────────────────────────────
+
+def _pg_cache_get(key: str) -> dict | None:
+    """Load CV cache dict for today from Postgres layer_cache table."""
+    try:
+        from layer_cache_helper import pg_cache_get  # noqa: PLC0415
+        val = pg_cache_get("cv_consistency", key, _cv_today)
+        return val  # None on miss
+    except Exception as exc:
+        logger.debug("[CV] pg_cache_get failed: %s", exc)
+        return None
+
+
+def _pg_cache_set(key: str, value: object) -> None:
+    """Persist a CV result to Postgres layer_cache table."""
+    try:
+        from layer_cache_helper import pg_cache_set  # noqa: PLC0415
+        pg_cache_set("cv_consistency", key, value, _cv_today)
+    except Exception as exc:
+        logger.debug("[CV] pg_cache_set failed: %s", exc)
+
+
+# ─────────────────────────────────────────────
+# Disk cache helpers (L2 — within same restart)
 # ─────────────────────────────────────────────
 
 def _load_cache() -> dict:
-    """Load today's CV cache from disk."""
+    """Load today's CV cache from /tmp disk (L2)."""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r") as f:
@@ -86,7 +114,7 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
-    """Persist CV cache to disk."""
+    """Persist CV cache to /tmp disk (L2)."""
     try:
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f)
@@ -129,7 +157,6 @@ def _fetch_game_log(player_id: int, stat_group: str, season: int) -> list:
         resp.raise_for_status()
         data = resp.json()
         splits = data.get("stats", [{}])[0].get("splits", [])
-        # splits are oldest-first; reverse to get most recent first
         return [s.get("stat", {}) for s in reversed(splits)][:GAME_LOG_COUNT]
     except Exception as exc:
         logger.debug(f"CV game log fetch failed for player {player_id}: {exc}")
@@ -141,17 +168,13 @@ def _fetch_game_log(player_id: int, stat_group: str, season: int) -> list:
 # ─────────────────────────────────────────────
 
 def _compute_cv(values: list) -> Optional[float]:
-    """
-    Compute CV = std / mean for a list of numeric values.
-    Returns None if insufficient data.
-    Returns 2.0 (very volatile sentinel) if mean == 0.
-    """
+    """Compute CV = std / mean. Returns None if insufficient data."""
     values = [float(v) for v in values if v is not None]
     if len(values) < 3:
-        return None  # not enough data → no nudge
+        return None
     mean = statistics.mean(values)
     if mean == 0:
-        return 2.0  # zero-mean → treat as maximally volatile
+        return 2.0
     std = statistics.stdev(values) if len(values) > 1 else 0.0
     return std / mean
 
@@ -163,7 +186,7 @@ def _cv_to_nudge(cv: Optional[float]) -> float:
     for threshold, nudge in CV_TIERS:
         if cv < threshold:
             return nudge
-    return -0.04  # fallback
+    return -0.04
 
 
 # ─────────────────────────────────────────────
@@ -177,21 +200,19 @@ def get_player_cv_nudge(
     cache: dict,
 ) -> float:
     """
-    Return a probability nudge for a player based on their L10 CV
-    for the relevant stat. Uses cache to avoid duplicate API calls.
-
-    Args:
-        player_id: MLBAM player ID
-        prop_type: prop type string (e.g., "hits", "pitcher_strikeouts")
-        season: MLB season year
-        cache: shared mutable dict for today's results
-
-    Returns:
-        float nudge value (±0.04 max)
+    Return a probability nudge for a player based on their L10 CV.
+    Cache hierarchy: in-process dict → /tmp disk → Postgres → live fetch.
     """
     cache_key = f"{player_id}_{prop_type}"
     if cache_key in cache:
         return cache[cache_key]
+
+    # H-7: try Postgres before live fetch
+    pg_val = _pg_cache_get(cache_key)
+    if pg_val is not None:
+        nudge = float(pg_val)
+        cache[cache_key] = nudge
+        return nudge
 
     if prop_type not in PROP_STAT_MAP:
         cache[cache_key] = 0.0
@@ -199,15 +220,12 @@ def get_player_cv_nudge(
 
     stat_group, stat_key, custom_fn = PROP_STAT_MAP[prop_type]
 
-    # Rate-limit: small jitter between requests
     time.sleep(0.2)
-
     game_log = _fetch_game_log(player_id, stat_group, season)
     if not game_log:
         cache[cache_key] = 0.0
         return 0.0
 
-    # Extract per-game stat values
     if custom_fn == "calc_total_bases":
         values = [_calc_total_bases(g) for g in game_log]
     elif stat_key:
@@ -220,6 +238,9 @@ def get_player_cv_nudge(
     nudge = _cv_to_nudge(cv)
 
     cache[cache_key] = nudge
+    # H-7: persist to Postgres so next Railway restart gets this without a live fetch
+    _pg_cache_set(cache_key, nudge)
+
     logger.debug(
         f"CV layer | player={player_id} prop={prop_type} "
         f"L10={values} CV={cv:.3f if cv else 'N/A'} nudge={nudge:+.3f}"
@@ -235,15 +256,11 @@ def apply_cv_consistency_layer(props: list, season: int) -> list:
     """
     Layer 9: Apply CV-based consistency gate to all props.
 
-    For each prop with a known player_id, fetches L10 game log,
-    computes CV for the relevant stat, and nudges implied_prob.
-
-    Args:
-        props: list of prop dicts (must have implied_prob, player_id, prop_type)
-        season: current MLB season year (e.g., 2026)
-
-    Returns:
-        Updated list of prop dicts with cv_nudge and adjusted implied_prob.
+    Cache hierarchy per player_id+prop_type:
+      1. in-process dict (free)
+      2. /tmp disk JSON (fast — same process lifetime)
+      3. Postgres layer_cache (survives Railway redeploy — H-7 fix)
+      4. Live MLB Stats API game log fetch
     """
     logger.info("Layer 9 — CV Consistency Gate starting...")
     cache = _load_cache()
@@ -266,7 +283,6 @@ def apply_cv_consistency_layer(props: list, season: int) -> list:
                 cache=cache,
             )
 
-            # Apply nudge to implied_prob — clamp to [0.01, 0.99]
             original = prop.get("implied_prob", 0.5)
             prop["cv_nudge"] = nudge
             prop["implied_prob"] = max(0.01, min(0.99, original + nudge))
@@ -281,46 +297,3 @@ def apply_cv_consistency_layer(props: list, season: int) -> list:
     _save_cache(cache)
     logger.info(f"Layer 9 — CV Consistency Gate complete. {updated}/{len(props)} props nudged.")
     return props
-
-
-# ─────────────────────────────────────────────
-# Dispatcher integration snippet
-# ─────────────────────────────────────────────
-#
-# Add to live_dispatcher.py after Layer 8 (Marcel + Predict+) block:
-#
-#   # ── Layer 9: CV Consistency Gate ──────────────────────────────
-#   try:
-#       from cv_consistency_layer import apply_cv_consistency_layer
-#       props = apply_cv_consistency_layer(props, season=CURRENT_SEASON)
-#       logger.info("Layer 9 (CV consistency) applied.")
-#   except Exception as e:
-#       logger.warning(f"Layer 9 CV skipped (fallback): {e}")
-#
-# ─────────────────────────────────────────────
-
-
-if __name__ == "__main__":
-    # Quick smoke test
-    logging.basicConfig(level=logging.DEBUG)
-    test_props = [
-        {
-            "player_id": 592450,  # Gerrit Cole
-            "prop_type": "pitcher_strikeouts",
-            "implied_prob": 0.58,
-            "description": "Gerrit Cole K Over 7.5",
-        },
-        {
-            "player_id": 660271,  # Juan Soto
-            "prop_type": "hits",
-            "implied_prob": 0.62,
-            "description": "Juan Soto Hits Over 0.5",
-        },
-    ]
-    result = apply_cv_consistency_layer(test_props, season=2026)
-    for p in result:
-        print(
-            f"{p['description']} | "
-            f"CV nudge: {p['cv_nudge']:+.3f} | "
-            f"Final prob: {p['implied_prob']:.4f}"
-        )
