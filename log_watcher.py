@@ -29,15 +29,59 @@ import json
 from email.mime.text import MIMEText
 
 # ── Config ────────────────────────────────────────────────────────────────
+# Railway env var names → code aliases:
+#   RAILWAY_API_TOKEN   → RAILWAY_TOKEN
+#   RAILWAY_SERVICE_ID  → SERVICE_ID
+#   SMTP_USER           → send-from address  (also NOTIFY_EMAIL fallback)
+#   SMTP_PASS           → Gmail app password (also GMAIL_APP_PASSWORD fallback)
+#   ALERT_EMAIL         → send-to address    (also NOTIFY_EMAIL fallback)
 RAILWAY_TOKEN      = os.getenv("RAILWAY_API_TOKEN", "")
 SERVICE_ID         = os.getenv("RAILWAY_SERVICE_ID", "")
 PROJECT_ID         = os.getenv("RAILWAY_PROJECT_ID", "")
-NOTIFY_EMAIL       = os.getenv("NOTIFY_EMAIL", "")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+
+# Email: accept both Railway naming (SMTP_USER/SMTP_PASS/ALERT_EMAIL)
+# and legacy naming (NOTIFY_EMAIL/GMAIL_APP_PASSWORD)
+_SMTP_USER         = os.getenv("SMTP_USER", "")
+_SMTP_PASS         = os.getenv("SMTP_PASS", "")
+_ALERT_EMAIL       = os.getenv("ALERT_EMAIL", "")
+NOTIFY_EMAIL       = os.getenv("NOTIFY_EMAIL") or _ALERT_EMAIL or _SMTP_USER or ""
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD") or _SMTP_PASS or ""
+SMTP_FROM          = _SMTP_USER or NOTIFY_EMAIL  # sender address
+
 TWILIO_SID         = os.getenv("TWILIO_SID", "")
 TWILIO_TOKEN       = os.getenv("TWILIO_TOKEN", "")
 TWILIO_FROM        = os.getenv("TWILIO_FROM", "")
 TWILIO_TO          = os.getenv("TWILIO_TO", "")
+
+
+def _check_env_vars() -> None:
+    """Log clearly which env vars are missing at startup.
+    Railway vars required for basic email operation:
+      RAILWAY_API_TOKEN, RAILWAY_SERVICE_ID, SMTP_USER, SMTP_PASS, ALERT_EMAIL
+    Optional SMS: TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, TWILIO_TO
+    """
+    required = {
+        "RAILWAY_API_TOKEN":  RAILWAY_TOKEN,
+        "RAILWAY_SERVICE_ID": SERVICE_ID,
+        "SMTP_USER (or NOTIFY_EMAIL)":  SMTP_FROM,
+        "SMTP_PASS (or GMAIL_APP_PASSWORD)": GMAIL_APP_PASSWORD,
+        "ALERT_EMAIL (or NOTIFY_EMAIL)": NOTIFY_EMAIL,
+    }
+    optional = {
+        "TWILIO_SID":   TWILIO_SID,
+        "TWILIO_TOKEN": TWILIO_TOKEN,
+        "TWILIO_FROM":  TWILIO_FROM,
+        "TWILIO_TO":    TWILIO_TO,
+    }
+    missing_req  = [k for k, v in required.items()  if not v]
+    missing_opt  = [k for k, v in optional.items()  if not v]
+    if missing_req:
+        print(f"[LogWatcher] ⚠️  MISSING REQUIRED env vars: {', '.join(missing_req)}")
+        print("[LogWatcher]    Set these in Railway → service Variables tab.")
+    if missing_opt:
+        print(f"[LogWatcher] ℹ️  SMS not configured (missing: {', '.join(missing_opt)}) — email only")
+    if not missing_req:
+        print(f"[LogWatcher] ✅ Env vars OK — email to {NOTIFY_EMAIL!r} from {SMTP_FROM!r}")
 
 # Lines to extract from logs (regex patterns)
 WATCH_PATTERNS = [
@@ -164,19 +208,23 @@ def build_summary(key_lines: list[str]) -> str:
 
 
 def send_email(subject: str, body: str) -> None:
-    if not NOTIFY_EMAIL or not GMAIL_APP_PASSWORD:
+    # sender = SMTP_USER (Railway) or NOTIFY_EMAIL; recipient = NOTIFY_EMAIL or ALERT_EMAIL
+    _from = SMTP_FROM or NOTIFY_EMAIL
+    _to   = NOTIFY_EMAIL
+    _pwd  = GMAIL_APP_PASSWORD
+    if not _from or not _pwd or not _to:
         print("[Notify] Email not configured — printing to stdout:")
         print(body)
         return
     msg = MIMEText(body)
     msg["Subject"] = subject
-    msg["From"]    = NOTIFY_EMAIL
-    msg["To"]      = NOTIFY_EMAIL
+    msg["From"]    = _from
+    msg["To"]      = _to
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
+            server.login(_from, _pwd)
             server.send_message(msg)
-        print(f"[Notify] Email sent to {NOTIFY_EMAIL}")
+        print(f"[Notify] Email sent from {_from!r} to {_to!r}")
     except Exception as e:
         print(f"[Notify] Email failed: {e}")
         print(body)
@@ -204,6 +252,7 @@ def send_sms(body: str) -> None:
 
 
 def main():
+    _check_env_vars()
     print("[LogWatcher] Fetching Railway logs...")
     log_lines  = fetch_railway_logs(minutes_back=15)
     key_lines  = extract_key_lines(log_lines)
