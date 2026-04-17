@@ -418,7 +418,12 @@ def run(settle_date: Optional[str] = None) -> None:
                                 (bet_date, agent_name, player_name, prop_type, side, line,
                                  actual_outcome, profit_loss, status, created_at)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                            ON CONFLICT DO NOTHING
+                            ON CONFLICT (player_name, prop_type, line, side, agent_name, bet_date)
+                            DO UPDATE SET
+                                actual_outcome = EXCLUDED.actual_outcome,
+                                status         = EXCLUDED.status,
+                                profit_loss    = EXCLUDED.profit_loss
+                            WHERE bet_ledger.actual_outcome IS NULL
                             """,
                             (
                                 settle_date,

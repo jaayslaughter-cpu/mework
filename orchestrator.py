@@ -355,7 +355,7 @@ async def lifespan(_app: FastAPI):
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
     scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
-    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, timezone="America/Los_Angeles"), id="xgboost")
+    scheduler.add_job(job_xgboost,  CronTrigger(day_of_week="sun", hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")
 
     # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(
@@ -404,13 +404,28 @@ async def lifespan(_app: FastAPI):
     # Discord startup ping — guarded: at most once per PT calendar day
     _startup_ping_if_needed()
 
+    # ── PR #341: Auto-rebuild calibration map from bet_ledger if identity ──────
+    # Touch the map once so _CAL_MAP_IS_IDENTITY gets set on first import.
+    # If the map is still a pass-through identity, rebuild from settled bet_ledger rows.
+    try:
+        from calibration_layer import apply_isotonic_calibration as _touch_cal  # noqa: PLC0415
+        _touch_cal(0.55)
+        from calibration_layer import _CAL_MAP_IS_IDENTITY  # noqa: PLC0415
+        if _CAL_MAP_IS_IDENTITY:
+            logger.info("[startup] calibration_map.json is identity — rebuilding from bet_ledger")
+            from calibrate_model import generate_calibration_map_from_db as _rebuild_cal  # noqa: PLC0415
+            _rebuild_cal()
+            logger.info("[startup] Calibration map rebuilt from settled bets.")
+    except Exception as _cal_err:
+        logger.warning("[startup] Calibration auto-rebuild skipped: %s", _cal_err)
+
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
 
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2AM"
+        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2:30AM"
     )
     yield
 
