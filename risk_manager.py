@@ -152,7 +152,13 @@ class RiskManager:
         Returns True if this stake fits within:
           - Per-agent daily cap
           - Aggregate daily cap
+
+        H-3 fix: reloads from Postgres on every call. In-memory cache resets to {}
+        on every Railway deploy. Without this reload, an agent that already spent $30
+        against its $30 cap before a deploy could fire again after the deploy restores
+        the in-memory total to $0.
         """
+        self._load_today_exposure()  # H-3: always read from Postgres, never trust stale in-memory state
         agent_cap = self.bankroll * self.max_agent_pct
         aggregate_cap = self.bankroll * self.max_daily_pct
 
@@ -209,6 +215,23 @@ class RiskManager:
                 conn.commit()
         except Exception as exc:
             logger.error("Failed to write cool-down: %s", exc)
+
+        # H-2 fix: also write to agent_freeze_log — the table that get_frozen_agents() reads.
+        # Without this, cool-downs only appear in agent_cool_down and are invisible to dispatch.
+        try:
+            with _get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO agent_freeze_log (agent_name, freeze_date, freeze_reason, unfreeze_date)
+                        VALUES (%s, CURRENT_DATE, %s, %s)
+                        ON CONFLICT (agent_name) DO UPDATE
+                            SET freeze_reason = EXCLUDED.freeze_reason,
+                                freeze_date    = EXCLUDED.freeze_date,
+                                unfreeze_date  = EXCLUDED.unfreeze_date
+                    """, (agent_name, reason, until.isoformat()))
+                conn.commit()
+        except Exception as exc:
+            logger.warning("apply_cool_down: agent_freeze_log write failed: %s", exc)
 
     def check_and_apply_cool_downs(self, edge_metrics: dict) -> None:
         """

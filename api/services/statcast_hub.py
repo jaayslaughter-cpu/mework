@@ -26,7 +26,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 REDIS_URL    = os.getenv("REDIS_URL",    "redis://localhost:6379/0")
-APIFY_KEY    = os.getenv("APIFY_API_KEY","apify_api_oRAek9mVqwtsTUczc9Xsf0TBdXbSoQ4dUkzj")
+APIFY_KEY    = os.getenv("APIFY_API_KEY","")  # NEVER hardcode API keys in source
 REQUEST_TIMEOUT = 30
 
 # Baseball Savant base for CSV exports

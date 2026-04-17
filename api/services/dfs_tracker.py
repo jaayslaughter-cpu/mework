@@ -320,17 +320,4 @@ class PropBacktester:
             return json.load(f)
 
 
-# ─────────────────────────────────────────────
-# Context7 integration setup (documentation)
-# ─────────────────────────────────────────────
-CONTEXT7_MCP_CONFIG = {
-    "mcpServers": {
-        "context7": {
-            "command": "npx",
-            "args": ["-y", "@upstash/context7-mcp@latest"],
-            "env": {
-                "CONTEXT7_API_KEY": "ctx7sk-8e246594-e35e-44f1-b8df-bd2416b8831e"
-            }
-        }
-    }
-}
+# Context7 integration: configure via CONTEXT7_API_KEY env var in Railway. Never hardcode.

@@ -90,23 +90,27 @@ except ImportError:
 _DISPATCHER_AVAILABLE = True   # always True — inline configs always available
 
 AGENT_CONFIGS = [
-    {"name": "EVHunter",              "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "UnderMachine",          "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.55},
-    {"name": "UmpireAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "F5Agent",               "filter": lambda sr: sr.implied_prob >= 0.60},
-    {"name": "FadeAgent",             "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineValueAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "BullpenAgent",          "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "WeatherAgent",          "filter": lambda sr: sr.implied_prob >= 0.58},
-    {"name": "MLEdgeAgent",           "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "UnderDogAgent",         "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "StackSmithAgent",       "filter": lambda sr: sr.implied_prob >= 0.58},
-    {"name": "ChalkBusterAgent",      "filter": lambda sr: sr.implied_prob >= 0.55},
-    {"name": "SharpFadeAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "CorrelatedParlayAgent", "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "PropCycleAgent",        "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineupChaseAgent",      "filter": lambda sr: sr.implied_prob >= 0.57},
-    {"name": "LineDriftAgent",        "filter": lambda sr: sr.implied_prob >= 0.60},
+    # H-9 fix: removed 8 phantom agents that only checked implied_prob >= threshold,
+    # causing every prop at >= 0.55 prob to count as 8/17 signals automatically.
+    # All 17 entries now have differentiated filters using real StreakResult fields.
+    # StreakResult fields available: implied_prob, side, ev_pct, prop_type, position, line
+    {"name": "EVHunter",             "filter": lambda sr: sr.implied_prob >= 0.55 and sr.ev_pct >= 3.0},
+    {"name": "UnderMachine",         "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.55},
+    {"name": "UmpireAgent",          "filter": lambda sr: sr.prop_type in ("strikeouts", "pitching_outs") and sr.implied_prob >= 0.57},
+    {"name": "F5Agent",              "filter": lambda sr: sr.implied_prob >= 0.60},
+    {"name": "FadeAgent",            "filter": lambda sr: sr.side == "Under" and sr.ev_pct >= 5.0},
+    {"name": "LineValueAgent",       "filter": lambda sr: sr.implied_prob >= 0.57 and sr.ev_pct >= 4.0},
+    {"name": "BullpenAgent",         "filter": lambda sr: sr.prop_type in ("earned_runs", "hits_allowed", "pitching_outs") and sr.implied_prob >= 0.55},
+    {"name": "WeatherAgent",         "filter": lambda sr: sr.prop_type in ("strikeouts", "earned_runs") and sr.implied_prob >= 0.57},
+    {"name": "MLEdgeAgent",          "filter": lambda sr: sr.implied_prob >= 0.62 and sr.ev_pct >= 6.0},
+    {"name": "StackSmithAgent",      "filter": lambda sr: sr.prop_type in ("hits", "hits_runs_rbis", "total_bases") and sr.implied_prob >= 0.58},
+    {"name": "ChalkBusterAgent",     "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.58},
+    {"name": "CorrelatedParlayAgent","filter": lambda sr: sr.prop_type in ("hits", "total_bases", "rbis", "runs") and sr.implied_prob >= 0.58},
+    {"name": "PropCycleAgent",       "filter": lambda sr: sr.ev_pct >= 7.0},
+    {"name": "LineupChaseAgent",     "filter": lambda sr: sr.position not in ("SP", "RP") and sr.implied_prob >= 0.57},
+    {"name": "LineDriftAgent",       "filter": lambda sr: sr.implied_prob >= 0.60 and sr.ev_pct >= 5.0},
+    {"name": "SharpFadeAgent",       "filter": lambda sr: sr.side == "Under" and sr.implied_prob >= 0.60},
+    {"name": "UnderDogAgent",        "filter": lambda sr: sr.implied_prob >= 0.62},
 ]
 
 def fetch_today_schedule(): return []
@@ -124,11 +128,12 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN    = 5.0    # FIX: lowered from 7.0 — base rate model gives 55-62% probs during
-                            # paper trading which only scores ~4.2-4.5. Raise to 7.0 after
-                            # April 13 XGBoost retrain when real probs diverge from 50%.
-STREAK_PROB_MIN    = 0.57   # FIX: lowered from 0.62 — matches MIN_PROB in main AgentTasklet.
-STREAK_EV_MIN      = 5.0    # FIX: lowered from 8.0 — consistent with MIN_EV_THRESH_PCT (3%).
+STREAK_CONF_MIN    = 7.0    # Raised from 5.0 — April 13 retrain never fired (SQLite/Postgres
+                            # disconnect confirmed by audit). Gate held at 5.0 since before April 13.
+                            # The $10→$10,000 format requires 11 consecutive wins. 5.0 gate allowed
+                            # picks with 4.2–5.0 confidence that the spec explicitly rejects.
+STREAK_PROB_MIN    = 0.62   # Restored to spec value. Was 0.57 pending April 13 retrain that never fired.
+STREAK_EV_MIN      = 8.0    # Restored to spec value. Was 5.0 pending April 13 retrain that never fired.
 STREAK_MIN_LINE    = 1.0    # NEW: block all 0.5 stat lines — too trivial, near-certain base rate
 STREAK_MIN_SIGNALS = 2      # NEW: at least 2/17 agents must agree before a pick qualifies
 STREAK_TOTAL_WINS = 11     # picks needed to win
