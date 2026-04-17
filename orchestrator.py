@@ -322,7 +322,19 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 8:00 AM PT, before the main dispatch window."""
+    """Streak pick — runs at 8:00 AM PT, before the main dispatch window.
+    PR #340: Also pre-warms the sportsbook prop reference here so the first
+    Odds API fetch happens at 8 AM, not inside the 9 AM DataHub loop.
+    All DataHub cycles after this return from memory with zero I/O.
+    """
+    # PR #340: Pre-warm sportsbook reference at 8 AM (first fetch of the day)
+    try:
+        from sportsbook_reference_layer import build_sportsbook_reference as _sb_warm  # noqa: PLC0415
+        _sb_count = len(_sb_warm())
+        logger.info("[StreakAgent] Sportsbook reference pre-warmed: %d entries.", _sb_count)
+    except Exception as _sb_exc:
+        logger.warning("[StreakAgent] Sportsbook reference pre-warm failed: %s", _sb_exc)
+
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
