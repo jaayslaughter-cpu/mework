@@ -98,10 +98,11 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
 }
 
 # ── Module-level caches ──────────────────────────────────────────────────────
-_PITCHER_CACHE: dict[str, dict[str, float]] = {}
-_BATTER_CACHE:  dict[str, dict[str, float]] = {}
-_LOADED_DATE:   str = ""          # YYYY-MM-DD of last successful load
-_loaded:        bool = False
+_PITCHER_CACHE:   dict[str, dict[str, float]] = {}
+_BATTER_CACHE:    dict[str, dict[str, float]] = {}
+_PITCHER_WORKLOAD: dict[str, dict[str, float]] = {}  # days rest / recent pitch count
+_LOADED_DATE:     str = ""          # YYYY-MM-DD of last successful load
+_loaded:          bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +470,105 @@ def _parse_batter(raw: dict, name: str) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Pitcher days rest / recent workload
+# ---------------------------------------------------------------------------
+
+def _fetch_pitcher_game_log(player_id: int, season: int) -> dict | None:
+    """
+    Fetch pitcher's last 5 game log entries to compute days rest
+    and recent pitch count.
+
+    Returns dict with:
+        days_rest        — calendar days since last appearance (0–99)
+        last_pitch_count — pitches thrown in last outing
+        last_ip          — innings pitched in last outing
+        recent_era       — ERA over last 3 outings (trailing form)
+        recent_k_rate    — K rate over last 3 outings
+    """
+    data = _get(
+        f"/people/{player_id}",
+        {"hydrate": f"stats(group=pitching,type=gameLog,season={season})"},
+    )
+    if not data:
+        return None
+    people = data.get("people", [])
+    if not people:
+        return None
+
+    stats_list = people[0].get("stats") or []
+    splits = []
+    for s in stats_list:
+        if s.get("type", {}).get("displayName") == "gameLog":
+            splits = s.get("splits", [])
+            break
+
+    if not splits:
+        return None
+
+    # Splits are chronological — most recent last
+    recent = list(reversed(splits))
+
+    # Days rest: date of most recent game → today
+    from datetime import date as _date
+    try:
+        last_game_date = _date.fromisoformat(recent[0].get("date", "")[:10])
+        days_rest      = (_date.today() - last_game_date).days
+    except Exception:
+        days_rest = 5   # assume normal rest if date parse fails
+
+    # Last outing stats
+    last_stat = recent[0].get("stat", {})
+    last_ip_str = str(last_stat.get("inningsPitched", "0.0"))
+    try:
+        whole, thirds = last_ip_str.split(".")
+        last_ip = float(whole) + float(thirds) / 3.0
+    except Exception:
+        last_ip = float(last_ip_str or 0)
+
+    last_k  = float(last_stat.get("strikeOuts",    0))
+    last_bf = float(last_stat.get("battersFaced",  max(last_ip * 3.5, 1)))
+
+    # Estimate pitch count from battersFaced (avg ~3.8 pitches/PA)
+    # MLB Stats API doesn't expose pitch count directly in gameLog
+    last_pitch_count = round(last_bf * 3.8)
+
+    # Recent form: ERA and K-rate over last 3 outings
+    recent3 = recent[:3]
+    r3_k  = sum(float(s.get("stat", {}).get("strikeOuts",   0)) for s in recent3)
+    r3_er = sum(float(s.get("stat", {}).get("earnedRuns",   0)) for s in recent3)
+    r3_bf = sum(float(s.get("stat", {}).get("battersFaced", 0)) for s in recent3)
+    r3_ip_total = 0.0
+    for s in recent3:
+        _ips = str(s.get("stat", {}).get("inningsPitched", "0.0"))
+        try:
+            w, t = _ips.split(".")
+            r3_ip_total += float(w) + float(t) / 3.0
+        except Exception:
+            r3_ip_total += float(_ips or 0)
+
+    recent_era    = (r3_er / max(r3_ip_total, 1.0)) * 9
+    recent_k_rate = (r3_k  / max(r3_bf, 1.0))
+
+    return {
+        "days_rest":        days_rest,
+        "last_pitch_count": last_pitch_count,
+        "last_ip":          round(last_ip, 1),
+        "recent_era":       round(recent_era, 2),
+        "recent_k_rate":    round(recent_k_rate, 4),
+    }
+
+
+def get_pitcher_workload(name: str) -> dict[str, float]:
+    """
+    Return pitcher workload/rest data. Empty dict if not found.
+    Called by prop_enrichment_layer to stamp _days_rest on props.
+    """
+    if not _loaded:
+        load()
+    return _PITCHER_WORKLOAD.get(_norm(name), {})
+
+
+# ---------------------------------------------------------------------------
 # Main load function — called by DataHub every cycle
 # ---------------------------------------------------------------------------
 
@@ -562,6 +662,16 @@ def load(hub: dict | None = None) -> None:
                          name, parsed["era"], parsed["k_pct"] * 100)
         else:
             logger.debug("[MLBStats] No stats for pitcher %s (%d) — using defaults", name, pid)
+
+        # Fetch game log for workload/rest data (one extra call per starter — worth it)
+        workload = _fetch_pitcher_game_log(pid, season)
+        if not workload:
+            workload = _fetch_pitcher_game_log(pid, season - 1)
+        if workload:
+            _PITCHER_WORKLOAD[_norm(name)] = workload
+            logger.debug("[MLBStats] %s  days_rest=%d  last_pc=%d  recent_era=%.2f",
+                         name, workload["days_rest"], workload["last_pitch_count"],
+                         workload["recent_era"])
         time.sleep(_SLEEP_MS)
 
     # ── Fetch batter stats ───────────────────────────────────────────────────

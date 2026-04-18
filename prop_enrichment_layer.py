@@ -518,7 +518,7 @@ def _get_weather(team: str, hub: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _get_park_context(venue: str, team: str) -> dict:
-    result = {"is_dome": False, "altitude_ft": 0, "humidor": False}
+    result = {"is_dome": False, "altitude_ft": 0, "humidor": False, "park_factor_batting": 1.0}
     if not venue and not team:
         return result
 
@@ -535,6 +535,14 @@ def _get_park_context(venue: str, team: str) -> dict:
         v = venue or get_venue_for_team(team)
         result["altitude_ft"] = int(get_altitude_ft(v) or 0)
         result["humidor"]     = bool(get_humidor_status(v))
+    except Exception:
+        pass
+
+    # Park factors — general batting factor stored now, prop-specific applied per-prop
+    try:
+        from park_factors import get_park_factor, get_park_info  # noqa: PLC0415
+        result["park_factor_batting"] = get_park_factor(venue or "", "batting", team)
+        result["_park_info"] = get_park_info(venue or "", team)
     except Exception:
         pass
 
@@ -869,6 +877,16 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     _weather_cache: dict[str, dict] = {}
     _park_cache:    dict[str, dict] = {}
 
+    # ── Load injury layer — stamps flags before any agent sees the prop ─────────
+    try:
+        from injury_layer import load_from_hub as _inj_load, get_injury_status as _inj_status, get_confidence_penalty as _inj_penalty  # noqa: PLC0415
+        _inj_load(hub)
+        _injury_available = True
+    except Exception:
+        _inj_status   = lambda name: None        # noqa: E731
+        _inj_penalty  = lambda name: 0.0         # noqa: E731
+        _injury_available = False
+
     enriched_count = 0
     fg_hits        = 0
 
@@ -877,6 +895,28 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         prop_type = prop.get("prop_type", "")
         line      = float(prop.get("line", 1.5) or 1.5)
         pn        = _norm(player)
+
+        # ── Injury flag — stamped before any feature enrichment ───────────────
+        _inj_rec = _inj_status(player)
+        if _inj_rec:
+            prop["injury_status"]  = _inj_rec["status"]
+            prop["injury_is_il"]   = _inj_rec["is_il"]
+            prop["injury_is_dtd"]  = _inj_rec["is_dtd"]
+            prop["injury_penalty"] = _inj_penalty(player)
+            if _inj_rec["is_il"]:
+                # Player is on IL — this prop should not exist.
+                # Log and skip: it will be filtered in run_agent_tasklet.
+                logger.info(
+                    "[Enrichment] SKIP — %s is on %s (%s)",
+                    player, _inj_rec["status"], _inj_rec.get("detail", "")
+                )
+                prop["_skip_injury"] = True
+        else:
+            prop["injury_status"]  = None
+            prop["injury_is_il"]   = False
+            prop["injury_is_dtd"]  = False
+            prop["injury_penalty"] = 0.0
+            prop["_skip_injury"]   = False
 
         # ── Fix missing team / opponent from DataHub ──────────────────────────
         if not prop.get("team") and pn in p2team:
@@ -1180,6 +1220,58 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             _park_cache[park_key] = _get_park_context(venue, team)
         prop.update(_park_cache[park_key])
 
+        # ── Prop-specific park factor ─────────────────────────────────────────
+        try:
+            from park_factors import get_park_factor as _gpf  # noqa: PLC0415
+            _pf = _gpf(venue, prop_type, team)
+            prop["_park_factor"] = round(_pf, 4)
+            # Apply park factor to model_prob: boost or suppress toward/away from 50%
+            # A 1.15 park factor means expected stat is 15% higher → shifts OVER prob up
+            if _pf != 1.0:
+                _raw = float(prop.get("model_prob", 50.0))
+                # Scale: factor 1.15 → shift +5pp toward OVER; 0.85 → shift -5pp
+                _shift = (_pf - 1.0) * 33.0   # ~5pp per 15% park factor
+                prop["model_prob"]    = max(5.0, min(95.0, _raw + _shift))
+                prop["_park_adj"]     = round(_shift, 2)
+        except Exception:
+            prop["_park_factor"] = 1.0
+            prop["_park_adj"]    = 0.0
+
+        # ── Pitcher days rest / recent workload ───────────────────────────────
+        if is_pitcher_prop:
+            try:
+                from mlb_stats_layer import get_pitcher_workload as _gpw  # noqa: PLC0415
+                _wl = _gpw(player)
+                if _wl:
+                    prop["_days_rest"]        = _wl.get("days_rest", 5)
+                    prop["_last_pitch_count"] = _wl.get("last_pitch_count", 85)
+                    prop["_recent_era"]       = _wl.get("recent_era", 4.06)
+                    prop["_recent_k_rate"]    = _wl.get("recent_k_rate", 0.22)
+                    # Fatigue signal: short rest (<4 days) or high pitch count (>100) → adjust
+                    _days  = _wl.get("days_rest", 5)
+                    _pc    = _wl.get("last_pitch_count", 85)
+                    _raw   = float(prop.get("model_prob", 50.0))
+                    if _days <= 3:
+                        # Short rest: pitcher typically less effective
+                        prop["model_prob"]  = max(5.0, _raw - 4.0)
+                        prop["_rest_adj"]   = -4.0
+                    elif _days >= 7:
+                        # Extra rest: generally positive for performance
+                        prop["model_prob"]  = min(95.0, _raw + 2.0)
+                        prop["_rest_adj"]   = 2.0
+                    else:
+                        prop["_rest_adj"] = 0.0
+                    if _pc >= 105:
+                        # High pitch count last outing → likely on pitch limit today
+                        _raw2 = float(prop.get("model_prob", 50.0))
+                        prop["model_prob"]    = max(5.0, _raw2 - 3.0)
+                        prop["_pitch_count_adj"] = -3.0
+                    else:
+                        prop["_pitch_count_adj"] = 0.0
+            except Exception:
+                prop["_days_rest"] = 5
+                prop["_rest_adj"]  = 0.0
+
         # ── Game prediction context ───────────────────────────────────────────
         prop.update(_get_game_context(team, hub))
 
@@ -1222,6 +1314,24 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             prop["_feature_weights"] = _get_fw(prop)
         except Exception:
             pass
+
+        # ── DTD/QUESTIONABLE confidence penalty ──────────────────────────────
+        # IL props are already filtered at the tasklet level (_skip_injury=True).
+        # For DTD/OUT players that somehow still have a prop posted, reduce
+        # model_prob so agents see the uncertainty and are less likely to pick.
+        _inj_pen = prop.get("injury_penalty", 0.0)
+        if _inj_pen > 0 and not prop.get("injury_is_il"):
+            _raw_prob = float(prop.get("model_prob", 50.0))
+            # Penalty is subtracted from probability in percentage points
+            # DTD = -25pp (e.g. 62% → 37%), OUT = -90pp (e.g. 62% → -28% → floor 5%)
+            _adj_prob = max(5.0, _raw_prob - (_inj_pen * 100))
+            prop["model_prob"]     = _adj_prob
+            prop["_injury_adj"]    = round(_raw_prob - _adj_prob, 1)
+            logger.debug(
+                "[Enrichment] %s  %s penalty: prob %.1f → %.1f  (-%s%%)",
+                prop.get("player",""), prop.get("injury_status",""),
+                _raw_prob, _adj_prob, round(_inj_pen*100),
+            )
 
         enriched_count += 1
 
