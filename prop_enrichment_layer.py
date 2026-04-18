@@ -59,13 +59,13 @@ logger = logging.getLogger("propiq.enrichment")
 _PITCHER_PROP_TYPES = {
     "strikeouts", "pitcher_strikeouts", "pitching_outs",
     "earned_runs", "hits_allowed",
-    # walks_allowed excluded per Prop Exclusion Directive (Phase 112+118)
+    "walks_allowed",       # ABS 2026: reinstated — BB rate up 18% structurally
     "hitter_strikeouts",   # batter K — still lookup pitcher's K stats
 }
 
 _BATTER_PROP_TYPES = {
     "hits", "home_runs", "total_bases", "rbis", "rbi", "runs",
-    "stolen_bases", "doubles", "singles", "walks",
+    "stolen_bases", "doubles", "singles",
     "hits_runs_rbis", "fantasy_hitter",
 }
 
@@ -895,6 +895,35 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         prop_type = prop.get("prop_type", "")
         line      = float(prop.get("line", 1.5) or 1.5)
         pn        = _norm(player)
+
+        # ── ABS (Automated Ball-Strike) adjustments — 2026 structural shift ────
+        try:
+            from abs_layer import get_abs_context as _abs_ctx  # noqa: PLC0415
+            # Get umpire name from hub umpires list (matched to this game's team)
+            _ump_name = ""
+            for _u in (hub.get("context") or {}).get("umpires", []):
+                _u_home = str(_u.get("home_team", "")).lower()
+                _u_away = str(_u.get("away_team", "")).lower()
+                _t_lower = (prop.get("team") or "").lower()
+                if _t_lower and (_t_lower in _u_home or _t_lower in _u_away):
+                    _ump_name = _u.get("name", "")
+                    break
+            # season_day: days since Opening Day 2026-03-26
+            from datetime import date as _date
+            _szn_day = (_date.today() - _date(2026, 3, 26)).days + 1
+            _abs = _abs_ctx(prop_type, _ump_name, _szn_day)
+            prop["_abs_prop_adj"]         = _abs["abs_prop_adj"]
+            prop["_abs_umpire_k_adj"]     = _abs["abs_umpire_k_adj"]
+            prop["_abs_total_adj"]        = _abs["abs_total_adj"]
+            prop["_abs_zone_reliability"] = _abs["abs_zone_reliability"]
+            prop["_abs_era_baseline"]     = _abs["abs_era_baseline"]
+            # Apply structural ABS adjustment to model_prob
+            if _abs["abs_total_adj"] != 0.0:
+                _raw_abs = float(prop.get("model_prob", 50.0))
+                prop["model_prob"] = max(5.0, min(95.0, _raw_abs + _abs["abs_total_adj"]))
+        except Exception:
+            prop["_abs_prop_adj"]     = 0.0
+            prop["_abs_total_adj"]    = 0.0
 
         # ── Injury flag — stamped before any feature enrichment ───────────────
         _inj_rec = _inj_status(player)

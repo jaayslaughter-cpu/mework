@@ -155,13 +155,19 @@ except ImportError:
              "hitter_fantasy_score":"fantasy_score","pitcher_fantasy_score":"fantasy_score",
              "hitter fantasy pts":"fantasy_score","pitcher fantasy pts":"fantasy_score",
              "hits allowed":"hits_allowed","pitching outs":"pitching_outs",
-             "earned runs":"earned_runs","earned runs allowed":"earned_runs"}
+             "earned runs":"earned_runs","earned runs allowed":"earned_runs",
+             "walks allowed":"walks_allowed","bb allowed":"walks_allowed",
+             "walks":"walks_allowed","bb":"walks_allowed",
+             "pitcher walks":"walks_allowed","pitcher bb":"walks_allowed"}
         s2 = str(s).lower().replace(" ","_").replace("-","_").strip()
         result = m.get(s2, s2)
         # Block removed prop types even if they slip through via raw string match
-        _BLOCKED = {"stolen_bases","home_runs","walks","walks_allowed","doubles","triples","singles"}
+        # ABS 2026: walks_allowed reinstated — walk rate up 18% vs historical.
+        # stolen_bases and home_runs remain blocked (high variance, low sample size).
+        _BLOCKED = {"stolen_bases","home_runs","doubles","triples","singles"}
         return result if result not in _BLOCKED else ""
     ABS_FRAMING_WEIGHT = 0.20
+    # abs_layer ERA adjustment wired below in DataHub
     class SteamMonitor:
         def __init__(self, *a, **kw): pass  # accepts steam_threshold and any future kwargs
         def detect_steam(self, *a, **kw): return False, 0.0
@@ -2279,6 +2285,7 @@ class _BaseAgent:
                    "rbis": 3, "rbi": 3,
                    "hits_runs_rbis": 4,                   # most common prop — needs unique code
                    "total_bases": 5, "fantasy_score": 5,  # power/fantasy bucket
+                   "walks_allowed": 6, "walks": 6,            # ABS 2026: reinstated
                   }
         pt_enc = _pt_map.get(str(b.get("prop_type") or prop.get("prop_type", "")).lower(), 6) / 6.0
 
@@ -2676,6 +2683,36 @@ class _UmpireAgent(_BaseAgent):
         # UmpireAgent only needs K props — umpires just confirm game is happening
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
 
+        # Apply umpire modifier: historical K-rate × ABS overturn rate (2026)
+        if umpires:
+            _ump       = umpires[0]
+            _ump_name  = _ump.get("name", "")
+            k_mod      = float(_ump.get("k_mod", _ump.get("k_rate", 8.8) / 8.8))
+            _ump_known  = _ump.get("known", False)
+            # Dampen modifier for unknown umpires (regression to mean)
+            if not _ump_known:
+                k_mod = 1.0 + (k_mod - 1.0) * 0.5
+            # Apply historical K-rate modifier first
+            model_prob = min(model_prob * k_mod, 95.0)
+            # Layer ABS overturn rate on top (2026-specific signal)
+            try:
+                from abs_layer import get_umpire_abs_rate as _guar  # noqa: PLC0415
+                _abs_rates = _guar(_ump_name)
+                # High overturn = unreliable zone = suppress K prob further
+                model_prob = max(5.0, min(95.0,
+                    model_prob + _abs_rates.get("k_adj", 0.0)))
+                logger.debug(
+                    "[UmpireAgent] %s  k_mod=%.3f  abs_k_adj=%.1f  "
+                    "overturn=%.0f%%  prob→%.1f",
+                    _ump_name, k_mod,
+                    _abs_rates.get("k_adj", 0.0),
+                    _abs_rates.get("avg_overturn_rate", 0.55) * 100,
+                    model_prob,
+                )
+            except Exception:
+                logger.debug("[UmpireAgent] %s  k_mod=%.3f  prob→%.1f",
+                             _ump_name, k_mod, model_prob)
+        else:
         # Apply umpire K-rate modifier from real umpire_rates lookup
         if umpires:
             _ump      = umpires[0]
@@ -2721,7 +2758,8 @@ class _F5Agent(_BaseAgent):
         """
         prop_type = _norm_stat(prop.get("prop_type", ""))
         _PITCHER_TARGETS = {"strikeouts", "pitching_outs", "earned_runs",
-                            "hits_allowed", "fantasy_pitcher"}
+                            "hits_allowed", "fantasy_pitcher",
+                            "walks_allowed"}  # ABS 2026: reinstated — BB rate +18%
         if prop_type not in _PITCHER_TARGETS:
             return None
 
@@ -3826,7 +3864,7 @@ class _LineDriftAgent(_BaseAgent):
     DRIFT_MIN: float = 4.0    # 4 percentage points (both sides in 0-100 scale)
     LINE_GAP_BONUS: float = 1.5   # added to ev_pct when gap favors Over
 
-    _EXCLUDED = {"stolen_bases", "home_runs", "walks", "walks_allowed"}
+    _EXCLUDED = {"stolen_bases", "home_runs"}   # ABS 2026: walks_allowed reinstated
 
     def evaluate(self, prop: dict) -> dict | None:
         prop_type = prop.get("prop_type", "").lower()

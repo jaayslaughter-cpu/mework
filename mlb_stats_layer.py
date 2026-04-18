@@ -68,17 +68,19 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
         "csw_pct":   0.275,
         "swstr_pct": 0.110,
         "k_bb_pct":  0.130,
-        "xfip":      4.06,
-        "siera":     4.06,
-        "fip":       4.06,
+        # ABS 2026: ERA/FIP baseline adjusted upward (~4.35 early season)
+        # abs_layer.abs_era_adjustment() blends historical 4.06 with 2026 actual
+        "xfip":      4.20,
+        "siera":     4.20,
+        "fip":       4.20,
         "hr_fb_pct": 0.119,
         "lob_pct":   0.720,
         "babip":     0.288,
         # raw rate stats (extra — agents may use these directly)
-        "k_pct":     0.223,
-        "bb_pct":    0.087,
-        "era":       4.06,
-        "whip":      1.30,
+        "k_pct":     0.220,   # ABS 2026: very slightly suppressed vs 0.223
+        "bb_pct":    0.099,   # ABS 2026: up from 0.087 (9.9% early vs 8.7% hist)
+        "era":       4.20,
+        "whip":      1.35,    # ABS 2026: more walks inflate WHIP
     },
     "batter": {
         "wrc_plus":    100.0,
