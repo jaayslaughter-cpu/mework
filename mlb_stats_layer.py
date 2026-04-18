@@ -143,7 +143,8 @@ def _pg_load(today: str) -> tuple[dict, dict]:
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT data_type, data FROM fg_cache WHERE season = %s",
+            # FIX: fg_cache.season is INTEGER typed — cast to TEXT to accept YYYY-MM-DD date strings
+            "SELECT data_type, data FROM fg_cache WHERE season::TEXT = %s",
             (today,),          # we use the date string as the "season" key for daily caches
         )
         rows = cur.fetchall()
@@ -178,11 +179,11 @@ def _pg_save(today: str, batters: dict, pitchers: dict) -> None:
             cur.execute(
                 """
                 INSERT INTO fg_cache (season, data_type, data, cached_at)
-                VALUES (%s, %s, %s, NOW())
+                VALUES (EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER, %s, %s, NOW())
                 ON CONFLICT (season, data_type) DO UPDATE
                     SET data = EXCLUDED.data, cached_at = EXCLUDED.cached_at
                 """,
-                (today, dtype, psycopg2.extras.Json(payload)),
+                (dtype, psycopg2.extras.Json(payload)),  # season now from SQL EXTRACT
             )
         conn.commit()
         conn.close()

@@ -1642,7 +1642,10 @@ def _ensure_bet_ledger() -> None:
                     actual_outcome  INTEGER,
                     mlbam_id        INTEGER,          -- for accent-safe grading
                     discord_sent    BOOLEAN      NOT NULL DEFAULT FALSE,
-                    created_at      TIMESTAMP    DEFAULT NOW()
+                    created_at      TIMESTAMP    DEFAULT NOW(),
+                    units_wagered   FLOAT,                    -- actual dollar stake
+                    entry_type      VARCHAR(20)  DEFAULT 'STANDARD',
+                    lookahead_safe  BOOLEAN      DEFAULT TRUE  -- no future data leakage
                 )
             """)
             conn.commit()
@@ -1712,6 +1715,26 @@ def _ensure_bet_ledger() -> None:
         logger.info("[DB] bet_ledger table ensured.")
     except Exception as exc:
         logger.warning("[DB] bet_ledger create failed: %s", exc)
+
+    # ── Add columns missing from pre-existing Railway DB ──────────────────────
+    # Railway keeps the DB between deploys — if CREATE TABLE already ran without
+    # these columns, ALTER TABLE adds them without data loss.
+    try:
+        _ac = _pg_conn()
+        with _ac.cursor() as _cc:
+            for _col_ddl in [
+                "ADD COLUMN IF NOT EXISTS units_wagered   FLOAT",
+                "ADD COLUMN IF NOT EXISTS entry_type      VARCHAR(20) DEFAULT 'STANDARD'",
+                "ADD COLUMN IF NOT EXISTS lookahead_safe  BOOLEAN DEFAULT TRUE",
+            ]:
+                try:
+                    _cc.execute(f"ALTER TABLE bet_ledger {_col_ddl}")
+                except Exception:
+                    pass
+        _ac.commit()
+        _ac.close()
+    except Exception as _ae:
+        logger.debug("[DB] ALTER TABLE bet_ledger: %s", _ae)
 
     # ── UD streak state — tracks Underdog Streaks current count ───────────────
     try:
