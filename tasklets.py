@@ -3637,14 +3637,13 @@ class _ChalkBusterAgent(_BaseAgent):
         player     = prop.get("player", "")
         prop_type  = prop.get("prop_type", "").lower()
 
-        # SBD returns {"game_df": [...], "prop_df": [...]} — scan prop_df rows
-        pub_over   = 50.0
+        # ── Path 1: SBD prop_df — player-level public splits (rarely populated for MLB) ──
+        pub_over   = 0.0  # 0 = not found from SBD
         _prop_records = pub.get("prop_df", []) if isinstance(pub, dict) else []
         _player_lc    = player.lower()
         for _rec in _prop_records:
             _rec_player = str(_rec.get("player_name", _rec.get("player", ""))).lower()
             if _rec_player and (_rec_player in _player_lc or _player_lc in _rec_player):
-                # SBD actual column is prop_over_bets_pct; fall back to legacy keys
                 _pct = float(
                     _rec.get("prop_over_bets_pct")
                     or _rec.get("over_pct")
@@ -3655,8 +3654,35 @@ class _ChalkBusterAgent(_BaseAgent):
                     pub_over = _pct
                     break
 
-        # Fade if public is piling on overs (>68%) — contrarian under edge
-        if pub_over > 68:
+        # ── Path 2: sportsbook reference implied prob as chalk proxy ────────────
+        # SBD prop_df is almost always empty for MLB. Use sharp-book implied
+        # probability as a proxy for public action: if books price the over at
+        # >60% implied, the market has been pushed up by public betting volume.
+        if pub_over == 0.0:
+            sb_over_implied = float(prop.get("sb_implied_prob_over", 0) or 0)
+            if sb_over_implied > 60.0:
+                pub_over = sb_over_implied  # treat heavy sharp pricing as chalk signal
+            elif sb_over_implied > 0.0:
+                # Not chalky enough on Path 2 — check AN game sentiment
+                # If the player's team has >65% money% on game over total → batter props are chalk
+                an_sentiment = market.get("an_game_sentiment", {})
+                _team_key = str(prop.get("_team", prop.get("team", ""))).lower()
+                # Normalise abbreviation to full name for AN lookup
+                _team_full = _ABBREV_TO_FULL.get(_team_key.upper(), _team_key)
+                game_ctx = an_sentiment.get(_team_full.lower(), {})
+                if not game_ctx:
+                    # Try direct key (full name already)
+                    for _k, _v in an_sentiment.items():
+                        if _team_key in _k or _k in _team_key:
+                            game_ctx = _v
+                            break
+                over_money_pct = float(game_ctx.get("over_money_pct", 50) or 50)
+                if over_money_pct > 65:
+                    pub_over = over_money_pct
+
+        # Fade if public chalk >68% (SBD) or >60% sharp-implied + EV gate
+        _chalk_threshold = 68.0 if pub_over < 80 else 60.0
+        if pub_over >= _chalk_threshold:
             model_prob = self._model_prob(player, prop_type, prop=prop)
             under_odds = prop.get("under_american", -115)
             implied    = _american_to_implied(under_odds)
@@ -3670,6 +3696,9 @@ class _ChalkBusterAgent(_BaseAgent):
                 # Public pounding UNDER → fade to OVER
                 return self._build_bet(prop, "OVER", model_prob, over_implied_cb, ev_over_pct * 100)
             if ev_pct >= MIN_EV_THRESH_PCT:  # original: public heavy OVER → fade to UNDER
+            under_prob = 100.0 - model_prob
+            ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
+            if ev_pct >= MIN_EV_THRESH_PCT:
                 return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct * 100)
         return None
 
@@ -3716,6 +3745,13 @@ class _SharpFadeAgent(_BaseAgent):
         _team_full = _ABBREV_TO_FULL.get(_raw_team.upper(), _raw_team)
         team = _team_full.lower()
         game_ctx = an_sentiment.get(team, {})
+        if not game_ctx and _raw_team:
+            # Fuzzy fallback: check if any AN key contains the team token
+            _raw_lc = _raw_team.lower()
+            for _ak, _av in an_sentiment.items():
+                if _raw_lc in _ak or _ak in _raw_lc:
+                    game_ctx = _av
+                    break
 
         if not game_ctx or not game_ctx.get("rlm_signal"):
             return None
@@ -4097,10 +4133,10 @@ def run_agent_tasklet() -> bool:
     logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
                 _entry_now.hour, _entry_now.minute)
 
-    # ── Send-window clock gate — only dispatch picks 11:00 AM–12:00 PM PT ────────
+    # ── Send-window clock gate — only dispatch picks 9:00–10:00 AM PT ──────────
     _pt_now = _entry_now
-    if not (11 <= _pt_now.hour < 12):
-        logger.info("[AgentTasklet] Outside 11 AM–12 PM PT send window (%02d:%02d PT) — skipping cycle.",
+    if not (9 <= _pt_now.hour < 10):
+        logger.info("[AgentTasklet] Outside 9–10 AM PT send window (%02d:%02d PT) — skipping cycle.",
                     _pt_now.hour, _pt_now.minute)
         return
 
@@ -4890,6 +4926,53 @@ def run_backtest_tasklet() -> None:
 # 5. GradingTasklet  (nightly 1:05 AM)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ---------------------------------------------------------------------------
+# H-1 fix: fuzzy player-name matcher for GradingTasklet
+# ---------------------------------------------------------------------------
+def _grading_name_match(a: str, b: str) -> bool:
+    """
+    Return True if two player name strings refer to the same player.
+
+    Handles the ESPN displayName abbreviation problem:
+      - "C. Burnes"    ↔  "Corbin Burnes"    (first-initial + last)
+      - "R. Acuna Jr." ↔  "Ronald Acuña Jr." (accent-strip + suffix)
+      - "Crow-Armstrong" ↔ "Armstrong"        (hyphen / multi-part last name)
+    """
+    import unicodedata as _udg
+    _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+    def _norm(s: str) -> list[str]:
+        s = _udg.normalize("NFD", s.lower().strip())
+        s = "".join(c for c in s if _udg.category(c) != "Mn")
+        parts = s.replace("-", " ").replace(".", "").replace("'", "").split()
+        return [p for p in parts if p not in _SUFFIXES]
+
+    if not a or not b:
+        return False
+    a_p = _norm(a)
+    b_p = _norm(b)
+    if not a_p or not b_p:
+        return False
+    # Exact (after normalisation)
+    if a_p == b_p:
+        return True
+    # Last name + first initial
+    if a_p[-1] == b_p[-1] and a_p[0][:1] == b_p[0][:1]:
+        return True
+    # Single-token (nickname / last-name-only) contained in the other
+    if len(a_p) == 1 and a_p[0] in b_p:
+        return True
+    if len(b_p) == 1 and b_p[0] in a_p:
+        return True
+    # Hyphenated / multi-part last name: shorter is suffix of longer
+    # e.g. ["crow","armstrong"] ends ["brett","crow","armstrong"]
+    short, long = (a_p, b_p) if len(a_p) <= len(b_p) else (b_p, a_p)
+    if len(short) >= 2 and long[-len(short):] == short:
+        return True
+    return False
+
+
 def run_grading_tasklet() -> None:
     """
     Fetch final boxscores via ESPN (free, no key), grade open bets,
@@ -4954,6 +5037,16 @@ def run_grading_tasklet() -> None:
         _ascii_nohyphen = _ascii_name.replace("-", " ")
         stat_lookup[_ascii_nohyphen]          = mapped
         stat_lookup[_ascii_nohyphen.lower()]  = mapped
+
+    # H-1 fix: one entry per ESPN player for fuzzy fallback scan
+    _grading_players: list[tuple[str, dict]] = []
+    _seen_grading_dn: set[str] = set()
+    for _nl2, _espn2 in raw_stats.items():
+        _dn2 = _espn2.get("full_name", _nl2.title())
+        if _dn2 not in _seen_grading_dn:
+            _seen_grading_dn.add(_dn2)
+            _grading_players.append((_dn2, stat_lookup.get(_dn2, stat_lookup.get(_nl2, {}))))
+
 
     open_bets: list[tuple] = []
     try:
@@ -5031,10 +5124,8 @@ def run_grading_tasklet() -> None:
                         pass
                 _pn_nohyphen = player.replace("-", " ")
                 _pn_norm_nohyphen = _pn_norm.replace("-", " ")
-                # Last-name-only fallback: "Crow-Armstrong" → "Armstrong"
-                _pn_lastname = player.strip().split()[-1] if player.strip() else ""
-                _pn_lastname_lower = _pn_lastname.lower()
-                stats = (
+                # Fast-path: direct dict lookups (exact, accent, hyphen variants)
+                _fast_stats = (
                     _stats_by_id
                     or stat_lookup.get(player)
                     or stat_lookup.get(_pn_norm)
@@ -5044,13 +5135,31 @@ def run_grading_tasklet() -> None:
                     or stat_lookup.get(_pn_nohyphen.lower())
                     or stat_lookup.get(_pn_norm_nohyphen)
                     or stat_lookup.get(_pn_norm_nohyphen.lower())
-                    # Last-name-only: last resort to catch spacing/suffix variants
-                    or next(
-                        (v for k, v in stat_lookup.items()
-                         if _pn_lastname_lower and k.split()[-1].lower() == _pn_lastname_lower),
-                        {}
-                    )
                 )
+                if _fast_stats:
+                    stats = _fast_stats
+                else:
+                    # H-1 fix: fuzzy scan — catches "C. Burnes" ↔ "Corbin Burnes"
+                    # and other abbreviated ESPN displayName ↔ full UD/PP name mismatches.
+                    # Iterates _grading_players (one entry per ESPN player, deduped)
+                    # so no false positives from duplicate stat_lookup keys.
+                    _fuzzy_hit = next(
+                        ((espn_name, v) for espn_name, v in _grading_players
+                         if _grading_name_match(player, espn_name)),
+                        None,
+                    )
+                    if _fuzzy_hit:
+                        _fz_espn_name, stats = _fuzzy_hit
+                        logger.debug(
+                            "[GradingTasklet] H-1 fuzzy match: '%s' → '%s'",
+                            player, _fz_espn_name,
+                        )
+                    else:
+                        stats = {}
+                        logger.debug(
+                            "[GradingTasklet] No stats match for '%s' — skipping (bet stays OPEN)",
+                            player,
+                        )
                 actual = _get_stat(stats, ptype, platform=plat)
 
                 if actual is None:
