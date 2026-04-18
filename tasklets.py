@@ -599,6 +599,16 @@ def _fetch_espn_games() -> dict:
         logger.warning("[DataHub] ESPN scoreboard error: %s", exc)
         return {}
 
+def _fetch_injuries_today() -> list[dict]:
+    """Fetch current MLB injury list from ESPN + Action Network PRO."""
+    try:
+        from injury_layer import fetch_injuries as _fetch_inj  # noqa: PLC0415
+        return _fetch_inj()
+    except Exception as exc:
+        logger.warning("[DataHub] injury_layer fetch failed: %s", exc)
+        return []
+
+
 def _fetch_mlb_lineups_today() -> list[dict]:
     """Fetch today's confirmed batting order lineups from MLB Stats API (free, no key)."""
     import datetime as _dt  # noqa: PLC0415
@@ -1780,7 +1790,7 @@ def run_data_hub_tasklet() -> None:
             context = {
                 "weather":            _fetch_weather_today(),    # Open-Meteo free
                 "umpires":            [],  # no source yet
-                "injuries":           [],  # no source yet
+                "injuries":           _fetch_injuries_today(),  # injury_layer
                 "lineups":            _fetch_mlb_lineups_today(),
                 "projected_starters": _fetch_mlb_probable_starters(),
                 "standings":          _fetch_mlb_standings(),
@@ -2662,14 +2672,22 @@ class _UmpireAgent(_BaseAgent):
             # No umpire data — still evaluate but without umpire boost
             model_prob = min(model_prob + 3.0, 95.0)
 
-        # FIX: _model_prob returns P(OVER). Flip to P(UNDER) before EV calc.
-        under_prob = 100.0 - model_prob
-        under_odds = prop.get("under_american", -110)
-        implied    = _american_to_implied(under_odds) / 100
-        ev_pct     = (under_prob / 100 - implied) / implied
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+        # Bidirectional: umpire with tight zone → favour UNDER K; wide zone → OVER K.
+        over_odds     = prop.get("over_american",  -110)
+        under_odds    = prop.get("under_american", -110)
+        over_prob     = model_prob
+        under_prob    = 100.0 - model_prob
+        over_implied  = _american_to_implied(over_odds)  / 100
+        under_implied = _american_to_implied(under_odds) / 100
+        ev_over  = (over_prob  / 100 - over_implied)  / over_implied
+        ev_under = (under_prob / 100 - under_implied) / under_implied
+        _thresh  = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
+        if ev_over >= _thresh and ev_over >= ev_under:
+            return self._build_bet(prop, "OVER",  over_prob,
+                                   over_implied  * 100, ev_over  * 100)
+        if ev_under >= _thresh:
             return self._build_bet(prop, "UNDER", under_prob,
-                                   implied * 100, ev_pct * 100)
+                                   under_implied * 100, ev_under * 100)
         return None
 
 
@@ -2701,12 +2719,20 @@ class _F5Agent(_BaseAgent):
         elif csw < 0.23:
             model_prob = max(model_prob - 2.0, 30.0)
 
-        over_odds  = prop.get("over_american", -110)
-        implied    = _american_to_implied(over_odds) / 100
-        ev_pct     = (model_prob / 100 - implied) / implied
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "OVER", model_prob,
-                                   implied * 100, ev_pct * 100)
+        over_odds     = prop.get("over_american",  -110)
+        under_odds    = prop.get("under_american", -110)
+        under_prob    = 100.0 - model_prob
+        over_implied  = _american_to_implied(over_odds)  / 100
+        under_implied = _american_to_implied(under_odds) / 100
+        ev_over  = (model_prob  / 100 - over_implied)  / over_implied
+        ev_under = (under_prob  / 100 - under_implied) / under_implied
+        _thresh  = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
+        if ev_over >= _thresh and ev_over >= ev_under:
+            return self._build_bet(prop, "OVER",  model_prob,
+                                   over_implied  * 100, ev_over  * 100)
+        if ev_under >= _thresh:
+            return self._build_bet(prop, "UNDER", under_prob,
+                                   under_implied * 100, ev_under * 100)
         return None
 
 
@@ -2863,12 +2889,21 @@ class _BullpenAgent(_BaseAgent):
         elif fatigue >= 2:
             model_prob = min(model_prob + 2.0, 95.0)
 
-        over_odds = prop.get("over_american", -110)
-        implied   = _american_to_implied(over_odds) / 100
-        ev_pct    = (model_prob / 100 - implied) / implied
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "OVER", model_prob,
-                                   implied * 100, ev_pct * 100)
+        over_odds     = prop.get("over_american",  -110)
+        under_odds    = prop.get("under_american", -110)
+        under_prob    = 100.0 - model_prob
+        over_implied  = _american_to_implied(over_odds)  / 100
+        under_implied = _american_to_implied(under_odds) / 100
+        ev_over  = (model_prob  / 100 - over_implied)  / over_implied
+        ev_under = (under_prob  / 100 - under_implied) / under_implied
+        _thresh  = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
+        # Fatigued bullpen → OVER. Rested elite bullpen → UNDER also valid.
+        if ev_over >= _thresh and ev_over >= ev_under:
+            return self._build_bet(prop, "OVER",  model_prob,
+                                   over_implied  * 100, ev_over  * 100)
+        if ev_under >= _thresh:
+            return self._build_bet(prop, "UNDER", under_prob,
+                                   under_implied * 100, ev_under * 100)
         return None
 
 
@@ -2910,7 +2945,7 @@ class _WeatherAgent(_BaseAgent):
 
         pt_norm = _norm_stat(prop_type)
 
-        # Wind blowing out ≥10mph → boost power props
+        # Wind blowing out ≥10mph → boost OVER on power props
         if wind_mph >= 10 and "out" in wind_dir.lower() and pt_norm in _POWER_PROPS:
             model_prob = self._model_prob(player, prop_type, prop=prop)
             # Scale boost: 10mph=+4pp, 15mph=+6pp, 20mph+=+8pp
@@ -2921,6 +2956,18 @@ class _WeatherAgent(_BaseAgent):
             ev_pct     = (model_prob / 100 - implied) / implied
             if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
                 return self._build_bet(prop, "OVER", model_prob,
+                                       implied * 100, ev_pct * 100)
+
+        # Wind blowing IN ≥10mph → boost UNDER on power props
+        if wind_mph >= 10 and "in" in wind_dir.lower() and "out" not in wind_dir.lower() and pt_norm in _POWER_PROPS:
+            model_prob = self._model_prob(player, prop_type, prop=prop)
+            boost      = min(8.0, (wind_mph - 10) * 0.4 + 4.0)
+            under_prob = min(100.0 - model_prob + boost, 95.0)
+            under_odds = prop.get("under_american", -110)
+            implied    = _american_to_implied(under_odds) / 100
+            ev_pct     = (under_prob / 100 - implied) / implied
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, "UNDER", under_prob,
                                        implied * 100, ev_pct * 100)
 
         # Hot temperature (>85°F) → boost all hitter props
@@ -3503,9 +3550,15 @@ class _CorrelatedParlayAgent(_BaseAgent):
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds)
-        ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct * 100)
+        ev_pct       = (model_prob / 100 - implied / 100) / (implied / 100) * 100
+        under_odds   = prop.get("under_american", -115)
+        under_implied = _american_to_implied(under_odds)
+        under_prob   = 100.0 - model_prob
+        ev_under_pct = (under_prob / 100 - under_implied / 100) / (under_implied / 100) * 100
+        if ev_pct >= MIN_EV_THRESH_PCT and ev_pct >= ev_under_pct:
+            return self._build_bet(prop, "OVER",  model_prob,  implied,       ev_pct      * 100)
+        if ev_under_pct >= MIN_EV_THRESH_PCT:
+            return self._build_bet(prop, "UNDER", under_prob,  under_implied, ev_under_pct * 100)
         return None
 
 
@@ -3559,9 +3612,16 @@ class _StackSmithAgent(_BaseAgent):
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds)
-        ev_pct     = (model_prob / 100 - implied / 100) / (implied / 100) * 100
-        if ev_pct >= MIN_EV_THRESH_PCT:  # FIX: percent-scale EV gate (was always True vs 0.03)
-            return self._build_bet(prop, "OVER", model_prob, implied, ev_pct * 100)
+        ev_pct       = (model_prob / 100 - implied / 100) / (implied / 100) * 100
+        under_odds   = prop.get("under_american", -115)
+        under_implied = _american_to_implied(under_odds)
+        under_prob   = 100.0 - model_prob
+        ev_under_pct = (under_prob / 100 - under_implied / 100) / (under_implied / 100) * 100
+        # Weak pitcher → hitter OVER. Elite pitcher (model_prob < 50) → hitter UNDER.
+        if ev_pct >= MIN_EV_THRESH_PCT and ev_pct >= ev_under_pct:
+            return self._build_bet(prop, "OVER",  model_prob,  implied,       ev_pct      * 100)
+        if ev_under_pct >= MIN_EV_THRESH_PCT:
+            return self._build_bet(prop, "UNDER", under_prob,  under_implied, ev_under_pct * 100)
         return None
 
 
@@ -3626,6 +3686,16 @@ class _ChalkBusterAgent(_BaseAgent):
             model_prob = self._model_prob(player, prop_type, prop=prop)
             under_odds = prop.get("under_american", -115)
             implied    = _american_to_implied(under_odds)
+            under_prob   = 100.0 - model_prob
+            ev_pct       = (under_prob / 100 - implied / 100) / (implied / 100) * 100
+            # Bidirectional: if public is heavy UNDER instead, fade to OVER
+            over_odds_cb    = prop.get("over_american", -115)
+            over_implied_cb = _american_to_implied(over_odds_cb)
+            ev_over_pct     = (model_prob / 100 - over_implied_cb / 100) / (over_implied_cb / 100) * 100
+            if pub_over < 35.0 and ev_over_pct >= MIN_EV_THRESH_PCT:
+                # Public pounding UNDER → fade to OVER
+                return self._build_bet(prop, "OVER", model_prob, over_implied_cb, ev_over_pct * 100)
+            if ev_pct >= MIN_EV_THRESH_PCT:  # original: public heavy OVER → fade to UNDER
             under_prob = 100.0 - model_prob
             ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
             if ev_pct >= MIN_EV_THRESH_PCT:
@@ -4092,6 +4162,19 @@ def run_agent_tasklet() -> bool:
     props = _get_props(hub)
     if not props:
         logger.info("[AgentTasklet] No live UD/PP props this cycle — skipping.")
+        return
+
+    # ── Injury filter — remove IL props before any agent evaluation ───────────
+    _pre_inj = len(props)
+    props = [p for p in props if not p.get("_skip_injury")]
+    _inj_removed = _pre_inj - len(props)
+    if _inj_removed:
+        logger.info(
+            "[AgentTasklet] Filtered %d IL props (players on injured list) — %d props remain.",
+            _inj_removed, len(props),
+        )
+    if not props:
+        logger.info("[AgentTasklet] All props filtered (injury). Skipping cycle.")
         return
 
     # Enrich all props with FanGraphs, weather, Bayesian, CV, form, park context
