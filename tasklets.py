@@ -527,20 +527,76 @@ def _fetch_apify(actor_id: str, run_input: dict) -> list[dict]:
 
 
 def _fetch_sbd_public_trends() -> dict:
-    """Fetch SportsBettingDime public betting splits.
+    """
+    Public betting splits — now sourced from Action Network instead of SBD.
 
-    Returns dict with keys: game_df, prop_df (pandas DataFrames as dicts for JSON storage).
-    Caches via PublicTrendsScraper daily Parquet cache — zero re-hits after first fetch.
+    SBD was unreliable (data structure mismatch, scraping blocks).
+    Action Network PRO returns identical data: player-level ticket% and money%
+    per prop, plus game-level totals — same fields all agents expect.
+
+    Column mapping (AN → SBD-compatible names so all agents work unchanged):
+        AN "player"           → "player_name"          (FadeAgent, ChalkBuster)
+        AN "over_ticket_pct"  → "prop_over_bets_pct"   (ChalkBuster primary key)
+                              → "ticket_pct"            (SharpFade fallback)
+        AN "over_money_pct"   → "money_pct"
+        AN "prop_type"        → "prop_type"             (already PropIQ canonical)
+        AN "rlm_signal"       → "rlm_signal"
+        AN "rlm_direction"    → "rlm_direction"
+
+    Returns {"game_df": [...], "prop_df": [...]} — same schema all agents expect.
+    Falls back to empty lists if AN not available (agents degrade gracefully).
     """
     try:
-        scraper = PublicTrendsScraper()
-        game_df, prop_df = scraper.fetch()
-        return {
-            "game_df": game_df.to_dict(orient="records") if not game_df.empty else [],
-            "prop_df": prop_df.to_dict(orient="records") if not prop_df.empty else [],
-        }
+        from action_network_layer import (  # noqa: PLC0415
+            fetch_mlb_prop_projections,
+            fetch_mlb_game_sentiment,
+        )
+
+        # ── Player-level prop splits (replaces SBD prop_df) ──────────────────
+        an_props = fetch_mlb_prop_projections()
+        prop_df_records = []
+        for p in an_props:
+            prop_df_records.append({
+                # SBD-compatible keys — all downstream agents read these
+                "player_name":        p.get("player", ""),
+                "prop_type":          p.get("prop_type", ""),
+                "prop_over_bets_pct": p.get("over_ticket_pct", 50),  # ChalkBuster primary
+                "over_pct":           p.get("over_ticket_pct", 50),   # legacy alias
+                "ticket_pct":         p.get("over_ticket_pct", 50),   # SharpFade fallback
+                "money_pct":          p.get("over_money_pct",  50),
+                "under_ticket_pct":   p.get("under_ticket_pct", 50),
+                "under_money_pct":    p.get("under_money_pct",  50),
+                "rlm_signal":         p.get("rlm_signal", False),
+                "rlm_direction":      p.get("rlm_direction"),
+                "line":               p.get("line"),
+                "source":             "action_network",
+            })
+
+        # ── Game-level splits (replaces SBD game_df) ─────────────────────────
+        # AN game sentiment is already fetched for DataHub — reuse it here.
+        # Returns {} if JWT not set; agents fall back to 50% (no fade signal).
+        an_sentiment = fetch_mlb_game_sentiment()
+        game_df_records = []
+        for team_name, g in an_sentiment.items():
+            game_df_records.append({
+                "team":               team_name,
+                "over_bets_pct":      g.get("over_ticket_pct", 50),
+                "over_money_pct":     g.get("over_money_pct",  50),
+                "ticket_pct":         g.get("over_ticket_pct", 50),
+                "money_pct":          g.get("over_money_pct",  50),
+                "rlm_signal":         g.get("rlm_signal", False),
+                "rlm_direction":      g.get("rlm_direction"),
+                "source":             "action_network",
+            })
+
+        logger.info(
+            "[DataHub] AN public trends: %d player props, %d game records",
+            len(prop_df_records), len(game_df_records),
+        )
+        return {"game_df": game_df_records, "prop_df": prop_df_records}
+
     except Exception as exc:
-        logger.warning("[DataHub] SBD public trends fetch failed: %s", exc)
+        logger.warning("[DataHub] AN public trends fetch failed: %s", exc)
         return {"game_df": [], "prop_df": []}
 
 
@@ -2713,20 +2769,6 @@ class _UmpireAgent(_BaseAgent):
                 logger.debug("[UmpireAgent] %s  k_mod=%.3f  prob→%.1f",
                              _ump_name, k_mod, model_prob)
         else:
-        # Apply umpire K-rate modifier from real umpire_rates lookup
-        if umpires:
-            _ump      = umpires[0]
-            k_mod     = float(_ump.get("k_mod", _ump.get("k_rate", 8.8) / 8.8))
-            _ump_known = _ump.get("known", False)
-            # Dampen modifier for unknown umpires (regression to mean)
-            if not _ump_known:
-                k_mod = 1.0 + (k_mod - 1.0) * 0.5
-            # Apply: k_mod>1 → pitcher-friendly → boosts K probability
-            model_prob = min(model_prob * k_mod, 95.0)
-            logger.debug("[UmpireAgent] %s  k_mod=%.3f  known=%s  prob→%.1f",
-                         _ump.get("name","?"), k_mod, _ump_known, model_prob)
-        else:
-            # No umpire data — still evaluate but without umpire boost
             model_prob = min(model_prob + 1.0, 95.0)
 
         # Bidirectional: umpire with tight zone → favour UNDER K; wide zone → OVER K.
@@ -3701,13 +3743,14 @@ class _ChalkBusterAgent(_BaseAgent):
         player     = prop.get("player", "")
         prop_type  = prop.get("prop_type", "").lower()
 
-        # ── Path 1: SBD prop_df — player-level public splits (rarely populated for MLB) ──
-        pub_over   = 0.0  # 0 = not found from SBD
+        # SBD returns {"game_df": [...], "prop_df": [...]} — scan prop_df rows
+        pub_over   = 0.0
         _prop_records = pub.get("prop_df", []) if isinstance(pub, dict) else []
         _player_lc    = player.lower()
         for _rec in _prop_records:
             _rec_player = str(_rec.get("player_name", _rec.get("player", ""))).lower()
             if _rec_player and (_rec_player in _player_lc or _player_lc in _rec_player):
+                # SBD actual column is prop_over_bets_pct; fall back to legacy keys
                 _pct = float(
                     _rec.get("prop_over_bets_pct")
                     or _rec.get("over_pct")
@@ -3744,15 +3787,22 @@ class _ChalkBusterAgent(_BaseAgent):
                 if over_money_pct > 65:
                     pub_over = over_money_pct
 
-        # Fade if public chalk >68% (SBD) or >60% sharp-implied + EV gate
-        _chalk_threshold = 68.0 if pub_over < 80 else 60.0
-        if pub_over >= _chalk_threshold:
+
+        # Fade if public is piling on overs (>68%) — contrarian under edge
+        if pub_over > 68:
             model_prob = self._model_prob(player, prop_type, prop=prop)
             under_odds = prop.get("under_american", -115)
             implied    = _american_to_implied(under_odds)
-            under_prob = 100.0 - model_prob
-            ev_pct     = (under_prob / 100 - implied / 100) / (implied / 100) * 100
-            if ev_pct >= MIN_EV_THRESH_PCT:
+            under_prob   = 100.0 - model_prob
+            ev_pct       = (under_prob / 100 - implied / 100) / (implied / 100) * 100
+            # Bidirectional: if public is heavy UNDER instead, fade to OVER
+            over_odds_cb    = prop.get("over_american", -115)
+            over_implied_cb = _american_to_implied(over_odds_cb)
+            ev_over_pct     = (model_prob / 100 - over_implied_cb / 100) / (over_implied_cb / 100) * 100
+            if pub_over < 35.0 and ev_over_pct >= MIN_EV_THRESH_PCT:
+                # Public pounding UNDER → fade to OVER
+                return self._build_bet(prop, "OVER", model_prob, over_implied_cb, ev_over_pct * 100)
+            if ev_pct >= MIN_EV_THRESH_PCT:  # original: public heavy OVER → fade to UNDER
                 return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct * 100)
         return None
 
@@ -3793,11 +3843,7 @@ class _SharpFadeAgent(_BaseAgent):
         # ── Path 2: game-level RLM from Action Network ────────────────────────
         # Only fires on batter props (hits, TB, RBIs, runs, h+r+rbi) where
         an_sentiment = market.get("an_game_sentiment", {})
-        _raw_team = str(prop.get("_team", prop.get("team", ""))).strip()
-        # AN keys are full_name.lower() (e.g. "new york yankees").
-        # Props may carry abbreviation (e.g. "NYY") — translate before lookup.
-        _team_full = _ABBREV_TO_FULL.get(_raw_team.upper(), _raw_team)
-        team = _team_full.lower()
+        team = prop.get("_team", prop.get("team", "")).lower()
         game_ctx = an_sentiment.get(team, {})
 
         if not game_ctx or not game_ctx.get("rlm_signal"):
