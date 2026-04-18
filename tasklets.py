@@ -2713,6 +2713,20 @@ class _UmpireAgent(_BaseAgent):
                 logger.debug("[UmpireAgent] %s  k_mod=%.3f  prob→%.1f",
                              _ump_name, k_mod, model_prob)
         else:
+        # Apply umpire K-rate modifier from real umpire_rates lookup
+        if umpires:
+            _ump      = umpires[0]
+            k_mod     = float(_ump.get("k_mod", _ump.get("k_rate", 8.8) / 8.8))
+            _ump_known = _ump.get("known", False)
+            # Dampen modifier for unknown umpires (regression to mean)
+            if not _ump_known:
+                k_mod = 1.0 + (k_mod - 1.0) * 0.5
+            # Apply: k_mod>1 → pitcher-friendly → boosts K probability
+            model_prob = min(model_prob * k_mod, 95.0)
+            logger.debug("[UmpireAgent] %s  k_mod=%.3f  known=%s  prob→%.1f",
+                         _ump.get("name","?"), k_mod, _ump_known, model_prob)
+        else:
+            # No umpire data — still evaluate but without umpire boost
             model_prob = min(model_prob + 1.0, 95.0)
 
         # Bidirectional: umpire with tight zone → favour UNDER K; wide zone → OVER K.
