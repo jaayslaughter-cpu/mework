@@ -1736,6 +1736,54 @@ def _ensure_bet_ledger() -> None:
     except Exception as _ae:
         logger.debug("[DB] ALTER TABLE bet_ledger: %s", _ae)
 
+    # ── agent_unit_sizing — tier/streak tracking per agent ─────────────────────
+    try:
+        _us = _pg_conn()
+        with _us.cursor() as _uc:
+            _uc.execute("""
+                CREATE TABLE IF NOT EXISTS agent_unit_sizing (
+                    agent_name          VARCHAR(80) PRIMARY KEY,
+                    tier                INTEGER     NOT NULL DEFAULT 1,
+                    stake_dollars       FLOAT       NOT NULL DEFAULT 5.0,
+                    consecutive_wins    INTEGER     NOT NULL DEFAULT 0,
+                    consecutive_losses  INTEGER     NOT NULL DEFAULT 0,
+                    updated_at          TIMESTAMP   DEFAULT NOW()
+                )
+            """)
+        _us.commit()
+        _us.close()
+    except Exception as _ue:
+        logger.debug("[DB] agent_unit_sizing table: %s", _ue)
+
+    # ── clv_records — CLV tracking per bet leg ─────────────────────────────────
+    try:
+        _cr = _pg_conn()
+        with _cr.cursor() as _cc:
+            _cc.execute("""
+                CREATE TABLE IF NOT EXISTS clv_records (
+                    id              SERIAL PRIMARY KEY,
+                    bet_ledger_id   INTEGER,
+                    player_name     VARCHAR(150),
+                    prop_type       VARCHAR(60),
+                    side            VARCHAR(10),
+                    open_line       FLOAT,
+                    close_line      FLOAT,
+                    clv_pts         FLOAT,
+                    beat_close      BOOLEAN,
+                    game_date       DATE,
+                    agent_name      VARCHAR(80),
+                    created_at      TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            _cc.execute(
+                "CREATE INDEX IF NOT EXISTS idx_clv_records_date "
+                "ON clv_records (game_date)"
+            )
+        _cr.commit()
+        _cr.close()
+    except Exception as _cre:
+        logger.debug("[DB] clv_records table: %s", _cre)
+
     # ── UD streak state — tracks Underdog Streaks current count ───────────────
     try:
         conn = _pg_conn()
@@ -3570,7 +3618,7 @@ def _fetch_agent_season_stats(agent_name: str) -> dict:
                                      WHEN status = 'LOSS' THEN -COALESCE(units_wagered, ABS(kelly_units), 1.0)
                                      ELSE 0 END)
                             / NULLIF(SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0)), 0) * 100,
-                        0), 1
+                        0)::NUMERIC, 1
                     ) AS roi_pct
                 FROM bet_ledger
                 WHERE agent_name   = %s
