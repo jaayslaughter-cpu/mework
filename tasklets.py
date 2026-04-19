@@ -2406,7 +2406,7 @@ class _BaseAgent:
         impl_prob   = _clamp((_sb_implied if _sb_implied > 0.30 else _ud_implied) / 100.0)
         # Also encode sharp-book line gap as a feature (negative = DFS line favorable for Over)
         sb_line_gap = _clamp(((prop.get("sb_line_gap", 0.0) or 0.0) + 2.0) / 4.0)  # -2 to +2 range
-        _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0,
+        _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0, "hitter_strikeouts": 0,
                    "home_runs": 1, "hr": 1,
                    "hits": 2, "hits_allowed": 2,
                    "rbis": 3, "rbi": 3,
@@ -5133,7 +5133,8 @@ def run_grading_tasklet() -> None:
             "EarnedRuns":        espn.get("earned_runs",     0.0),
             "HitsAllowed":       espn.get("hits_allowed",    0.0),
             "WalksAllowed":      espn.get("walks_allowed", espn.get("bb_allowed",
-                                     espn.get("pitcher_walks", 0.0))),  # pitcher BB, not batter BB
+                                     espn.get("pitcher_walks",
+                                     espn.get("base_on_balls", 0.0)))),  # ESPN stores as base_on_balls
             # FIX: add fields needed for correct fantasy scoring and full grading
             "Doubles":           espn.get("doubles",         0.0),
             "Triples":           espn.get("triples",         0.0),
@@ -5700,6 +5701,7 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
         "triples":            "Triples",
         "strikeouts":         "Strikeouts",
         "pitcher_strikeouts": "Strikeouts",
+        "hitter_strikeouts":  "Strikeouts",   # batter K props (MLEdgeAgent, CorrelatedParlay)
         "earned_runs":        "EarnedRuns",
         "hits_allowed":       "HitsAllowed",
         "walks_allowed":      "WalksAllowed",
