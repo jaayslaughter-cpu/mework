@@ -138,6 +138,47 @@ def _save_to_pg(data: dict, today: str) -> None:
         logger.debug("[Steamer] pg_cache_set failed: %s", exc)
 
 
+
+def _fetch_steamer_pybaseball() -> dict[str, dict]:
+    """Pybaseball fallback when FanGraphs API is 403-blocked on Railway."""
+    try:
+        import pybaseball  # noqa: PLC0415
+        try:
+            pybaseball.cache.enable()
+        except Exception:
+            pass
+        df = pybaseball.batting_stats(2026, qual=1)
+        if df is None or df.empty:
+            return {}
+        projections: dict[str, dict] = {}
+        for _, row in df.iterrows():
+            name = str(row.get("Name") or "")
+            key = _norm(name)
+            if not key:
+                continue
+            def _f2(field, default=0.0):
+                try:
+                    return float(row.get(field) or default)
+                except (TypeError, ValueError):
+                    return default
+            pa  = max(1.0, _f2("PA", 1.0))
+            g   = max(1.0, _f2("G",  1.0))
+            r   = _f2("R"); rbi = _f2("RBI"); sb = _f2("SB"); hr = _f2("HR")
+            projections[key] = {
+                "avg": _f2("AVG", _LG["avg"]), "obp": _f2("OBP", _LG["obp"]),
+                "slg": _f2("SLG", _LG["slg"]),
+                "r": r, "rbi": rbi, "sb": sb, "hr": hr, "pa": pa, "g": g,
+                "r_pg":   r   / g if g > 0 else _LG["r_pg"],
+                "rbi_pg": rbi / g if g > 0 else _LG["rbi_pg"],
+                "sb_pg":  sb  / g if g > 0 else _LG["sb_pg"],
+                "hr_pg":  hr  / g if g > 0 else _LG["hr_pg"],
+            }
+        logger.info("[Steamer] pybaseball fallback: %d batters (2026 actuals)", len(projections))
+        return projections
+    except Exception as exc:
+        logger.warning("[Steamer] pybaseball fallback failed: %s", exc)
+        return {}
+
 def _fetch_steamer() -> dict[str, dict]:
     """
     Fetch Steamer 2026 batter projections from FanGraphs API.
@@ -153,8 +194,8 @@ def _fetch_steamer() -> dict[str, dict]:
         resp.raise_for_status()
         rows = (resp.json().get("data") or [])
     except Exception as exc:
-        logger.warning("[Steamer] FanGraphs fetch failed: %s", exc)
-        return {}
+        logger.warning("[Steamer] FanGraphs fetch failed: %s — trying pybaseball", exc)
+        return _fetch_steamer_pybaseball()
 
     projections: dict[str, dict] = {}
     for row in rows:
