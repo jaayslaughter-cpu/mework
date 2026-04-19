@@ -2389,7 +2389,11 @@ class _BaseAgent:
             shadow_whiff = _clamp(float(prop.get("k_pct", 0.223) or 0.223) / 0.35)
 
         # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
-        zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
+        # Blended with pitcher type cluster: power=+0.05, command=-0.05, neutral=0
+        _ptype_enc = {"power": 0.05, "command": -0.05}.get(
+            prop.get("_pitcher_type", "neutral"), 0.0
+        )
+        zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0) + _ptype_enc, 0.5, 1.5) / 1.5
 
         # ── Lineup context ────────────────────────────────────────────
         chase_adj   = _clamp((prop.get("_lineup_chase_adj", 0.0) + 0.10) / 0.20)  # -0.10→0, +0.10→1
@@ -2898,6 +2902,17 @@ class _F5Agent(_BaseAgent):
             model_prob = min(model_prob + 3.0, 95.0)
         elif csw < 0.23:
             model_prob = max(model_prob - 2.0, 30.0)
+
+        # Pitcher type cluster nudge (set by prop_enrichment_layer)
+        # Power pitchers get extra K-over bias on top of raw CSW%;
+        # command pitchers suppress K-over and support ER-under.
+        _ptype = prop.get("_pitcher_type", "neutral")
+        if _ptype == "power" and prop_type == "strikeouts":
+            model_prob = min(model_prob + 2.5, 95.0)
+        elif _ptype == "command" and prop_type == "strikeouts":
+            model_prob = max(model_prob - 2.5, 30.0)
+        elif _ptype == "command" and prop_type == "earned_runs":
+            model_prob = min(model_prob + 2.0, 95.0)  # command → ER under more likely
 
         # Days rest / pitch count adjustment from prop_enrichment_layer
         _rest_adj = float(prop.get("_rest_adj", 0.0))
