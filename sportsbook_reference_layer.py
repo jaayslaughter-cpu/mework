@@ -281,7 +281,7 @@ def _fetch_events() -> list[dict]:
         return []
 
 
-def _fetch_event_props(event_id: str, attempt: int = 0) -> list[dict]:
+def _fetch_event_props(event_id: str) -> list[dict]:
     """Step 2: fetch vig-stripped prop odds for one event.
     Returns a flat list of row dicts ready for _pg_save / reference dict.
     """
@@ -391,19 +391,18 @@ def _fetch_live(date_int: int) -> dict:
     if not all_rows:
         # Props may not be posted yet — retry once after 30s
         import time as _time  # noqa: PLC0415
-        log.info("[SBRef] No prop data from Odds API — waiting 30s then retrying once")
+        log.info("[SBRef] No prop lines on first attempt — waiting 30s then retrying")
         _time.sleep(30)
         all_rows = []
         for event in events[:20]:
             eid = event.get("id")
             if not eid:
                 continue
-            rows = _fetch_event_props(eid, attempt=1)
+            rows = _fetch_event_props(eid)
             all_rows.extend(rows)
             _time.sleep(0.1)
         log.info("[SBRef] Retry fetched %d prop lines", len(all_rows))
         if not all_rows:
-            log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
             return {}
 
     # Build reference dict — one entry per (player, market, side) key
@@ -487,8 +486,8 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
 
     # ── DraftEdge fallback — when Odds API has no props yet ──────────────────
     # DraftEdge gives projected_prob per player/prop. Used when sharp book
-    # lines aren't available (props not yet posted). Less precise than
-    # vig-stripped book odds but better than defaulting sb_implied_prob to 0.
+    # lines aren't available (props not yet posted for the day). Less precise
+    # than vig-stripped book odds but better than defaulting sb_implied_prob to 0.
     if not _mem_ref:
         try:
             from draftedge_scraper import fetch_all_projections as _de_fetch  # noqa: PLC0415

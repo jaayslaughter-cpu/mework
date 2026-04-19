@@ -59,21 +59,21 @@ logger = logging.getLogger("propiq.steamer_layer")
 
 _TZ     = ZoneInfo("America/Los_Angeles")
 _FG_BASE = "https://www.fangraphs.com/api/leaders/major-league/data"
-# Import shared rotating headers from fangraphs_layer
+# Import rotating headers from fangraphs_layer to avoid FanGraphs 403 blocks
 try:
-    from fangraphs_layer import _fg_headers as _get_fg_headers  # noqa: PLC0415
-    def _fg_headers() -> dict: return _get_fg_headers()
+    from fangraphs_layer import _fg_headers  # noqa: PLC0415
 except ImportError:
-    import random  # noqa: PLC0415
-    _FG_UA_POOL_ST = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-    ]
-    def _fg_headers() -> dict:
-        return {"User-Agent": random.choice(_FG_UA_POOL_ST),
-                "Referer": "https://www.fangraphs.com/projections",
-                "Accept": "application/json, text/plain, */*",
-                "Origin": "https://www.fangraphs.com"}
+    import random as _random  # noqa: PLC0415
+    def _fg_headers() -> dict:  # noqa: E306
+        return {
+            "User-Agent": _random.choice([
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            ]),
+            "Referer": "https://www.fangraphs.com/projections",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.fangraphs.com",
+        }
 
 # FanGraphs Steamer projection API params
 _STEAMER_PARAMS = {

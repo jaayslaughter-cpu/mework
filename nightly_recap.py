@@ -77,6 +77,7 @@ _AGENT_EMOJI: dict[str, str] = {
     "PropCycleAgent":        "🔄",
     "LineupChaseAgent":      "🎣",
     "LineDriftAgent":        "📈",
+    "SteamAgent":            "💨",
     "StreakAgent":            "⚡",
 }
 

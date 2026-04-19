@@ -59,7 +59,7 @@ def _ensure_table() -> None:
             )
         """)
 
-        # ── Schema healing — add columns if missing (all idempotent) ────────────
+        # ── Schema healing — add all columns that may be missing (idempotent) ──
         for _heal_sql in [
             "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS unit_dollars REAL NOT NULL DEFAULT 5.0",
             "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS consecutive_wins INTEGER NOT NULL DEFAULT 0",

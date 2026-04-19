@@ -71,7 +71,7 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
 # ---------------------------------------------------------------------------
 
 _FG_API_BASE = "https://www.fangraphs.com/api/leaders/major-league/data"
-# Rotating User-Agent pool — FanGraphs 403-blocks repeated identical UAs
+# Rotating User-Agent pool — FanGraphs 403-blocks repeated identical UAs on Railway
 _FG_UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -80,8 +80,9 @@ _FG_UA_POOL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
 ]
 
+
 def _fg_headers() -> dict:
-    """Return a randomised header set to avoid FanGraphs 403 blocks."""
+    """Return a randomised header set to avoid FanGraphs 403 blocks on Railway."""
     import random  # noqa: PLC0415
     return {
         "User-Agent":      random.choice(_FG_UA_POOL),
@@ -95,7 +96,8 @@ def _fg_headers() -> dict:
         "Sec-Fetch-Mode":  "cors",
     }
 
-# Keep backward-compat alias (some call sites use _FG_HEADERS directly)
+
+# Backward-compat alias for any call sites that reference _FG_HEADERS directly
 _FG_HEADERS = _fg_headers()
 
 _BATTING_PARAMS = {
