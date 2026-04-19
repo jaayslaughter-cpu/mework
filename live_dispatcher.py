@@ -50,7 +50,13 @@ except ImportError:
     _PLATFORM_SELECTOR_AVAILABLE = False
     platform_selector = None  # type: ignore[assignment]
 
-from phase89_DiscordAlertService import discord_alert, MAX_STAKE_USD
+try:
+    from phase89_DiscordAlertService import discord_alert, MAX_STAKE_USD
+except ImportError:
+    MAX_STAKE_USD = 20.0
+    class _DummyDiscordAlert:
+        def send_parlay_alert(self, *a, **kw): pass
+    discord_alert = _DummyDiscordAlert()
 
 # ── Phase 48 gap-fix: per-agent unit sizing ───────────────────────────────────
 try:
