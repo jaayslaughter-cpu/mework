@@ -1681,25 +1681,31 @@ def _ensure_bet_ledger() -> None:
             except Exception:
                 conn.rollback()
             # FIX GAP 2: add UNIQUE constraint to prevent duplicate grading
-            # Step 1: remove existing duplicate rows first (keeps lowest id per group)
-            # Without this, CREATE UNIQUE INDEX fails if duplicates already exist.
+            # Step 1: only dedup if index doesn't exist yet — guards against
+            # O(n²) self-join on large tables at every startup/redeploy.
             try:
-                cur.execute(
-                    """
-                    DELETE FROM bet_ledger a
-                    USING bet_ledger b
-                    WHERE a.id > b.id
-                      AND a.player_name = b.player_name
-                      AND a.prop_type   = b.prop_type
-                      AND a.line        = b.line
-                      AND a.side        = b.side
-                      AND a.agent_name  = b.agent_name
-                      AND a.bet_date    = b.bet_date
-                    """
-                )
-                conn.commit()
+                cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'ux_bet_ledger_dedup'")
+                _idx_exists = cur.fetchone() is not None
             except Exception:
-                conn.rollback()
+                _idx_exists = False
+            if not _idx_exists:
+                try:
+                    cur.execute(
+                        """
+                        DELETE FROM bet_ledger a
+                        USING bet_ledger b
+                        WHERE a.id > b.id
+                          AND a.player_name = b.player_name
+                          AND a.prop_type   = b.prop_type
+                          AND a.line        = b.line
+                          AND a.side        = b.side
+                          AND a.agent_name  = b.agent_name
+                          AND a.bet_date    = b.bet_date
+                        """
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
             # Step 2: now safe to create the unique index
             try:
                 cur.execute(
@@ -1755,6 +1761,42 @@ def _ensure_bet_ledger() -> None:
         conn.close()
     except Exception as _sse:
         logger.warning("[DB] ud_streak_state create failed: %s", _sse)
+
+    # ── XGBoost model store — persists trained model across redeploys ──────────
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS xgb_model_store (
+                    id           SERIAL PRIMARY KEY,
+                    model_json   TEXT NOT NULL,
+                    feature_names TEXT,
+                    trained_at   TIMESTAMPTZ DEFAULT NOW(),
+                    n_rows       INTEGER,
+                    notes        TEXT
+                )
+            """)
+        conn.commit()
+        conn.close()
+    except Exception as _xms:
+        logger.warning("[DB] xgb_model_store create failed: %s", _xms)
+
+    # ── XGBoost feature importance ─────────────────────────────────────────────
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS xgb_feature_importance (
+                    id           SERIAL PRIMARY KEY,
+                    feature_name VARCHAR(80),
+                    importance   FLOAT,
+                    recorded_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+        conn.close()
+    except Exception as _xfi:
+        logger.warning("[DB] xgb_feature_importance create failed: %s", _xfi)
 
 
 def run_data_hub_tasklet() -> None:
