@@ -538,25 +538,50 @@ def predict_plus_adjustment(
 
     Scale: +0.010 at 110, +0.020 at 120+  (capped at ±0.020)
     """
-    if prop_type != "strikeouts" or predict_plus_score <= 0:
+    # Applies to pitcher K props AND batter contact props (Deception+ logic)
+    _K_PROPS      = ("strikeouts", "pitcher_strikeouts")
+    _CONTACT_PROPS = ("hits", "total_bases", "hits_runs_rbis")
+
+    if prop_type not in _K_PROPS + _CONTACT_PROPS or predict_plus_score <= 0:
         return 0.0
 
-    deviation = predict_plus_score - 100.0  # positive = unpredictable
+    deviation = predict_plus_score - 100.0   # positive = more unpredictable
 
-    if side == "Over":
-        if deviation >= 10:        # score ≥ 110
-            adj = min(0.020, deviation / 100.0 * 0.020)
-            return round(adj, 4)
-        elif deviation <= -10:     # score ≤ 90
-            adj = min(0.010, abs(deviation) / 100.0 * 0.010)
-            return round(-adj, 4)
+    # ── Pitcher strikeout props ───────────────────────────────────────────────
+    if prop_type in _K_PROPS:
+        if side == "Over":
+            if deviation >= 10:        # score ≥ 110 — batters can't read arsenal → more Ks
+                adj = min(0.020, (deviation / 20.0) * 0.020)
+                return round(adj, 4)
+            elif deviation <= -10:     # score ≤ 90 — batters sit on pitches → fewer Ks
+                adj = min(0.010, (abs(deviation) / 20.0) * 0.010)
+                return round(-adj, 4)
+        elif side == "Under":
+            if deviation <= -10:       # predictable → more contact → K Under value
+                adj = min(0.015, (abs(deviation) / 20.0) * 0.015)
+                return round(adj, 4)
+            elif deviation >= 10:      # unpredictable → fewer "free" contact ABs
+                adj = min(0.010, (deviation / 20.0) * 0.010)
+                return round(-adj, 4)
 
-    elif side == "Under":
-        if deviation <= -10:       # score ≤ 90 — predictable pitcher, more contact
-            adj = min(0.015, abs(deviation) / 100.0 * 0.015)
-            return round(adj, 4)
-        elif deviation >= 10:      # score ≥ 110 — unpredictable = fewer "free" contact ABs
-            adj = min(0.010, deviation / 100.0 * 0.010)
-            return round(-adj, 4)
+    # ── Batter contact props — inverse of K logic (Deception+ extension) ─────
+    # High Deception+: harder to make contact → nudge UNDER hits/TB
+    # Low Deception+:  easy to read pitcher  → nudge OVER  hits/TB
+    # Half weight vs K props (indirect signal — contact/K inverse is real but noisy)
+    elif prop_type in _CONTACT_PROPS:
+        if side == "Over":
+            if deviation >= 15:        # strongly unpredictable → less contact → UNDER
+                adj = min(0.010, (deviation / 30.0) * 0.010)
+                return round(-adj, 4)
+            elif deviation <= -15:     # strongly predictable → more contact → OVER
+                adj = min(0.010, (abs(deviation) / 30.0) * 0.010)
+                return round(adj, 4)
+        elif side == "Under":
+            if deviation >= 15:        # unpredictable pitcher → Under contact value
+                adj = min(0.010, (deviation / 30.0) * 0.010)
+                return round(adj, 4)
+            elif deviation <= -15:     # predictable → batters see more fat pitches
+                adj = min(0.008, (abs(deviation) / 30.0) * 0.008)
+                return round(-adj, 4)
 
     return 0.0

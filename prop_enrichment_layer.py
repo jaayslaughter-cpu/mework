@@ -1333,6 +1333,19 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         )
         prop["_predict_plus_adj"] = _pp_adj
 
+        # ── Steamer 2026 counting stat projection (Layer 8b) ─────────────────
+        # Fills gaps Marcel leaves: runs, rbis, stolen_bases, home_runs
+        # Marcel covers rate stats (wOBA, K%, BB%); Steamer adds counting stat priors
+        try:
+            from steamer_layer import get_steamer_adj as _get_steamer_adj  # noqa: PLC0415
+            _steamer_adj = _get_steamer_adj(
+                player, prop_type, _side_for_adj, float(prop.get("line", 0.5) or 0.5)
+            )
+            prop["_steamer_adj"] = _steamer_adj
+        except Exception as _se:
+            prop["_steamer_adj"] = 0.0
+            logger.debug("[Enrichment] Steamer layer skipped for %s: %s", player, _se)
+
         # ── Bayesian nudge (uses implied_prob if set, else 52.4% default) ────
         base_prob = float(prop.get("implied_prob", 52.4))
         prop["_bayesian_nudge"] = _get_bayesian_nudge(prop, base_prob)

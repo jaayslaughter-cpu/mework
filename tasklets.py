@@ -1813,6 +1813,15 @@ def run_data_hub_tasklet() -> None:
     """
     _ensure_bet_ledger()       # ensure table exists on every startup
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
+
+    # ── Steamer 2026 prefetch (once per day, Postgres-cached) ────────────────
+    try:
+        from steamer_layer import prefetch as _steamer_prefetch  # noqa: PLC0415
+        _sc = _steamer_prefetch()
+        if _sc:
+            logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
+    except Exception as _spe:
+        logger.debug("[DataHub] Steamer prefetch skipped: %s", _spe)
     r = _redis()
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
     game_states: dict[str, str] = {}
@@ -5666,6 +5675,21 @@ def run_grading_tasklet() -> None:
         logger.info("[GradingTasklet] Isotonic calibration map rebuilt.")
     except Exception as _iso_err:
         logger.warning("[GradingTasklet] Isotonic calibration rebuild failed (non-fatal): %s", _iso_err)
+
+    # ── Temperature (Platt) calibration — fits per-agent T scalar ────────────
+    # Phase 47: walks agent_calibration_data → fits T for each agent with ≥30 graded picks
+    # T>1 compresses overconfident probs. Phase 45 backtest showed T≈3.0 on raw signal.
+    # temperature_scaling.py contains the math; temperature_calibration.py runs the loop.
+    try:
+        from temperature_calibration import run as _run_temp_cal  # noqa: PLC0415
+        _temp_updates = _run_temp_cal()
+        if _temp_updates:
+            logger.info("[GradingTasklet] Temperature calibration updated %d agents: %s",
+                        len(_temp_updates), list(_temp_updates.keys()))
+        else:
+            logger.info("[GradingTasklet] Temperature calibration: no agents had ≥30 graded picks yet.")
+    except Exception as _tc_err:
+        logger.warning("[GradingTasklet] Temperature calibration failed (non-fatal): %s", _tc_err)
 
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
