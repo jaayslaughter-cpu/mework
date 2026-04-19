@@ -285,7 +285,7 @@ MIN_CONFIDENCE    = 6
 # raise the bar from 52% without losing too many qualifying picks.
 # At 0.55 with correct multipliers: 2-leg PP needs 55%^2 * 3 - 1 = -9.2% → still
 # needs higher prob per leg, but combined_ev gate (+3%) now does the real work.
-MIN_PROB          = 0.55   # raised from 0.52 — combined_ev gate now primary quality control
+MIN_PROB          = 0.57   # April 20 retrain: raised from 0.55 — first real model trained on historical data
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
