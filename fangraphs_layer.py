@@ -71,15 +71,32 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
 # ---------------------------------------------------------------------------
 
 _FG_API_BASE = "https://www.fangraphs.com/api/leaders/major-league/data"
-_FG_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.fangraphs.com/leaders/major-league",
-    "Accept": "application/json",
-}
+# Rotating User-Agent pool — FanGraphs 403-blocks repeated identical UAs
+_FG_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
+
+def _fg_headers() -> dict:
+    """Return a randomised header set to avoid FanGraphs 403 blocks."""
+    import random  # noqa: PLC0415
+    return {
+        "User-Agent":      random.choice(_FG_UA_POOL),
+        "Referer":         "https://www.fangraphs.com/leaders/major-league",
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Origin":          "https://www.fangraphs.com",
+        "Connection":      "keep-alive",
+        "Sec-Fetch-Site":  "same-origin",
+        "Sec-Fetch-Mode":  "cors",
+    }
+
+# Keep backward-compat alias (some call sites use _FG_HEADERS directly)
+_FG_HEADERS = _fg_headers()
 
 _BATTING_PARAMS = {
     "age": "0",
@@ -230,7 +247,7 @@ def _fetch_season(stats: str, season: int) -> list[dict]:
         resp = requests.get(
             _FG_API_BASE,
             params=params,
-            headers=_FG_HEADERS,
+            headers=_fg_headers(),
             timeout=20,
         )
         resp.raise_for_status()

@@ -59,14 +59,16 @@ def _ensure_table() -> None:
             )
         """)
 
-        # ── PR #325: Schema healing — add unit_dollars if missing ─────────────
-        # ALTER TABLE ... ADD COLUMN IF NOT EXISTS is idempotent; safe to run
-        # every startup. When the column already exists this is a metadata-only
-        # no-op that Postgres resolves in microseconds.
-        cur.execute(
-            "ALTER TABLE agent_unit_sizing "
-            "ADD COLUMN IF NOT EXISTS unit_dollars REAL NOT NULL DEFAULT 5.0"
-        )
+        # ── Schema healing — add columns if missing (all idempotent) ────────────
+        for _heal_sql in [
+            "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS unit_dollars REAL NOT NULL DEFAULT 5.0",
+            "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS consecutive_wins INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS consecutive_losses INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS last_result VARCHAR(1)",
+            "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS temperature REAL NOT NULL DEFAULT 1.5",
+            "ALTER TABLE agent_unit_sizing ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        ]:
+            cur.execute(_heal_sql)
         # Backfill unit_dollars from legacy 'stake' column (V33 schema) if both
         # exist and unit_dollars is still at the default floor value.
         cur.execute("""

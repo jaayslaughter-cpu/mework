@@ -281,7 +281,7 @@ def _fetch_events() -> list[dict]:
         return []
 
 
-def _fetch_event_props(event_id: str) -> list[dict]:
+def _fetch_event_props(event_id: str, attempt: int = 0) -> list[dict]:
     """Step 2: fetch vig-stripped prop odds for one event.
     Returns a flat list of row dicts ready for _pg_save / reference dict.
     """
@@ -389,7 +389,22 @@ def _fetch_live(date_int: int) -> dict:
 
     log.info("[SBRef] Fetched %d prop lines from Odds API for %d", len(all_rows), date_int)
     if not all_rows:
-        return {}
+        # Props may not be posted yet — retry once after 30s
+        import time as _time  # noqa: PLC0415
+        log.info("[SBRef] No prop data from Odds API — waiting 30s then retrying once")
+        _time.sleep(30)
+        all_rows = []
+        for event in events[:20]:
+            eid = event.get("id")
+            if not eid:
+                continue
+            rows = _fetch_event_props(eid, attempt=1)
+            all_rows.extend(rows)
+            _time.sleep(0.1)
+        log.info("[SBRef] Retry fetched %d prop lines", len(all_rows))
+        if not all_rows:
+            log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
+            return {}
 
     # Build reference dict — one entry per (player, market, side) key
     # sb_implied_prob is already the weighted-consensus value from the fetch loop
@@ -469,5 +484,47 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         log.info("[SBRef] Built and cached %d entries for %d", len(ref), date_int)
     else:
         log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
+
+    # ── DraftEdge fallback — when Odds API has no props yet ──────────────────
+    # DraftEdge gives projected_prob per player/prop. Used when sharp book
+    # lines aren't available (props not yet posted). Less precise than
+    # vig-stripped book odds but better than defaulting sb_implied_prob to 0.
+    if not _mem_ref:
+        try:
+            from draftedge_scraper import fetch_all_projections as _de_fetch  # noqa: PLC0415
+            de_props = _de_fetch()
+            if de_props:
+                de_ref: dict = {}
+                _PT_DE_MAP = {
+                    "strikeouts":        "pitcher_strikeouts",
+                    "hits":              "batter_hits",
+                    "total_bases":       "batter_total_bases",
+                    "earned_runs":       "pitcher_earned_runs",
+                    "hitter_strikeouts": "batter_strikeouts",
+                    "rbis":              "batter_rbis",
+                    "runs":              "batter_runs_scored",
+                }
+                for prop in de_props:
+                    pname = _normalize(str(prop.get("player_name", "")))
+                    pt    = str(prop.get("prop_type", ""))
+                    mk    = _PT_DE_MAP.get(pt, pt)
+                    prob  = float(prop.get("projected_prob", 0.524) or 0.524)
+                    line  = float(prop.get("line", 0.5) or 0.5)
+                    if not pname or not mk:
+                        continue
+                    for side, si in [("Over", prob), ("Under", round(1.0 - prob, 4))]:
+                        de_ref[(pname, mk, side)] = {
+                            "sb_implied_prob": round(si, 4),
+                            "line":            line,
+                            "bookmaker":       "draftedge",
+                            "over_odds":       None,
+                            "under_odds":      None,
+                        }
+                if de_ref:
+                    log.info("[SBRef] DraftEdge fallback: %d entries (Odds API empty)", len(de_ref))
+                    _mem_ref    = de_ref
+                    _fetch_date = date_int
+        except Exception as _de_err:
+            log.debug("[SBRef] DraftEdge fallback failed: %s", _de_err)
 
     return _mem_ref
