@@ -1,514 +1,393 @@
-#!/usr/bin/env python3
 """
-historical_seed.py — PR #373
-Seeds bet_ledger with 2022-2024 MLB game-log outcomes via MLB Stats API.
-Run once against Railway Postgres to pre-populate XGBoost training data.
+historical_seed.py
+==================
+Seeds bet_ledger with historical MLB game logs (2022-2024) for XGBoost training.
+Fetches pitcher K/ER/outs and batter hit/TB game logs from MLB Stats API.
 
-Target: ~15,000 rows across pitcher K, walks, earned_runs, pitching_outs
-        and batter hits, total_bases, hitter_strikeouts, runs, rbis.
+Usage (Windows cmd):
+    set DATABASE_URL=postgresql://postgres:PASSWORD@host:port/railway
+    python historical_seed.py
 
-Usage:
-  DATABASE_URL=postgresql://... python historical_seed.py
-  -- or --
-  Set DATABASE_URL env var, then: python historical_seed.py [--dry-run]
+Usage (dry run — no DB writes, just prints counts):
+    python historical_seed.py --dry-run
 
-Dedup: ux_bet_ledger_dedup unique index (player, prop_type, side, bet_date, agent)
-blocks re-inserts cleanly. Safe to run multiple times.
+Usage (single season):
+    python historical_seed.py --seasons 2023
 """
 
-import os
-import sys
-import json
-import time
-import math
-import logging
+from __future__ import annotations
+
 import argparse
-import requests
+import logging
+import math
+import os
+import time
 import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import warnings
+
+import requests
 import psycopg2
-from datetime import datetime, date
-from typing import Optional
+
+warnings.filterwarnings("ignore")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("historical_seed")
+log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
 MLBAPI = "https://statsapi.mlb.com/api/v1"
-AGENT_NAME = "HistoricalSeed"
-TARGET_SEASONS = [2022, 2023, 2024]
+SEASONS = [2022, 2023, 2024]
 
-# Pitcher filters
-MIN_GS = 8          # minimum games started to qualify
-MAX_PITCHERS_PER_SEASON = 100   # top SPs by games started
-
-# Batter filters
-MIN_PA = 150        # minimum plate appearances
-MAX_BATTERS_PER_SEASON = 200    # top hitters by PA
-
-# Prop types and standard lines
-PITCHER_PROPS = {
-    "pitcher_strikeouts": {
-        "api_key": "strikeOuts",
-        "line_fn": lambda avg: _round_line(avg, 1.0),   # nearest 0.5, shifted -1 → ~50/50
-        "min_line": 2.5,
-    },
-    "walks_allowed": {
-        "api_key": "baseOnBalls",
-        "line_fn": lambda avg: _round_line(avg, 0.5),
-        "min_line": 0.5,
-    },
-    "earned_runs": {
-        "api_key": "earnedRuns",
-        "line_fn": lambda avg: _round_line(avg, 0.5),
-        "min_line": 0.5,
-    },
-    "pitching_outs": {
-        "api_key": "outs",           # MLB Stats API reports outs directly
-        "line_fn": lambda avg: _round_line(avg, 1.0),
-        "min_line": 6.5,
-    },
+# ── Prop lines: median DFS line for each stat (used as the historical "line")
+PITCHER_LINES = {
+    "strikeouts":    5.5,
+    "earned_runs":   2.5,
+    "pitching_outs": 14.5,
+}
+BATTER_LINES = {
+    "hits":          0.5,
+    "total_bases":   1.5,
 }
 
-BATTER_PROPS = {
-    "hits": {
-        "api_key": "hits",
-        "line_fn": lambda avg: 0.5,   # fixed — standard UD line
-        "min_line": 0.5,
-    },
-    "total_bases": {
-        "api_key": "totalBases",
-        "line_fn": lambda avg: _round_line(avg, 0.5),
-        "min_line": 0.5,
-    },
-    "hitter_strikeouts": {
-        "api_key": "strikeOuts",
-        "line_fn": lambda avg: _round_line(avg, 0.5),
-        "min_line": 0.5,
-    },
-    "runs": {
-        "api_key": "runs",
-        "line_fn": lambda avg: 0.5,
-        "min_line": 0.5,
-    },
-    "rbis": {
-        "api_key": "rbi",
-        "line_fn": lambda avg: 0.5,
-        "min_line": 0.5,
-    },
-}
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def _round_line(avg: float, offset: float = 0.5) -> float:
-    """Set line at avg - offset, then round to nearest 0.5."""
-    target = avg - offset
-    target = max(target, 0.5)
-    return math.floor(target * 2) / 2 + 0.5   # always ends in .5
-
-
-def _parse_ip(ip_str: str) -> float:
-    """Convert '5.2' innings pitched notation to outs (5*3 + 2 = 17)."""
-    try:
-        parts = str(ip_str).split(".")
-        full_innings = int(parts[0])
-        partial = int(parts[1]) if len(parts) > 1 else 0
-        return float(full_innings * 3 + partial)
-    except Exception:
-        return 0.0
-
-
-def _build_features(
-    model_prob: float,
-    implied_prob: float,
-    ev: float,
-    confidence: float,
-    avg_stat: float,
-    line: float,
-    prop_type: str,
-) -> str:
-    """
-    Build a 27-slot feature vector.  Historical rows lack live signals
-    (lineup, umpire, weather) — those slots default to neutral (0.5 / 0.0).
-    XGBoost will learn from the non-neutral slots (prob, EV, line gap, etc.)
-    """
-    line_gap = model_prob / 100 - implied_prob / 100   # model edge
-    over_rate = model_prob / 100                        # fraction of games went over
-    feats = [
-        round(model_prob / 100, 4),   # 0  model_prob (0-1)
-        round(implied_prob / 100, 4), # 1  implied_prob
-        round(ev, 4),                 # 2  ev
-        round(confidence / 10, 4),    # 3  confidence (0-1)
-        round(line_gap, 4),           # 4  line_gap
-        round(over_rate, 4),          # 5  over_rate (historical)
-        round(avg_stat, 3),           # 6  player avg per game
-        round(line, 1),               # 7  prop line
-        round(avg_stat - line, 3),    # 8  avg vs line delta
-        0.5,                          # 9  sb_implied_prob (neutral)
-        0.0,                          # 10 sb_line_gap (neutral)
-        0.5,                          # 11 lineup_score (neutral)
-        0.5,                          # 12 umpire_k_rate (neutral)
-        0.0,                          # 13 weather_factor (neutral)
-        0.0,                          # 14 park_factor (neutral)
-        0.0,                          # 15 abs_total_adj (neutral)
-        0.5,                          # 16 statcast_xwoba (neutral)
-        0.5,                          # 17 barrel_rate (neutral)
-        0.5,                          # 18 hard_hit_rate (neutral)
-        0.0,                          # 19 platoon_adj (neutral)
-        0.0,                          # 20 form_adj (neutral)
-        0.0,                          # 21 bayesian_nudge (neutral)
-        0.0,                          # 22 cv_nudge (neutral)
-        0.0,                          # 23 rolling_adj (neutral)
-        round(model_prob / 100, 4),   # 24 calibrated_prob
-        0.0,                          # 25 clv (neutral)
-        0.0,                          # 26 rest_days (neutral)
-    ]
-    return json.dumps(feats)
+# ── Minimum plate appearances / batters faced to include a game
+MIN_PA  = 1    # batters: at least 1 PA
+MIN_BF  = 3    # pitchers: at least 3 batters faced
 
 
 def _get_conn():
-    url = DATABASE_URL
+    url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
-        sys.exit("ERROR: DATABASE_URL not set. Export it before running.")
+        raise SystemExit("ERROR: DATABASE_URL not set. Export it before running.")
+    # Strip any accidental trailing space (Windows && trick side effect)
+    url = url.rstrip()
     return psycopg2.connect(url, connect_timeout=15)
 
 
-# ── MLB Stats API fetches ────────────────────────────────────────────────────
-def fetch_players_for_season(season: int, position_type: str) -> list[dict]:
-    """
-    Returns list of {id, fullName, primaryPosition} for a season.
-    position_type: 'P' for pitchers, 'B' for all batters.
-    """
-    url = f"{MLBAPI}/sports/1/players"
-    params = {"season": season, "gameType": "R"}
-    try:
-        r = requests.get(url, params=params, timeout=20, verify=False)
-        players = r.json().get("people", [])
-        if position_type == "P":
-            return [p for p in players if p.get("primaryPosition", {}).get("abbreviation") == "P"]
-        else:
-            non_pitchers = {"C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"}
-            return [p for p in players if p.get("primaryPosition", {}).get("abbreviation") in non_pitchers]
-    except Exception as e:
-        log.error("Failed to fetch players for season %d: %s", season, e)
+def _get(url: str, params: dict = None) -> dict:
+    """GET with retries and SSL verify=False for Windows cert issues."""
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=20, verify=False)
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            if attempt == 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+    return {}
+
+
+# ────────────────────────────────────────────────────────────
+# Fetch helpers
+# ────────────────────────────────────────────────────────────
+
+def get_pitcher_ids(season: int) -> list[tuple[int, str]]:
+    """Return [(mlbam_id, full_name)] for all pitchers with ≥5 starts."""
+    data = _get(f"{MLBAPI}/stats", {
+        "stats":       "season",
+        "group":       "pitching",
+        "season":      season,
+        "gameType":    "R",
+        "sportId":     1,
+        "limit":       1000,
+        "playerPool":  "All",
+    })
+    results = []
+    for split in data.get("stats", [{}])[0].get("splits", []):
+        p   = split.get("player", {})
+        st  = split.get("stat", {})
+        gs  = int(st.get("gamesStarted", 0) or 0)
+        if gs >= 5:
+            results.append((int(p["id"]), p["fullName"]))
+    return results
+
+
+def get_batter_ids(season: int) -> list[tuple[int, str]]:
+    """Return [(mlbam_id, full_name)] for all batters with ≥50 PA."""
+    data = _get(f"{MLBAPI}/stats", {
+        "stats":      "season",
+        "group":      "hitting",
+        "season":     season,
+        "gameType":   "R",
+        "sportId":    1,
+        "limit":      1500,
+        "playerPool": "All",
+    })
+    results = []
+    for split in data.get("stats", [{}])[0].get("splits", []):
+        p  = split.get("player", {})
+        st = split.get("stat", {})
+        pa = int(st.get("plateAppearances", 0) or 0)
+        if pa >= 50:
+            results.append((int(p["id"]), p["fullName"]))
+    return results
+
+
+def get_pitcher_game_log(player_id: int, season: int) -> list[dict]:
+    """Fetch per-game pitching stats for one pitcher."""
+    data = _get(f"{MLBAPI}/people/{player_id}", {
+        "hydrate": f"stats(group=pitching,type=gameLog,season={season},gameType=R)"
+    })
+    people = data.get("people", [])
+    if not people:
         return []
-
-
-def fetch_game_log(player_id: int, group: str, season: int) -> list[dict]:
-    """
-    Fetches game-level splits. group = 'pitching' or 'hitting'.
-    Returns list of split dicts with stat values.
-    """
-    url = f"{MLBAPI}/people/{player_id}"
-    params = {"hydrate": f"stats(group={group},type=gameLog,season={season})"}
-    try:
-        r = requests.get(url, params=params, timeout=15, verify=False)
-        data = r.json()
-        people = data.get("people", [])
-        if not people:
-            return []
-        for stat_block in people[0].get("stats", []):
-            if stat_block.get("group", {}).get("displayName", "").lower() == group:
-                return stat_block.get("splits", [])
+    stats = people[0].get("stats", [])
+    if not stats:
         return []
-    except Exception as e:
-        log.warning("Game log fetch failed pid=%d group=%s season=%d: %s", player_id, group, season, e)
+    return stats[0].get("splits", [])
+
+
+def get_batter_game_log(player_id: int, season: int) -> list[dict]:
+    """Fetch per-game batting stats for one batter."""
+    data = _get(f"{MLBAPI}/people/{player_id}", {
+        "hydrate": f"stats(group=hitting,type=gameLog,season={season},gameType=R)"
+    })
+    people = data.get("people", [])
+    if not people:
         return []
+    stats = people[0].get("stats", [])
+    if not stats:
+        return []
+    return stats[0].get("splits", [])
 
 
-# ── Row builder ──────────────────────────────────────────────────────────────
-def build_pitcher_rows(player_name: str, splits: list[dict], season: int) -> list[dict]:
-    """Convert pitcher game log splits into bet_ledger rows."""
+# ────────────────────────────────────────────────────────────
+# Row builders
+# ────────────────────────────────────────────────────────────
+
+def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
     rows = []
-    # Compute per-season averages for each prop
-    for prop_type, cfg in PITCHER_PROPS.items():
-        api_key = cfg["api_key"]
-        values = []
-        for s in splits:
-            stat = s.get("stat", {})
-            if prop_type == "pitching_outs":
-                val = _parse_ip(stat.get("inningsPitched", "0.0"))
-            else:
-                val = float(stat.get(api_key, 0) or 0)
-            # Only include starts (check inningsPitched > 0 as proxy for appearance)
-            ip = _parse_ip(stat.get("inningsPitched", "0.0"))
-            if ip >= 3:   # min 1 IP (3 outs) = actual start/appearance
-                values.append((s["date"], val, ip))
-
-        if len(values) < MIN_GS:
+    for s in splits:
+        st       = s.get("stat", {})
+        date_str = s.get("date", "")
+        if not date_str:
             continue
 
-        avg = sum(v for _, v, _ in values) / len(values)
-        line = cfg["line_fn"](avg)
-        if line < cfg["min_line"]:
-            line = cfg["min_line"]
+        bf = int(st.get("battersFaced", 0) or 0)
+        if bf < MIN_BF:
+            continue
 
-        # Historical over-rate at this line
-        overs = sum(1 for _, v, _ in values if v > line)
-        over_rate = overs / len(values)
+        ks   = int(st.get("strikeOuts",    0) or 0)
+        er   = int(st.get("earnedRuns",    0) or 0)
+        outs = int(st.get("outs",          0) or 0)
 
-        for game_date, actual_val, _ in values:
-            won_over = actual_val > line
-            # Synthetic model_prob = slight edge toward the historical outcome
-            # but noisy — we don't want to overfit to the "correct" direction
-            model_prob = min(70.0, max(30.0, over_rate * 100 * 0.8 + 50 * 0.2))
-            implied_prob = 52.4   # standard -110 vig
-            ev = (model_prob / 100 - implied_prob / 100) * 100
-            confidence = max(6.0, min(9.0, 6.0 + abs(avg - line) / max(avg, 1) * 3))
+        for prop_type, line, actual in [
+            ("strikeouts",    PITCHER_LINES["strikeouts"],    ks),
+            ("earned_runs",   PITCHER_LINES["earned_runs"],   er),
+            ("pitching_outs", PITCHER_LINES["pitching_outs"], outs),
+        ]:
+            for side, threshold in [("Over", line), ("Under", line)]:
+                if side == "Over":
+                    outcome = 1 if actual > threshold else 0
+                else:
+                    outcome = 1 if actual < threshold else 0
 
-            # Both sides — OVER and UNDER rows
-            for side, outcome in [("OVER", 1 if won_over else 0),
-                                   ("UNDER", 1 if not won_over else 0)]:
-                mp = model_prob if side == "OVER" else (100 - model_prob)
                 rows.append({
-                    "player_name": player_name,
-                    "prop_type": prop_type,
-                    "side": side,
-                    "line": line,
-                    "bet_date": game_date,
-                    "agent": AGENT_NAME,
-                    "model_prob": round(mp, 2),
-                    "implied_prob": implied_prob,
-                    "ev": round(ev if side == "OVER" else -ev, 2),
-                    "confidence": round(confidence, 1),
-                    "actual_value": actual_val,
+                    "player_name":    name,
+                    "prop_type":      prop_type,
+                    "line":           threshold,
+                    "side":           side,
+                    "agent_name":     "HistoricalSeed",
+                    "status":         "WIN" if outcome == 1 else "LOSS",
                     "actual_outcome": outcome,
-                    "features_json": _build_features(mp, implied_prob, ev, confidence, avg, line, prop_type),
-                    "model_source": "historical_seed",
-                    "discord_sent": True,
-                    "lookahead_safe": True,
+                    "actual_result":  float(actual),
+                    "profit_loss":    1.0 if outcome == 1 else -1.0,
+                    "model_prob":     55.0,
+                    "ev_pct":         3.0,
+                    "bet_date":       date_str,
+                    "platform":       "historical",
                 })
     return rows
 
 
-def build_batter_rows(player_name: str, splits: list[dict], season: int) -> list[dict]:
-    """Convert batter game log splits into bet_ledger rows."""
+def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
     rows = []
-    for prop_type, cfg in BATTER_PROPS.items():
-        api_key = cfg["api_key"]
-        values = []
-        for s in splits:
-            stat = s.get("stat", {})
-            val = float(stat.get(api_key, 0) or 0)
-            # Require at least 1 PA (approximate via AB + walks)
-            ab = float(stat.get("atBats", 0) or 0)
-            bb = float(stat.get("baseOnBalls", 0) or 0)
-            if ab + bb >= 1:
-                values.append((s["date"], val))
-
-        if len(values) < 15:
+    for s in splits:
+        st       = s.get("stat", {})
+        date_str = s.get("date", "")
+        if not date_str:
             continue
 
-        avg = sum(v for _, v in values) / len(values)
-        line = cfg["line_fn"](avg)
-        if line < cfg["min_line"]:
-            line = cfg["min_line"]
+        pa = int(st.get("plateAppearances", 0) or 0)
+        if pa < MIN_PA:
+            continue
 
-        overs = sum(1 for _, v in values if v > line)
-        over_rate = overs / len(values)
+        hits  = int(st.get("hits",       0) or 0)
+        tb    = int(st.get("totalBases", 0) or 0)
 
-        for game_date, actual_val in values:
-            won_over = actual_val > line
-            model_prob = min(70.0, max(30.0, over_rate * 100 * 0.8 + 50 * 0.2))
-            implied_prob = 52.4
-            ev = (model_prob / 100 - implied_prob / 100) * 100
-            confidence = max(6.0, min(8.5, 6.0 + abs(avg - line) / max(avg, 1) * 2))
+        for prop_type, line, actual in [
+            ("hits",        BATTER_LINES["hits"],        hits),
+            ("total_bases", BATTER_LINES["total_bases"], tb),
+        ]:
+            for side, threshold in [("Over", line), ("Under", line)]:
+                if side == "Over":
+                    outcome = 1 if actual > threshold else 0
+                else:
+                    outcome = 1 if actual < threshold else 0
 
-            for side, outcome in [("OVER", 1 if won_over else 0),
-                                   ("UNDER", 1 if not won_over else 0)]:
-                mp = model_prob if side == "OVER" else (100 - model_prob)
                 rows.append({
-                    "player_name": player_name,
-                    "prop_type": prop_type,
-                    "side": side,
-                    "line": line,
-                    "bet_date": game_date,
-                    "agent": AGENT_NAME,
-                    "model_prob": round(mp, 2),
-                    "implied_prob": implied_prob,
-                    "ev": round(ev if side == "OVER" else -ev, 2),
-                    "confidence": round(confidence, 1),
-                    "actual_value": actual_val,
+                    "player_name":    name,
+                    "prop_type":      prop_type,
+                    "line":           threshold,
+                    "side":           side,
+                    "agent_name":     "HistoricalSeed",
+                    "status":         "WIN" if outcome == 1 else "LOSS",
                     "actual_outcome": outcome,
-                    "features_json": _build_features(mp, implied_prob, ev, confidence, avg, line, prop_type),
-                    "model_source": "historical_seed",
-                    "discord_sent": True,
-                    "lookahead_safe": True,
+                    "actual_result":  float(actual),
+                    "profit_loss":    1.0 if outcome == 1 else -1.0,
+                    "model_prob":     55.0,
+                    "ev_pct":         3.0,
+                    "bet_date":       date_str,
+                    "platform":       "historical",
                 })
     return rows
 
 
-# ── DB insert ────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
+# DB insert
+# ────────────────────────────────────────────────────────────
+
 INSERT_SQL = """
 INSERT INTO bet_ledger (
-    player_name, prop_type, side, line, bet_date, agent,
-    model_prob, implied_prob, ev, confidence,
-    actual_value, actual_outcome,
-    discord_sent, lookahead_safe,
-    features_json, model_source
+    player_name, prop_type, line, side,
+    agent_name, status, actual_outcome, actual_result,
+    profit_loss, model_prob, ev_pct, bet_date, platform
 ) VALUES (
-    %(player_name)s, %(prop_type)s, %(side)s, %(line)s, %(bet_date)s, %(agent)s,
-    %(model_prob)s, %(implied_prob)s, %(ev)s, %(confidence)s,
-    %(actual_value)s, %(actual_outcome)s,
-    %(discord_sent)s, %(lookahead_safe)s,
-    %(features_json)s, %(model_source)s
+    %(player_name)s, %(prop_type)s, %(line)s, %(side)s,
+    %(agent_name)s, %(status)s, %(actual_outcome)s, %(actual_result)s,
+    %(profit_loss)s, %(model_prob)s, %(ev_pct)s, %(bet_date)s, %(platform)s
 )
-ON CONFLICT ON CONSTRAINT ux_bet_ledger_dedup DO NOTHING
+ON CONFLICT DO NOTHING
 """
 
 
-def insert_batch(conn, rows: list[dict], dry_run: bool = False) -> tuple[int, int]:
-    """Insert a batch of rows. Returns (inserted, skipped)."""
-    if dry_run:
-        log.info("[DRY RUN] Would insert %d rows", len(rows))
-        return len(rows), 0
-
-    inserted = 0
-    skipped = 0
+def insert_rows(conn, rows: list[dict]) -> tuple[int, int]:
+    """Insert rows. Returns (inserted, skipped)."""
+    ins = skp = 0
     with conn.cursor() as cur:
         for row in rows:
             try:
                 cur.execute(INSERT_SQL, row)
                 if cur.rowcount:
-                    inserted += 1
+                    ins += 1
                 else:
-                    skipped += 1
-            except psycopg2.errors.UniqueViolation:
-                skipped += 1
+                    skp += 1
+            except Exception as exc:
                 conn.rollback()
-            except Exception as e:
-                log.warning("Insert failed for %s %s %s: %s", row["player_name"], row["prop_type"], row["bet_date"], e)
-                conn.rollback()
-                skipped += 1
-        conn.commit()
-    return inserted, skipped
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-def _migrate_schema(conn) -> None:
-    """Idempotently add any columns bet_ledger may be missing."""
-    migrations = [
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS agent VARCHAR(50)",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS model_prob FLOAT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS implied_prob FLOAT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS ev FLOAT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS confidence FLOAT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS actual_value FLOAT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS actual_outcome VARCHAR(10)",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS discord_sent BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS lookahead_safe BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS features_json TEXT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS model_source VARCHAR(30)",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS units_wagered FLOAT",
-        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20)",
-    ]
-    with conn.cursor() as cur:
-        for sql in migrations:
-            try:
-                cur.execute(sql)
-            except Exception as e:
-                log.warning("Migration skipped (%s): %s", sql[:60], e)
-                conn.rollback()
+                log.warning("Insert failed %s %s %s: %s",
+                            row["player_name"], row["prop_type"], row["bet_date"], exc)
+                skp += 1
+                continue
     conn.commit()
-    log.info("Schema migration complete.")
+    return ins, skp
 
+
+# ────────────────────────────────────────────────────────────
+# Main
+# ────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true", help="Print stats without writing to DB")
-    parser.add_argument("--seasons", nargs="+", type=int, default=TARGET_SEASONS)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Fetch data but don't write to DB")
+    parser.add_argument("--seasons", nargs="+", type=int, default=SEASONS,
+                        help="Seasons to seed (default: 2022 2023 2024)")
     parser.add_argument("--pitchers-only", action="store_true")
-    parser.add_argument("--batters-only", action="store_true")
-    parser.add_argument("--max-pitchers", type=int, default=MAX_PITCHERS_PER_SEASON)
-    parser.add_argument("--max-batters", type=int, default=MAX_BATTERS_PER_SEASON)
+    parser.add_argument("--batters-only",  action="store_true")
     args = parser.parse_args()
 
     conn = None if args.dry_run else _get_conn()
-
-    # ── Schema migration: add any missing columns before first insert ─────
     if conn:
-        _migrate_schema(conn)
+        log.info("Connected to Railway Postgres ✓")
 
-    total_inserted = 0
-    total_skipped = 0
-    total_rows = 0
+    grand_ins = grand_skp = 0
 
     for season in args.seasons:
         log.info("═══ Season %d ═══", season)
+        season_ins = season_skp = 0
 
-        # ── Pitchers ──────────────────────────────────────────────────────
+        # ── PITCHERS ──────────────────────────────────────────────────────────
         if not args.batters_only:
             log.info("Fetching pitcher list for %d...", season)
-            pitchers = fetch_players_for_season(season, "P")
-            log.info("  %d total pitchers found", len(pitchers))
+            try:
+                pitchers = get_pitcher_ids(season)
+            except Exception as exc:
+                log.warning("  Could not fetch pitcher list: %s", exc)
+                pitchers = []
+            log.info("  %d qualifying pitchers found", len(pitchers))
 
-            # Sort by player ID (stable order); cap at max
-            pitchers = pitchers[:args.max_pitchers]
-
-            for i, p in enumerate(pitchers, 1):
-                pid = p["id"]
-                name = p["fullName"]
-                splits = fetch_game_log(pid, "pitching", season)
-                if not splits:
+            for i, (pid, name) in enumerate(pitchers, 1):
+                try:
+                    splits = get_pitcher_game_log(pid, season)
+                    rows   = build_pitcher_rows(name, splits)
+                    if args.dry_run:
+                        season_ins += len(rows)
+                    elif rows:
+                        ins, skp = insert_rows(conn, rows)
+                        season_ins += ins
+                        season_skp += skp
+                except Exception as exc:
+                    log.debug("  %s [%d]: %s", name, pid, exc)
                     continue
 
-                # Filter to starts only (IP >= 3 outs / 1.0 IP)
-                starts = [s for s in splits if _parse_ip(s["stat"].get("inningsPitched", "0.0")) >= 3.0]
-                if len(starts) < MIN_GS:
-                    continue
+                if i % 25 == 0 or i == len(pitchers):
+                    log.info("  Pitchers %d/%d | rows inserted: %d skipped: %d",
+                             i, len(pitchers), season_ins, season_skp)
+                time.sleep(0.15)   # polite rate limit
 
-                rows = build_pitcher_rows(name, starts, season)
-                if rows:
-                    ins, skp = insert_batch(conn, rows, args.dry_run)
-                    total_inserted += ins
-                    total_skipped += skp
-                    total_rows += len(rows)
-                    if i % 10 == 0:
-                        log.info("  Pitchers processed: %d/%d | rows so far: %d (ins=%d skp=%d)",
-                                 i, len(pitchers), total_rows, total_inserted, total_skipped)
-
-                time.sleep(0.05)   # gentle on MLB API
-
-        # ── Batters ───────────────────────────────────────────────────────
+        # ── BATTERS ───────────────────────────────────────────────────────────
         if not args.pitchers_only:
             log.info("Fetching batter list for %d...", season)
-            batters = fetch_players_for_season(season, "B")
-            log.info("  %d total batters found", len(batters))
-            batters = batters[:args.max_batters]
+            try:
+                batters = get_batter_ids(season)
+            except Exception as exc:
+                log.warning("  Could not fetch batter list: %s", exc)
+                batters = []
+            log.info("  %d qualifying batters found", len(batters))
 
-            for i, p in enumerate(batters, 1):
-                pid = p["id"]
-                name = p["fullName"]
-                splits = fetch_game_log(pid, "hitting", season)
-                if not splits:
+            bat_ins = bat_skp = 0
+            for i, (pid, name) in enumerate(batters, 1):
+                try:
+                    splits = get_batter_game_log(pid, season)
+                    rows   = build_batter_rows(name, splits)
+                    if args.dry_run:
+                        bat_ins += len(rows)
+                    elif rows:
+                        ins, skp = insert_rows(conn, rows)
+                        bat_ins += ins
+                        bat_skp += skp
+                except Exception as exc:
+                    log.debug("  %s [%d]: %s", name, pid, exc)
                     continue
 
-                rows = build_batter_rows(name, splits, season)
-                if rows:
-                    ins, skp = insert_batch(conn, rows, args.dry_run)
-                    total_inserted += ins
-                    total_skipped += skp
-                    total_rows += len(rows)
-                    if i % 20 == 0:
-                        log.info("  Batters processed: %d/%d | rows so far: %d (ins=%d skp=%d)",
-                                 i, len(batters), total_rows, total_inserted, total_skipped)
+                if i % 50 == 0 or i == len(batters):
+                    log.info("  Batters %d/%d | rows inserted: %d skipped: %d",
+                             i, len(batters), bat_ins, bat_skp)
+                time.sleep(0.10)
 
-                time.sleep(0.03)
+            season_ins += bat_ins
+            season_skp += bat_skp
+
+        log.info("Season %d complete — inserted: %d  skipped/dup: %d",
+                 season, season_ins, season_skp)
+        grand_ins += season_ins
+        grand_skp += season_skp
 
     if conn:
         conn.close()
 
-    log.info("══════════════════════════════════")
-    log.info("COMPLETE: %d rows generated", total_rows)
-    log.info("  Inserted: %d", total_inserted)
-    log.info("  Skipped (dupes): %d", total_skipped)
-    log.info("  XGBoost training rows now in bet_ledger ✓")
-    if total_inserted > 0:
-        log.info("  Sunday 2:30 AM retrain will use these rows automatically.")
+    log.info("")
+    log.info("══════════════════════════════════════")
+    log.info("TOTAL inserted : %d", grand_ins)
+    log.info("TOTAL skipped  : %d  (duplicates or already present)", grand_skp)
+    log.info("══════════════════════════════════════")
+    if args.dry_run:
+        log.info("DRY RUN — nothing written to DB")
+    else:
+        log.info("Done. XGBoost retraining will use these rows on Sunday 2:30 AM.")
 
 
 if __name__ == "__main__":
