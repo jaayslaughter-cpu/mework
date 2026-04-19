@@ -389,6 +389,34 @@ def insert_batch(conn, rows: list[dict], dry_run: bool = False) -> tuple[int, in
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+def _migrate_schema(conn) -> None:
+    """Idempotently add any columns bet_ledger may be missing."""
+    migrations = [
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS agent VARCHAR(50)",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS model_prob FLOAT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS implied_prob FLOAT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS ev FLOAT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS confidence FLOAT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS actual_value FLOAT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS actual_outcome VARCHAR(10)",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS discord_sent BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS lookahead_safe BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS features_json TEXT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS model_source VARCHAR(30)",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS units_wagered FLOAT",
+        "ALTER TABLE bet_ledger ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20)",
+    ]
+    with conn.cursor() as cur:
+        for sql in migrations:
+            try:
+                cur.execute(sql)
+            except Exception as e:
+                log.warning("Migration skipped (%s): %s", sql[:60], e)
+                conn.rollback()
+    conn.commit()
+    log.info("Schema migration complete.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Print stats without writing to DB")
@@ -400,6 +428,10 @@ def main():
     args = parser.parse_args()
 
     conn = None if args.dry_run else _get_conn()
+
+    # ── Schema migration: add any missing columns before first insert ─────
+    if conn:
+        _migrate_schema(conn)
 
     total_inserted = 0
     total_skipped = 0
