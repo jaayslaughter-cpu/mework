@@ -1003,6 +1003,21 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     "xfip":          fg.get("xfip",      4.06),
                     "k_bb_pct":      fg.get("k_bb_pct",  0.139),
                 })
+                # ── Pitcher type cluster — derived from FanGraphs rates ──────
+                # Classifies pitcher archetype using already-stamped k_rate,
+                # csw_pct, and bb_rate. Used by F5Agent and XGBoost feature slot.
+                # Power:   elite K% + elite CSW% → K-over bias +3pp
+                # Command: low K% + low BB%      → K-under bias, safer ER unders
+                # Neutral: everything else
+                _k   = float(prop.get("k_rate",   0.223))
+                _csw = float(prop.get("csw_pct",  0.275))
+                _bb  = float(prop.get("bb_rate",  0.087))
+                if _k >= 0.270 and _csw >= 0.300:
+                    prop["_pitcher_type"] = "power"      # elite swing-and-miss
+                elif _k <= 0.185 and _bb <= 0.070:
+                    prop["_pitcher_type"] = "command"    # contact/location pitcher
+                else:
+                    prop["_pitcher_type"] = "neutral"
                 # FanGraphs doesn't expose raw IP/ER totals — fetch from mlbapi
                 if not prop.get("season_ip"):
                     _player_id = prop.get("player_id") or prop.get("mlbam_id")
