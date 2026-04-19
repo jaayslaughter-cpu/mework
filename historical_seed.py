@@ -24,6 +24,8 @@ import math
 import logging
 import argparse
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import psycopg2
 from datetime import datetime, date
 from typing import Optional
@@ -204,7 +206,7 @@ def fetch_game_log(player_id: int, group: str, season: int) -> list[dict]:
     url = f"{MLBAPI}/people/{player_id}"
     params = {"hydrate": f"stats(group={group},type=gameLog,season={season})"}
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(url, params=params, timeout=15, verify=False)
         data = r.json()
         people = data.get("people", [])
         if not people:
