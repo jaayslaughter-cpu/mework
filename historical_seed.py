@@ -206,6 +206,7 @@ def fetch_game_log(player_id: int, group: str, season: int) -> list[dict]:
     url = f"{MLBAPI}/people/{player_id}"
     params = {"hydrate": f"stats(group={group},type=gameLog,season={season})"}
     try:
+        r = requests.get(url, params=params, timeout=15)
         r = requests.get(url, params=params, timeout=15, verify=False)
         data = r.json()
         people = data.get("people", [])
@@ -265,6 +266,7 @@ def build_pitcher_rows(player_name: str, splits: list[dict], season: int) -> lis
                                    ("UNDER", 1 if not won_over else 0)]:
                 mp = model_prob if side == "OVER" else (100 - model_prob)
                 rows.append({
+                    "player": player_name,
                     "player_name": player_name,
                     "prop_type": prop_type,
                     "side": side,
@@ -322,6 +324,7 @@ def build_batter_rows(player_name: str, splits: list[dict], season: int) -> list
                                    ("UNDER", 1 if not won_over else 0)]:
                 mp = model_prob if side == "OVER" else (100 - model_prob)
                 rows.append({
+                    "player": player_name,
                     "player_name": player_name,
                     "prop_type": prop_type,
                     "side": side,
@@ -345,12 +348,14 @@ def build_batter_rows(player_name: str, splits: list[dict], season: int) -> list
 # ── DB insert ────────────────────────────────────────────────────────────────
 INSERT_SQL = """
 INSERT INTO bet_ledger (
+    player, prop_type, side, line, bet_date, agent,
     player_name, prop_type, side, line, bet_date, agent,
     model_prob, implied_prob, ev, confidence,
     actual_value, actual_outcome,
     discord_sent, lookahead_safe,
     features_json, model_source
 ) VALUES (
+    %(player)s, %(prop_type)s, %(side)s, %(line)s, %(bet_date)s, %(agent)s,
     %(player_name)s, %(prop_type)s, %(side)s, %(line)s, %(bet_date)s, %(agent)s,
     %(model_prob)s, %(implied_prob)s, %(ev)s, %(confidence)s,
     %(actual_value)s, %(actual_outcome)s,
@@ -381,6 +386,7 @@ def insert_batch(conn, rows: list[dict], dry_run: bool = False) -> tuple[int, in
                 skipped += 1
                 conn.rollback()
             except Exception as e:
+                log.warning("Insert failed for %s %s %s: %s", row["player"], row["prop_type"], row["bet_date"], e)
                 log.warning("Insert failed for %s %s %s: %s", row["player_name"], row["prop_type"], row["bet_date"], e)
                 conn.rollback()
                 skipped += 1
