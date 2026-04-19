@@ -4770,6 +4770,42 @@ def run_agent_tasklet() -> bool:
             logger.warning("[AgentTasklet] bet_ledger send-time INSERT failed for %s: %s — "
                            "duplicate send on restart is possible.", agent_name, _dbe2)
 
+        # ── Leg-level DB dedup — survives restart + Redis expiry ────────────
+        # Check if ANY leg in this parlay was already Discord-sent today.
+        # ON CONFLICT DO NOTHING blocks duplicate rows but the UPDATE path
+        # can still fire on restart if discord_sent was left FALSE.
+        # This query is the authoritative final gate — pure Postgres, no state.
+        _already_sent_legs = False
+        try:
+            _pg_chk = _pg_conn()
+            with _pg_chk.cursor() as _cc:
+                for _chk_leg in parlay.get("legs", []):
+                    _chk_player = (_chk_leg.get("player") or _chk_leg.get("player_name", "")).strip()
+                    _chk_pt     = (_chk_leg.get("prop_type") or "").strip()
+                    _chk_side   = (_chk_leg.get("side") or "").strip().upper()
+                    _cc.execute(
+                        "SELECT 1 FROM bet_ledger "
+                        "WHERE player_name = %s AND prop_type = %s AND side = %s "
+                        "  AND agent_name = %s AND bet_date = %s "
+                        "  AND discord_sent = TRUE LIMIT 1",
+                        (_chk_player, _chk_pt, _chk_side, agent_name, today_str),
+                    )
+                    if _cc.fetchone():
+                        _already_sent_legs = True
+                        logger.info(
+                            "[AgentTasklet] %s leg %s %s %s already discord_sent=TRUE — "
+                            "skipping duplicate dispatch.",
+                            agent_name, _chk_player, _chk_pt, _chk_side,
+                        )
+                        break
+            _pg_chk.close()
+        except Exception as _chk_err:
+            logger.debug("[AgentTasklet] leg dedup check failed: %s", _chk_err)
+
+        if _already_sent_legs:
+            _AGENT_SENT_TODAY[agent_name] = today_str   # sync in-memory so it won't retry
+            continue
+
         try:
             discord_alert.send_parlay_alert(parlay)      # 4. Discord (fires last)
             # Prevents ghost grades where DB has a row but subscriber never saw the pick
@@ -5584,12 +5620,22 @@ def run_grading_tasklet() -> None:
                 if prob is None:
                     continue  # FIX: skip rows with no model_prob — 0.52 default biases calibration
                 brier_inputs.append({"prob": prob, "outcome": outcome})
-            if brier_inputs:
+            # Minimum sample gate: Brier is meaningless on fewer than 30 graded picks.
+            # A single bad day on 9 picks swings Brier 15%+ triggering false drift alerts.
+            _MIN_BRIER_SAMPLE = 30
+            if brier_inputs and len(brier_inputs) >= _MIN_BRIER_SAMPLE:
                 from calibration_layer import calculate_brier_score  # noqa: PLC0415
                 brier = calculate_brier_score(brier_inputs)
                 if brier is not None:
-                    record_brier(brier)
-                    logger.info("[GradingTasklet] Brier score recorded: %.4f", brier)
+                    record_brier(brier, n_samples=len(brier_inputs))
+                    logger.info("[GradingTasklet] Brier score recorded: %.4f (%d samples)",
+                                brier, len(brier_inputs))
+            elif brier_inputs:
+                logger.info(
+                    "[GradingTasklet] Brier skipped — only %d graded rows (need %d). "
+                    "No drift check fired. Governor stays inactive.",
+                    len(brier_inputs), _MIN_BRIER_SAMPLE,
+                )
         except Exception as _brier_err:
             logger.warning("[GradingTasklet] Brier record failed: %s", _brier_err)  # FIX: was debug
     # Previously calibration_map.json only updated on Sunday XGBoost retrain.

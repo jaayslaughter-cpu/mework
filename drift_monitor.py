@@ -280,22 +280,39 @@ def _send_drift_alert(brier: float, drift_pct: float) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def record_brier(new_score: float) -> bool:
+# Minimum sample size before drift monitor fires.
+# Below this threshold Brier variance dominates signal — drift alerts are noise.
+BRIER_MIN_SAMPLE = 30
+
+
+def record_brier(new_score: float, n_samples: int = 0) -> bool:
     """Record a Brier score and check for drift.
 
     Persists to Postgres ``brier_ledger`` table. Falls back to JSON file
     at /tmp/brier_score_ledger.json if DATABASE_URL is unavailable.
 
+    Args:
+        new_score:  Brier score to record (0.0–1.0).
+        n_samples:  Number of graded rows used to compute this score.
+                    Drift check is skipped if n_samples < BRIER_MIN_SAMPLE.
+
     Returns True if drift was detected (Discord alert fired).
-    Should be called from ``calibrate_model.py`` weekly.
     """
     old_score = _load_last_brier_pg()
     _save_brier_pg(round(new_score, 4))
 
+    if n_samples > 0 and n_samples < BRIER_MIN_SAMPLE:
+        logger.info(
+            "[DriftMonitor] Brier %.4f recorded but drift check skipped — "
+            "only %d samples (need %d).",
+            new_score, n_samples, BRIER_MIN_SAMPLE,
+        )
+        return False
+
     drift = check_for_model_drift(new_score, old_score)
     logger.info(
-        "[DriftMonitor] Brier recorded: %.4f (prev=%.4f drift=%s)",
-        new_score, old_score, "YES" if drift else "NO",
+        "[DriftMonitor] Brier recorded: %.4f (prev=%.4f n=%d drift=%s)",
+        new_score, old_score, n_samples, "YES" if drift else "NO",
     )
     return drift
 
