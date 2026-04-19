@@ -59,6 +59,18 @@ _BASE_URL = "https://api.the-odds-api.com/v4"
 _BOOKMAKERS = "pinnacle,draftkings,fanduel,betmgm"
 _PRIORITY: dict[str, int] = {"pinnacle": 0, "draftkings": 1, "fanduel": 2, "betmgm": 3}
 
+# Sharpness weights for consensus implied probability.
+# Pinnacle is the global sharp market maker — given highest weight.
+# DraftKings is next (large US volume, efficient lines).
+# FanDuel and BetMGM are softer books included for line coverage.
+# When only one book has a prop, its vig-stripped implied is used directly.
+_BOOK_WEIGHTS: dict[str, float] = {
+    "pinnacle":   0.40,
+    "draftkings": 0.30,
+    "fanduel":    0.20,
+    "betmgm":     0.10,
+}
+
 # Prop markets to fetch.  Excluded per PropIQ directive:
 #   stolen_bases, home_runs, walks, walks_allowed, doubles, triples, singles
 _MARKETS: list[str] = [
@@ -327,20 +339,36 @@ def _fetch_event_props(event_id: str) -> list[dict]:
                 ovi, uvi = _vig_strip(over_o, under_o)
                 line = pd["line"]
                 for side, si in (("Over", ovi), ("Under", uvi)):
-                    rk = (pname, mk, bk, side)
-                    existing = rows_by_key.get(rk)
-                    if existing is None or _PRIORITY.get(bk, 99) < _PRIORITY.get(existing["bookmaker"], 99):
+                    rk = (pname, mk, side)   # key without book — aggregate across books
+                    w  = _BOOK_WEIGHTS.get(bk, 0.05)
+                    if rk not in rows_by_key:
                         rows_by_key[rk] = {
-                            "player_name": pname,
-                            "market_key":  mk,
-                            "side":        side,
-                            "sb_implied_prob": si,
-                            "line":        line,
-                            "bookmaker":   bk,
-                            "over_odds":   over_o,
-                            "under_odds":  under_o,
+                            "player_name":     pname,
+                            "market_key":      mk,
+                            "side":            side,
+                            "line":            line,
+                            "_weighted_sum":   si * w,
+                            "_weight_total":   w,
+                            "_books":          [bk],
+                            "over_odds":       over_o if side == "Over" else None,
+                            "under_odds":      under_o if side == "Under" else None,
+                            "bookmaker":       bk,  # sharpest book for reference
                         }
+                    else:
+                        rows_by_key[rk]["_weighted_sum"]  += si * w
+                        rows_by_key[rk]["_weight_total"]  += w
+                        rows_by_key[rk]["_books"].append(bk)
+                        # Keep sharpest book reference (lowest priority number)
+                        if _PRIORITY.get(bk, 99) < _PRIORITY.get(rows_by_key[rk]["bookmaker"], 99):
+                            rows_by_key[rk]["bookmaker"] = bk
 
+    # ── Finalise: compute weighted-average implied prob, clean up internals ──
+    output = []
+    for row in rows_by_key.values():
+        wt = row.pop("_weight_total", 0)
+        ws = row.pop("_weighted_sum", 0)
+        row.pop("_books", None)
+        row["sb_implied_prob"] = round(ws / wt, 6) if wt > 0 else 0.5
     return list(rows_by_key.values())
 
 
@@ -363,7 +391,8 @@ def _fetch_live(date_int: int) -> dict:
     if not all_rows:
         return {}
 
-    # Build reference dict — best bookmaker wins per (player, market, side) key
+    # Build reference dict — one entry per (player, market, side) key
+    # sb_implied_prob is already the weighted-consensus value from the fetch loop
     ref: dict = {}
     for r in all_rows:
         k = (r["player_name"], r["market_key"], r["side"])
