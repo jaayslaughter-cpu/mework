@@ -285,7 +285,7 @@ MIN_CONFIDENCE    = 6
 # raise the bar from 52% without losing too many qualifying picks.
 # At 0.55 with correct multipliers: 2-leg PP needs 55%^2 * 3 - 1 = -9.2% → still
 # needs higher prob per leg, but combined_ev gate (+3%) now does the real work.
-MIN_PROB          = 0.55   # raised from 0.52 — combined_ev gate now primary quality control
+MIN_PROB          = 0.57   # April 20 retrain: raised from 0.55 — first real model trained on historical data
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -1742,6 +1742,54 @@ def _ensure_bet_ledger() -> None:
     except Exception as _ae:
         logger.debug("[DB] ALTER TABLE bet_ledger: %s", _ae)
 
+    # ── agent_unit_sizing — tier/streak tracking per agent ─────────────────────
+    try:
+        _us = _pg_conn()
+        with _us.cursor() as _uc:
+            _uc.execute("""
+                CREATE TABLE IF NOT EXISTS agent_unit_sizing (
+                    agent_name          VARCHAR(80) PRIMARY KEY,
+                    tier                INTEGER     NOT NULL DEFAULT 1,
+                    stake_dollars       FLOAT       NOT NULL DEFAULT 5.0,
+                    consecutive_wins    INTEGER     NOT NULL DEFAULT 0,
+                    consecutive_losses  INTEGER     NOT NULL DEFAULT 0,
+                    updated_at          TIMESTAMP   DEFAULT NOW()
+                )
+            """)
+        _us.commit()
+        _us.close()
+    except Exception as _ue:
+        logger.debug("[DB] agent_unit_sizing table: %s", _ue)
+
+    # ── clv_records — CLV tracking per bet leg ─────────────────────────────────
+    try:
+        _cr = _pg_conn()
+        with _cr.cursor() as _cc:
+            _cc.execute("""
+                CREATE TABLE IF NOT EXISTS clv_records (
+                    id              SERIAL PRIMARY KEY,
+                    bet_ledger_id   INTEGER,
+                    player_name     VARCHAR(150),
+                    prop_type       VARCHAR(60),
+                    side            VARCHAR(10),
+                    open_line       FLOAT,
+                    close_line      FLOAT,
+                    clv_pts         FLOAT,
+                    beat_close      BOOLEAN,
+                    game_date       DATE,
+                    agent_name      VARCHAR(80),
+                    created_at      TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            _cc.execute(
+                "CREATE INDEX IF NOT EXISTS idx_clv_records_date "
+                "ON clv_records (game_date)"
+            )
+        _cr.commit()
+        _cr.close()
+    except Exception as _cre:
+        logger.debug("[DB] clv_records table: %s", _cre)
+
     # ── UD streak state — tracks Underdog Streaks current count ───────────────
     try:
         conn = _pg_conn()
@@ -1781,22 +1829,6 @@ def _ensure_bet_ledger() -> None:
     except Exception as _xms:
         logger.warning("[DB] xgb_model_store create failed: %s", _xms)
 
-    # ── XGBoost feature importance ─────────────────────────────────────────────
-    try:
-        conn = _pg_conn()
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS xgb_feature_importance (
-                    id           SERIAL PRIMARY KEY,
-                    feature_name VARCHAR(80),
-                    importance   FLOAT,
-                    recorded_at  TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-        conn.commit()
-        conn.close()
-    except Exception as _xfi:
-        logger.warning("[DB] xgb_feature_importance create failed: %s", _xfi)
 
 
 def run_data_hub_tasklet() -> None:
@@ -1807,6 +1839,15 @@ def run_data_hub_tasklet() -> None:
     """
     _ensure_bet_ledger()       # ensure table exists on every startup
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
+
+    # ── Steamer 2026 prefetch (once per day, Postgres-cached) ────────────────
+    try:
+        from steamer_layer import prefetch as _steamer_prefetch  # noqa: PLC0415
+        _sc = _steamer_prefetch()
+        if _sc:
+            logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
+    except Exception as _spe:
+        logger.debug("[DataHub] Steamer prefetch skipped: %s", _spe)
     r = _redis()
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
     game_states: dict[str, str] = {}
@@ -2374,7 +2415,11 @@ class _BaseAgent:
             shadow_whiff = _clamp(float(prop.get("k_pct", 0.223) or 0.223) / 0.35)
 
         # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
-        zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0), 0.5, 1.5) / 1.5
+        # Blended with pitcher type cluster: power=+0.05, command=-0.05, neutral=0
+        _ptype_enc = {"power": 0.05, "command": -0.05}.get(
+            prop.get("_pitcher_type", "neutral"), 0.0
+        )
+        zone_mult    = _clamp(prop.get("_zone_integrity_mult", 1.0) + _ptype_enc, 0.5, 1.5) / 1.5
 
         # ── Lineup context ────────────────────────────────────────────
         chase_adj   = _clamp((prop.get("_lineup_chase_adj", 0.0) + 0.10) / 0.20)  # -0.10→0, +0.10→1
@@ -2400,7 +2445,7 @@ class _BaseAgent:
         impl_prob   = _clamp((_sb_implied if _sb_implied > 0.30 else _ud_implied) / 100.0)
         # Also encode sharp-book line gap as a feature (negative = DFS line favorable for Over)
         sb_line_gap = _clamp(((prop.get("sb_line_gap", 0.0) or 0.0) + 2.0) / 4.0)  # -2 to +2 range
-        _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0,
+        _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0, "hitter_strikeouts": 0,
                    "home_runs": 1, "hr": 1,
                    "hits": 2, "hits_allowed": 2,
                    "rbis": 3, "rbi": 3,
@@ -2883,6 +2928,17 @@ class _F5Agent(_BaseAgent):
             model_prob = min(model_prob + 3.0, 95.0)
         elif csw < 0.23:
             model_prob = max(model_prob - 2.0, 30.0)
+
+        # Pitcher type cluster nudge (set by prop_enrichment_layer)
+        # Power pitchers get extra K-over bias on top of raw CSW%;
+        # command pitchers suppress K-over and support ER-under.
+        _ptype = prop.get("_pitcher_type", "neutral")
+        if _ptype == "power" and prop_type == "strikeouts":
+            model_prob = min(model_prob + 2.5, 95.0)
+        elif _ptype == "command" and prop_type == "strikeouts":
+            model_prob = max(model_prob - 2.5, 30.0)
+        elif _ptype == "command" and prop_type == "earned_runs":
+            model_prob = min(model_prob + 2.0, 95.0)  # command → ER under more likely
 
         # Days rest / pitch count adjustment from prop_enrichment_layer
         _rest_adj = float(prop.get("_rest_adj", 0.0))
@@ -3612,7 +3668,7 @@ def _fetch_agent_season_stats(agent_name: str) -> dict:
                                      WHEN status = 'LOSS' THEN -COALESCE(units_wagered, ABS(kelly_units), 1.0)
                                      ELSE 0 END)
                             / NULLIF(SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0)), 0) * 100,
-                        0), 1
+                        0)::NUMERIC, 1
                     ) AS roi_pct
                 FROM bet_ledger
                 WHERE agent_name   = %s
@@ -4740,6 +4796,42 @@ def run_agent_tasklet() -> bool:
             logger.warning("[AgentTasklet] bet_ledger send-time INSERT failed for %s: %s — "
                            "duplicate send on restart is possible.", agent_name, _dbe2)
 
+        # ── Leg-level DB dedup — survives restart + Redis expiry ────────────
+        # Check if ANY leg in this parlay was already Discord-sent today.
+        # ON CONFLICT DO NOTHING blocks duplicate rows but the UPDATE path
+        # can still fire on restart if discord_sent was left FALSE.
+        # This query is the authoritative final gate — pure Postgres, no state.
+        _already_sent_legs = False
+        try:
+            _pg_chk = _pg_conn()
+            with _pg_chk.cursor() as _cc:
+                for _chk_leg in parlay.get("legs", []):
+                    _chk_player = (_chk_leg.get("player") or _chk_leg.get("player_name", "")).strip()
+                    _chk_pt     = (_chk_leg.get("prop_type") or "").strip()
+                    _chk_side   = (_chk_leg.get("side") or "").strip().upper()
+                    _cc.execute(
+                        "SELECT 1 FROM bet_ledger "
+                        "WHERE player_name = %s AND prop_type = %s AND side = %s "
+                        "  AND agent_name = %s AND bet_date = %s "
+                        "  AND discord_sent = TRUE LIMIT 1",
+                        (_chk_player, _chk_pt, _chk_side, agent_name, today_str),
+                    )
+                    if _cc.fetchone():
+                        _already_sent_legs = True
+                        logger.info(
+                            "[AgentTasklet] %s leg %s %s %s already discord_sent=TRUE — "
+                            "skipping duplicate dispatch.",
+                            agent_name, _chk_player, _chk_pt, _chk_side,
+                        )
+                        break
+            _pg_chk.close()
+        except Exception as _chk_err:
+            logger.debug("[AgentTasklet] leg dedup check failed: %s", _chk_err)
+
+        if _already_sent_legs:
+            _AGENT_SENT_TODAY[agent_name] = today_str   # sync in-memory so it won't retry
+            continue
+
         try:
             discord_alert.send_parlay_alert(parlay)      # 4. Discord (fires last)
             # Prevents ghost grades where DB has a row but subscriber never saw the pick
@@ -5127,7 +5219,8 @@ def run_grading_tasklet() -> None:
             "EarnedRuns":        espn.get("earned_runs",     0.0),
             "HitsAllowed":       espn.get("hits_allowed",    0.0),
             "WalksAllowed":      espn.get("walks_allowed", espn.get("bb_allowed",
-                                     espn.get("pitcher_walks", 0.0))),  # pitcher BB, not batter BB
+                                     espn.get("pitcher_walks",
+                                     espn.get("base_on_balls", 0.0)))),  # ESPN stores as base_on_balls
             # FIX: add fields needed for correct fantasy scoring and full grading
             "Doubles":           espn.get("doubles",         0.0),
             "Triples":           espn.get("triples",         0.0),
@@ -5553,12 +5646,22 @@ def run_grading_tasklet() -> None:
                 if prob is None:
                     continue  # FIX: skip rows with no model_prob — 0.52 default biases calibration
                 brier_inputs.append({"prob": prob, "outcome": outcome})
-            if brier_inputs:
+            # Minimum sample gate: Brier is meaningless on fewer than 30 graded picks.
+            # A single bad day on 9 picks swings Brier 15%+ triggering false drift alerts.
+            _MIN_BRIER_SAMPLE = 30
+            if brier_inputs and len(brier_inputs) >= _MIN_BRIER_SAMPLE:
                 from calibration_layer import calculate_brier_score  # noqa: PLC0415
                 brier = calculate_brier_score(brier_inputs)
                 if brier is not None:
-                    record_brier(brier)
-                    logger.info("[GradingTasklet] Brier score recorded: %.4f", brier)
+                    record_brier(brier, n_samples=len(brier_inputs))
+                    logger.info("[GradingTasklet] Brier score recorded: %.4f (%d samples)",
+                                brier, len(brier_inputs))
+            elif brier_inputs:
+                logger.info(
+                    "[GradingTasklet] Brier skipped — only %d graded rows (need %d). "
+                    "No drift check fired. Governor stays inactive.",
+                    len(brier_inputs), _MIN_BRIER_SAMPLE,
+                )
         except Exception as _brier_err:
             logger.warning("[GradingTasklet] Brier record failed: %s", _brier_err)  # FIX: was debug
     # Previously calibration_map.json only updated on Sunday XGBoost retrain.
@@ -5660,6 +5763,21 @@ def run_grading_tasklet() -> None:
     except Exception as _iso_err:
         logger.warning("[GradingTasklet] Isotonic calibration rebuild failed (non-fatal): %s", _iso_err)
 
+    # ── Temperature (Platt) calibration — fits per-agent T scalar ────────────
+    # Phase 47: walks agent_calibration_data → fits T for each agent with ≥30 graded picks
+    # T>1 compresses overconfident probs. Phase 45 backtest showed T≈3.0 on raw signal.
+    # temperature_scaling.py contains the math; temperature_calibration.py runs the loop.
+    try:
+        from temperature_calibration import run as _run_temp_cal  # noqa: PLC0415
+        _temp_updates = _run_temp_cal()
+        if _temp_updates:
+            logger.info("[GradingTasklet] Temperature calibration updated %d agents: %s",
+                        len(_temp_updates), list(_temp_updates.keys()))
+        else:
+            logger.info("[GradingTasklet] Temperature calibration: no agents had ≥30 graded picks yet.")
+    except Exception as _tc_err:
+        logger.warning("[GradingTasklet] Temperature calibration failed (non-fatal): %s", _tc_err)
+
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
     """
@@ -5694,6 +5812,7 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
         "triples":            "Triples",
         "strikeouts":         "Strikeouts",
         "pitcher_strikeouts": "Strikeouts",
+        "hitter_strikeouts":  "Strikeouts",   # batter K props (MLEdgeAgent, CorrelatedParlay)
         "earned_runs":        "EarnedRuns",
         "hits_allowed":       "HitsAllowed",
         "walks_allowed":      "WalksAllowed",
