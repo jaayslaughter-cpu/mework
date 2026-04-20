@@ -37,7 +37,7 @@ from email.mime.text import MIMEText
 #   ALERT_EMAIL         → send-to address    (also NOTIFY_EMAIL fallback)
 RAILWAY_TOKEN      = os.getenv("RAILWAY_API_TOKEN", "")
 SERVICE_ID         = os.getenv("RAILWAY_SERVICE_ID", "")
-PROJECT_ID         = os.getenv("RAILWAY_PROJECT_ID", "")
+PROJECT_ID         = os.getenv("RAILWAY_PROJECT_ID", "19ef3bb0-1e36-466c-b23e-376ff1ef86ee")
 
 # Email: accept both Railway naming (SMTP_USER/SMTP_PASS/ALERT_EMAIL)
 # and legacy naming (NOTIFY_EMAIL/GMAIL_APP_PASSWORD)

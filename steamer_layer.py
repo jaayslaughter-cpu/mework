@@ -151,7 +151,7 @@ def _save_to_pg(data: dict, today: str) -> None:
 def _fetch_via_scraperapi_steamer(timeout: int = 30) -> list[dict]:
     """ScraperAPI fallback for Steamer FanGraphs requests."""
     import urllib.parse  # noqa: PLC0415
-    key = os.environ.get("SCRAPERAPI_KEY", "")
+    key = os.environ.get("SCRAPERAPI_KEY2", "")
     if not key:
         return []
     full_url = _FG_BASE + "?" + urllib.parse.urlencode(_STEAMER_PARAMS)
