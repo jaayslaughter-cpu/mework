@@ -238,6 +238,26 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
 # Internal fetch helpers
 # ---------------------------------------------------------------------------
 
+
+def _fetch_via_scraperapi(url: str, params: dict, timeout: int = 30) -> list[dict]:
+    """Route FanGraphs request through ScraperAPI when direct access is 403-blocked on Railway."""
+    import urllib.parse  # noqa: PLC0415
+    key = os.environ.get("SCRAPERAPI_KEY", "")
+    if not key:
+        return []
+    full_url = url + "?" + urllib.parse.urlencode(params)
+    proxy_url = f"http://api.scraperapi.com?api_key={key}&url={urllib.parse.quote(full_url)}"
+    try:
+        resp = requests.get(proxy_url, timeout=timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = payload.get("data") or []
+        logger.info("[FG] ScraperAPI fallback returned %d rows", len(rows))
+        return rows
+    except Exception as exc:
+        logger.warning("[FG] ScraperAPI fallback failed: %s", exc)
+        return []
+
 def _fetch_season(stats: str, season: int) -> list[dict]:
     """Fetch one season of batter or pitcher data from FanGraphs API.
     Returns list of player dicts, or empty list on failure.
@@ -256,7 +276,10 @@ def _fetch_season(stats: str, season: int) -> list[dict]:
         payload = resp.json()
         return payload.get("data") or []
     except Exception as exc:
-        logger.warning("[FG] API fetch failed (stats=%s, season=%d): %s", stats, season, exc)
+        logger.warning("[FG] API fetch failed (stats=%s, season=%d): %s — trying ScraperAPI", stats, season, exc)
+        scraperapi_rows = _fetch_via_scraperapi(_FG_API_BASE, params)
+        if scraperapi_rows:
+            return scraperapi_rows
         return []
 
 
