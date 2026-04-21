@@ -7,7 +7,7 @@ Runs 8 tasklets on their defined schedules:
   - LeaderboardTasklet:  every 60s
   - BacktestTasklet:     daily  12:01AM PT
   - GradingTasklet:      daily  2:00AM PT (after all West Coast games finish)
-  - XGBoostTasklet:      weekly Sunday 2:00AM PT
+  - XGBoostTasklet:      daily 2:30AM PT
   - NightlyRecap:        daily  11:00PM PT ( 2:00AM ET) → Discord settlement
 
 Also exposes a FastAPI dashboard on $PORT.
@@ -407,7 +407,7 @@ async def lifespan(_app: FastAPI):
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
         "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@2:00AM, xgboost@Sun2AM"
+        "backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
     )
     yield
 
