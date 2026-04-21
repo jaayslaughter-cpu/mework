@@ -1,6 +1,7 @@
 # season_record.py — FIXED: renamed _ev_pct -> ev_pct (Problem 1 & 17)
 # Phase 104: added sslmode=require to _get_conn() -- Railway Postgres requires SSL
-# All other logic unchanged.
+# PR #393: Fixed get_overall_season_stats() SQL — was only summing WIN payouts,
+#          missing loss amounts from net profit. Renamed total_payout -> net_profit.
 
 from __future__ import annotations
 
@@ -26,9 +27,6 @@ def _get_conn():
         return None
     try:
         import psycopg2  # noqa: PLC0415
-        # sslmode=require is mandatory for Railway Postgres external connections.
-        # Without it, psycopg2 silently fails on Railway and record_parlay()
-        # returns False -- parlays reach Discord but never hit the DB.
         return psycopg2.connect(db_url, sslmode="require")
     except Exception as exc:
         logger.warning("[SeasonRecord] DB connect failed: %s", exc)
@@ -75,17 +73,12 @@ def record_parlay(
     agent: str,
     num_legs: int,
     confidence: float,
-    ev_pct: float = 0.0,          # FIX: was _ev_pct — caused TypeError crash
+    ev_pct: float = 0.0,
     platform: str = "Mixed",
     stake: float = _DEFAULT_STAKE,
     legs: Optional[list] = None,
 ) -> bool:
-    """Insert a new PENDING parlay into the season record.
-
-    FIX: Dedup guard — if a row already exists for (date, agent_name, legs_json)
-    today, skip the insert. Prevents the 30s agent loop from writing the same
-    parlay multiple times when dispatch fires in the same 9AM window.
-    """
+    """Insert a new PENDING parlay into the season record."""
     conn = _get_conn()
     if not conn:
         logger.warning("[SeasonRecord] record_parlay skipped — no DB connection")
@@ -95,7 +88,6 @@ def record_parlay(
         legs_json = json.dumps(legs) if legs else None
         cur = conn.cursor()
 
-        # ── Dedup check: skip if identical parlay already recorded today ──────
         cur.execute(
             """
             SELECT 1 FROM propiq_season_record
@@ -105,10 +97,9 @@ def record_parlay(
             (date, agent, legs_json),
         )
         if cur.fetchone():
-            logger.debug("[SeasonRecord] Duplicate parlay skipped: %s %s (already recorded)",
-                         date, agent)
+            logger.debug("[SeasonRecord] Duplicate parlay skipped: %s %s", date, agent)
             cur.close()
-            return True  # not an error — just already written
+            return True
 
         cur.execute(
             """
@@ -211,11 +202,7 @@ def get_pending_parlays(date: str) -> list[dict]:
 
 
 def get_all_pending_parlays() -> list[dict]:
-    """Return ALL PENDING parlays across all dates (for rollover settlement).
-
-    Used by nightly_recap.py to pick up any prior-day parlays where games
-    ran past the midnight window and could not be settled the previous night.
-    """
+    """Return ALL PENDING parlays across all dates (for rollover settlement)."""
     conn = _get_conn()
     if not conn:
         return []
@@ -242,7 +229,7 @@ def get_all_pending_parlays() -> list[dict]:
                 "legs": legs,
             })
         return results
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("[SeasonRecord] get_all_pending_parlays failed: %s", exc)
         return []
     finally:
@@ -253,7 +240,12 @@ def get_all_pending_parlays() -> list[dict]:
 
 
 def get_overall_season_stats() -> dict:
-    """Return aggregate W/L/ROI stats for the full season."""
+    """Return aggregate W/L/ROI stats for the full season.
+
+    PR #393 FIX: SQL now sums payout for WIN+LOSS rows to get true net_profit.
+    Previous version only summed WIN payouts, ignoring the -5u on every loss,
+    which inflated season_units and ROI in the Discord footer.
+    """
     conn = _get_conn()
     if not conn:
         return {}
@@ -265,24 +257,28 @@ def get_overall_season_stats() -> dict:
                     COUNT(*) FILTER (WHERE status = 'LOSS')    AS losses,
                     COUNT(*) FILTER (WHERE status = 'PUSH')    AS pushes,
                     COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
-                    COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
-                    -- FIX: exclude PUSH from staked denominator — pushes return stake, not a loss
+                    -- PR #393: sum WIN+LOSS payouts for true net profit
+                    -- (payout stores net units_profit: positive for WIN, negative for LOSS)
+                    COALESCE(SUM(payout) FILTER (WHERE status IN ('WIN','LOSS')), 0) AS net_profit,
                     COALESCE(SUM(stake) FILTER (WHERE status IN ('WIN','LOSS')), 0) AS total_staked
                 FROM propiq_season_record
             """)
             row = cur.fetchone()
         if not row:
             return {}
-        wins, losses, pushes, pending, total_payout, total_staked = row
+        wins, losses, pushes, pending, net_profit, total_staked = row
         roi = (
-            (float(total_payout) - float(total_staked)) / float(total_staked) * 100
+            float(net_profit) / float(total_staked) * 100
             if total_staked and float(total_staked) > 0 else 0.0
         )
         return {
-            "wins": wins, "losses": losses, "pushes": pushes,
-            "pending": pending, "roi_pct": round(roi, 2),
+            "wins":         wins,
+            "losses":       losses,
+            "pushes":       pushes,
+            "pending":      pending,
+            "roi_pct":      round(roi, 2),
+            "net_profit":   float(net_profit),
             "total_staked": float(total_staked),
-            "total_payout": float(total_payout),
         }
     except Exception as exc:
         logger.warning("[SeasonRecord] get_overall_season_stats failed: %s", exc)
@@ -306,24 +302,27 @@ def get_agent_season_stats(agent_name: str) -> dict:
                     COUNT(*) FILTER (WHERE status = 'WIN')  AS wins,
                     COUNT(*) FILTER (WHERE status = 'LOSS') AS losses,
                     COUNT(*) FILTER (WHERE status = 'PUSH') AS pushes,
-                    COALESCE(SUM(payout) FILTER (WHERE status = 'WIN'), 0) AS total_payout,
-                    COALESCE(SUM(stake) FILTER (WHERE status != 'PENDING'), 0) AS total_staked
+                    COALESCE(SUM(payout) FILTER (WHERE status IN ('WIN','LOSS')), 0) AS net_profit,
+                    COALESCE(SUM(stake) FILTER (WHERE status IN ('WIN','LOSS')), 0) AS total_staked
                 FROM propiq_season_record
                 WHERE agent_name = %s
             """, (agent_name,))
             row = cur.fetchone()
         if not row:
             return {}
-        wins, losses, pushes, total_payout, total_staked = row
+        wins, losses, pushes, net_profit, total_staked = row
         total_graded = (wins or 0) + (losses or 0)
         win_rate = wins / total_graded * 100 if total_graded > 0 else 0.0
         roi = (
-            (float(total_payout) - float(total_staked)) / float(total_staked) * 100
+            float(net_profit) / float(total_staked) * 100
             if total_staked and float(total_staked) > 0 else 0.0
         )
         return {
-            "wins": wins, "losses": losses, "pushes": pushes,
-            "win_rate": round(win_rate, 1), "roi_pct": round(roi, 2),
+            "wins":     wins,
+            "losses":   losses,
+            "pushes":   pushes,
+            "win_rate": round(win_rate, 1),
+            "roi_pct":  round(roi, 2),
         }
     except Exception as exc:
         logger.warning("[SeasonRecord] get_agent_season_stats failed: %s", exc)

@@ -60,25 +60,25 @@ logger = logging.getLogger("nightly_recap")
 
 # Emoji map for agent names
 _AGENT_EMOJI: dict[str, str] = {
-    "EVHunter":              "🎯",
-    "UnderMachine":          "🔽",
-    "F5Agent":               "5️⃣",
-    "MLEdgeAgent":           "🧠",
-    "UmpireAgent":           "⚖️",
-    "FadeAgent":             "👻",
-    "LineValueAgent":        "📐",
-    "BullpenAgent":          "🔥",
-    "WeatherAgent":          "🌬️",
-    "UnderDogAgent":         "🐕",
-    "StackSmithAgent":       "🏗️",
-    "ChalkBusterAgent":      "💥",
-    "SharpFadeAgent":        "📡",
-    "CorrelatedParlayAgent": "🔗",
-    "PropCycleAgent":        "🔄",
-    "LineupChaseAgent":      "🎣",
-    "LineDriftAgent":        "📈",
-    "SteamAgent":            "💨",
-    "StreakAgent":            "⚡",
+    "EVHunter":              "\U0001f3af",
+    "UnderMachine":          "\U0001f53d",
+    "F5Agent":               "5\ufe0f\u20e3",
+    "MLEdgeAgent":           "\U0001f9e0",
+    "UmpireAgent":           "\u2696\ufe0f",
+    "FadeAgent":             "\U0001f47b",
+    "LineValueAgent":        "\U0001f4d0",
+    "BullpenAgent":          "\U0001f525",
+    "WeatherAgent":          "\U0001f32c\ufe0f",
+    "UnderDogAgent":         "\U0001f415",
+    "StackSmithAgent":       "\U0001f3d7\ufe0f",
+    "ChalkBusterAgent":      "\U0001f4a5",
+    "SharpFadeAgent":        "\U0001f4e1",
+    "CorrelatedParlayAgent": "\U0001f517",
+    "PropCycleAgent":        "\U0001f504",
+    "LineupChaseAgent":      "\U0001f3a3",
+    "LineDriftAgent":        "\U0001f4c8",
+    "SteamAgent":            "\U0001f4a8",
+    "StreakAgent":            "\u26a1",
 }
 
 # FIX: canonical list of active agents — filter out phantom legacy picks
@@ -109,15 +109,9 @@ def _yesterday_pt() -> str:
 
 # ---------------------------------------------------------------------------
 # PR #333 FIX 1: settlement_date_log dedup guard
-# Prevents double-send when APScheduler misfires on Railway restart at ~11 PM.
-# Same pattern as dispatch_date_log in orchestrator.py.
 # ---------------------------------------------------------------------------
 
 def _settlement_already_ran(settle_date: str) -> bool:
-    """
-    Returns True if nightly settlement for settle_date already completed.
-    Uses Postgres `settlement_date_log` table — survives Railway restarts.
-    """
     import psycopg2  # noqa: PLC0415
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -146,7 +140,6 @@ def _settlement_already_ran(settle_date: str) -> bool:
 
 
 def _record_settlement_ran(settle_date: str) -> None:
-    """Mark settle_date as done in settlement_date_log."""
     import psycopg2  # noqa: PLC0415
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -171,7 +164,6 @@ def _record_settlement_ran(settle_date: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _send_discord_embed(payload: dict) -> bool:
-    """POST a Discord embed payload to the webhook."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         DISCORD_WEBHOOK,
@@ -259,22 +251,23 @@ def _build_recap_embed(
                 "inline": False,
             })
 
-    _sw = season_stats.get("wins",         0)
-    _sl = season_stats.get("losses",       0)
-    _sp = season_stats.get("pushes",       0)
+    _sw = season_stats.get("wins",        0)
+    _sl = season_stats.get("losses",      0)
+    _sp = season_stats.get("pushes",      0)
     season_record = f"{_sw}W-{_sl}L-{_sp}P"
-    season_units  = round(
-        season_stats.get("total_payout", 0.0) - season_stats.get("total_staked", 0.0), 1
-    )
-    season_roi    = season_stats.get("roi_pct",  0.0)
-    pending_count = season_stats.get("pending",  0)
+
+    # PR #393 FIX: use net_profit (WIN+LOSS payouts combined) not total_payout-total_staked
+    # net_profit already accounts for both winning payouts and losing stakes
+    season_units  = round(season_stats.get("net_profit", 0.0), 1)
+    season_roi    = season_stats.get("roi_pct",   0.0)
+    pending_count = season_stats.get("pending",   0)
 
     embed = {
         "embeds": [{
             "title": f"\U0001f4ca PropIQ Nightly Recap \u2014 {date_str}",
             "description": (
                 f"**Today:** {day_record} \u00b7 {day_units} \u00b7 {total} parlays settled\n"
-                f"{'⏳ Parlays pending — games still in progress.' if total == 0 and pending_count > 0 else ('No parlays sent today.' if total == 0 else '')}"
+                f"{'\u23f3 Parlays pending \u2014 games still in progress.' if total == 0 and pending_count > 0 else ('No parlays sent today.' if total == 0 else '')}"
             ),
             "color": color,
             "fields": fields,
@@ -297,30 +290,24 @@ def _build_recap_embed(
 # ---------------------------------------------------------------------------
 
 def run(settle_date: Optional[str] = None) -> None:
-    """
-    settle_date: 'YYYY-MM-DD' — defaults to yesterday PT (DST-aware).
-    """
     if settle_date is None:
         settle_date = _yesterday_pt()
 
     logger.info("=== PropIQ Nightly Settlement: %s ===", settle_date)
 
-    # PR #333 FIX 1: dedup guard — one settlement per date, survives Railway restarts
     if _settlement_already_ran(settle_date):
         logger.info(
-            "[Recap] Settlement for %s already ran — skipping duplicate. "
-            "(APScheduler misfire on redeploy suppressed.)",
+            "[Recap] Settlement for %s already ran — skipping duplicate.",
             settle_date,
         )
         return
 
-    # 1. Fetch all PENDING parlays across all dates (rollover-aware)
     pending = get_all_pending_parlays()
-    logger.info("[Recap] Found %d PENDING parlays in propiq_season_record for settlement.", len(pending))
+    logger.info("[Recap] Found %d PENDING parlays for settlement.", len(pending))
     _phantom_count = len([p for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS])
     if _phantom_count:
         logger.warning(
-            "[Recap] Filtering %d parlays from legacy agents not in current roster: %s",
+            "[Recap] Filtering %d parlays from legacy agents: %s",
             _phantom_count,
             list({p["agent_name"] for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS}),
         )
@@ -331,20 +318,17 @@ def run(settle_date: Optional[str] = None) -> None:
         clv_summary = get_daily_clv_summary(settle_date)
         embed = _build_recap_embed(settle_date, [], season_stats, clv_summary)
         _send_discord_embed(embed)
-        # PR #333: still record so restarts don't send this zero-recap twice
         _record_settlement_ran(settle_date)
         return
 
     logger.info("Found %d PENDING parlays for %s", len(pending), settle_date)
 
-    # 2. Fetch ESPN stats
     espn_date = settle_date.replace("-", "")
     player_stats = get_all_player_stats(espn_date)
     if not player_stats:
         logger.warning("ESPN returned no stats for %s — aborting settlement", settle_date)
         return
 
-    # 3. Settle each parlay
     settled_results = []
     for parlay_row in pending:
         parlay_date = parlay_row.get("date", settle_date)
@@ -356,14 +340,14 @@ def run(settle_date: Optional[str] = None) -> None:
         days_old = (today_et - parlay_dt).days
         if not all_final and days_old < 2:
             logger.info(
-                "[Rollover] Parlay %s from %s skipped — games not yet FINAL (age=%d day(s))",
-                parlay_row.get("id"), parlay_date, days_old
+                "[Rollover] Parlay %s from %s skipped — games not yet FINAL",
+                parlay_row.get("id"), parlay_date,
             )
             continue
         if not all_final and days_old >= 2:
             logger.warning(
-                "[Rollover] Parlay %s from %s force-pushed after %d days without FINAL stats",
-                parlay_row.get("id"), parlay_date, days_old
+                "[Rollover] Parlay %s from %s force-pushed after %d days",
+                parlay_row.get("id"), parlay_date, days_old,
             )
 
         parlay_id  = parlay_row["id"]
@@ -444,7 +428,7 @@ def run(settle_date: Optional[str] = None) -> None:
                 logger.warning("[Phase94] bet_ledger insert error: %s", _ledger_err)
 
         if agent_name not in _ACTIVE_AGENTS:
-            logger.info("[Recap] Skipping ghost agent %s — not in current roster.", agent_name)
+            logger.info("[Recap] Skipping ghost agent %s", agent_name)
             continue
 
         settled_results.append({
@@ -457,10 +441,8 @@ def run(settle_date: Optional[str] = None) -> None:
 
         time.sleep(0.1)
 
-    # 4. Fetch updated season stats
     season_stats = get_overall_season_stats()
 
-    # Phase 94: Rebuild adaptive edge thresholds
     if _CLV_FEEDBACK_AVAILABLE:
         try:
             logger.info("[Phase94] Rebuilding edge thresholds from bet_ledger...")
@@ -469,15 +451,12 @@ def run(settle_date: Optional[str] = None) -> None:
         except Exception as _thresh_err:
             logger.warning("[Phase94] rebuild_thresholds error: %s", _thresh_err)
 
-    # 5. Fetch CLV summary
     clv_summary = get_daily_clv_summary(settle_date)
 
-    # 6. Post Discord recap
     embed = _build_recap_embed(settle_date, settled_results, season_stats, clv_summary)
     ok = _send_discord_embed(embed)
     if ok:
         logger.info("Recap sent to Discord for %s", settle_date)
-        # PR #333: mark settled AFTER successful Discord send — dedup from here forward
         _record_settlement_ran(settle_date)
     else:
         logger.error("Failed to send recap to Discord for %s", settle_date)
@@ -497,7 +476,7 @@ def run(settle_date: Optional[str] = None) -> None:
         logger.info("[StreakAgent] Running streak settlement for %s", settle_date)
         settle_streak_picks(settle_date)
     except ImportError:
-        logger.debug("[StreakAgent] streak_agent.py not found — skipping settlement.")
+        logger.debug("[StreakAgent] streak_agent.py not found — skipping.")
     except Exception as _streak_settle_err:
         logger.warning("[StreakAgent] Settlement error: %s", _streak_settle_err)
 
