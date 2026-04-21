@@ -81,6 +81,17 @@ def _ensure_progress_table(conn):
                 PRIMARY KEY (season, player_type, player_id)
             )
         """)
+        # Schema healing — table may exist from prior run without all columns
+        for _heal in [
+            "ALTER TABLE seed_progress ADD COLUMN IF NOT EXISTS done BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE seed_progress ADD COLUMN IF NOT EXISTS inserted INTEGER DEFAULT 0",
+            "ALTER TABLE seed_progress ADD COLUMN IF NOT EXISTS player_name VARCHAR(120)",
+            "ALTER TABLE seed_progress ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ DEFAULT NOW()",
+        ]:
+            try:
+                cur.execute(_heal)
+            except Exception:
+                pass
     conn.commit()
 
 

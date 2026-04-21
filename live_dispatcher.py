@@ -8,7 +8,7 @@ dispatch system is AgentTasklet in tasklets.py, scheduled every 30s by
 orchestrator.py. Both /propiq/dispatch endpoints return {"status": "disabled"}.
 
 This file is NOT imported or called by orchestrator.py or tasklets.py.
-It imports phase89_DiscordAlertService (old pre-Phase-89 service) and will
+It imports DiscordAlertService for Discord alerts and will
 break if run directly. Safe to delete once confirmed no downstream references.
 
 DO NOT add new features here. DO NOT call this from orchestrator.py.
@@ -51,7 +51,7 @@ except ImportError:
     platform_selector = None  # type: ignore[assignment]
 
 try:
-    from phase89_DiscordAlertService import discord_alert, MAX_STAKE_USD
+    from DiscordAlertService import discord_alert, MAX_STAKE_USD
 except ImportError:
     MAX_STAKE_USD = 20.0
     class _DummyDiscordAlert:
