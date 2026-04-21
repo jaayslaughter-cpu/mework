@@ -22,6 +22,10 @@ Public interface:
     }
     Returns {} gracefully if no data available — never raises.
 
+  enrich_props_with_sportsbook(props, date=None) -> list
+    Stamps sb_implied_prob, sb_line, sb_line_gap on each prop dict.
+    Adjusts implied probability when UD/PP line differs from sportsbook line.
+
 Called from:
   - orchestrator.job_streak()  at 8:00 AM PT  →  first fetch of the day
   - run_data_hub_tasklet()     warm section    →  free cache hit every 15s
@@ -72,7 +76,7 @@ _BOOK_WEIGHTS: dict[str, float] = {
 }
 
 # Prop markets to fetch.  Excluded per PropIQ directive:
-#   stolen_bases, home_runs, walks, walks_allowed, doubles, triples, singles
+#   stolen_bases, home_runs, walks, doubles, triples, singles
 _MARKETS: list[str] = [
     "pitcher_strikeouts",
     "pitcher_hits_allowed",
@@ -100,7 +104,26 @@ STAT_TO_MARKET: dict[str, str] = {
     "rbi":                 "batter_rbis",
     "runs":                "batter_runs_scored",
     "runs_scored":         "batter_runs_scored",
+    "walks_allowed":       "pitcher_walks_allowed",
 }
+
+# Per-prop-type probability shift per 0.5 point of line difference.
+# When UD/PP line differs from sportsbook line, the implied probability
+# is adjusted by this amount per half-point of difference.
+# Derived from Poisson approximation of each prop type's typical lambda.
+_LINE_SHIFT_PER_HALF: dict[str, float] = {
+    "pitcher_outs":           0.025,   # ~2.5% per 0.5 pts (lambda ~15-17)
+    "pitcher_strikeouts":     0.040,   # ~4% per 0.5 pts   (lambda ~4-7)
+    "pitcher_earned_runs":    0.060,   # ~6% per 0.5 pts   (lambda ~1-3)
+    "pitcher_hits_allowed":   0.035,   # ~3.5% per 0.5 pts (lambda ~4-6)
+    "pitcher_walks_allowed":  0.055,   # ~5.5% per 0.5 pts (lambda ~1-3)
+    "batter_hits":            0.070,   # ~7% per 0.5 pts   (lambda ~0.5-1.5)
+    "batter_total_bases":     0.055,   # ~5.5% per 0.5 pts (lambda ~1-2)
+    "batter_rbis":            0.060,   # ~6% per 0.5 pts   (lambda ~0.5-1.5)
+    "batter_runs_scored":     0.060,   # ~6% per 0.5 pts
+    "batter_strikeouts":      0.070,   # ~7% per 0.5 pts   (lambda ~0.5-1.5)
+}
+_DEFAULT_SHIFT = 0.035  # fallback for unknown market keys
 
 # ── In-memory gate ─────────────────────────────────────────────────────────────
 _mem_ref: dict = {}
@@ -527,3 +550,130 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
             log.debug("[SBRef] DraftEdge fallback failed: %s", _de_err)
 
     return _mem_ref
+
+
+def enrich_props_with_sportsbook(props: list, date: str | None = None) -> list:
+    """
+    Stamp sportsbook reference data on each prop dict.
+
+    Matches each UD/PP prop to the sportsbook reference by
+    (player_norm, market_key, side).  When the UD/PP line differs from
+    the sportsbook line (e.g. UD has 16.0, Pinnacle has 15.5), the
+    implied probability is adjusted using a per-prop-type shift.
+
+    Stamps on each prop:
+        sb_implied_prob        — line-adjusted vig-stripped implied prob (0–1)
+        sb_implied_prob_over   — over side implied prob
+        sb_implied_prob_under  — under side implied prob
+        sb_line                — sportsbook's actual line
+        sb_line_gap            — UD/PP line minus sportsbook line (positive = more generous)
+        _sb_line_adj           — probability adjustment applied for line gap
+        bookmaker              — sharpest book that provided this line
+
+    Falls through silently if no sportsbook data available.
+    """
+    if not props:
+        return props
+
+    # Convert date string to int (YYYYMMDD)
+    if date:
+        try:
+            date_int = int(date.replace("-", ""))
+        except (ValueError, AttributeError):
+            date_int = _today_int()
+    else:
+        date_int = _today_int()
+
+    ref = build_sportsbook_reference(date_int)
+    if not ref:
+        log.debug("[SBRef] enrich_props_with_sportsbook: no reference data for %d", date_int)
+        return props
+
+    stamped = 0
+    for prop in props:
+        player = _normalize(
+            prop.get("player", "") or prop.get("player_name", "")
+        )
+        prop_type = prop.get("prop_type", "")
+        market_key = STAT_TO_MARKET.get(prop_type, "")
+        if not player or not market_key:
+            continue
+
+        ud_line = float(prop.get("line", 0) or 0)
+        side_raw = str(prop.get("side", "OVER")).upper()
+        sb_side = "Over" if side_raw in ("OVER", "HIGHER") else "Under"
+        opp_side = "Under" if sb_side == "Over" else "Over"
+
+        # Look up our side first, then try deriving from opposite side
+        entry = ref.get((player, market_key, sb_side))
+        derived_from_opp = False
+        if entry is None:
+            opp_entry = ref.get((player, market_key, opp_side))
+            if opp_entry:
+                entry = {
+                    "sb_implied_prob": round(1.0 - opp_entry["sb_implied_prob"], 6),
+                    "line":            opp_entry["line"],
+                    "bookmaker":       opp_entry["bookmaker"],
+                    "over_odds":       opp_entry.get("under_odds"),
+                    "under_odds":      opp_entry.get("over_odds"),
+                }
+                derived_from_opp = True
+
+        if entry is None:
+            continue  # No sportsbook data for this player/prop
+
+        sb_line = float(entry.get("line", ud_line) or ud_line)
+        raw_implied = float(entry.get("sb_implied_prob", 0.5) or 0.5)
+
+        # ── Line-shift adjustment ────────────────────────────────────────────
+        # When UD/PP line differs from sportsbook line, adjust the implied
+        # probability to reflect the actual UD/PP line.
+        #
+        # Example: UD UNDER 16.0 pitching_outs, Pinnacle UNDER 15.5 = 52%
+        #   line_diff = 16.0 - 15.5 = +0.5
+        #   For UNDER: higher line = easier to hit → add shift
+        #   shift = 0.025 per half-point → +2.5pp
+        #   adjusted = 52% + 2.5% = 54.5%
+        #
+        # Example: UD OVER 6.0 strikeouts, Pinnacle OVER 5.5 = 48%
+        #   line_diff = 6.0 - 5.5 = +0.5
+        #   For OVER: higher line = harder to hit → subtract shift
+        #   adjusted = 48% - 4.0% = 44%
+        line_diff = ud_line - sb_line
+        shift_per_half = _LINE_SHIFT_PER_HALF.get(market_key, _DEFAULT_SHIFT)
+        line_adj = 0.0
+
+        if abs(line_diff) >= 0.25:  # Only adjust for meaningful differences
+            half_pts = line_diff / 0.5
+            if sb_side == "Under":
+                line_adj = half_pts * shift_per_half   # higher line → easier UNDER
+            else:
+                line_adj = -half_pts * shift_per_half  # higher line → harder OVER
+            line_adj = max(-0.15, min(0.15, line_adj))  # cap at ±15pp
+
+        adjusted_implied = round(
+            max(0.05, min(0.95, raw_implied + line_adj)), 6
+        )
+
+        # Derive both sides
+        if sb_side == "Under":
+            imp_under = adjusted_implied
+            imp_over  = round(1.0 - adjusted_implied, 6)
+        else:
+            imp_over  = adjusted_implied
+            imp_under = round(1.0 - adjusted_implied, 6)
+
+        prop["sb_implied_prob"]        = adjusted_implied
+        prop["sb_implied_prob_over"]   = imp_over
+        prop["sb_implied_prob_under"]  = imp_under
+        prop["sb_line"]                = sb_line
+        prop["sb_line_gap"]            = round(ud_line - sb_line, 2)
+        prop["_sb_line_adj"]           = round(line_adj, 4)
+        prop["bookmaker"]              = entry.get("bookmaker", "")
+        stamped += 1
+
+    log.info(
+        "[SBRef] enrich_props_with_sportsbook: %d/%d props stamped with sb_implied_prob",
+        stamped, len(props),
+    )
+    return props
