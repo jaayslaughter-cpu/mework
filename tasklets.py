@@ -1379,6 +1379,34 @@ def _load_xgb_model():
     global _XGB_MODEL_CACHE
     if _XGB_MODEL_CACHE is not None:
         return _XGB_MODEL_CACHE
+    # ── Try Postgres first — survives Railway restarts (filesystem is ephemeral) ──
+    try:
+        import psycopg2 as _psycopg2  # noqa: PLC0415
+        _db_url = os.getenv("DATABASE_URL", "")
+        if _db_url:
+            with _psycopg2.connect(_db_url) as _mc:
+                with _mc.cursor() as _xcur:
+                    _xcur.execute(
+                        "SELECT model_json FROM xgb_model_store ORDER BY trained_at DESC LIMIT 1"
+                    )
+                    _mrow = _xcur.fetchone()
+            if _mrow and _mrow[0]:
+                import xgboost as xgb  # noqa: PLC0415
+                import tempfile as _tmpfile  # noqa: PLC0415
+                with _tmpfile.NamedTemporaryFile(suffix=".json", delete=False) as _tf:
+                    _tf.write(_mrow[0].encode())
+                    _tmp_path = _tf.name
+                _booster = xgb.Booster()
+                _booster.load_model(_tmp_path)
+                try:
+                    os.unlink(_tmp_path)
+                except Exception:
+                    pass
+                logger.info("[XGB] Loaded model from xgb_model_store (DB recovery after restart)")
+                _XGB_MODEL_CACHE = _booster
+                return _booster
+    except Exception as _dbe:
+        logger.debug("[XGB] DB model load skipped: %s", _dbe)
     path = os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json")
     if not os.path.exists(path):
         logger.warning("[XGB] Model not found at %s — agents using flat 50%% probability", path)
@@ -5125,14 +5153,38 @@ def run_backtest_tasklet() -> None:
         logger.info("[BacktestTasklet] Insufficient data (%d rows) — skipping.", len(rows))
         return
 
-    # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
+    # ── Feature padding: pad older records + build defaults for seed rows ────────
     _TARGET_FEATS = 27
-    _raw_feats = [json.loads(r[0]) for r in rows]
-    _padded    = [
-        f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
-        else f[:_TARGET_FEATS]
-        for f in _raw_feats
-    ]
+    # Prop-type → normalized index for default feature vectors (seed rows with NULL features_json)
+    _PROP_IDX: dict = {
+        "strikeouts": 0.1, "pitching_outs": 0.2, "earned_runs": 0.3, "walks_allowed": 0.4,
+        "hits_allowed": 0.5, "hits": 0.6, "total_bases": 0.7, "rbis": 0.8,
+        "hits_runs_rbis": 0.9, "fantasy_score": 1.0,
+    }
+    _padded: list = []
+    _null_feat_count = 0
+    for r in rows:
+        if r[0] is not None:
+            f = json.loads(r[0])
+        else:
+            # Seed row missing features_json — build league-average default vector
+            _null_feat_count += 1
+            _mp   = float(r[5] or 57.0) / 100.0 if (r[5] or 0) > 1 else float(r[5] or 0.57)
+            _side = 1.0 if str(r[4] or "").upper() == "OVER" else 0.0
+            _pt   = _PROP_IDX.get(str(r[3] or "").lower(), 0.5)
+            _ln   = min(float(r[6] or 2.0) / 10.0, 1.0)
+            f = [0.5] * 27
+            f[0] = max(0.0, min(1.0, (_mp - 0.5) * 2))  # ev proxy
+            f[1] = _mp      # rolling_avg proxy
+            f[5] = _side    # side encoding
+            f[6] = _pt      # prop type encoding
+            f[7] = _ln      # line value normalized
+        _padded.append(
+            f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
+            else f[:_TARGET_FEATS]
+        )
+    logger.info("[XGBoostTasklet] Feature vectors: %d real, %d default (seed rows)",
+                len(rows) - _null_feat_count, _null_feat_count)
     X = np.array(_padded, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
@@ -5467,6 +5519,22 @@ def run_grading_tasklet() -> None:
 
                 logger.info("[GradingTasklet] Graded: %s %s %.1f %s → actual=%.1f → %s (P/L: %+.2f)",
                             player, ptype, line, side, actual, status, round(pl, 4))
+                # ── Wire CLV record to clv_records analytics table ─────────────
+                try:
+                    from clv_tracker import insert_clv_record as _ins_clv  # noqa: PLC0415
+                    _ins_clv(
+                        game_date    = today,
+                        player_name  = player,
+                        prop_type    = ptype,
+                        side         = side,
+                        pick_line    = float(line or 0),
+                        closing_line = float(line or 0),
+                        clv_pts      = round(clv, 2),
+                        beat_close   = 1 if clv > 0 else 0,
+                        agent_name   = agent,
+                    )
+                except Exception as _clv_ie:
+                    logger.debug("[GradingTasklet] clv_records insert: %s", _clv_ie)
                 results.append({
                     "id": bid, "player": player, "prop_type": ptype,
                     "line": line, "side": side, "actual": actual,
@@ -6012,15 +6080,14 @@ def run_xgboost_tasklet() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT features_json, actual_outcome, graded_at
+                SELECT features_json, actual_outcome, graded_at, prop_type, side, model_prob, line
                 FROM bet_ledger
                 WHERE graded_at IS NOT NULL
-                  AND features_json IS NOT NULL
                   AND actual_outcome IS NOT NULL
                   AND discord_sent = TRUE
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                 ORDER BY graded_at DESC
-                LIMIT 20000
+                LIMIT 25000
                 """
             )
             rows = cur.fetchall()
@@ -6086,6 +6153,27 @@ def run_xgboost_tasklet() -> None:
         with open(model_path.replace(".json", ".pkl"), "wb") as f:
             pickle.dump(model, f)
         logger.info("[XGBoostTasklet] Saved model as pickle (JSON save failed)")
+
+    # ── Persist model to Postgres so it survives Railway restarts ─────────────
+    try:
+        with open(model_path, "r") as _mf:
+            _model_json_str = _mf.read()
+        _ms_conn = _pg_conn()
+        with _ms_conn.cursor() as _ms_cur:
+            # Keep only last 3 models to cap storage
+            _ms_cur.execute(
+                "DELETE FROM xgb_model_store WHERE id NOT IN "
+                "(SELECT id FROM xgb_model_store ORDER BY trained_at DESC LIMIT 2)"
+            )
+            _ms_cur.execute(
+                "INSERT INTO xgb_model_store (model_json, n_rows, notes) VALUES (%s, %s, %s)",
+                (_model_json_str, len(rows), f"accuracy={round(accuracy, 4)}")
+            )
+        _ms_conn.commit()
+        _ms_conn.close()
+        logger.info("[XGBoostTasklet] Model persisted to xgb_model_store (%d rows).", len(rows))
+    except Exception as _ms_err:
+        logger.warning("[XGBoostTasklet] xgb_model_store persist failed: %s", _ms_err)
 
     r = _redis()
     r.setex("xgb_meta", 604800, json.dumps({
