@@ -4404,7 +4404,8 @@ def run_agent_tasklet() -> bool:
     _EXCLUDED_PROP_TYPES = {
         "stolen_bases", "home_runs", "sb", "hr",
         "walks", "bb", "bases_on_balls",
-        "walks_allowed", "singles", "doubles", "triples",
+        # walks_allowed REINSTATED (PR #364) — pitcher prop, evaluated by F5Agent
+        "singles", "doubles", "triples",
     }
     props = [p for p in props if p.get("prop_type", "").lower() not in _EXCLUDED_PROP_TYPES]
 

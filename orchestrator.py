@@ -223,6 +223,15 @@ async def job_agents():
     # ran today (dispatch_date_log has today's date), skip entirely.
     # Prevents Railway restarts from re-sending already-sent picks.
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
+
+    # ── Pre-window gate: don't burn CPU before 11 AM PT ──────────────────────
+    if _pt_ck.hour < 11:
+        logger.debug(
+            "[orchestrator] Pre-window cycle at %02d:%02d PT — dispatch window opens 11 AM. Skipping.",
+            _pt_ck.hour, _pt_ck.minute,
+        )
+        return
+
     if _pt_ck.hour >= 12:
         try:
             import psycopg2 as _pg2  # noqa: PLC0415

@@ -416,7 +416,7 @@ def fetch_underdog_props_with_teams() -> list[dict]:
 # Signal counting
 # ---------------------------------------------------------------------------
 
-def _count_signals(prop_type: str, side: str, implied_prob: float) -> int:
+def _count_signals(prop_type: str, side: str, implied_prob: float, position: str = "", prop: dict | None = None) -> int:
     """
     Count how many of the 17 AGENT_CONFIGS would approve this pick.
     Uses the same lambda filters defined in live_dispatcher.AGENT_CONFIGS.
@@ -431,10 +431,14 @@ def _count_signals(prop_type: str, side: str, implied_prob: float) -> int:
         pass
 
     sr = _SR()
-    sr.side         = side
-    sr.prop_type    = prop_type
-    sr.implied_prob = implied_prob
-    sr.fantasy_pts_edge = 0.0
+    sr.side              = side
+    sr.prop_type         = prop_type
+    sr.implied_prob      = implied_prob
+    sr.fantasy_pts_edge  = 0.0
+    # FIX PR #388: ev_pct and position were missing — caused 7 agent filters to
+    # silently except out, artifically lowering signal counts for every candidate.
+    sr.ev_pct   = (implied_prob - 0.50) / 0.50 * 100   # even-money EV
+    sr.position = position  # passed from evaluate_props_for_streaks
 
     for agent in AGENT_CONFIGS:
         try:
@@ -503,7 +507,7 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
             # EV at DFS standard -110 payout
             ev_pct = (prob - 0.50) / 0.50 * 100   # FIX: Streaks = even money break-even
 
-            signals = _count_signals(prop_type, side, prob)
+            signals = _count_signals(prop_type, side, prob, position=position)
             conf    = streak_confidence(prob, ev_pct, signals)
 
             candidates.append(StreakCandidate(
