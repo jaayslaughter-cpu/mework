@@ -230,6 +230,54 @@ def _payout_multiplier(n_legs: int, platform: str) -> float:
 # Public API
 # ---------------------------------------------------------------------------
 
+
+def settle_leg(leg: dict, player_stats: dict) -> LegResult:
+    """
+    Settle a single prop leg against player stats.
+
+    Parameters
+    ----------
+    leg          : dict with keys: player, prop_type, side, line
+                   (also accepts player_name as alias for player)
+    player_stats : dict keyed by player name → stat dict (espn_scraper output)
+
+    Returns
+    -------
+    LegResult with .outcome (WIN/LOSS/PUSH), .actual, and leg metadata.
+
+    Used by tests and any caller that needs per-leg settlement without
+    building a full parlay structure.
+    """
+    player_name = (leg.get("player") or leg.get("player_name") or "").strip()
+    prop_type   = (leg.get("prop_type") or "").strip()
+    side        = (leg.get("side")      or "").strip()
+    line        = float(leg.get("line", 0.0))
+    platform    = (leg.get("platform") or "").lower()
+
+    # Stat lookup — case-insensitive with partial-name fallback
+    pstats = player_stats.get(player_name) or player_stats.get(player_name.lower())
+    if pstats is None:
+        lower = player_name.lower()
+        for k, v in player_stats.items():
+            if lower in k.lower() or k.lower() in lower:
+                pstats = v
+                break
+
+    if not pstats:
+        return LegResult(
+            player_name=player_name, prop_type=prop_type,
+            side=side, line=line, actual=-1.0, outcome="PUSH",
+        )
+
+    actual  = _resolve_actual(prop_type, pstats, platform)
+    outcome = _grade_leg(actual, line, side)
+    return LegResult(
+        player_name=player_name, prop_type=prop_type,
+        side=side, line=line,
+        actual=actual if actual is not None else -1.0,
+        outcome=outcome,
+    )
+
 def settle_parlay(
     parlay_id:    int,
     agent_name:   str,

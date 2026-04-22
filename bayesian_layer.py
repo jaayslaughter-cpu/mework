@@ -423,6 +423,51 @@ def apply_bayesian_layer(legs: list, player_stats_cache: dict = None) -> list:
 
 # ── Standalone test ───────────────────────────────────────────────────────────
 
+
+
+# ── prop_enrichment_layer compatibility shim ──────────────────────────────────
+# prop_enrichment_layer calls bayesian_adjustment(prop_type, side, player_name,
+# player_rate, player_pa, line, existing_prob) and expects a float nudge back.
+# This wraps the existing empirical_bayes_shrinkage + monte_carlo_prop_prob
+# pipeline into that single-call interface.
+
+def bayesian_adjustment(
+    prop_type: str,
+    side: str,
+    player_name: str,
+    player_rate: float,
+    player_pa: int,
+    line: float,
+    existing_prob: float,
+) -> float:
+    """
+    Single-call Bayesian nudge for prop_enrichment_layer.
+
+    Returns a signed probability delta (−MAX_NUDGE … +MAX_NUDGE) to add
+    to existing_prob.  Positive = nudge toward OVER, negative = toward UNDER.
+
+    Internally runs empirical_bayes_shrinkage → monte_carlo_prop_prob and
+    blends with the existing pipeline probability (70/30 split).
+
+    Returns 0.0 on any error so the enrichment pipeline degrades gracefully.
+    """
+    try:
+        posterior  = empirical_bayes_shrinkage(player_rate, player_pa, prop_type)
+        pa_est     = PA_ESTIMATE.get(prop_type, 4)
+        mc         = monte_carlo_prop_prob(posterior, line, pa_est)
+        prob_over  = mc["prob_over"]
+
+        if side.upper() in ("UNDER", "U"):
+            bayes_prob = 1.0 - prob_over
+        else:
+            bayes_prob = prob_over
+
+        blended = (1 - BLEND_WEIGHT_BAYES) * existing_prob + BLEND_WEIGHT_BAYES * bayes_prob
+        nudge   = max(-MAX_NUDGE, min(MAX_NUDGE, blended - existing_prob))
+        return round(nudge, 6)
+    except Exception:
+        return 0.0
+
 if __name__ == "__main__":
     # Quick smoke test
     test_legs = [
