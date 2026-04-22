@@ -3445,13 +3445,17 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
         # Map internal prop_type ("hits") to Odds API market key ("batter_hits")
         # DraftEdge fallback stores by market key, Odds API also uses market keys
         _PT_TO_MARKET = {
-            "hits":         "batter_hits",
-            "runs":         "batter_runs_scored",
-            "rbis":         "batter_rbis",
-            "rbi":          "batter_rbis",
-            "total_bases":  "batter_total_bases",
-            "strikeouts":   "pitcher_strikeouts",
-            "earned_runs":  "pitcher_earned_runs",
+            "hits":              "batter_hits",
+            "runs":              "batter_runs_scored",
+            "rbis":              "batter_rbis",
+            "rbi":               "batter_rbis",
+            "total_bases":       "batter_total_bases",
+            "strikeouts":        "pitcher_strikeouts",
+            "earned_runs":       "pitcher_earned_runs",
+            # these two were missing — caused sharp_prob to always be None
+            # for pitching outs and hitter strikeout props
+            "pitching_outs":     "pitcher_outs",
+            "hitter_strikeouts": "batter_strikeouts",
         }
         market_key = _PT_TO_MARKET.get(prop_type, prop_type)
 
@@ -4522,29 +4526,37 @@ def run_agent_tasklet() -> bool:
                         continue
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
-                if sharp_prob is not None:
-                    side    = bet["side"]
-                    ud_odds = (prop.get("over_american", -120)
-                               if side == "OVER"
-                               else prop.get("under_american", -120))
-                    edge = _underdog_edge(ud_odds, sharp_prob)
-                    if edge < MIN_EV_THRESH * 100:
-                        continue
+                if sharp_prob is None:
+                    # No sharp book data available for this prop — drop it.
+                    # Without a verified consensus line we cannot compute a
+                    # real edge, so the bet must not be sent to Discord.
+                    logger.debug(
+                        "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
+                        agent.name, player, prop_type,
+                    )
+                    continue
 
-                    # WagerBrain: also compute dollar EV for logging
-                    if _ODDS_MATH_AVAILABLE:
-                        dollar_ev = _prop_ev_dollar(
-                            model_prob=sharp_prob / 100,
-                            odds_american=ud_odds,
-                        )
-                        bet["dollar_ev"] = round(dollar_ev, 4)
+                side    = bet["side"]
+                ud_odds = (prop.get("over_american", -120)
+                           if side == "OVER"
+                           else prop.get("under_american", -120))
+                edge = _underdog_edge(ud_odds, sharp_prob)
+                if edge < MIN_EV_THRESH * 100:
+                    continue
 
-                    bet["ev_pct"]          = round(edge, 2)
-                    bet["model_prob"]      = round(sharp_prob, 1)
-                    bet["sharp_consensus"] = True
+                # WagerBrain: also compute dollar EV for logging
+                if _ODDS_MATH_AVAILABLE:
+                    dollar_ev = _prop_ev_dollar(
+                        model_prob=sharp_prob / 100,
+                        odds_american=ud_odds,
+                    )
+                    bet["dollar_ev"] = round(dollar_ev, 4)
 
-                bet["underdog_line"] = prop.get("underdog_line",
-                                                prop.get("over_american", -120))
+                bet["ev_pct"]          = round(edge, 2)
+                bet["model_prob"]      = round(sharp_prob, 1)
+                bet["sharp_consensus"] = True
+                bet["underdog_line"]   = prop.get("underdog_line",
+                                                    prop.get("over_american", -120))
                 agent_hits.append(bet)
 
             except Exception as e:
