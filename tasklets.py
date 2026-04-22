@@ -6103,7 +6103,6 @@ def run_xgboost_tasklet() -> None:
                 FROM bet_ledger
                 WHERE actual_outcome IS NOT NULL
                   AND discord_sent = TRUE
-                  AND features_json IS NOT NULL
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                 ORDER BY COALESCE(graded_at, NOW()) DESC
                 LIMIT 25000
