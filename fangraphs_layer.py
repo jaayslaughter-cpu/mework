@@ -242,7 +242,7 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
 def _fetch_via_scraperapi(url: str, params: dict, timeout: int = 30) -> list[dict]:
     """Route FanGraphs request through ScraperAPI when direct access is 403-blocked on Railway."""
     import urllib.parse  # noqa: PLC0415
-    key = os.environ.get("SCRAPERAPI_KEY2", "")
+    key = os.environ.get("SCRAPERAPI_KEY", "")
     if not key:
         return []
     full_url = url + "?" + urllib.parse.urlencode(params)

@@ -1897,8 +1897,10 @@ def run_data_hub_tasklet() -> None:
         _sc = _steamer_prefetch()
         if _sc:
             logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
+        else:
+            logger.warning("[DataHub] Steamer projections unavailable -- using league-average priors")
     except Exception as _spe:
-        logger.debug("[DataHub] Steamer prefetch skipped: %s", _spe)
+        logger.warning("[DataHub] Steamer prefetch failed: %s", _spe)
     r = _redis()
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
     game_states: dict[str, str] = {}

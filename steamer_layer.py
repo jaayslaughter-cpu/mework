@@ -112,6 +112,7 @@ _LG = {
 # ── In-process cache ───────────────────────────────────────────────────────────
 _CACHE: dict[str, dict] = {}      # {name_key: projection_dict}
 _CACHE_DATE: str = ""
+_FETCH_ATTEMPTED_DATE: str = ""   # tracks date of last fetch attempt (success OR fail)
 
 
 def _norm(name: str) -> str:
@@ -151,7 +152,7 @@ def _save_to_pg(data: dict, today: str) -> None:
 def _fetch_via_scraperapi_steamer(timeout: int = 30) -> list[dict]:
     """ScraperAPI fallback for Steamer FanGraphs requests."""
     import urllib.parse  # noqa: PLC0415
-    key = os.environ.get("SCRAPERAPI_KEY2", "")
+    key = os.environ.get("SCRAPERAPI_KEY", "")
     if not key:
         return []
     full_url = _FG_BASE + "?" + urllib.parse.urlencode(_STEAMER_PARAMS)
@@ -270,15 +271,20 @@ def _fetch_steamer() -> dict[str, dict]:
 
 
 def _get_cache() -> dict[str, dict]:
-    """Return in-memory cache, loading from Postgres or API if stale."""
-    global _CACHE, _CACHE_DATE
+    """Return in-memory cache, loading from Postgres or API if stale.
+
+    Fetch-attempt guard: if all three fetch paths fail today, we set
+    _FETCH_ATTEMPTED_DATE so subsequent calls in the same day return the
+    empty cache immediately instead of hammering FanGraphs every 15 s.
+    """
+    global _CACHE, _CACHE_DATE, _FETCH_ATTEMPTED_DATE
     today = _today()
 
-    # L1 memory hit
+    # L1 memory hit (cache populated and still fresh)
     if _CACHE and _CACHE_DATE == today:
         return _CACHE
 
-    # L2 Postgres hit
+    # L2 Postgres hit (cache empty in memory but written to DB earlier today)
     pg_data = _load_from_pg(today)
     if pg_data:
         _CACHE = pg_data
@@ -286,13 +292,26 @@ def _get_cache() -> dict[str, dict]:
         logger.info("[Steamer] Cache hit from Postgres (%d players)", len(_CACHE))
         return _CACHE
 
-    # L3 fetch from FanGraphs
+    # Guard: if we already attempted a live fetch today and got nothing, don't
+    # retry until tomorrow -- avoids hammering FanGraphs every 15 s.
+    if _FETCH_ATTEMPTED_DATE == today:
+        return _CACHE
+
+    # L3 fetch from FanGraphs (once per day)
     logger.info("[Steamer] Fetching Steamer 2026 projections from FanGraphs...")
+    _FETCH_ATTEMPTED_DATE = today
     data = _fetch_steamer()
     if data:
         _CACHE = data
         _CACHE_DATE = today
         _save_to_pg(data, today)
+        logger.info("[Steamer] Projections cached: %d players", len(data))
+    else:
+        logger.warning(
+            "[Steamer] All fetch paths failed for %s -- model will use league-average "
+            "priors until tomorrow. Check SCRAPERAPI_KEY env var and FanGraphs access.",
+            today,
+        )
 
     return _CACHE
 

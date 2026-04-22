@@ -69,7 +69,14 @@ logging.basicConfig(
 logger = logging.getLogger("propiq.orchestrator")
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
-scheduler = AsyncIOScheduler(timezone="America/Los_Angeles")
+scheduler = AsyncIOScheduler(
+    timezone="America/Los_Angeles",
+    job_defaults={
+        "coalesce": True,          # if a job is missed N times, fire it once not N times
+        "misfire_grace_time": 30,  # skip a job run if the scheduler is more than 30s late
+        "max_instances": 1,        # never run the same job concurrently
+    },
+)
 
 _last_hub_run: str | None = None
 _last_agent_run: str | None = None
@@ -164,11 +171,13 @@ def _startup_ping_if_needed() -> None:
 
 
 async def _safe_run(name: str, fn, *args, **kwargs):
-    """Run a tasklet with error logging."""
+    """Run a synchronous tasklet in a thread so it never blocks the event loop."""
+    loop = asyncio.get_event_loop()
+    import functools
     try:
         logger.info("[orchestrator] Running %s...", name)
         start = time.time()
-        result = fn(*args, **kwargs)
+        result = await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
         elapsed = time.time() - start
         logger.info("[orchestrator] %s done in %.2fs", name, elapsed)
         return result
