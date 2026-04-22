@@ -10,6 +10,9 @@ Changes vs historical_seed.py:
   - 1.5s sleep between players (vs 0.15s) to avoid Postgres temp pressure
   - PLAYERS_PER_RUN cap (default 150) — designed to be called repeatedly
 
+PR #401: Added walks_allowed, hitter_strikeouts, hits_runs_rbis
+PR #402: Added fantasy_score (UD + PP formulas, computed from game log stats)
+
 Usage:
     python historical_seed_slow.py              # process next 150 players
     python historical_seed_slow.py --players 50 # process next 50 players
@@ -52,11 +55,22 @@ PITCHER_LINES = {
     "walks_allowed": 1.5,   # pitcher BB — baseOnBalls from MLB Stats API gamelog
 }
 BATTER_LINES = {
-    "hits":            0.5,
-    "total_bases":     1.5,
+    "hits":              0.5,
+    "total_bases":       1.5,
     "hitter_strikeouts": 0.5,  # batter Ks — strikeOuts from MLB Stats API gamelog
-    "hits_runs_rbis":  2.5,    # H+R+RBI composite — hits+runs+rbi from gamelog
+    "hits_runs_rbis":    2.5,  # H+R+RBI composite
 }
+
+# Fantasy score seed lines — league-average defaults used as the line.
+# UD pitcher formula: IP×3 + K×3 + QS×5 + W×5 + ER×-3   → avg SP ~18-19 pts
+# PP pitcher formula: W×6 + QS×4 + ER×-3 + K×3 + Out×1  → avg SP ~15-16 pts
+# UD batter formula:  HR×10+3B×8+2B×5+1B×3+BB×3+HBP×3+RBI×2+R×2+SB×4 → avg ~22 pts
+# PP batter formula:  1B×3+2B×5+3B×8+HR×10+R×2+RBI×2+BB×2+HBP×2+SB×5 → avg ~18 pts
+FS_PITCHER_UD_LINE = 18.5
+FS_PITCHER_PP_LINE = 15.5
+FS_BATTER_UD_LINE  = 22.5
+FS_BATTER_PP_LINE  = 18.5
+
 MIN_PA = 1
 MIN_BF = 3
 
@@ -210,10 +224,16 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
             continue
         if int(st.get("battersFaced", 0) or 0) < MIN_BF:
             continue
+
         ks   = int(st.get("strikeOuts",   0) or 0)
         er   = int(st.get("earnedRuns",   0) or 0)
         outs = int(st.get("outs",         0) or 0)
         bb   = int(st.get("baseOnBalls",  0) or 0)   # walks allowed
+        wins = int(st.get("wins",         0) or 0)
+        qs   = 1 if (outs >= 18 and er <= 3) else 0  # quality start: 6+ IP, ≤3 ER
+        ip   = outs / 3.0
+
+        # Standard prop rows
         for prop_type, line, actual in [
             ("strikeouts",    PITCHER_LINES["strikeouts"],    ks),
             ("earned_runs",   PITCHER_LINES["earned_runs"],   er),
@@ -231,6 +251,37 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
                     "model_prob": 55.0, "ev_pct": 3.0,
                     "bet_date": date_str, "platform": "historical",
                 })
+
+        # Fantasy score — Underdog formula: IP×3 + K×3 + QS×5 + W×5 + ER×-3
+        ud_fs = round(ip * 3 + ks * 3 + qs * 5 + wins * 5 + er * -3, 2)
+        for side in ("Over", "Under"):
+            outcome = 1 if (ud_fs > FS_PITCHER_UD_LINE if side == "Over" else ud_fs < FS_PITCHER_UD_LINE) else 0
+            rows.append({
+                "player_name": name, "prop_type": "fantasy_score",
+                "line": FS_PITCHER_UD_LINE,
+                "side": side, "agent_name": "HistoricalSeed_UD",
+                "status": "WIN" if outcome == 1 else "LOSS",
+                "actual_outcome": outcome, "actual_result": ud_fs,
+                "profit_loss": 1.0 if outcome == 1 else -1.0,
+                "model_prob": 55.0, "ev_pct": 3.0,
+                "bet_date": date_str, "platform": "underdog",
+            })
+
+        # Fantasy score — PrizePicks formula: W×6 + QS×4 + ER×-3 + K×3 + Out×1
+        pp_fs = round(wins * 6 + qs * 4 + er * -3 + ks * 3 + outs * 1.0, 2)
+        for side in ("Over", "Under"):
+            outcome = 1 if (pp_fs > FS_PITCHER_PP_LINE if side == "Over" else pp_fs < FS_PITCHER_PP_LINE) else 0
+            rows.append({
+                "player_name": name, "prop_type": "fantasy_score",
+                "line": FS_PITCHER_PP_LINE,
+                "side": side, "agent_name": "HistoricalSeed_PP",
+                "status": "WIN" if outcome == 1 else "LOSS",
+                "actual_outcome": outcome, "actual_result": pp_fs,
+                "profit_loss": 1.0 if outcome == 1 else -1.0,
+                "model_prob": 55.0, "ev_pct": 3.0,
+                "bet_date": date_str, "platform": "prizepicks",
+            })
+
     return rows
 
 
@@ -243,12 +294,22 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
             continue
         if int(st.get("plateAppearances", 0) or 0) < MIN_PA:
             continue
-        hits = int(st.get("hits",         0) or 0)
-        tb   = int(st.get("totalBases",   0) or 0)
-        bk   = int(st.get("strikeOuts",   0) or 0)   # batter strikeouts
-        runs = int(st.get("runs",         0) or 0)
-        rbi  = int(st.get("rbi",          0) or 0)
-        hrbi = hits + runs + rbi                      # hits_runs_rbis composite
+
+        hits    = int(st.get("hits",         0) or 0)
+        tb      = int(st.get("totalBases",   0) or 0)
+        bk      = int(st.get("strikeOuts",   0) or 0)   # batter strikeouts
+        runs    = int(st.get("runs",         0) or 0)
+        rbi     = int(st.get("rbi",          0) or 0)
+        hr      = int(st.get("homeRuns",     0) or 0)
+        doubles = int(st.get("doubles",      0) or 0)
+        triples = int(st.get("triples",      0) or 0)
+        bb      = int(st.get("baseOnBalls",  0) or 0)
+        hbp     = int(st.get("hitByPitch",   0) or 0)
+        sb      = int(st.get("stolenBases",  0) or 0)
+        singles = max(0, hits - doubles - triples - hr)
+        hrbi    = hits + runs + rbi                      # hits_runs_rbis composite
+
+        # Standard prop rows
         for prop_type, line, actual in [
             ("hits",              BATTER_LINES["hits"],              hits),
             ("total_bases",       BATTER_LINES["total_bases"],       tb),
@@ -266,6 +327,47 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
                     "model_prob": 55.0, "ev_pct": 3.0,
                     "bet_date": date_str, "platform": "historical",
                 })
+
+        # Fantasy score — Underdog formula:
+        # HR×10 + 3B×8 + 2B×5 + 1B×3 + BB×3 + HBP×3 + RBI×2 + R×2 + SB×4
+        ud_fs = round(
+            hr * 10 + triples * 8 + doubles * 5 + singles * 3
+            + bb * 3 + hbp * 3 + rbi * 2 + runs * 2 + sb * 4,
+            2,
+        )
+        for side in ("Over", "Under"):
+            outcome = 1 if (ud_fs > FS_BATTER_UD_LINE if side == "Over" else ud_fs < FS_BATTER_UD_LINE) else 0
+            rows.append({
+                "player_name": name, "prop_type": "fantasy_score",
+                "line": FS_BATTER_UD_LINE,
+                "side": side, "agent_name": "HistoricalSeed_UD",
+                "status": "WIN" if outcome == 1 else "LOSS",
+                "actual_outcome": outcome, "actual_result": ud_fs,
+                "profit_loss": 1.0 if outcome == 1 else -1.0,
+                "model_prob": 55.0, "ev_pct": 3.0,
+                "bet_date": date_str, "platform": "underdog",
+            })
+
+        # Fantasy score — PrizePicks formula:
+        # 1B×3 + 2B×5 + 3B×8 + HR×10 + R×2 + RBI×2 + BB×2 + HBP×2 + SB×5
+        pp_fs = round(
+            singles * 3 + doubles * 5 + triples * 8 + hr * 10
+            + runs * 2 + rbi * 2 + bb * 2 + hbp * 2 + sb * 5,
+            2,
+        )
+        for side in ("Over", "Under"):
+            outcome = 1 if (pp_fs > FS_BATTER_PP_LINE if side == "Over" else pp_fs < FS_BATTER_PP_LINE) else 0
+            rows.append({
+                "player_name": name, "prop_type": "fantasy_score",
+                "line": FS_BATTER_PP_LINE,
+                "side": side, "agent_name": "HistoricalSeed_PP",
+                "status": "WIN" if outcome == 1 else "LOSS",
+                "actual_outcome": outcome, "actual_result": pp_fs,
+                "profit_loss": 1.0 if outcome == 1 else -1.0,
+                "model_prob": 55.0, "ev_pct": 3.0,
+                "bet_date": date_str, "platform": "prizepicks",
+            })
+
     return rows
 
 
@@ -333,7 +435,7 @@ def main():
     if args.reset:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM seed_progress")
-            cur.execute("DELETE FROM bet_ledger WHERE agent_name = 'HistoricalSeed'")
+            cur.execute("DELETE FROM bet_ledger WHERE agent_name IN ('HistoricalSeed','HistoricalSeed_UD','HistoricalSeed_PP')")
         conn.commit()
         log.info("Reset complete — seed_progress cleared, HistoricalSeed rows deleted.")
         log.info("Run VACUUM ANALYZE bet_ledger in Railway Postgres console to reclaim disk.")
