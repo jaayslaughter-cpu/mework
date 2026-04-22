@@ -134,7 +134,9 @@ STREAK_CONF_MIN    = 7.0    # Raised from 5.0 — April 13 retrain never fired (
                             # picks with 4.2–5.0 confidence that the spec explicitly rejects.
 STREAK_PROB_MIN    = 0.62   # Restored to spec value. Was 0.57 pending April 13 retrain that never fired.
 STREAK_EV_MIN      = 8.0    # Restored to spec value. Was 5.0 pending April 13 retrain that never fired.
-STREAK_MIN_LINE    = 1.0    # NEW: block all 0.5 stat lines — too trivial, near-certain base rate
+STREAK_MIN_LINE    = 0.5    # Allow 0.5 lines — high-prob props (earned_runs Over 0.5 = 88%) are valid
+                            # STREAK_CONF_MIN=7.0 gate prevents trivial picks; min_line=1.0 was too strict
+                            # (mathematically impossible for any 1.0+ line prop to hit 7.0 conf at prob=0.62)
 STREAK_MIN_SIGNALS = 2      # NEW: at least 2/17 agents must agree before a pick qualifies
 STREAK_TOTAL_WINS = 11     # picks needed to win
 STREAK_WINDOW_DAYS = 10    # calendar days to complete the streak

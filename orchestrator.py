@@ -233,27 +233,11 @@ async def job_agents():
         return
 
     if _pt_ck.hour >= 12:
-        try:
-            import psycopg2 as _pg2  # noqa: PLC0415
-            _db_url = os.environ.get("DATABASE_URL")
-            if _db_url:
-                _dg_conn = _pg2.connect(_db_url)
-                _dg_cur  = _dg_conn.cursor()
-                _dg_cur.execute(
-                    "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s",
-                    (_pt_ck.date(),)
-                )
-                _already_ran = _dg_cur.fetchone()
-                _dg_cur.close()
-                _dg_conn.close()
-                if _already_ran:
-                    logger.debug(
-                        "[orchestrator] Post-window cycle at %02d:%02d PT — dispatch already ran today (after 12 PM). Skipping.",
-                        _pt_ck.hour, _pt_ck.minute,
-                    )
-                    return
-        except Exception as _dg_err:
-            logger.debug("[orchestrator] dispatch_date_log check failed: %s", _dg_err)
+        logger.debug(
+            "[orchestrator] Post-window at %02d:%02d PT — dispatch locked until 11 AM tomorrow. Skipping.",
+            _pt_ck.hour, _pt_ck.minute,
+        )
+        return
 
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
