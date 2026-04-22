@@ -49,10 +49,13 @@ PITCHER_LINES = {
     "strikeouts":    5.5,
     "earned_runs":   2.5,
     "pitching_outs": 14.5,
+    "walks_allowed": 1.5,   # pitcher BB — baseOnBalls from MLB Stats API gamelog
 }
 BATTER_LINES = {
-    "hits":        0.5,
-    "total_bases": 1.5,
+    "hits":            0.5,
+    "total_bases":     1.5,
+    "hitter_strikeouts": 0.5,  # batter Ks — strikeOuts from MLB Stats API gamelog
+    "hits_runs_rbis":  2.5,    # H+R+RBI composite — hits+runs+rbi from gamelog
 }
 MIN_PA = 1
 MIN_BF = 3
@@ -207,13 +210,15 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
             continue
         if int(st.get("battersFaced", 0) or 0) < MIN_BF:
             continue
-        ks   = int(st.get("strikeOuts",  0) or 0)
-        er   = int(st.get("earnedRuns",  0) or 0)
-        outs = int(st.get("outs",        0) or 0)
+        ks   = int(st.get("strikeOuts",   0) or 0)
+        er   = int(st.get("earnedRuns",   0) or 0)
+        outs = int(st.get("outs",         0) or 0)
+        bb   = int(st.get("baseOnBalls",  0) or 0)   # walks allowed
         for prop_type, line, actual in [
             ("strikeouts",    PITCHER_LINES["strikeouts"],    ks),
             ("earned_runs",   PITCHER_LINES["earned_runs"],   er),
             ("pitching_outs", PITCHER_LINES["pitching_outs"], outs),
+            ("walks_allowed", PITCHER_LINES["walks_allowed"], bb),
         ]:
             for side in ("Over", "Under"):
                 outcome = 1 if (actual > line if side == "Over" else actual < line) else 0
@@ -238,11 +243,17 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
             continue
         if int(st.get("plateAppearances", 0) or 0) < MIN_PA:
             continue
-        hits = int(st.get("hits",       0) or 0)
-        tb   = int(st.get("totalBases", 0) or 0)
+        hits = int(st.get("hits",         0) or 0)
+        tb   = int(st.get("totalBases",   0) or 0)
+        bk   = int(st.get("strikeOuts",   0) or 0)   # batter strikeouts
+        runs = int(st.get("runs",         0) or 0)
+        rbi  = int(st.get("rbi",          0) or 0)
+        hrbi = hits + runs + rbi                      # hits_runs_rbis composite
         for prop_type, line, actual in [
-            ("hits",        BATTER_LINES["hits"],        hits),
-            ("total_bases", BATTER_LINES["total_bases"], tb),
+            ("hits",              BATTER_LINES["hits"],              hits),
+            ("total_bases",       BATTER_LINES["total_bases"],       tb),
+            ("hitter_strikeouts", BATTER_LINES["hitter_strikeouts"], bk),
+            ("hits_runs_rbis",    BATTER_LINES["hits_runs_rbis"],    hrbi),
         ]:
             for side in ("Over", "Under"):
                 outcome = 1 if (actual > line if side == "Over" else actual < line) else 0
