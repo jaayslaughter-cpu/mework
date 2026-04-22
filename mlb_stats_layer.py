@@ -598,37 +598,62 @@ def load(hub: dict | None = None) -> None:
         return
 
     # ── Disk cache ──────────────────────────────────────────────────────────
+    # Minimum pitcher threshold: a full MLB slate has 15-30 starters.
+    # If cache has fewer than 15 pitchers it's stale (partial fetch or off-day).
+    # In that case fall through to live fetch so today's starters get real stats.
+    _MIN_PITCHERS = 15
     disk_path = _CACHE_PATH.format(date=today)
     if os.path.exists(disk_path):
         try:
             with open(disk_path) as fh:
                 data = json.load(fh)
-            _BATTER_CACHE  = data.get("batters", {})
-            _PITCHER_CACHE = data.get("pitchers", {})
-            _LOADED_DATE   = today
-            _loaded        = True
-            logger.info(
-                "[MLBStats] Disk cache hit — %d batters  %d pitchers",
-                len(_BATTER_CACHE), len(_PITCHER_CACHE),
-            )
-            return
+            _pit_tmp = data.get("pitchers", {})
+            if len(_pit_tmp) >= _MIN_PITCHERS:
+                _BATTER_CACHE  = data.get("batters", {})
+                _PITCHER_CACHE = _pit_tmp
+                _LOADED_DATE   = today
+                _loaded        = True
+                logger.info(
+                    "[MLBStats] Disk cache hit — %d batters  %d pitchers",
+                    len(_BATTER_CACHE), len(_PITCHER_CACHE),
+                )
+                return
+            else:
+                logger.info(
+                    "[MLBStats] Disk cache stale (%d pitchers < %d minimum) — "
+                    "forcing live fetch for today's full starter list.",
+                    len(_pit_tmp), _MIN_PITCHERS,
+                )
+                # Delete stale cache so it gets replaced after live fetch
+                try:
+                    os.remove(disk_path)
+                except Exception:
+                    pass
         except Exception as exc:
             logger.debug("[MLBStats] Disk cache read failed: %s", exc)
 
     # ── Postgres cache ───────────────────────────────────────────────────────
     pg_bat, pg_pit = _pg_load(today)
     if pg_bat or pg_pit:
-        _BATTER_CACHE  = pg_bat
-        _PITCHER_CACHE = pg_pit
-        _LOADED_DATE   = today
-        _loaded        = True
-        # Warm disk cache
-        try:
-            with open(disk_path, "w") as fh:
-                json.dump({"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE}, fh)
-        except Exception:
-            pass
-        return
+        # Same minimum pitcher check as disk cache
+        if len(pg_pit) >= _MIN_PITCHERS:
+            _BATTER_CACHE  = pg_bat
+            _PITCHER_CACHE = pg_pit
+            _LOADED_DATE   = today
+            _loaded        = True
+            # Warm disk cache
+            try:
+                with open(disk_path, "w") as fh:
+                    json.dump({"batters": _BATTER_CACHE, "pitchers": _PITCHER_CACHE}, fh)
+            except Exception:
+                pass
+            return
+        else:
+            logger.info(
+                "[MLBStats] Postgres cache stale (%d pitchers < %d minimum) — "
+                "forcing live fetch.",
+                len(pg_pit), _MIN_PITCHERS,
+            )
 
     # ── Live fetch ───────────────────────────────────────────────────────────
     season = date.today().year

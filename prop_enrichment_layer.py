@@ -1208,9 +1208,14 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
         # regardless of who the player is.  Chase Burns and a AAA call-up were identical.
         if is_pitcher_prop:
-            prop.setdefault("_k_pct",   prop.get("k_rate")  or prop.get("k_pct",  0.223))  # FIX: 0.225→0.223 (2024 actual)
-            prop.setdefault("_bb_pct",  prop.get("bb_rate") or prop.get("bb_pct", 0.087))  # FIX: 0.080→0.086 (2024 actual)
-            prop.setdefault("_whip",    prop.get("whip",    1.28))
+            # Use FG/MLB stats if available; fall back to DraftEdge projection (de_k_pct)
+            # then league average. This prevents flat 72.4% when FanGraphs is 403-blocked.
+            _de_k   = float(prop.get("de_k_pct",   0.0) or 0.0)
+            _de_bb  = float(prop.get("de_bb_pct",  0.0) or 0.0)
+            _de_era = float(prop.get("de_era",     0.0) or 0.0)
+            prop.setdefault("_k_pct",  prop.get("k_rate") or prop.get("k_pct") or (_de_k if _de_k > 0.05 else 0.223))
+            prop.setdefault("_bb_pct",  prop.get("bb_rate") or prop.get("bb_pct") or (_de_bb if _de_bb > 0.02 else 0.087))
+            prop.setdefault("_whip",    prop.get("whip") or (_de_era / 3.5 if _de_era > 0 else 1.28))  # rough proxy from ERA
             prop.setdefault("_csw_pct", prop.get("csw_pct", 0.275))  # 2025: ~27.5%
             _fg_ip  = prop.get("xfip")   # rough proxy; actual ip/gs not fetched yet
             _fg_gs  = 1
