@@ -28,6 +28,7 @@ import time
 import urllib3
 import warnings
 
+import json
 import requests
 import psycopg2
 import psycopg2.extras
@@ -73,6 +74,87 @@ FS_BATTER_PP_LINE  = 18.5
 
 MIN_PA = 1
 MIN_BF = 3
+
+# ─── Feature vector builder (mirrors _BaseAgent._build_feature_vector) ────────
+# Generates the 27-element float list XGBoost trains on.
+# Seed rows use league-average defaults for enrichment slots (20-26) since
+# we have no pick-time enrichment data for historical games.
+
+_PITCHER_PT = {"strikeouts", "pitching_outs", "earned_runs", "walks_allowed",
+               "hits_allowed", "fantasy_pitcher"}
+# Must mirror _pt_map in tasklets.py _build_feature_vector — keep in sync
+_PT_ENC = {
+    "strikeouts":         0.0 / 9,
+    "pitcher_strikeouts": 0.0 / 9,
+    "hitter_strikeouts":  1.0 / 9,  # distinct bucket from pitcher Ks
+    "pitching_outs":      2.0 / 9,
+    "home_runs":          3.0 / 9,
+    "hits":               4.0 / 9,
+    "hits_allowed":       4.0 / 9,
+    "rbis":               5.0 / 9,
+    "rbi":                5.0 / 9,
+    "hits_runs_rbis":     6.0 / 9,
+    "total_bases":        7.0 / 9,
+    "fantasy_score":      7.0 / 9,
+    "walks_allowed":      8.0 / 9,
+    "earned_runs":        9.0 / 9,
+}
+
+def _clamp(v, lo=0.0, hi=1.0):
+    try:
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return 0.0
+
+def _build_seed_features(prop_type: str, line: float, side: str,
+                          model_prob: float = 0.55, ev_pct: float = 3.0,
+                          is_pitcher: bool = False) -> list:
+    """
+    Build a 27-element feature vector for a historical seed row.
+    Uses league-average values for all enrichment slots we cannot
+    recompute from game-log data alone.
+    """
+    _side_enc = 0.0 if side == "Over" else 1.0
+    _pt_enc   = _PT_ENC.get(prop_type, 5.0 / 9)
+    _line_val = _clamp(line / 10.0)
+    _mp       = _clamp(model_prob / 100.0 if model_prob > 1 else model_prob)
+    _ev       = _clamp((ev_pct + 20) / 40.0)
+
+    if is_pitcher:
+        # League-average pitcher slots (FG 2025)
+        k_rate       = 0.22           # avg K%
+        bb_rate       = 0.08          # avg BB%
+        era           = _clamp(4.0 / 9.0)
+        whip          = _clamp(1.3 / 3.0)
+        shadow_whiff  = 0.275         # avg CSW%
+    else:
+        # League-average batter slots
+        k_rate        = _clamp(100.0 / 200.0)   # wRC+ 100 → 0.5
+        bb_rate       = _clamp(0.156 / 0.35)    # ISO avg
+        era           = _clamp((0.288 - 0.200) / 0.200)  # BABIP avg
+        whip          = _clamp(0.087 / 0.20)    # BB% avg
+        shadow_whiff  = _clamp(0.223 / 0.35)    # K% avg
+
+    vec = [
+        k_rate, bb_rate, era, whip,           # 0-3  pitcher/batter stats
+        shadow_whiff, 0.5 / 1.5,              # 4-5  statcast (zone_mult neutral)
+        0.5, 0.28,                            # 6-7  lineup chase neutral, avg o_swing
+        _clamp(8.0 / 30.0), _clamp((72 - 32) / 80.0),  # 8-9  weather avg
+        0.0,                                  # 10   not spring training
+        _mp, _ev, _clamp(0.02 / 3.0),        # 11-13 bet quality
+        _line_val, _clamp(52.4 / 100.0),      # 14-15 line, implied prob
+        _pt_enc, _side_enc,                   # 16-17 prop meta
+        0.25, 0.5,                            # 18-19 brier neutral, sb_line_gap neutral
+        0.5,                                  # 20   form_adj neutral
+        0.5,                                  # 21   cv_nudge neutral
+        0.5,                                  # 22   bayesian_nudge neutral
+        0.5,                                  # 23   marcel_adj neutral
+        0.5,                                  # 24   predict_plus neutral
+        _mp,                                  # 25   ps_prob = model_prob proxy
+        0.5,                                  # 26   batting order neutral
+    ]
+    assert len(vec) == 27
+    return [round(v, 6) for v in vec]
 
 
 # ─── DB ──────────────────────────────────────────────────────────────────────
@@ -250,6 +332,9 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
                     "profit_loss": 1.0 if outcome == 1 else -1.0,
                     "model_prob": 55.0, "ev_pct": 3.0,
                     "bet_date": date_str, "platform": "historical",
+                    "features_json": json.dumps(_build_seed_features(
+                        prop_type, line, side, model_prob=55.0, ev_pct=3.0, is_pitcher=True,
+                    )),
                 })
 
         # Fantasy score — Underdog formula: IP×3 + K×3 + QS×5 + W×5 + ER×-3
@@ -265,6 +350,9 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
                 "profit_loss": 1.0 if outcome == 1 else -1.0,
                 "model_prob": 55.0, "ev_pct": 3.0,
                 "bet_date": date_str, "platform": "underdog",
+                "features_json": json.dumps(_build_seed_features(
+                    "fantasy_score", FS_PITCHER_UD_LINE, side, model_prob=55.0, ev_pct=3.0, is_pitcher=True,
+                )),
             })
 
         # Fantasy score — PrizePicks formula: W×6 + QS×4 + ER×-3 + K×3 + Out×1
@@ -280,6 +368,9 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
                 "profit_loss": 1.0 if outcome == 1 else -1.0,
                 "model_prob": 55.0, "ev_pct": 3.0,
                 "bet_date": date_str, "platform": "prizepicks",
+                "features_json": json.dumps(_build_seed_features(
+                    "fantasy_score", FS_PITCHER_PP_LINE, side, model_prob=55.0, ev_pct=3.0, is_pitcher=True,
+                )),
             })
 
     return rows
@@ -326,6 +417,9 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
                     "profit_loss": 1.0 if outcome == 1 else -1.0,
                     "model_prob": 55.0, "ev_pct": 3.0,
                     "bet_date": date_str, "platform": "historical",
+                    "features_json": json.dumps(_build_seed_features(
+                        prop_type, line, side, model_prob=55.0, ev_pct=3.0, is_pitcher=False,
+                    )),
                 })
 
         # Fantasy score — Underdog formula:
@@ -346,6 +440,9 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
                 "profit_loss": 1.0 if outcome == 1 else -1.0,
                 "model_prob": 55.0, "ev_pct": 3.0,
                 "bet_date": date_str, "platform": "underdog",
+                "features_json": json.dumps(_build_seed_features(
+                    "fantasy_score", FS_BATTER_UD_LINE, side, model_prob=55.0, ev_pct=3.0, is_pitcher=False,
+                )),
             })
 
         # Fantasy score — PrizePicks formula:
@@ -366,6 +463,9 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
                 "profit_loss": 1.0 if outcome == 1 else -1.0,
                 "model_prob": 55.0, "ev_pct": 3.0,
                 "bet_date": date_str, "platform": "prizepicks",
+                "features_json": json.dumps(_build_seed_features(
+                    "fantasy_score", FS_BATTER_PP_LINE, side, model_prob=55.0, ev_pct=3.0, is_pitcher=False,
+                )),
             })
 
     return rows
@@ -377,11 +477,13 @@ INSERT_SQL = """
 INSERT INTO bet_ledger (
     player_name, prop_type, line, side,
     agent_name, status, actual_outcome, actual_result,
-    profit_loss, model_prob, ev_pct, bet_date, platform, discord_sent
+    profit_loss, model_prob, ev_pct, bet_date, platform, discord_sent,
+    features_json, graded_at, lookahead_safe
 ) VALUES (
     %(player_name)s, %(prop_type)s, %(line)s, %(side)s,
     %(agent_name)s, %(status)s, %(actual_outcome)s, %(actual_result)s,
-    %(profit_loss)s, %(model_prob)s, %(ev_pct)s, %(bet_date)s, %(platform)s, TRUE
+    %(profit_loss)s, %(model_prob)s, %(ev_pct)s, %(bet_date)s, %(platform)s, TRUE,
+    %(features_json)s, NOW(), TRUE
 )
 ON CONFLICT DO NOTHING
 """

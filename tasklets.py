@@ -2498,15 +2498,20 @@ class _BaseAgent:
         impl_prob   = _clamp((_sb_implied if _sb_implied > 0.30 else _ud_implied) / 100.0)
         # Also encode sharp-book line gap as a feature (negative = DFS line favorable for Over)
         sb_line_gap = _clamp(((prop.get("sb_line_gap", 0.0) or 0.0) + 2.0) / 4.0)  # -2 to +2 range
-        _pt_map = {"strikeouts": 0, "pitcher_strikeouts": 0, "hitter_strikeouts": 0,
-                   "home_runs": 1, "hr": 1,
-                   "hits": 2, "hits_allowed": 2,
-                   "rbis": 3, "rbi": 3,
-                   "hits_runs_rbis": 4,                   # most common prop — needs unique code
-                   "total_bases": 5, "fantasy_score": 5,  # power/fantasy bucket
-                   "walks_allowed": 6, "walks": 6,            # ABS 2026: reinstated
-                  }
-        pt_enc = _pt_map.get(str(b.get("prop_type") or prop.get("prop_type", "")).lower(), 6) / 6.0
+        _pt_map = {
+            "strikeouts":        0,   # pitcher Ks
+            "pitcher_strikeouts": 0,
+            "hitter_strikeouts": 1,   # batter Ks — distinct bucket from pitcher Ks
+            "pitching_outs":      2,   # pitcher outs recorded
+            "home_runs":          3, "hr": 3,
+            "hits":               4, "hits_allowed": 4,
+            "rbis":               5, "rbi": 5,
+            "hits_runs_rbis":     6,   # most common prop — needs unique code
+            "total_bases":        7, "fantasy_score": 7,  # power/fantasy bucket
+            "walks_allowed":      8, "walks": 8,
+            "earned_runs":        9,
+        }
+        pt_enc = _pt_map.get(str(b.get("prop_type") or prop.get("prop_type", "")).lower(), 5) / 9.0
 
         side_enc    = 0.0 if str(b.get("side") or prop.get("side", "OVER")).upper() == "OVER" else 1.0
 
@@ -6096,11 +6101,11 @@ def run_xgboost_tasklet() -> None:
                 """
                 SELECT features_json, actual_outcome, graded_at, prop_type, side, model_prob, line
                 FROM bet_ledger
-                WHERE graded_at IS NOT NULL
-                  AND actual_outcome IS NOT NULL
+                WHERE actual_outcome IS NOT NULL
                   AND discord_sent = TRUE
+                  AND features_json IS NOT NULL
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
-                ORDER BY graded_at DESC
+                ORDER BY COALESCE(graded_at, NOW()) DESC
                 LIMIT 25000
                 """
             )
@@ -6115,8 +6120,18 @@ def run_xgboost_tasklet() -> None:
 
     # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
     _TARGET_FEATS = 27
-    _raw_feats = [json.loads(r[0]) for r in rows]
-    _padded    = [
+    _null_feat_count = 0
+    _raw_feats = []
+    for r in rows:
+        if r[0] is not None:
+            _raw_feats.append(json.loads(r[0]))
+        else:
+            # Seed row missing features_json (pre-fix rows) — use neutral defaults
+            _null_feat_count += 1
+            _raw_feats.append([0.5] * _TARGET_FEATS)
+    if _null_feat_count:
+        logger.info("[XGBoostTasklet] %d rows had NULL features_json — using neutral defaults", _null_feat_count)
+    _padded = [
         f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
         else f[:_TARGET_FEATS]
         for f in _raw_feats
