@@ -13,6 +13,8 @@ When drift is detected:
 
 PR #334: Added daily dedup guard via ``drift_alert_date_log`` Postgres table.
          Railway startup misfires no longer cause duplicate drift alerts.
+PR #400: _save_brier_pg() now writes agent_name + n_samples to brier_ledger.
+         record_brier() accepts agent_name param (default "global").
 """
 from __future__ import annotations
 
@@ -53,9 +55,20 @@ def _ensure_brier_table() -> None:
             CREATE TABLE IF NOT EXISTS brier_ledger (
                 id          SERIAL PRIMARY KEY,
                 brier_score FLOAT NOT NULL,
+                agent_name  VARCHAR(80) DEFAULT 'global',
+                n_samples   INTEGER     DEFAULT 0,
                 graded_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        # Add columns to pre-existing tables that lack them
+        for col_ddl in [
+            "ADD COLUMN IF NOT EXISTS agent_name VARCHAR(80) DEFAULT 'global'",
+            "ADD COLUMN IF NOT EXISTS n_samples  INTEGER     DEFAULT 0",
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE brier_ledger {col_ddl}")
+            except Exception:
+                pass
         conn.commit()
         cur.close()
         conn.close()
@@ -144,20 +157,25 @@ def _record_drift_alert_ran_today() -> None:
         logger.warning("[DriftMonitor] Failed to record alert date: %s", exc)
 
 
-def _save_brier_pg(score: float) -> None:
-    """Persist Brier score to Postgres. Falls back to JSON if DB unavailable."""
+def _save_brier_pg(score: float, agent_name: str = "global", n_samples: int = 0) -> None:
+    """Persist Brier score to Postgres. Falls back to JSON if DB unavailable.
+
+    PR #400: now writes agent_name and n_samples so brier_ledger rows are
+    attributable (previously agent_name was always NULL).
+    """
     try:
         _ensure_brier_table()
         conn = _get_brier_conn()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO brier_ledger (brier_score) VALUES (%s)",
-            (score,),
+            "INSERT INTO brier_ledger (brier_score, agent_name, n_samples) VALUES (%s, %s, %s)",
+            (score, agent_name, n_samples),
         )
         conn.commit()
         cur.close()
         conn.close()
-        logger.debug("[DriftMonitor] Brier %.4f saved to Postgres", score)
+        logger.debug("[DriftMonitor] Brier %.4f saved to Postgres (agent=%s n=%d)",
+                     score, agent_name, n_samples)
     except Exception as e:
         logger.error(f"brier_ledger DB save failed, falling back to JSON: {e}")
         _save_brier_json(score)
@@ -285,7 +303,7 @@ def _send_drift_alert(brier: float, drift_pct: float) -> None:
 BRIER_MIN_SAMPLE = 30
 
 
-def record_brier(new_score: float, n_samples: int = 0) -> bool:
+def record_brier(new_score: float, n_samples: int = 0, agent_name: str = "global") -> bool:
     """Record a Brier score and check for drift.
 
     Persists to Postgres ``brier_ledger`` table. Falls back to JSON file
@@ -295,11 +313,14 @@ def record_brier(new_score: float, n_samples: int = 0) -> bool:
         new_score:  Brier score to record (0.0–1.0).
         n_samples:  Number of graded rows used to compute this score.
                     Drift check is skipped if n_samples < BRIER_MIN_SAMPLE.
+        agent_name: Label written to brier_ledger.agent_name (default "global").
 
     Returns True if drift was detected (Discord alert fired).
+
+    PR #400: added agent_name param so brier_ledger rows are no longer NULL.
     """
     old_score = _load_last_brier_pg()
-    _save_brier_pg(round(new_score, 4))
+    _save_brier_pg(round(new_score, 4), agent_name=agent_name, n_samples=n_samples)
 
     if n_samples > 0 and n_samples < BRIER_MIN_SAMPLE:
         logger.info(
@@ -311,8 +332,8 @@ def record_brier(new_score: float, n_samples: int = 0) -> bool:
 
     drift = check_for_model_drift(new_score, old_score)
     logger.info(
-        "[DriftMonitor] Brier recorded: %.4f (prev=%.4f n=%d drift=%s)",
-        new_score, old_score, n_samples, "YES" if drift else "NO",
+        "[DriftMonitor] Brier recorded: %.4f (prev=%.4f n=%d agent=%s drift=%s)",
+        new_score, old_score, n_samples, agent_name, "YES" if drift else "NO",
     )
     return drift
 

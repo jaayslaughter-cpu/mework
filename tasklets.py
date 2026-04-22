@@ -5745,7 +5745,7 @@ def run_grading_tasklet() -> None:
                 from calibration_layer import calculate_brier_score  # noqa: PLC0415
                 brier = calculate_brier_score(brier_inputs)
                 if brier is not None:
-                    record_brier(brier, n_samples=len(brier_inputs))
+                    record_brier(brier, n_samples=len(brier_inputs), agent_name="global")
                     logger.info("[GradingTasklet] Brier score recorded: %.4f (%d samples)",
                                 brier, len(brier_inputs))
             elif brier_inputs:
@@ -5788,7 +5788,7 @@ def run_grading_tasklet() -> None:
             _vc.execute("""
                 UPDATE bet_ledger
                    SET status = 'VOID', graded_at = NOW()
-                 WHERE status = 'OPEN'
+                 WHERE (status IS NULL OR status = 'OPEN')
                    AND discord_sent = TRUE
                    AND bet_date <= CURRENT_DATE - INTERVAL '7 days'
             """)

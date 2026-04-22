@@ -7,7 +7,7 @@ Computes rolling 30-day metrics per agent after each grading run:
   - win_rate:   wins / (wins + losses)   [pushes excluded]
   - roi:        sum(profit_loss) / sum(stake)
   - brier:      mean((model_prob/100 - actual_outcome)^2) for graded rows
-  - n_graded:   total discord_sent=TRUE + result IN ('WIN','LOSS','PUSH')
+  - n_graded:   total discord_sent=TRUE + status IN ('WIN','LOSS','PUSH')
 
 Freeze logic:
   - Agent is FROZEN if ROI < 0.0 for 20+ consecutive calendar days.
@@ -103,6 +103,10 @@ def _compute_agent_metrics(conn, agent_name: str, today) -> dict:
     """
     Compute 30-day rolling metrics for one agent.
     Returns dict with win_rate, roi, brier, n_graded.
+
+    PR #400 fix: bet_ledger uses `status` column (WIN/LOSS/PUSH), NOT `result`.
+    The `result` column exists but is always NULL — querying it returned 0 rows
+    for every agent, making win_rate/roi/brier all NULL.
     """
     import datetime
     window_start = today - datetime.timedelta(days=ROLLING_WINDOW_DAYS)
@@ -110,17 +114,17 @@ def _compute_agent_metrics(conn, agent_name: str, today) -> dict:
     with conn.cursor() as cur:
         cur.execute("""
             SELECT
-                result,
+                status,
                 COALESCE(profit_loss, 0.0)  AS pl,
-                COALESCE(units_wagered, ABS(kelly_units), 1.0)  AS stake,  -- PR #338: bet_ledger has no 'stake' col
+                COALESCE(units_wagered, ABS(kelly_units), 1.0)  AS stake,
                 COALESCE(model_prob,  50.0)  AS mp,
-                CASE WHEN result = 'WIN'  THEN 1
-                     WHEN result = 'LOSS' THEN 0
+                CASE WHEN status = 'WIN'  THEN 1
+                     WHEN status = 'LOSS' THEN 0
                      ELSE NULL END            AS outcome
             FROM bet_ledger
             WHERE agent_name   = %s
               AND discord_sent = TRUE
-              AND result       IN ('WIN', 'LOSS', 'PUSH')
+              AND status       IN ('WIN', 'LOSS', 'PUSH')
               AND bet_date      >= %s
               AND bet_date      <= %s
         """, (agent_name, window_start, today))
@@ -154,6 +158,8 @@ def _negative_roi_streak(conn, agent_name: str, today) -> int:
     """
     Count consecutive calendar days (ending today) where agent had negative ROI.
     Returns 0 if no negative-ROI days at the end of the sequence.
+
+    PR #400 fix: uses `status` column (was incorrectly using `result`).
     """
     import datetime
     # Pull daily ROI for last 60 days to check streak
@@ -163,11 +169,11 @@ def _negative_roi_streak(conn, agent_name: str, today) -> int:
             SELECT
                 bet_date,
                 SUM(COALESCE(profit_loss, 0.0))  AS daily_pl,
-                SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0))  AS daily_stk  -- PR #338
+                SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0))  AS daily_stk
             FROM bet_ledger
             WHERE agent_name   = %s
               AND discord_sent = TRUE
-              AND result       IN ('WIN', 'LOSS', 'PUSH')
+              AND status       IN ('WIN', 'LOSS', 'PUSH')
               AND bet_date      >= %s
               AND bet_date      <= %s
             GROUP BY bet_date
