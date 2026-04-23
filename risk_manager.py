@@ -63,11 +63,18 @@ def _ensure_tables(conn) -> None:
             CREATE TABLE IF NOT EXISTS agent_cool_down (
                 agent_name TEXT PRIMARY KEY,
                 cool_down_until DATE NOT NULL,
+                cool_until      DATE,           -- kept in sync with cool_down_until
                 reason TEXT,
                 triggered_at TIMESTAMPTZ DEFAULT NOW(),
                 config_version TEXT
             )
         """)
+        # Heal: add cool_until column for existing deployments
+        try:
+            cur.execute("ALTER TABLE agent_cool_down ADD COLUMN IF NOT EXISTS cool_until DATE")
+            conn.commit()
+        except Exception:
+            conn.rollback()
         conn.commit()
 
 
@@ -204,14 +211,15 @@ class RiskManager:
             with _get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO agent_cool_down (agent_name, cool_down_until, reason, config_version)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO agent_cool_down (agent_name, cool_down_until, cool_until, reason, config_version)
+                        VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (agent_name) DO UPDATE
                             SET cool_down_until = EXCLUDED.cool_down_until,
+                                cool_until      = EXCLUDED.cool_down_until,
                                 reason = EXCLUDED.reason,
                                 triggered_at = NOW(),
                                 config_version = EXCLUDED.config_version
-                    """, (agent_name, until.isoformat(), reason, self.config_version))
+                    """, (agent_name, until.isoformat(), until.isoformat(), reason, self.config_version))
                 conn.commit()
         except Exception as exc:
             logger.error("Failed to write cool-down: %s", exc)

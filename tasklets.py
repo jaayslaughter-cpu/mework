@@ -1915,6 +1915,65 @@ def _ensure_bet_ledger() -> None:
     except Exception as _xms:
         logger.warning("[DB] xgb_model_store create failed: %s", _xms)
 
+    # ── rejection_log — props dropped by MIN_PROB / confidence / EV gates ─────
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rejection_log (
+                    id            SERIAL PRIMARY KEY,
+                    logged_at     TIMESTAMPTZ DEFAULT NOW(),
+                    agent_name    VARCHAR(80),
+                    player_name   VARCHAR(150),
+                    prop_type     VARCHAR(60),
+                    side          VARCHAR(10),
+                    line          FLOAT,
+                    model_prob    FLOAT,
+                    ev_pct        FLOAT,
+                    confidence    FLOAT,
+                    reject_reason VARCHAR(120)
+                )
+            """)
+        conn.commit()
+        conn.close()
+    except Exception as _rl_exc:
+        logger.debug("[DB] rejection_log table: %s", _rl_exc)
+
+
+def _log_rejection(agent_name: str, parlay: dict, reason: str) -> None:
+    """Write a dropped parlay/slip to rejection_log for post-game gate analysis.
+    Fires at every MIN_PROB / confidence / combined-EV drop.
+    Never raises — must never interrupt the dispatch loop."""
+    try:
+        conn_str = os.getenv("DATABASE_URL", "")
+        if not conn_str:
+            return
+        import psycopg2 as _rl_psycopg2  # noqa: PLC0415
+        legs = parlay.get("legs", []) or [{}]
+        rows = []
+        for lg in legs:
+            rows.append((
+                agent_name,
+                (lg.get("player_name") or lg.get("player", ""))[:150],
+                (lg.get("prop_type") or "")[:60],
+                (lg.get("side") or "")[:10],
+                float(lg.get("line", 0) or 0),
+                float(lg.get("model_prob", 0) or 0),
+                float(parlay.get("combined_ev_pct", parlay.get("ev_pct", 0)) or 0),
+                float(parlay.get("confidence", 0) or 0),
+                reason[:120],
+            ))
+        with _rl_psycopg2.connect(conn_str) as _rc:
+            with _rc.cursor() as _wr:
+                _wr.executemany(
+                    """INSERT INTO rejection_log
+                       (agent_name, player_name, prop_type, side, line,
+                        model_prob, ev_pct, confidence, reject_reason)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    rows,
+                )
+    except Exception as _rle:
+        logger.debug("[Reject] log_rejection failed: %s", _rle)
 
 
 def run_data_hub_tasklet() -> None:
@@ -4732,6 +4791,7 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < 0:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < 0.",
                         agent_name, _combined_ev_check)
+            _log_rejection(agent_name, parlay, f"combined_ev {_combined_ev_check:.1f}% < 0")
             continue
         # Minimum combined EV floor: slip must be worth playing, not just positive.
         # With correct multipliers (PP 2-leg=3x, PP 3-leg=5x, UD 2-leg=3x, UD 3-leg=6x)
@@ -4740,6 +4800,7 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < _MIN_COMBINED_EV:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < %.1f%% floor.",
                         agent_name, _combined_ev_check, _MIN_COMBINED_EV)
+            _log_rejection(agent_name, parlay, f"combined_ev {_combined_ev_check:.1f}% < {_MIN_COMBINED_EV}% floor")
             continue
         # Platform purity gate: every leg in the final slip must share one platform.
         _legs = parlay.get("legs", [])
@@ -4754,6 +4815,7 @@ def run_agent_tasklet() -> bool:
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
+            _log_rejection(agent_name, parlay, f"confidence {play_conf:.1f} < {MIN_CONFIDENCE}")
             continue
 
         # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
@@ -4767,6 +4829,7 @@ def run_agent_tasklet() -> bool:
         if _low_legs:
             logger.info("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
                          agent_name, _min_prob_pct, _low_legs)
+            _log_rejection(agent_name, parlay, f"MIN_PROB {_min_prob_pct:.0f}%: {_low_legs}")
             continue
 
         # Keep only the single highest-EV parlay per agent this cycle
