@@ -1815,29 +1815,49 @@ def _ensure_bet_ledger() -> None:
         logger.debug("[DB] agent_unit_sizing table: %s", _ue)
 
     # ── clv_records — CLV tracking per bet leg ─────────────────────────────────
+    # Schema owned by clv_tracker.py — this block only adds missing columns
+    # to existing deployments that were created with the old wrong schema.
     try:
         _cr = _pg_conn()
         with _cr.cursor() as _cc:
             _cc.execute("""
                 CREATE TABLE IF NOT EXISTS clv_records (
-                    id              SERIAL PRIMARY KEY,
-                    bet_ledger_id   INTEGER,
-                    player_name     VARCHAR(150),
-                    prop_type       VARCHAR(60),
-                    side            VARCHAR(10),
-                    open_line       FLOAT,
-                    close_line      FLOAT,
-                    clv_pts         FLOAT,
-                    beat_close      BOOLEAN,
-                    game_date       DATE,
-                    agent_name      VARCHAR(80),
-                    created_at      TIMESTAMP DEFAULT NOW()
+                    id           SERIAL PRIMARY KEY,
+                    game_date    DATE NOT NULL,
+                    agent_name   TEXT,
+                    player_name  TEXT,
+                    prop_type    TEXT,
+                    side         TEXT,
+                    pick_line    FLOAT,
+                    closing_line FLOAT,
+                    clv_pts      FLOAT,
+                    beat_close   INTEGER,
+                    recorded_at  TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             _cc.execute(
                 "CREATE INDEX IF NOT EXISTS idx_clv_records_date "
                 "ON clv_records (game_date)"
             )
+            # Heal: add missing columns on existing DBs that have the old schema
+            for _heal_sql in [
+                "ALTER TABLE clv_records ADD COLUMN IF NOT EXISTS pick_line    FLOAT",
+                "ALTER TABLE clv_records ADD COLUMN IF NOT EXISTS closing_line FLOAT",
+                "ALTER TABLE clv_records ADD COLUMN IF NOT EXISTS recorded_at  TIMESTAMPTZ DEFAULT NOW()",
+            ]:
+                try:
+                    _cc.execute(_heal_sql)
+                except Exception:
+                    pass
+            # Heal beat_close: convert BOOLEAN → INTEGER if needed
+            try:
+                _cc.execute("""
+                    ALTER TABLE clv_records
+                    ALTER COLUMN beat_close TYPE INTEGER
+                    USING beat_close::int
+                """)
+            except Exception:
+                pass  # already INTEGER or column doesn't exist yet
         _cr.commit()
         _cr.close()
     except Exception as _cre:
@@ -1869,14 +1889,27 @@ def _ensure_bet_ledger() -> None:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS xgb_model_store (
-                    id           SERIAL PRIMARY KEY,
-                    model_json   TEXT NOT NULL,
+                    id            SERIAL PRIMARY KEY,
+                    model_json    TEXT NOT NULL,
                     feature_names TEXT,
-                    trained_at   TIMESTAMPTZ DEFAULT NOW(),
-                    n_rows       INTEGER,
-                    notes        TEXT
+                    trained_at    TIMESTAMPTZ DEFAULT NOW(),
+                    n_rows        INTEGER,
+                    notes         TEXT,
+                    prop_type     VARCHAR(64),
+                    brier_score   FLOAT,
+                    n_samples     INTEGER
                 )
             """)
+            # Heal: add columns missing from existing deployments
+            for _xms_sql in [
+                "ALTER TABLE xgb_model_store ADD COLUMN IF NOT EXISTS prop_type   VARCHAR(64)",
+                "ALTER TABLE xgb_model_store ADD COLUMN IF NOT EXISTS brier_score FLOAT",
+                "ALTER TABLE xgb_model_store ADD COLUMN IF NOT EXISTS n_samples   INTEGER",
+            ]:
+                try:
+                    cur.execute(_xms_sql)
+                except Exception:
+                    pass
         conn.commit()
         conn.close()
     except Exception as _xms:

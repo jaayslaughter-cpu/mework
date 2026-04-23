@@ -83,13 +83,21 @@ def _ensure_tables(conn) -> None:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS agent_freeze_log (
                 id            SERIAL PRIMARY KEY,
-                agent_name    VARCHAR(80)   NOT NULL,
+                agent_name    VARCHAR(80)   NOT NULL UNIQUE,
                 freeze_date   DATE          NOT NULL,
                 unfreeze_date DATE,
                 freeze_reason TEXT,
                 created_at    TIMESTAMPTZ   DEFAULT NOW()
             )
         """)
+        # Heal: add unique constraint on existing deployments
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS agent_freeze_log_agent_name_uidx
+                ON agent_freeze_log (agent_name)
+            """)
+        except Exception:
+            pass
     conn.commit()
 
 

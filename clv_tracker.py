@@ -114,7 +114,7 @@ def _query_pg(date_str: str) -> dict | None:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT COUNT(*) AS total,
-                           SUM(beat_close) AS beats,
+                           SUM(beat_close::int) AS beats,
                            AVG(clv_pts) AS avg_clv
                     FROM clv_records
                     WHERE game_date = %s
@@ -148,7 +148,7 @@ def _query_sqlite(date_str: str) -> dict | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT COUNT(*) AS total, SUM(beat_close) AS beats, AVG(clv_pts) AS avg_clv
+            SELECT COUNT(*) AS total, SUM(beat_close::int) AS beats, AVG(clv_pts) AS avg_clv
             FROM clv_records WHERE game_date = ?
             """,
             (date_str,),
