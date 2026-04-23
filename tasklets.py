@@ -1696,7 +1696,8 @@ def _ensure_bet_ledger() -> None:
                     created_at      TIMESTAMP    DEFAULT NOW(),
                     units_wagered   FLOAT,                    -- actual dollar stake
                     entry_type      VARCHAR(20)  DEFAULT 'STANDARD',
-                    lookahead_safe  BOOLEAN      DEFAULT TRUE  -- no future data leakage
+                    lookahead_safe  BOOLEAN      DEFAULT TRUE, -- no future data leakage
+                    parlay_id       VARCHAR(64)               -- links legs of the same slip (agent+date+uuid)
                 )
             """)
             conn.commit()
@@ -1783,6 +1784,7 @@ def _ensure_bet_ledger() -> None:
                 "ADD COLUMN IF NOT EXISTS units_wagered   FLOAT",
                 "ADD COLUMN IF NOT EXISTS entry_type      VARCHAR(20) DEFAULT 'STANDARD'",
                 "ADD COLUMN IF NOT EXISTS lookahead_safe  BOOLEAN DEFAULT TRUE",
+                "ADD COLUMN IF NOT EXISTS parlay_id       VARCHAR(64)",
             ]:
                 try:
                     _cc.execute(f"ALTER TABLE bet_ledger {_col_ddl}")
@@ -4822,6 +4824,11 @@ def run_agent_tasklet() -> bool:
             _pg2 = _pg_conn()
             with _pg2.cursor() as _c2:
                 _send_today = _today_pt().isoformat()
+                # One parlay_id shared by all legs of this slip (agent+date+shortUUID)
+                import uuid as _uuid
+                _parlay_id = (
+                    f"{agent_name}_{_today_pt().strftime('%Y%m%d')}_{_uuid.uuid4().hex[:8]}"
+                )
                 for _sl in parlay.get("legs", []):
                     _c2.execute(
                         """
@@ -4830,11 +4837,11 @@ def run_agent_tasklet() -> bool:
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
                              units_wagered, mlbam_id, entry_type, discord_sent,
-                             lookahead_safe)
+                             lookahead_safe, parlay_id)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
                                 ABS(%s), %s, %s, FALSE,
-                                %s)
+                                %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -4857,6 +4864,7 @@ def run_agent_tasklet() -> bool:
                             # so XGBoost training has an audit trail of pre-game vs in-game picks.
                             # Default True (safe) if not stamped — conservative for training integrity.
                             bool(_sl.get("lookahead_safe", True)),
+                            _parlay_id,
                         ),
                     )
             _pg2.commit()
@@ -5349,7 +5357,8 @@ def run_grading_tasklet() -> None:
                        mlbam_id,
                        COALESCE(entry_type, 'STANDARD') AS entry_type,
                        COALESCE(units_wagered, ABS(kelly_units), 1.0) AS stake_units,
-                       features_json
+                       features_json,
+                       parlay_id
                 FROM bet_ledger
                 WHERE status = 'OPEN' AND bet_date <= %s AND discord_sent = TRUE  -- FIX PR#276: <= catches all historical OPEN rows
                 """,
@@ -5379,6 +5388,7 @@ def run_grading_tasklet() -> None:
                 # FIX: use actual stake (units_wagered $5-$20) not kelly_units (~0.03 fraction)
                 _stake_units    = float(row_data[13]) if len(row_data) > 13 and row_data[13] else float(abs(units) or 1.0)
                 _stored_feats   = row_data[14] if len(row_data) > 14 else None  # existing features_json
+                _parlay_id      = row_data[15] if len(row_data) > 15 else None  # slip grouping key
                 # mlbam_id must be fetched from bet_ledger (stored at bet time)
                 _bid_mlbam = None
                 try:
@@ -5561,6 +5571,8 @@ def run_grading_tasklet() -> None:
                     "clv": round(clv, 2), "agent": agent,
                     "odds_american": int(odds or -110),
                     "entry_type": _entry_type,
+                    "parlay_id": _parlay_id,
+                    "stake_units": _stake_units,
                 })
 
         conn.commit()
@@ -5573,10 +5585,95 @@ def run_grading_tasklet() -> None:
         logger.info("[GradingTasklet] All open bets still in-progress.")
         return
 
-    total_profit = sum(r["profit_loss"] for r in results)
-    wins   = sum(1 for r in results if r["status"] == "WIN")
-    losses = sum(1 for r in results if r["status"] == "LOSS")
-    pushes = sum(1 for r in results if r["status"] == "PUSH")
+    # ── Group legs into parlays for correct P/L calculation ─────────────────
+    # Each slip (parlay_id) is ONE bet. All legs must WIN for the slip to WIN.
+    # If any leg is LOSS → slip LOSS. All legs PUSH → slip PUSH.
+    # Legs with no parlay_id (old rows) are graded individually (backward compat).
+    from collections import defaultdict as _defaultdict
+    _parlay_groups: dict = _defaultdict(list)
+    _solo_results: list = []
+    for _r in results:
+        _pid = _r.get("parlay_id")
+        if _pid:
+            _parlay_groups[_pid].append(_r)
+        else:
+            _solo_results.append(_r)
+
+    # Build parlay-level results for recap display
+    parlay_results: list[dict] = []
+
+    for _pid, _legs in _parlay_groups.items():
+        _agent     = _legs[0]["agent"]
+        _platform  = _legs[0].get("entry_type", "FlexPlay")
+        _stake     = float(_legs[0].get("stake_units", 5.0))
+        _n         = len(_legs)
+        _any_loss  = any(l["status"] == "LOSS" for l in _legs)
+        _all_push  = all(l["status"] == "PUSH" for l in _legs)
+        _all_win   = all(l["status"] == "WIN"  for l in _legs)
+
+        if _all_push:
+            _slip_status = "PUSH"
+            _slip_pl     = 0.0
+        elif _any_loss:
+            _slip_status = "LOSS"
+            _slip_pl     = -_stake          # lose the stake
+        elif _all_win:
+            _slip_status = "WIN"
+            # DFS parlay multipliers (PowerPlay / FlexPlay)
+            _UD_MULTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
+            _PP_MULTS = {2: 3.0, 3: 5.0,  4: 10.0, 5: 20.0}
+            _is_pp    = "prize" in (_legs[0].get("entry_type") or "").lower()
+            _mult     = (_PP_MULTS if _is_pp else _UD_MULTS).get(_n, 3.0)
+            _slip_pl  = round(_stake * _mult - _stake, 4)   # net profit
+        else:
+            # Mixed WIN/PUSH with no LOSS — treat as PUSH (conservative)
+            _slip_status = "PUSH"
+            _slip_pl     = 0.0
+
+        # Update each leg's profit_loss in DB to 0 (individual legs don't earn)
+        # and set all legs to the slip-level status for record-keeping
+        try:
+            _upd_conn = _pg_conn()
+            with _upd_conn.cursor() as _uc:
+                for _leg in _legs:
+                    _leg_pl = _slip_pl if _leg["status"] != "PUSH" else 0.0
+                    _uc.execute(
+                        "UPDATE bet_ledger SET profit_loss = %s WHERE id = %s",
+                        (round(_leg_pl / max(_n, 1), 4), _leg["id"]),
+                    )
+            _upd_conn.commit()
+            _upd_conn.close()
+        except Exception as _upd_err:
+            logger.debug("[GradingTasklet] Parlay P/L update failed: %s", _upd_err)
+
+        parlay_results.append({
+            "parlay_id":   _pid,
+            "agent":       _agent,
+            "legs":        _legs,
+            "leg_count":   _n,
+            "status":      _slip_status,
+            "profit_loss": _slip_pl,
+            "stake":       _stake,
+            "entry_type":  _platform,
+        })
+
+    # Solo legs (no parlay_id — backward compat with old rows)
+    for _r in _solo_results:
+        parlay_results.append({
+            "parlay_id":   None,
+            "agent":       _r["agent"],
+            "legs":        [_r],
+            "leg_count":   1,
+            "status":      _r["status"],
+            "profit_loss": _r["profit_loss"],
+            "stake":       _r.get("stake_units", 5.0),
+            "entry_type":  _r.get("entry_type", ""),
+        })
+
+    total_profit = sum(p["profit_loss"] for p in parlay_results)
+    wins   = sum(1 for p in parlay_results if p["status"] == "WIN")
+    losses = sum(1 for p in parlay_results if p["status"] == "LOSS")
+    pushes = sum(1 for p in parlay_results if p["status"] == "PUSH")
 
     logger.info("[GradingTasklet] Graded %d bets — W:%d L:%d P:%d  Profit: %+.2fu",
                 len(results), wins, losses, pushes, total_profit)
@@ -5706,7 +5803,7 @@ def run_grading_tasklet() -> None:
 
     try:
         discord_alert.send_daily_recap(
-            results, total_profit, today,
+            parlay_results, total_profit, today,
             tier_updates=_tier_progress if _tier_progress else None,
         )
     except Exception as _disc_err:
@@ -6103,6 +6200,7 @@ def run_xgboost_tasklet() -> None:
                 FROM bet_ledger
                 WHERE actual_outcome IS NOT NULL
                   AND discord_sent = TRUE
+                  AND features_json IS NOT NULL
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                 ORDER BY COALESCE(graded_at, NOW()) DESC
                 LIMIT 25000

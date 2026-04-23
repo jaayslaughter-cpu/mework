@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo as _ZoneInfo
+_PT = _ZoneInfo("America/Los_Angeles")
 from typing import Any
 
 import requests
@@ -100,7 +102,7 @@ class DiscordAlertService:
                 ),
                 "color": _COLOUR_GREEN,
                 "footer": {"text": "PropIQ Analytics Engine"},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(_PT).isoformat(),
             }]
         })
         if ok:
@@ -152,62 +154,73 @@ class DiscordAlertService:
                     {"name": "✔️ 7-Point Check",  "value": checks,                              "inline": False},
                 ],
                 "footer": {"text": "PropIQ Analytics Engine"},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(_PT).isoformat(),
             }]
         })
 
     def send_daily_recap(
         self,
-        results: list[dict],
+        parlay_results: list[dict],
         total_profit: float,
         date_str: str,
         tier_updates: list[str] | None = None,
     ) -> None:
-        """Send end-of-day settlement recap with per-bet detail and tier ladder progress."""
-        wins   = sum(1 for r in results if r.get("status") == "WIN")
-        losses = sum(1 for r in results if r.get("status") == "LOSS")
-        pushes = sum(1 for r in results if r.get("status") == "PUSH")
+        """Send end-of-day settlement recap grouped by parlay slip. Each slip is one line."""
+        from zoneinfo import ZoneInfo as _ZI
+        _PT = _ZI("America/Los_Angeles")
+
+        wins   = sum(1 for p in parlay_results if p.get("status") == "WIN")
+        losses = sum(1 for p in parlay_results if p.get("status") == "LOSS")
+        pushes = sum(1 for p in parlay_results if p.get("status") == "PUSH")
 
         sign   = "+" if total_profit >= 0 else ""
         colour = _COLOUR_GREEN if total_profit >= 0 else _COLOUR_RED
 
         lines: list[str] = []
-        for r in results:
-            status   = r.get("status", "")
-            emoji    = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(status, "❓")
-            pl       = r.get("profit_loss", 0.0)
-            pl_sign  = "+" if pl >= 0 else ""
-            # odds_american now included from run_grading_tasklet() results.append()
-            odds_raw = r.get("odds_american", -110)
-            odds_str = f"+{odds_raw}" if isinstance(odds_raw, (int, float)) and odds_raw > 0 else str(int(odds_raw))
-            # Show actual stat vs line so it's clear why the bet won/lost
-            actual   = r.get("actual")
-            line_val = r.get("line", "?")
-            if actual is not None:
-                actual_str = f" | Actual **{actual}** vs Line {line_val}"
-            else:
-                actual_str = ""
-            # Show which agent owned this pick
-            agent = r.get("agent", "")
-            agent_tag = f" `[{agent}]`" if agent else ""
+        for parlay in parlay_results:
+            status    = parlay.get("status", "")
+            emoji     = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(status, "❓")
+            pl        = parlay.get("profit_loss", 0.0)
+            pl_sign   = "+" if pl >= 0 else ""
+            agent     = parlay.get("agent", "")
+            legs      = parlay.get("legs", [])
+            n_legs    = parlay.get("leg_count", len(legs))
+            stake     = parlay.get("stake", 5.0)
+            entry     = parlay.get("entry_type", "")
+
+            # Header line: agent + slip-level result
+            agent_tag  = f"`[{agent}]`" if agent else ""
+            entry_tag  = f" {entry}" if entry and entry not in ("STANDARD", "FlexPlay") else ""
             lines.append(
-                f"{emoji}{agent_tag} **{r.get('player', '?')}** — "
-                f"{r.get('prop_type', '?')} {r.get('side', '?')}{actual_str} | "
-                f"{odds_str} | {pl_sign}{pl:.2f}u"
+                f"{emoji} {agent_tag} **{n_legs}-Leg Slip**{entry_tag}  |  "
+                f"${stake:.0f} stake  |  {pl_sign}{pl:.2f}u"
             )
 
-        description = "\n".join(lines) or "_No graded bets._"
+            # One sub-line per leg showing actual vs line
+            for leg in legs:
+                leg_status  = leg.get("status", "")
+                leg_emoji   = {"WIN": "✅", "LOSS": "❌", "PUSH": "➖"}.get(leg_status, "❓")
+                actual      = leg.get("actual")
+                line_val    = leg.get("line", "?")
+                prop_type   = str(leg.get("prop_type", "?")).replace("_", " ").title()
+                side        = leg.get("side", "?")
+                player      = leg.get("player", "?")
+                actual_str  = f"Actual **{actual}** vs {line_val}" if actual is not None else ""
+                lines.append(
+                    f"  {leg_emoji} {player} — {prop_type} {side}  {actual_str}"
+                )
+
+        description = "\n".join(lines) or "_No graded slips._"
         if len(description) > 3_000:
             description = description[:2_950] + "\n…(truncated)"
 
         fields = [
             {"name": "📈 Units",   "value": f"{sign}{total_profit:.2f}u",      "inline": True},
-            {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P", "inline": True},
+            {"name": "🏆 Record",  "value": f"{wins}-{losses}-{pushes} W-L-P (slips)", "inline": True},
         ]
-        # Always show tier ladder progress — promotions AND in-progress streaks
         if tier_updates:
             fields.append({
-                "name": "🎅 Tier Ladder",
+                "name": "🎰 Tier Ladder",
                 "value": "\n".join(tier_updates),
                 "inline": False,
             })
@@ -219,10 +232,10 @@ class DiscordAlertService:
                 "color": colour,
                 "fields": fields,
                 "footer": {"text": "Powered by PropIQ Analytics 🤖  |  3 W or 3 L in a row = tier move"},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(_PT).isoformat(),
             }]
         })
-        logger.info("[Discord] Daily recap sent — %s  %s%+.2fu  %d-%d-%d",
+        logger.info("[Discord] Daily recap sent — %s  %s%+.2fu  %d-%d-%d (slips)",
                     date_str, sign, total_profit, wins, losses, pushes)
 
     def send_parlay_alert(self, parlay: dict) -> None:
@@ -348,7 +361,7 @@ class DiscordAlertService:
                 "color": color,
                 "fields": fields,
                 "footer": {"text": season_str},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(_PT).isoformat(),
             }]
         })
         logger.info("[Discord] Parlay alert sent — %s | %d legs | +%.1f%% EV | $%.0f stake | %s T%d",
@@ -406,7 +419,7 @@ class DiscordAlertService:
                 "color": _COLOUR_GOLD,
                 "fields": fields,
                 "footer": {"text": footer_str},
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(_PT).isoformat(),
             }]
         })
         logger.info("[Discord] Streak alert sent — %d legs, +%.1f%% EV, $%.0f stake",
