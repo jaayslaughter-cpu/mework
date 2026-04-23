@@ -5897,13 +5897,31 @@ def run_grading_tasklet() -> None:
         logger.debug("[GradingTasklet] Tier update error: %s", _tier_err)
     # ── End Phase 89 ──────────────────────────────────────────────────────
 
+    # Send recap only if nightly_recap.py (11 PM) hasn't already sent it
+    # (settlement_date_log records when 11 PM run succeeds — avoid duplicate Discord msg)
+    _recap_already_sent = False
     try:
-        discord_alert.send_daily_recap(
-            parlay_results, total_profit, today,
-            tier_updates=_tier_progress if _tier_progress else None,
-        )
-    except Exception as _disc_err:
-        logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
+        _rc2 = _pg_conn()
+        with _rc2.cursor() as _rcc:
+            _rcc.execute(
+                "SELECT 1 FROM settlement_date_log WHERE settle_date = %s",
+                (today,),
+            )
+            _recap_already_sent = _rcc.fetchone() is not None
+        _rc2.close()
+    except Exception as _rcchk_err:
+        logger.debug("[GradingTasklet] settlement_date_log check: %s", _rcchk_err)
+
+    if not _recap_already_sent:
+        try:
+            discord_alert.send_daily_recap(
+                parlay_results, total_profit, today,
+                tier_updates=_tier_progress if _tier_progress else None,
+            )
+        except Exception as _disc_err:
+            logger.warning("[GradingTasklet] Discord recap error: %s", _disc_err)
+    else:
+        logger.info("[GradingTasklet] Recap already sent by 11 PM settlement — skipping duplicate.")
 
     # ── Post-grading monitoring: calibration + edge health ──────────────────
     try:
