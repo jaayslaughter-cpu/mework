@@ -549,6 +549,116 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         except Exception as _de_err:
             log.debug("[SBRef] DraftEdge fallback failed: %s", _de_err)
 
+    # ── ActionNetwork money% fallback — when Odds API AND DraftEdge are empty ─
+    # Converts sharp money% into an implied probability proxy.
+    # money_pct=65 (65% of money on Over) → sb_implied_prob ≈ 0.65.
+    # Weaker than vig-stripped book lines but much better than nothing —
+    # sharp money flow is a real signal that keeps agents running on quota-exhausted days.
+    # Requires ACTION_NETWORK_COOKIE env var (Bearer JWT).
+    if not _mem_ref:
+        try:
+            from action_network_layer import fetch_mlb_prop_projections as _an_fetch
+            _an_props = _an_fetch()
+            if _an_props:
+                _an_ref: dict = {}
+                _PT_AN_MAP = {
+                    "strikeouts":        "pitcher_strikeouts",
+                    "hits":              "batter_hits",
+                    "total_bases":       "batter_total_bases",
+                    "earned_runs":       "pitcher_earned_runs",
+                    "hitter_strikeouts": "batter_strikeouts",
+                    "rbis":              "batter_rbis",
+                    "runs":              "batter_runs_scored",
+                    "pitching_outs":     "pitcher_outs",
+                    "walks_allowed":     "pitcher_walks_allowed",
+                }
+                for prop in _an_props:
+                    pname    = _normalize(str(prop.get("player") or prop.get("player_name") or ""))
+                    pt       = str(prop.get("prop_type") or "")
+                    mk       = _PT_AN_MAP.get(pt, pt)
+                    line     = prop.get("line")
+                    over_m   = int(prop.get("over_money_pct",  prop.get("money_pct", 50)) or 50)
+                    under_m  = 100 - over_m
+                    # Convert money% to implied prob: clamp so no side goes below 40%
+                    # (sharp money can be one-sided; 40/60 is a reasonable floor/ceiling)
+                    over_prob  = round(max(0.40, min(0.60, over_m  / 100.0)), 4)
+                    under_prob = round(1.0 - over_prob, 4)
+                    if not pname or not mk or line is None:
+                        continue
+                    for side, si in [("Over", over_prob), ("Under", under_prob)]:
+                        _an_ref[(pname, mk, side)] = {
+                            "sb_implied_prob": si,
+                            "line":            float(line),
+                            "bookmaker":       "action_network_money_pct",
+                            "over_odds":       None,
+                            "under_odds":      None,
+                        }
+                if _an_ref:
+                    log.info("[SBRef] ActionNetwork money%% fallback: %d entries", len(_an_ref))
+                    _mem_ref    = _an_ref
+                    _fetch_date = date_int
+        except Exception as _an_err:
+            log.debug("[SBRef] ActionNetwork fallback failed: %s", _an_err)
+
+    # ── TheRundown fallback — pitcher strikeouts only (real book lines, free) ─
+    # Covers pitcher_strikeouts when both OddsAPI and AN are unavailable.
+    # Hardcoded key is the free-tier public key from env or fallback.
+    if not _mem_ref:
+        try:
+            import time as _time_rd
+            _rd_key  = os.getenv("RUNDOWN_API_KEY", "a455831fa40a562b43d7f7830f6ab467fa38074d46d078e0d47de324b46bea79")
+            _rd_date = datetime.now(_PT).strftime("%Y-%m-%d")
+            _rd_resp = requests.get(
+                f"https://therundown.io/api/v2/sports/3/events/{_rd_date}",
+                headers={"X-TheRundown-Key": _rd_key, "Accept": "application/json"},
+                params={"market_ids": 19},
+                timeout=12,
+            )
+            if _rd_resp.status_code == 200:
+                _rd_events = _rd_resp.json().get("events", [])
+                _rd_ref: dict = {}
+                for _ev in _rd_events:
+                    for _mkt in _ev.get("markets", []):
+                        if _mkt.get("market_id") != 19:
+                            continue
+                        for _part in _mkt.get("participants", []):
+                            pname = _normalize(str(_part.get("name", "")))
+                            if not pname:
+                                continue
+                            for _line in _part.get("lines", []):
+                                _parts = (_line.get("value") or "").strip().lower().split()
+                                if len(_parts) != 2:
+                                    continue
+                                _side_str, _val_str = _parts
+                                try:
+                                    line_val = float(_val_str)
+                                except ValueError:
+                                    continue
+                                _prices = _line.get("prices", {})
+                                for _bk, _pi in _prices.items():
+                                    try:
+                                        _price = int(float(str(_pi.get("price", -115)).replace("+", "")))
+                                    except (ValueError, TypeError):
+                                        continue
+                                    # Vig-strip: single-book no-vig implied
+                                    _impl = (100 / (abs(_price) + 100)) if _price < 0 else (_price / (_price + 100))
+                                    _side = "Over" if _side_str == "over" else "Under"
+                                    key   = (pname, "pitcher_strikeouts", _side)
+                                    if key not in _rd_ref:
+                                        _rd_ref[key] = {
+                                            "sb_implied_prob": round(_impl, 4),
+                                            "line":            line_val,
+                                            "bookmaker":       f"therundown_{_bk}",
+                                            "over_odds":       None,
+                                            "under_odds":      None,
+                                        }
+                if _rd_ref:
+                    log.info("[SBRef] TheRundown fallback: %d K-prop entries", len(_rd_ref))
+                    _mem_ref    = _rd_ref
+                    _fetch_date = date_int
+        except Exception as _rd_err:
+            log.debug("[SBRef] TheRundown fallback failed: %s", _rd_err)
+
     return _mem_ref
 
 
