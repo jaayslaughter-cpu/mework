@@ -9,9 +9,9 @@ Entry:
   $10 entry → $10,000 prize
 
 Rules enforced:
-  • Confidence gate    : ≥ 8.0/10  (vs. 7.0 for standard parlays)
+  • Confidence gate    : ≥ 7.0/10  (vs. 6.0 for standard parlays)
   • Probability gate   : ≥ 0.62 implied win probability per pick
-  • EV gate            : ≥ 5.0% per pick
+  • EV gate            : ≥ 8.0% per pick (even-money edge over 50% break-even)
   • Team diversity     : picks 1 & 2 must be from different teams
   • Single pick/day    : one Streaks pick per day maximum
   • Streak window      : 10 calendar days to complete 11 picks
@@ -208,7 +208,11 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "hits_runs_rbis": [(0.5, 0.78), (1.5, 0.58), (2.5, 0.40), (3.5, 0.24), (4.5, 0.12)],
     # Strikeouts: line-conditional rates (8.5 line only offered for aces → P(Over)≈40%)
     # FIX: old 8.5 rate was 0.19 (raw MLB avg), corrected to 0.40 (conditional on line)
-    "strikeouts":     [(3.5, 0.72), (4.5, 0.63), (5.5, 0.54), (6.5, 0.47), (7.5, 0.42), (8.5, 0.40), (9.5, 0.35), (10.5, 0.28)],
+    # Strikeouts: P(Over | line) conditional on Underdog offering that line.
+    # 3.5 line: offered for weaker starters (avg ~4.5 Ks/start) → P(≥4) ≈ 0.65 not 0.72.
+    # 0.72 was the rate for quality starters; Underdog only sets 3.5 for fringe arms.
+    # Player enrichment layer adjusts further using actual CSW%/FIP per pitcher.
+    "strikeouts":     [(3.5, 0.65), (4.5, 0.58), (5.5, 0.50), (6.5, 0.44), (7.5, 0.40), (8.5, 0.37), (9.5, 0.33), (10.5, 0.27)],
     # Earned runs: FIX: 0.5 rate was 0.42 (badly too low), corrected to 0.88 (real ER/start)
     "earned_runs":    [(0.5, 0.88), (1.5, 0.62), (2.5, 0.38), (3.5, 0.20)],
     "fantasy_hitter": [(15.0, 0.55), (20.0, 0.42), (25.0, 0.30), (30.0, 0.20)],
@@ -634,7 +638,7 @@ def select_streak_pick(
         if c.confidence >= STREAK_CONF_MIN
         and c.implied_prob >= STREAK_PROB_MIN
         and c.ev_pct >= STREAK_EV_MIN
-        and (_DISPATCHER_AVAILABLE is False or c.signal_count >= STREAK_MIN_SIGNALS)  # bypass gate if dispatcher unavailable
+        and c.signal_count >= STREAK_MIN_SIGNALS
     ]
 
     if not qualified:
@@ -671,7 +675,7 @@ def select_start_picks(
         if c.confidence >= STREAK_CONF_MIN
         and c.implied_prob >= STREAK_PROB_MIN
         and c.ev_pct >= STREAK_EV_MIN
-        and (_DISPATCHER_AVAILABLE is False or c.signal_count >= STREAK_MIN_SIGNALS)  # bypass gate if dispatcher unavailable
+        and c.signal_count >= STREAK_MIN_SIGNALS
     ]
     if not qualified:
         return []
@@ -1237,7 +1241,7 @@ def post_milestone_alert(pick_number: int, wins_in_row: int, entry_amount: int) 
         "color": 0xF1C40F,   # gold
         "description": milestone_msg.get(wins_in_row, ""),
         "footer": {"text": "PropIQ StreakAgent"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat(),
     }
     _send_webhook({"embeds": [embed]})
 
@@ -1255,8 +1259,10 @@ _PROP_TO_ESPN_STAT: dict[str, str] = {
     "strikeouts":      "strikeouts",  # pitcher Ks
     "earned_runs":     "earnedRuns",
     "pitching_outs":   "outsPitched",  # pitcher outs recorded (ESPN label)
-    "hits_allowed":    "hits",         # pitcher stat — hits allowed
+    "hits_allowed":    "hits_allowed",  # pitcher stat — hits allowed (distinct from batter hits)
     "walks_allowed":   "walks",
+    "hitter_strikeouts": "Strikeouts",  # batter Ks
+    "fantasy_score":    None,  # composite — computed manually
 }
 
 
@@ -1303,7 +1309,9 @@ def _grade_pick(
     """
     Grade a single streak pick against ESPN box scores.
     Returns (outcome, actual_value):
-      outcome: 'WIN' | 'LOSS' | 'PUSH' | 'NO_RESULT'
+      outcome: 'WIN' | 'LOSS' | 'PUSH' | 'VOID'
+    VOID is returned when: (a) player not in ESPN data (DNP/postponed), or
+    (b) player found but specific stat key missing (incomplete box score).
     """
     player_key = player_name.lower()
     stats = stat_lookup.get(player_key)
@@ -1317,7 +1325,8 @@ def _grade_pick(
                 break
 
     if not stats:
-        return "NO_RESULT", None
+        # Player not in ESPN data → DNP or postponed → VOID
+        return "VOID", None
 
     # Composite H+R+RBI
     if prop_type == "hits_runs_rbis":
@@ -1329,7 +1338,8 @@ def _grade_pick(
         espn_key = _PROP_TO_ESPN_STAT.get(prop_type, "")
         actual_raw = stats.get(espn_key)
         if actual_raw is None:
-            return "NO_RESULT", None
+            # Stat key missing from box score (incomplete data) → VOID
+            return "VOID", None
         actual = float(actual_raw)
 
     # Grade
@@ -1389,14 +1399,15 @@ def settle_streak_picks(game_date: str) -> None:
         # _grade_pick expects keys matching _PROP_TO_ESPN_STAT labels OR direct stat names
         for _name_lc, _espn in raw.items():
             stat_lookup[_name_lc] = {
-                "hits":        _espn.get("hits",          0.0),
-                "runs":        _espn.get("runs",          0.0),
-                "RBIs":        _espn.get("rbis", _espn.get("rbi", 0.0)),
-                "totalBases":  _espn.get("total_bases",   0.0),
-                "strikeouts":  _espn.get("strikeouts",    0.0),
-                "earnedRuns":  _espn.get("earned_runs",   0.0),
-                "outsPitched": _espn.get("pitching_outs", 0.0),
-                "walks":       _espn.get("base_on_balls", 0.0),
+                "hits":         _espn.get("hits",          0.0),   # batter hits
+                "hits_allowed": _espn.get("hits_allowed",  0.0),   # pitcher hits allowed (separate key)
+                "runs":         _espn.get("runs",          0.0),
+                "RBIs":         _espn.get("rbis", _espn.get("rbi", 0.0)),
+                "totalBases":   _espn.get("total_bases",   0.0),
+                "strikeouts":   _espn.get("strikeouts",    0.0),
+                "earnedRuns":   _espn.get("earned_runs",   0.0),
+                "outsPitched":  _espn.get("pitching_outs", 0.0),
+                "walks":        _espn.get("base_on_balls", 0.0),
             }
         logger.info("[Streak] Settlement using espn_scraper stats for %d players", len(stat_lookup))
     except Exception as _esp_err:
@@ -1423,9 +1434,14 @@ def settle_streak_picks(game_date: str) -> None:
             pick["direction"],
         )
 
-        if outcome == "NO_RESULT":
-            logger.info("[Streak] No ESPN data yet for %s — leaving PENDING", pick["player_name"])
-            continue
+        if outcome == "VOID":
+            # Check if we have ANY ESPN data for the day — if yes, player truly DNP → VOID.
+            # If ESPN returned 0 players, data not yet available → leave PENDING.
+            if not stat_lookup:
+                logger.info("[Streak] No ESPN data yet for %s — leaving PENDING", pick["player_name"])
+                continue
+            logger.info("[Streak] %s graded VOID (DNP / game postponed)", pick["player_name"])
+            # Fall through to VOID handling in state machine below
 
         streak_id    = pick["streak_id"]
         pick_number  = pick["pick_number"]
@@ -1447,15 +1463,16 @@ def settle_streak_picks(game_date: str) -> None:
                 if outcome == "WIN":
                     # Re-read wins_in_row to avoid stale batch reads
                     cur.execute(
-                        "SELECT wins_in_row FROM streak_state WHERE id=%s FOR UPDATE",
+                        "SELECT wins_in_row, current_pick FROM streak_state WHERE id=%s FOR UPDATE",
                         (streak_id,),
                     )
                     _fresh = cur.fetchone()
                     new_wins = (_fresh[0] if _fresh else pick["wins_in_row"]) + 1
+                    new_current = (_fresh[1] if _fresh else 0) + 1
                     streak_status = "WON" if new_wins >= STREAK_TOTAL_WINS else "ACTIVE"
                     cur.execute(
-                        "UPDATE streak_state SET wins_in_row=%s, status=%s WHERE id=%s",
-                        (new_wins, streak_status, streak_id),
+                        "UPDATE streak_state SET wins_in_row=%s, current_pick=%s, status=%s WHERE id=%s",
+                        (new_wins, new_current, streak_status, streak_id),
                     )
                 elif outcome == "LOSS":
                     streak_status = "LOST"
@@ -1489,9 +1506,17 @@ def settle_streak_picks(game_date: str) -> None:
                             (streak_id,),
                         )
                     # picks 3-11: pick_number preserved; next pick resumes at same slot
-                else:   # PUSH
+                elif outcome == "PUSH":
                     streak_status = "ACTIVE"
-                    # Push doesn't advance the win counter but doesn't reset it either
+                    # PUSH = exact line tie. Underdog Streaks: pick slot is voided and
+                    # replaced — user picks again for the same slot number.
+                    # Mark this pick PUSH so it doesn't count toward wins_in_row,
+                    # and reset current_pick so tomorrow's run re-uses this slot.
+                    cur.execute(
+                        "UPDATE streak_state SET current_pick = GREATEST(0, current_pick - 1) WHERE id=%s",
+                        (streak_id,),
+                    )
+                    logger.info("[Streak] Pick #%d PUSH — slot preserved for re-pick", pick_number)
             conn.commit()
         except Exception as e:
             logger.error("[Streak] DB update error: %s", e)
