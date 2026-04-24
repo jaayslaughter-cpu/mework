@@ -644,18 +644,19 @@ def select_streak_pick(
     if not qualified:
         return None
 
-    # Team diversity gate for picks 1 & 2
+    # Team + player diversity gate for picks 1 & 2
     if pick_number <= 2 and prior_pick_team:
         diverse = [c for c in qualified if c.team.upper() != prior_pick_team.upper()]
         if diverse:
             qualified = diverse
-        # If nothing passes diversity (all from same team), log + allow anyway
         else:
+            # All candidates from same team — skip day rather than relax diversity
             logger.warning(
                 "[Streak] Team diversity: all qualified picks from %s — "
-                "diversity rule relaxed for pick %d",
+                "skipping pick %d today to preserve streak integrity.",
                 prior_pick_team, pick_number,
             )
+            return None
 
     # Sort: highest win probability first (streak integrity), confidence as tiebreak
     qualified.sort(key=lambda c: (-c.implied_prob, -c.confidence, -c.signal_count))
@@ -684,21 +685,26 @@ def select_start_picks(
     qualified.sort(key=lambda c: (-c.implied_prob, -c.confidence, -c.signal_count))
 
     pick1 = qualified[0]
+
+    # Underdog Streaks rule: picks 1 & 2 must be from DIFFERENT TEAMS.
+    # We also enforce DIFFERENT PLAYERS — same player appearing twice
+    # (e.g. Carroll runs Under + Carroll total_bases Under) is invalid
+    # because both legs are correlated: if Carroll has a bad day both fail together.
     pick2 = next(
-        (c for c in qualified[1:] if c.team.upper() != pick1.team.upper()),
+        (c for c in qualified[1:]
+         if c.team.upper() != pick1.team.upper()
+         and c.player_name.lower() != pick1.player_name.lower()),
         None,
     )
-    if not pick2 and len(qualified) > 1:
-        logger.warning(
-            "[Streak] Start picks: all from %s — diversity relaxed, taking top 2",
-            pick1.team,
-        )
-        pick2 = qualified[1]
 
+    # Do NOT relax the diversity rule — if no diverse pick exists, skip the day.
+    # Sending two correlated picks from the same player or team defeats the purpose
+    # of team diversity and inflates the apparent independence of the streak.
     if not pick2:
         logger.info(
-            "[Streak] Fresh start requires 2 qualifying picks — only 1 found today. "
-            "Streak will not start until 2 are available."
+            "[Streak] Fresh start: no qualifying pick from a different team/player than %s (%s). "
+            "Skipping today — streak will start when a diverse pair is available.",
+            pick1.player_name, pick1.team,
         )
         return []
     return [pick1, pick2]
@@ -1261,8 +1267,8 @@ _PROP_TO_ESPN_STAT: dict[str, str] = {
     "pitching_outs":   "outsPitched",  # pitcher outs recorded (ESPN label)
     "hits_allowed":    "hits_allowed",  # pitcher stat — hits allowed (distinct from batter hits)
     "walks_allowed":   "walks",
-    "hitter_strikeouts": "Strikeouts",  # batter Ks
-    "fantasy_score":    None,  # composite — computed manually
+    "hitter_strikeouts": "Strikeouts",  # ESPN stores batter Ks under 'strikeouts' key (capitalized)
+    "fantasy_score":   None,            # composite stat — graded manually, no direct ESPN lookup
 }
 
 
@@ -1721,7 +1727,11 @@ def run_streak_pick(
             logger.debug("[Streak] Platform pre-fetch error: %s", _fe)
 
     def _apply_line_comp(p: StreakCandidate) -> str:
-        """Compare UD vs PP for one pick; mutates p.platform/p.line if better. Returns note."""
+        """
+        Compare UD vs PP lines for informational note only.
+        NEVER switches platform to PrizePicks — Underdog Streaks is UD-only.
+        May update p.line to a better UD line if found.
+        """
         if not _LINE_COMP_AVAILABLE:
             return ""
         try:
@@ -1729,12 +1739,17 @@ def run_streak_pick(
             _pp_lk = _build_ll(_pp_raw_lc)
             _c = _cmp_prop(p.player_name, p.prop_type, p.side, _ud_lk, _pp_lk)
             _n = _c.get("note", "")
-            if _c.get("platform") == "PrizePicks" and _c.get("line") is not None:
-                logger.info("[Streak] Better PP line: %s", _n)
-                p.platform = "PrizePicks"
-                p.line     = _c["line"]
-            elif _c.get("platform") == "Underdog" and _c.get("line") is not None:
+            # Streaks = Underdog ONLY. Never switch platform to PrizePicks.
+            # PrizePicks line shown as informational note only if it differs from UD.
+            if _c.get("platform") == "Underdog" and _c.get("line") is not None:
+                # UD has a better/different line — update to the actual UD line
                 p.line = _c["line"]
+            elif _c.get("platform") == "PrizePicks" and _c.get("line") is not None:
+                # PP has a better line but we can't use it for Streaks.
+                # Note it for the user but keep platform = Underdog.
+                logger.info("[Streak] PP has better line (%s) — staying on UD for Streaks", _n)
+                _n = f"UD only (Streaks) — PP line: {_c.get('line', '')}"
+            p.platform = "Underdog"   # enforce: Streaks picks are always Underdog
             return _n
         except Exception as _ce:
             logger.debug("[Streak] Line comp error: %s", _ce)
@@ -1889,12 +1904,14 @@ def run_streak_pick(
             _line_comparison_note = _comp.get("note", "")
 
             if _comp.get("platform") == "PrizePicks" and _comp.get("line") is not None:
-                logger.info("[Streak] Better line on PrizePicks: %s (was UD %.1f)",
-                            _line_comparison_note, pick.line)
-                pick.platform = "PrizePicks"
-                pick.line     = _comp["line"]
+                # Streaks = Underdog ONLY — never switch to PrizePicks.
+                # Log the PP line as informational only.
+                logger.info("[Streak] PP has better line (%s) — staying on UD for Streaks",
+                            _line_comparison_note)
+                _line_comparison_note = f"UD only (Streaks) — PP line: {_comp.get('line', '')}"
             elif _comp.get("platform") == "Underdog" and _comp.get("line") is not None:
                 pick.line = _comp["line"]
+            pick.platform = "Underdog"   # enforce: Streaks = Underdog only
         except Exception as _lce:
             logger.debug("[Streak] Line comparison error: %s", _lce)
 
