@@ -3,15 +3,13 @@ nightly_recap.py
 ================
 Runs at 11:00 PM PT every night.
 
-1. Reads bet_ledger WHERE bet_date=yesterday AND discord_sent=TRUE AND status OPEN/NULL
-2. Groups legs by parlay_id — each slip is graded as one unit (all-or-nothing)
-3. Settles each leg against ESPN boxscores
-4. Updates bet_ledger (status, profit_loss, actual_result, actual_outcome, graded_at)
-5. Posts a per-slip recap embed to Discord via DiscordAlertService
-6. Records in settlement_date_log to prevent duplicate sends
+1. Fetches actual MLB player stats from ESPN for yesterday's games
+2. Settles all PENDING parlays from that date (WIN / LOSS / PUSH)
+3. Posts a summary recap embed to Discord
+4. Updates the propiq_season_record table with final results
 
-All timestamps: America/Los_Angeles (DST-aware).
 Run directly: python3 nightly_recap.py [YYYY-MM-DD]
+If no date given, defaults to yesterday (America/Los_Angeles, DST-aware).
 """
 
 from __future__ import annotations
@@ -21,57 +19,105 @@ import logging
 import os
 import sys
 import time
-from collections import defaultdict
-from datetime import datetime, timedelta
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from typing import Optional
 
-logger = logging.getLogger("nightly_recap")
+from espn_scraper import get_all_player_stats, get_game_states
+from settlement_engine import settle_parlay
+from season_record import (
+    get_pending_parlays,
+    get_all_pending_parlays,
+    settle_parlay_record,
+    get_overall_season_stats,
+)
+from clv_tracker import get_daily_clv_summary
+
+# Phase 94: CLV feedback engine — adaptive thresholds + bet_ledger population
+try:
+    from clv_feedback_engine import rebuild_thresholds as _rebuild_thresholds, build_discord_summary as _build_edge_summary
+    _CLV_FEEDBACK_AVAILABLE = True
+except ImportError:
+    _CLV_FEEDBACK_AVAILABLE = False
+    def _rebuild_thresholds(): return {}
+    def _build_edge_summary(): return ""
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+_WEBHOOK_FALLBACK = (
+    "https://discordapp.com/api/webhooks/1484795164961800374/"
+    "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
+)
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", _WEBHOOK_FALLBACK)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
+logger = logging.getLogger("nightly_recap")
 
-_PT = ZoneInfo("America/Los_Angeles")
-
-# DFS parlay multipliers
-_UD_MULTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
-_PP_MULTS = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
-
-# Active agents — filter phantom legacy picks
-_ACTIVE_AGENTS = {
-    "EVHunter", "UnderMachine", "UmpireAgent", "F5Agent", "FadeAgent",
-    "LineValueAgent", "BullpenAgent", "WeatherAgent", "MLEdgeAgent",
-    "UnderDogAgent", "StackSmithAgent", "ChalkBusterAgent", "SharpFadeAgent",
-    "CorrelatedParlayAgent", "PropCycleAgent", "LineupChaseAgent", "LineDriftAgent",
-    "SteamAgent", "StreakAgent",
+# Emoji map for agent names
+_AGENT_EMOJI: dict[str, str] = {
+    "EVHunter":              "\U0001f3af",
+    "UnderMachine":          "\U0001f53d",
+    "F5Agent":               "5\ufe0f\u20e3",
+    "MLEdgeAgent":           "\U0001f9e0",
+    "UmpireAgent":           "\u2696\ufe0f",
+    "FadeAgent":             "\U0001f47b",
+    "LineValueAgent":        "\U0001f4d0",
+    "BullpenAgent":          "\U0001f525",
+    "WeatherAgent":          "\U0001f32c\ufe0f",
+    "UnderDogAgent":         "\U0001f415",
+    "StackSmithAgent":       "\U0001f3d7\ufe0f",
+    "ChalkBusterAgent":      "\U0001f4a5",
+    "SharpFadeAgent":        "\U0001f4e1",
+    "CorrelatedParlayAgent": "\U0001f517",
+    "PropCycleAgent":        "\U0001f504",
+    "LineupChaseAgent":      "\U0001f3a3",
+    "LineDriftAgent":        "\U0001f4c8",
+    "SteamAgent":            "\U0001f4a8",
+    "StreakAgent":            "\u26a1",
 }
+
+# FIX: canonical list of active agents — filter out phantom legacy picks
+_ACTIVE_AGENTS = set(_AGENT_EMOJI.keys())
+
+_OUTCOME_EMOJI = {"WIN": "\u2705", "LOSS": "\u274c", "PUSH": "\u23e9"}
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# DST-aware "yesterday in PT" helper
 # ---------------------------------------------------------------------------
 
 def _yesterday_pt() -> str:
-    """Return yesterday's date as YYYY-MM-DD in America/Los_Angeles."""
-    now_pt = datetime.now(_PT)
-    return (now_pt - timedelta(days=1)).strftime("%Y-%m-%d")
-
-
-def _pg_conn():
-    import psycopg2  # noqa: PLC0415
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        raise RuntimeError("DATABASE_URL not set")
-    return psycopg2.connect(db_url, sslmode="require")
+    """Return yesterday's date as YYYY-MM-DD in America/Los_Angeles, DST-aware."""
+    try:
+        import pytz  # noqa: PLC0415
+        pt_tz = pytz.timezone("America/Los_Angeles")
+        now_pt = datetime.now(pt_tz)
+        yesterday_pt = now_pt - timedelta(days=1)
+        return yesterday_pt.strftime("%Y-%m-%d")
+    except ImportError:
+        pass
+    from zoneinfo import ZoneInfo as _ZI  # noqa: PLC0415
+    now_pt_approx = datetime.now(_ZI("America/Los_Angeles"))
+    yesterday_approx = now_pt_approx - timedelta(days=1)
+    return yesterday_approx.strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
-# Dedup guard
+# PR #333 FIX 1: settlement_date_log dedup guard
 # ---------------------------------------------------------------------------
 
 def _settlement_already_ran(settle_date: str) -> bool:
+    import psycopg2  # noqa: PLC0415
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return False
     try:
-        conn = _pg_conn()
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS settlement_date_log (
@@ -79,18 +125,14 @@ def _settlement_already_ran(settle_date: str) -> bool:
                 ran_at      TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        # Heal missing column (PR #410 migration)
-        cur.execute("""
-            ALTER TABLE settlement_date_log
-            ADD COLUMN IF NOT EXISTS settlement_date DATE
-        """)
         conn.commit()
         cur.execute(
             "SELECT 1 FROM settlement_date_log WHERE settle_date = %s",
-            (settle_date,),
+            (settle_date,)
         )
         already = cur.fetchone() is not None
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         return already
     except Exception as exc:
         logger.warning("[Recap] settlement_date_log check failed: %s", exc)
@@ -98,315 +140,370 @@ def _settlement_already_ran(settle_date: str) -> bool:
 
 
 def _record_settlement_ran(settle_date: str) -> None:
+    import psycopg2  # noqa: PLC0415
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return
     try:
-        conn = _pg_conn()
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO settlement_date_log (settle_date) VALUES (%s) ON CONFLICT DO NOTHING",
-            (settle_date,),
+            (settle_date,)
         )
         conn.commit()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         logger.info("[Recap] Settlement date recorded: %s", settle_date)
     except Exception as exc:
         logger.warning("[Recap] _record_settlement_ran failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
-# Season record sync
+# Discord helpers
 # ---------------------------------------------------------------------------
 
-def _sync_season_record(parlay_results: list[dict], settle_date: str) -> None:
-    """Upsert each settled slip into propiq_season_record for downstream reporting."""
+def _send_discord_embed(payload: dict) -> bool:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        DISCORD_WEBHOOK,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "PropIQ/1.0",
+        },
+        method="POST",
+    )
     try:
-        from season_record import settle_parlay_record  # noqa: PLC0415
-        for pr in parlay_results:
-            if pr.get("_season_id"):
-                settle_parlay_record(pr["_season_id"], pr["status"], pr["profit_loss"])
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status in (200, 204)
     except Exception as exc:
-        logger.debug("[Recap] season_record sync failed (non-fatal): %s", exc)
+        logger.error("Discord send failed: %s", exc)
+        return False
+
+
+def _build_recap_embed(
+    date_str: str,
+    results: list[dict],
+    season_stats: dict,
+    clv_summary: dict | None = None,
+) -> dict:
+    """Build the nightly recap Discord embed."""
+    wins   = sum(1 for r in results if r["outcome"] == "WIN")
+    losses = sum(1 for r in results if r["outcome"] == "LOSS")
+    pushes = sum(1 for r in results if r["outcome"] == "PUSH")
+    units  = sum(r["units_profit"] for r in results)
+    total  = len(results)
+
+    day_record = f"{wins}W-{losses}L-{pushes}P"
+    day_units  = f"{'+' if units >= 0 else ''}{units:.1f}u"
+
+    if total == 0:
+        color = 0x95A5A6
+    elif wins > losses:
+        color = 0x2ECC71
+    elif losses > wins:
+        color = 0xE74C3C
+    else:
+        color = 0xF39C12
+
+    fields = []
+    for r in results[:23]:
+        emoji = _AGENT_EMOJI.get(r["agent_name"], "\U0001f916")
+        outcome_emoji = _OUTCOME_EMOJI.get(r["outcome"], "\u2753")
+        profit = r["units_profit"]
+        profit_str = f"{'+' if profit >= 0 else ''}{profit:.1f}u"
+
+        leg_lines = []
+        for leg in r.get("legs", [])[:4]:
+            act = leg.get("actual", -1)
+            act_str = f" (actual: {act:.0f})" if act >= 0 else ""
+            leg_lines.append(
+                f"\u2022 {leg['player_name']} {leg['side']} {leg['line']} {leg['prop_type']}{act_str}"
+            )
+
+        fields.append({
+            "name":   f"{outcome_emoji} {emoji} {r['agent_name']} \u2014 {profit_str}",
+            "value":  "\n".join(leg_lines) or "No leg details available",
+            "inline": False,
+        })
+
+    if clv_summary and clv_summary.get("available"):
+        beat_pct = clv_summary["beat_pct"]
+        avg_clv = clv_summary["avg_clv_pts"]
+        clv_icon = "\U0001f4c8" if beat_pct >= 55 else ("\u27a1\ufe0f" if beat_pct >= 45 else "\U0001f4c9")
+        fields.append({
+            "name": f"{clv_icon} Closing Line Value",
+            "value": (
+                f"Beat close on **{clv_summary['beat_close']}/{clv_summary['total_legs']} legs "
+                f"({beat_pct:.0f}%)** \u00b7 "
+                f"Avg CLV: **{'+' if avg_clv >= 0 else ''}{avg_clv:.2f}**"
+            ),
+            "inline": False,
+        })
+
+    if _CLV_FEEDBACK_AVAILABLE:
+        edge_summary = _build_edge_summary()
+        if edge_summary and edge_summary != "No edge threshold data yet.":
+            fields.append({
+                "name": "\U0001f3af Edge Threshold Health",
+                "value": edge_summary[:1024],
+                "inline": False,
+            })
+
+    _sw = season_stats.get("wins",        0)
+    _sl = season_stats.get("losses",      0)
+    _sp = season_stats.get("pushes",      0)
+    season_record = f"{_sw}W-{_sl}L-{_sp}P"
+
+    # PR #393 FIX: use net_profit (WIN+LOSS payouts combined) not total_payout-total_staked
+    # net_profit already accounts for both winning payouts and losing stakes
+    season_units  = round(season_stats.get("net_profit", 0.0), 1)
+    season_roi    = season_stats.get("roi_pct",   0.0)
+    pending_count = season_stats.get("pending",   0)
+
+    embed = {
+        "embeds": [{
+            "title": f"\U0001f4ca PropIQ Nightly Recap \u2014 {date_str}",
+            "description": (
+                f"**Today:** {day_record} \u00b7 {day_units} \u00b7 {total} parlays settled\n"
+                f"{'\u23f3 Parlays pending \u2014 games still in progress.' if total == 0 and pending_count > 0 else ('No parlays sent today.' if total == 0 else '')}"
+            ),
+            "color": color,
+            "fields": fields,
+            "footer": {
+                "text": (
+                    f"Season: {season_record} \u00b7 "
+                    f"{'+' if season_units >= 0 else ''}{season_units:.1f}u \u00b7 "
+                    f"ROI: {'+' if season_roi >= 0 else ''}{season_roi:.1f}% \u00b7 "
+                    f"{pending_count} pending"
+                )
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+    }
+    return embed
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def run(settle_date: str | None = None) -> None:
+def run(settle_date: Optional[str] = None) -> None:
     if settle_date is None:
         settle_date = _yesterday_pt()
 
-    logger.info("=== PropIQ Nightly Settlement: %s (PT) ===", settle_date)
+    logger.info("=== PropIQ Nightly Settlement: %s ===", settle_date)
 
     if _settlement_already_ran(settle_date):
-        logger.info("[Recap] Settlement for %s already ran — skipping.", settle_date)
+        logger.info(
+            "[Recap] Settlement for %s already ran — skipping duplicate.",
+            settle_date,
+        )
         return
 
-    # ── 1. ESPN stats ─────────────────────────────────────────────────────
-    espn_date = settle_date.replace("-", "")
-    try:
-        from espn_scraper import get_all_player_stats  # noqa: PLC0415
-        player_stats = get_all_player_stats(espn_date)
-    except Exception as exc:
-        logger.warning("[Recap] ESPN fetch failed: %s", exc)
-        player_stats = {}
-
-    if not player_stats:
-        logger.warning("[Recap] No ESPN boxscores for %s — aborting settlement.", settle_date)
-        return
-
-    # ── 2. Read bet_ledger — open rows for settle_date ────────────────────
-    try:
-        conn = _pg_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, parlay_id, agent_name, player_name, prop_type,
-                   side, line, entry_type,
-                   COALESCE(units_wagered, ABS(kelly_units), 5.0) AS stake,
-                   COALESCE(platform, 'underdog') AS platform
-            FROM   bet_ledger
-            WHERE  bet_date = %s
-              AND  discord_sent = TRUE
-              AND  (status IS NULL OR status = 'OPEN')
-            ORDER  BY agent_name, parlay_id NULLS LAST, id
-        """, (settle_date,))
-        rows = cur.fetchall()
-        conn.close()
-    except Exception as exc:
-        logger.error("[Recap] bet_ledger read failed: %s", exc)
-        return
-
-    logger.info("[Recap] Found %d open legs for %s.", len(rows), settle_date)
-
-    # ── 3. Group by parlay_id ─────────────────────────────────────────────
-    slip_groups: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        bid, pid, agent, player, prop_type, side, line, entry_type, stake, platform = row
-        if agent not in _ACTIVE_AGENTS:
-            logger.debug("[Recap] Skipping phantom agent %s", agent)
-            continue
-        key = str(pid) if pid else f"solo_{bid}"
-        slip_groups[key].append({
-            "id":         bid,
-            "player":     player,
-            "prop_type":  prop_type,
-            "side":       side,
-            "line":       float(line or 0),
-            "entry_type": entry_type or "FlexPlay",
-            "stake":      float(stake or 5.0),
-            "agent":      agent,
-            "platform":   platform,
-        })
-
-    if not slip_groups:
-        logger.info("[Recap] No open bets from active agents for %s.", settle_date)
-        # Still send empty recap so Discord shows 0-0-0
-        _send_empty_recap(settle_date)
+    pending = get_all_pending_parlays()
+    logger.info("[Recap] Found %d PENDING parlays for settlement.", len(pending))
+    _phantom_count = len([p for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS])
+    if _phantom_count:
+        logger.warning(
+            "[Recap] Filtering %d parlays from legacy agents: %s",
+            _phantom_count,
+            list({p["agent_name"] for p in pending if p.get("agent_name") not in _ACTIVE_AGENTS}),
+        )
+    pending = [p for p in pending if p.get("agent_name") in _ACTIVE_AGENTS]
+    if not pending:
+        logger.info("No PENDING parlays for %s — nothing to settle", settle_date)
+        season_stats = get_overall_season_stats()
+        clv_summary = get_daily_clv_summary(settle_date)
+        embed = _build_recap_embed(settle_date, [], season_stats, clv_summary)
+        _send_discord_embed(embed)
         _record_settlement_ran(settle_date)
         return
 
-    # ── 4. Settle each slip ───────────────────────────────────────────────
-    parlay_results: list[dict] = []
-    try:
-        conn = _pg_conn()
-        cur = conn.cursor()
+    logger.info("Found %d PENDING parlays for %s", len(pending), settle_date)
 
-        for pid_key, legs in slip_groups.items():
-            agent      = legs[0]["agent"]
-            stake      = legs[0]["stake"]
-            entry_type = legs[0]["entry_type"]
-            platform   = legs[0]["platform"]
-            _is_pp     = "prize" in platform.lower()
-            n          = len(legs)
-
-            # Settle each leg
-            for leg in legs:
-                actual = _lookup_actual(player_stats, leg["player"], leg["prop_type"])
-                leg["actual"] = actual
-                if actual is None:
-                    leg["status"] = "PUSH"      # no data = void/push
-                elif leg["side"].lower() in ("higher", "over"):
-                    if actual > leg["line"]:     leg["status"] = "WIN"
-                    elif actual == leg["line"]:  leg["status"] = "PUSH"
-                    else:                        leg["status"] = "LOSS"
-                else:
-                    if actual < leg["line"]:     leg["status"] = "WIN"
-                    elif actual == leg["line"]:  leg["status"] = "PUSH"
-                    else:                        leg["status"] = "LOSS"
-
-            # Slip-level outcome (all-or-nothing)
-            any_loss = any(l["status"] == "LOSS" for l in legs)
-            all_win  = all(l["status"] == "WIN"  for l in legs)
-            all_push = all(l["status"] == "PUSH" for l in legs)
-
-            if all_push:
-                slip_status = "PUSH";  slip_pl = 0.0
-            elif any_loss:
-                slip_status = "LOSS";  slip_pl = -stake
-            elif all_win:
-                slip_status = "WIN"
-                mult        = (_PP_MULTS if _is_pp else _UD_MULTS).get(n, 3.0)
-                slip_pl     = round(stake * mult - stake, 4)
-            else:
-                # Mixed WIN/PUSH, no LOSS — conservative push
-                slip_status = "PUSH";  slip_pl = 0.0
-
-            # UPDATE bet_ledger — set status + actual on each leg
-            per_leg_pl = round(slip_pl / max(n, 1), 4)
-            for leg in legs:
-                ao = 1 if leg["status"] == "WIN" else (0 if leg["status"] == "LOSS" else None)
-                cur.execute("""
-                    UPDATE bet_ledger
-                    SET    status         = %s,
-                           profit_loss    = %s,
-                           actual_result  = %s,
-                           actual_outcome = %s,
-                           graded_at      = NOW() AT TIME ZONE 'America/Los_Angeles'
-                    WHERE  id = %s AND (status IS NULL OR status = 'OPEN')
-                """, (
-                    slip_status,
-                    per_leg_pl,
-                    leg.get("actual"),
-                    ao,
-                    leg["id"],
-                ))
-
-            logger.info("[%s] slip %s → %s (%+.2fu)", agent, pid_key, slip_status, slip_pl)
-
-            parlay_results.append({
-                "parlay_id":   pid_key,
-                "agent":       agent,
-                "legs":        legs,
-                "leg_count":   n,
-                "status":      slip_status,
-                "profit_loss": slip_pl,
-                "stake":       stake,
-                "entry_type":  entry_type,
-            })
-
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        logger.error("[Recap] Settlement error: %s", exc)
+    espn_date = settle_date.replace("-", "")
+    player_stats = get_all_player_stats(espn_date)
+    if not player_stats:
+        logger.warning("ESPN returned no stats for %s — aborting settlement", settle_date)
         return
 
-    # ── 5. Season record sync ─────────────────────────────────────────────
-    try:
-        from season_record import get_overall_season_stats  # noqa: PLC0415
-        season_stats = get_overall_season_stats()
-    except Exception:
-        season_stats = {}
+    settled_results = []
+    for parlay_row in pending:
+        parlay_date = parlay_row.get("date", settle_date)
+        espn_parlay_date = parlay_date.replace("-", "") if isinstance(parlay_date, str) else settle_date.replace("-", "")
+        parlay_games = get_game_states(espn_parlay_date)
+        all_final = all(g["status"] == "FINAL" for g in parlay_games) if parlay_games else True
+        today_et = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+        parlay_dt = datetime.strptime(parlay_date, "%Y-%m-%d").date() if isinstance(parlay_date, str) else today_et
+        days_old = (today_et - parlay_dt).days
+        if not all_final and days_old < 2:
+            logger.info(
+                "[Rollover] Parlay %s from %s skipped — games not yet FINAL",
+                parlay_row.get("id"), parlay_date,
+            )
+            continue
+        if not all_final and days_old >= 2:
+            logger.warning(
+                "[Rollover] Parlay %s from %s force-pushed after %d days",
+                parlay_row.get("id"), parlay_date, days_old,
+            )
 
-    # ── 6. Discord recap ──────────────────────────────────────────────────
-    total_profit = sum(p["profit_loss"] for p in parlay_results)
-    try:
-        from DiscordAlertService import DiscordAlertService  # noqa: PLC0415
-        _da = DiscordAlertService()
-        _da.send_daily_recap(parlay_results, total_profit, settle_date)
-        logger.info("[Recap] Discord recap sent — %s  %+.2fu  %d slips",
-                    settle_date, total_profit, len(parlay_results))
-    except Exception as exc:
-        logger.error("[Recap] Discord send failed: %s", exc)
-        # Non-fatal — still record so we don't loop forever
-        return
+        parlay_id  = parlay_row["id"]
+        agent_name = parlay_row["agent_name"]
+        stake      = parlay_row["stake"]
+        legs       = parlay_row["legs"]
 
-    _record_settlement_ran(settle_date)
+        result = settle_parlay(
+            parlay_id=parlay_id,
+            agent_name=agent_name,
+            date=settle_date,
+            stake=stake,
+            legs_data=legs,
+            player_stats=player_stats,
+        )
 
-    wins   = sum(1 for p in parlay_results if p["status"] == "WIN")
-    losses = sum(1 for p in parlay_results if p["status"] == "LOSS")
-    pushes = sum(1 for p in parlay_results if p["status"] == "PUSH")
-    logger.info("=== Settlement complete: %dW-%dL-%dP  %+.2fu ===",
-                wins, losses, pushes, total_profit)
+        settle_parlay_record(
+            parlay_id=parlay_id,
+            status=result.outcome,
+            units_profit=result.units_profit,
+        )
 
-    # ── 7. Post-settlement hooks ──────────────────────────────────────────
-    _run_post_hooks(settle_date)
+        logger.info(
+            "[%s] %s → %s (%+.1fu)",
+            agent_name, parlay_id, result.outcome, result.units_profit,
+        )
 
+        leg_summaries = [
+            {
+                "player_name": lr.player_name,
+                "prop_type":   lr.prop_type,
+                "side":        lr.side,
+                "line":        lr.line,
+                "actual":      lr.actual,
+                "outcome":     lr.outcome,
+            }
+            for lr in result.legs
+        ]
 
-def _send_empty_recap(settle_date: str) -> None:
-    """Send a minimal no-bets recap so Discord always has a nightly message."""
-    try:
-        from DiscordAlertService import DiscordAlertService  # noqa: PLC0415
-        from season_record import get_overall_season_stats  # noqa: PLC0415
-        DiscordAlertService().send_daily_recap([], 0.0, settle_date)
-    except Exception as exc:
-        logger.warning("[Recap] Empty recap send failed: %s", exc)
-
-
-def _run_post_hooks(settle_date: str) -> None:
-    """Non-critical post-settlement jobs."""
-    try:
-        from streak_agent import settle_streak_picks  # noqa: PLC0415
-        settle_streak_picks(settle_date)
-        logger.info("[Recap] Streak picks settled.")
-    except Exception as exc:
-        logger.debug("[Recap] Streak settlement skipped: %s", exc)
-
-    try:
-        from calibration_monitor import run as _cal_run  # noqa: PLC0415
-        _cal_run(days=30, quiet=True)
-    except Exception as exc:
-        logger.debug("[Recap] Calibration monitor skipped: %s", exc)
-
-    try:
-        from edge_health_monitor import run as _edge_run  # noqa: PLC0415
-        from risk_manager import RiskManager  # noqa: PLC0415
-        metrics = _edge_run(days=30, quiet=True)
-        if metrics:
-            RiskManager().check_and_apply_cool_downs(metrics)
-    except Exception as exc:
-        logger.debug("[Recap] Edge health monitor skipped: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Stat lookup (ESPN box score)
-# ---------------------------------------------------------------------------
-
-_PROP_TO_ESPN: dict[str, list[str]] = {
-    "strikeouts":       ["strikeouts"],
-    "pitching_outs":    ["pitching_outs"],
-    "walks_allowed":    ["base_on_balls", "walks_allowed", "bb_allowed"],
-    "earned_runs":      ["earned_runs"],
-    "hits":             ["hits"],
-    "total_bases":      ["total_bases"],
-    "hitter_strikeouts":["strikeouts"],
-    "hits_runs_rbis":   ["hits_runs_rbis"],
-    "fantasy_score":    ["fantasy_score"],
-}
-
-
-def _lookup_actual(player_stats: dict, player_name: str, prop_type: str) -> float | None:
-    """Look up the actual stat for a player from the ESPN stat dict."""
-    import unicodedata  # noqa: PLC0415
-
-    def _norm(s: str) -> str:
-        nfd = unicodedata.normalize("NFD", s)
-        return "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower().strip()
-
-    p_norm = _norm(player_name)
-    espn_data: dict | None = None
-    for key, val in player_stats.items():
-        if _norm(key) == p_norm or _norm(val.get("full_name", "")) == p_norm:
-            espn_data = val
-            break
-
-    if espn_data is None:
-        logger.debug("[Recap] No ESPN data for %s", player_name)
-        return None
-
-    for stat_key in _PROP_TO_ESPN.get(prop_type, [prop_type]):
-        v = espn_data.get(stat_key)
-        if v is not None:
+        # Phase 94: Populate bet_ledger for each settled leg
+        if _CLV_FEEDBACK_AVAILABLE:
             try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
+                import os, psycopg2
+                _db_url = os.environ.get("DATABASE_URL", "")
+                if _db_url:
+                    _conn = psycopg2.connect(_db_url, sslmode="require")
+                    _cur  = _conn.cursor()
+                    for _lr in result.legs:
+                        _actual_outcome = 1 if _lr.outcome == "WIN" else (0 if _lr.outcome == "LOSS" else None)
+                        _cur.execute(
+                            """
+                            INSERT INTO bet_ledger
+                                (bet_date, agent_name, player_name, prop_type, side, line,
+                                 actual_outcome, profit_loss, status, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            ON CONFLICT (player_name, prop_type, line, side, agent_name, bet_date)
+                            DO UPDATE SET
+                                actual_outcome = EXCLUDED.actual_outcome,
+                                status         = EXCLUDED.status,
+                                profit_loss    = EXCLUDED.profit_loss
+                            WHERE bet_ledger.actual_outcome IS NULL
+                            """,
+                            (
+                                settle_date,
+                                agent_name,
+                                _lr.player_name,
+                                _lr.prop_type,
+                                _lr.side,
+                                _lr.line,
+                                _actual_outcome,
+                                result.units_profit / max(len(result.legs), 1),
+                                _lr.outcome,
+                            ),
+                        )
+                    _conn.commit()
+                    _conn.close()
+            except Exception as _ledger_err:
+                logger.warning("[Phase94] bet_ledger insert error: %s", _ledger_err)
 
-    logger.debug("[Recap] Stat key not found: %s / %s", player_name, prop_type)
-    return None
+        if agent_name not in _ACTIVE_AGENTS:
+            logger.info("[Recap] Skipping ghost agent %s", agent_name)
+            continue
 
+        settled_results.append({
+            "parlay_id":    parlay_id,
+            "agent_name":   agent_name,
+            "outcome":      result.outcome,
+            "units_profit": result.units_profit,
+            "legs":         leg_summaries,
+        })
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+        time.sleep(0.1)
+
+    season_stats = get_overall_season_stats()
+
+    if _CLV_FEEDBACK_AVAILABLE:
+        try:
+            logger.info("[Phase94] Rebuilding edge thresholds from bet_ledger...")
+            updated = _rebuild_thresholds()
+            logger.info("[Phase94] Rebuilt %d edge threshold overrides.", len(updated))
+        except Exception as _thresh_err:
+            logger.warning("[Phase94] rebuild_thresholds error: %s", _thresh_err)
+
+    clv_summary = get_daily_clv_summary(settle_date)
+
+    embed = _build_recap_embed(settle_date, settled_results, season_stats, clv_summary)
+    ok = _send_discord_embed(embed)
+    if ok:
+        logger.info("Recap sent to Discord for %s", settle_date)
+        _record_settlement_ran(settle_date)
+    else:
+        logger.error("Failed to send recap to Discord for %s", settle_date)
+
+    wins   = sum(1 for r in settled_results if r["outcome"] == "WIN")
+    losses = sum(1 for r in settled_results if r["outcome"] == "LOSS")
+    pushes = sum(1 for r in settled_results if r["outcome"] == "PUSH")
+    units  = sum(r["units_profit"] for r in settled_results)
+    logger.info(
+        "=== Settlement complete: %dW-%dL-%dP  %+.1fu ===",
+        wins, losses, pushes, units,
+    )
+
+    # ── StreakAgent settlement ────────────────────────────────────────────────
+    try:
+        from streak_agent import settle_streak_picks
+        logger.info("[StreakAgent] Running streak settlement for %s", settle_date)
+        settle_streak_picks(settle_date)
+    except ImportError:
+        logger.debug("[StreakAgent] streak_agent.py not found — skipping.")
+    except Exception as _streak_settle_err:
+        logger.warning("[StreakAgent] Settlement error: %s", _streak_settle_err)
+
+    # ── Calibration + Edge Health ─────────────────────────────────────────────
+    try:
+        from calibration_monitor import run as run_calibration
+        logger.info("[Phase35] Running calibration monitor (30-day window)...")
+        run_calibration(days=30, quiet=False)
+    except ImportError:
+        logger.debug("[Phase35] calibration_monitor.py not found — skipping.")
+    except Exception as _cal_err:
+        logger.warning("[Phase35] Calibration monitor error: %s", _cal_err)
+
+    try:
+        from edge_health_monitor import run as run_edge_health
+        from risk_manager import RiskManager
+        logger.info("[Phase35] Running edge health monitor...")
+        edge_metrics = run_edge_health(days=30, quiet=False)
+        if edge_metrics:
+            rm = RiskManager()
+            rm.check_and_apply_cool_downs(edge_metrics)
+            logger.info("[Phase35] Cool-down check complete for %d agents", len(edge_metrics))
+    except ImportError:
+        logger.debug("[Phase35] edge_health_monitor.py not found — skipping.")
+    except Exception as _eh_err:
+        logger.warning("[Phase35] Edge health monitor error: %s", _eh_err)
+
 
 if __name__ == "__main__":
     date_arg = sys.argv[1] if len(sys.argv) > 1 else None

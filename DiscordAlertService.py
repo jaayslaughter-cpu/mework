@@ -32,7 +32,6 @@ _PT = _ZoneInfo("America/Los_Angeles")
 from typing import Any
 
 import requests
-import time
 
 logger = logging.getLogger("propiq.discord")
 
@@ -72,37 +71,23 @@ class DiscordAlertService:
     # ── Internal helper ───────────────────────────────────────────────────────────────
 
     def _post(self, payload: dict[str, Any]) -> bool:
-        """POST payload to the webhook.  Retries up to 3 times with backoff.
-        Respects Discord 429 Retry-After header. Returns True on success."""
+        """POST payload to the webhook.  Returns True on success."""
         url = os.getenv("DISCORD_WEBHOOK_URL", self._url) or _FALLBACK_WEBHOOK
-        for attempt in range(3):
-            try:
-                resp = requests.post(
-                    url,
-                    json=payload,
-                    timeout=10,
-                    headers={"Content-Type": "application/json"},
-                )
-                if resp.status_code in (200, 204):
-                    return True
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", 2))
-                    wait = min(retry_after, 10)
-                    logger.warning("[Discord] Rate limited (429) — waiting %.1fs (attempt %d/3)",
-                                   wait, attempt + 1)
-                    time.sleep(wait)
-                    continue
-                logger.warning("[Discord] Webhook returned HTTP %d: %s (attempt %d/3)",
-                               resp.status_code, resp.text[:200], attempt + 1)
-                if attempt < 2:
-                    time.sleep(2)
-            except Exception as exc:
-                logger.warning("[Discord] Failed to reach webhook: %s (attempt %d/3)",
-                               exc, attempt + 1)
-                if attempt < 2:
-                    time.sleep(2)
-        logger.error("[Discord] Webhook failed after 3 attempts")
-        return False
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                timeout=10,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code in (200, 204):
+                return True
+            logger.warning("[Discord] Webhook returned HTTP %d: %s",
+                           resp.status_code, resp.text[:200])
+            return False
+        except Exception as exc:
+            logger.warning("[Discord] Failed to reach webhook: %s", exc)
+            return False
 
     # ── Public methods ───────────────────────────────────────────────────────────────
 

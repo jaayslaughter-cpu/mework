@@ -114,8 +114,18 @@ class SavantFetcher:
         today = datetime.today().strftime("%Y-%m-%d")
         return self.cache_dir / f"{name}_{today}.parquet"
 
+    # Class-level daily-attempt guard: tracks last fetch attempt per data type.
+    # Prevents hammering Savant every 15s when it returns empty or errors.
+    _FETCH_ATTEMPTED: dict = {}  # name -> "YYYY-MM-DD"
+
     def _csv_to_df(self, url: str, name: str):
-        """Download CSV, cache as parquet, return DataFrame or None."""
+        """
+        Download CSV, cache as parquet, return DataFrame or None.
+        Daily-attempt guard prevents re-fetching failed/empty sources within same day.
+        """
+        import datetime as _dt_sc
+        _today_sc = _dt_sc.date.today().isoformat()
+
         try:
             import pandas as pd
             import requests
@@ -125,8 +135,14 @@ class SavantFetcher:
                 logger.info("[Savant] Cache hit → %s", cache)
                 return pd.read_parquet(cache)
 
+            # Daily guard: skip network if already tried today and got nothing
+            if SavantFetcher._FETCH_ATTEMPTED.get(name) == _today_sc:
+                logger.debug("[Savant] %s already attempted today with no data — skipping", name)
+                return None
+
             logger.info("[Savant] Fetching %s ...", url)
             time.sleep(0.5)  # polite rate limit
+            SavantFetcher._FETCH_ATTEMPTED[name] = _today_sc  # mark attempt
             resp = requests.get(url, headers=_SAVANT_HEADERS, timeout=20)
             if resp.status_code != 200:
                 logger.warning("[Savant] HTTP %d for %s", resp.status_code, name)
@@ -134,21 +150,21 @@ class SavantFetcher:
 
             df = pd.read_csv(io.StringIO(resp.text))
             if df.empty:
-                logger.warning("[Savant] Empty CSV for %s", name)
+                logger.warning("[Savant] Empty CSV for %s — will not retry today", name)
                 return None
 
-            if not df.empty:
-                df.to_parquet(cache, index=False)
-                logger.info("[Savant] %s → %d rows cached", name, len(df))
-            else:
-                logger.info("[Savant] %s → empty, not caching (will retry tomorrow)", name)
-            return df if not df.empty else None
+            df.to_parquet(cache, index=False)
+            logger.info("[Savant] %s → %d rows cached", name, len(df))
+            # Clear the attempt guard on success so cache is used next time
+            SavantFetcher._FETCH_ATTEMPTED.pop(name, None)
+            return df
 
         except ImportError:
             logger.warning("[Savant] pandas/requests not available")
             return None
         except Exception as exc:
             logger.warning("[Savant] %s fetch failed: %s", name, exc)
+            SavantFetcher._FETCH_ATTEMPTED[name] = _today_sc
             return None
 
     # ------------------------------------------------------------------
