@@ -527,6 +527,84 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
                 signal_count = signals,
             ))
 
+    # ── Player-specific enrichment ──────────────────────────────────────────
+    # Adjust implied_prob using actual player stats from fangraphs/mlb_stats.
+    # Base rates are league averages — this layer makes picks player-specific.
+    try:
+        from fangraphs_layer import get_pitcher as _fg_pit, get_batter as _fg_bat
+        from fangraphs_layer import LEAGUE_DEFAULTS as _FG_DEFAULTS
+        _FG_LOADED = True
+    except ImportError:
+        _FG_LOADED = False
+
+    if _FG_LOADED:
+        _LG_K   = _FG_DEFAULTS["pitcher"]["csw_pct"]    # 0.275 league-avg CSW%
+        _LG_KP  = _FG_DEFAULTS["pitcher"]["k_bb_pct"]   # 0.130 league-avg K-BB%
+        _LG_WRC = _FG_DEFAULTS["batter"]["wrc_plus"]    # 100.0 league-avg wRC+
+
+        for cand in candidates:
+            pt   = cand.prop_type
+            side = cand.side
+            adj  = 0.0  # probability adjustment to apply
+
+            # ── Pitcher K props ──
+            if pt == "strikeouts":
+                stats = _fg_pit(cand.player_name)
+                if stats:
+                    csw  = stats.get("csw_pct", _LG_K)
+                    kbb  = stats.get("k_bb_pct", _LG_KP)
+                    fip  = stats.get("fip", 4.06)
+                    # CSW% is the strongest predictor of K outcomes
+                    # Each 1pp above league avg = ~+0.8pp win prob
+                    csw_delta = (csw - _LG_K) * 0.8
+                    # K-BB% quality adjustment
+                    kbb_delta = (kbb - _LG_KP) * 0.5
+                    # FIP quality: elite <3.50 adds small boost, high >5.00 subtracts
+                    fip_delta = max(-0.04, min(0.04, (4.06 - fip) * 0.015))
+                    adj = csw_delta + kbb_delta + fip_delta
+                    adj = max(-0.12, min(0.12, adj))  # cap at ±12pp
+
+            # ── Pitcher earned_runs / pitching_outs / hits_allowed ──
+            elif pt in ("earned_runs", "pitching_outs", "hits_allowed"):
+                stats = _fg_pit(cand.player_name)
+                if stats:
+                    fip  = stats.get("fip", 4.06)
+                    era  = stats.get("era", 4.06)
+                    # Below-average ERA/FIP → more likely to go deeper (more outs) 
+                    # or give up fewer earned runs
+                    quality = (4.06 - ((fip + era) / 2)) * 0.02
+                    adj = max(-0.08, min(0.08, quality))
+                    if side == "Under":
+                        adj = -adj  # inverse for Under on ER
+
+            # ── Batter hit/TB/HR props ──
+            elif pt in ("hits", "total_bases", "hits_runs_rbis", "rbis", "runs"):
+                stats = _fg_bat(cand.player_name)
+                if stats:
+                    wrc  = stats.get("wrc_plus", _LG_WRC)
+                    woba = stats.get("woba", 0.308)
+                    xbh  = stats.get("xbh_per_game", 0.50)
+                    # wRC+ above 100 → above-average hitter
+                    wrc_delta = (wrc - 100.0) * 0.001  # 120 wRC+ → +2pp
+                    woba_delta = (woba - 0.308) * 0.15
+                    adj = wrc_delta + woba_delta
+                    if pt in ("total_bases", "hits_runs_rbis"):
+                        # extra-base hit rate adds more weight for TB props
+                        adj += (xbh - 0.50) * 0.04
+                    adj = max(-0.10, min(0.10, adj))
+
+            if adj != 0.0:
+                old_prob = cand.implied_prob
+                new_prob = round(max(0.50, min(0.95, old_prob + adj)), 4)
+                if new_prob != old_prob:
+                    # Recompute EV and confidence with adjusted prob
+                    new_ev   = round((new_prob - 0.50) / 0.50 * 100, 2)
+                    new_conf = streak_confidence(new_prob, new_ev, cand.signal_count)
+                    # Update candidate in-place
+                    object.__setattr__(cand, "implied_prob", new_prob)
+                    object.__setattr__(cand, "ev_pct",       new_ev)
+                    object.__setattr__(cand, "confidence",   new_conf)
+
     return candidates
 
 
@@ -914,8 +992,8 @@ def post_pick_alert(
             {
                 "name": "📊 Edge",
                 "value": (
-                    f"Win Prob: **{prob_pct}%**\n"
-                    f"EV: **+{pick.ev_pct:.1f}%**\n"
+                    f"Win Prob: **{prob_pct}%** (edge: +{pick.ev_pct:.1f}% vs 50%)\n"
+                    f"Streak P(complete): ~**{(pick.implied_prob**STREAK_TOTAL_WINS)*100:.2f}%** per $10\n"
                     f"Signals: **{pick.signal_count}/17** agents agree"
                 ),
                 "inline": True,
@@ -965,11 +1043,11 @@ def post_pick_alert(
         ],
         "footer": {
             "text": (
-                f"PropIQ StreakAgent • {datetime.now(timezone.utc).strftime('%b %d %Y %H:%M')} UTC • "
+                f"PropIQ StreakAgent • {datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%b %d %Y %H:%M')} PT • "
                 f"Confidence gate ≥ {STREAK_CONF_MIN}/10 • Prob gate ≥ {int(STREAK_PROB_MIN*100)}%"
             )
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(ZoneInfo("America/Los_Angeles")).isoformat(),
     }
 
     payload = {"embeds": [embed]}
@@ -1005,7 +1083,7 @@ def post_start_picks_alert(
             "value": (
                 f"**{direction}  {pick.line}  {prop_label}**\n"
                 f"Platform: **{pick.platform}** | Entry: `{pick.entry_type}`{note_str}\n"
-                f"Win Prob: **{prob_pct}%** | EV: **+{pick.ev_pct:.1f}%** | "
+                f"Win Prob: **{prob_pct}%** | Edge: +{pick.ev_pct:.1f}% vs 50% | "
                 f"Signals: **{pick.signal_count}/17**\n"
                 f"`{conf_bar}` **{pick.confidence:.1f}/10**"
             ),
@@ -1054,7 +1132,7 @@ def post_start_picks_alert(
         "footer":    {
             "text": (
                 f"PropIQ StreakAgent • "
-                f"{datetime.now(timezone.utc).strftime('%b %d %Y %H:%M')} UTC • "
+                f"{datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%b %d %Y %H:%M')} PT • "
                 f"Confidence gate ≥ {STREAK_CONF_MIN}/10 • "
                 f"Prob gate ≥ {int(STREAK_PROB_MIN * 100)}%"
             )
