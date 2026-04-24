@@ -69,6 +69,15 @@ def _ensure_tables(conn) -> None:
                 config_version TEXT
             )
         """)
+        # Heal: add cool_until column to deployments created before PR #415
+        try:
+            cur.execute(
+                "ALTER TABLE agent_cool_down ADD COLUMN IF NOT EXISTS "
+                "cool_until TIMESTAMPTZ"
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
         conn.commit()
 
 

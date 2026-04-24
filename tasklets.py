@@ -286,6 +286,7 @@ MIN_CONFIDENCE    = 6
 # At 0.55 with correct multipliers: 2-leg PP needs 55%^2 * 3 - 1 = -9.2% → still
 # needs higher prob per leg, but combined_ev gate (+3%) now does the real work.
 MIN_PROB          = 0.57   # April 20 retrain: raised from 0.55 — first real model trained on historical data
+STREAK_MIN_LINE   = 0.5    # minimum DFS line value for streak tracking — filters junk sub-0.5 props
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
@@ -1957,6 +1958,25 @@ def _ensure_bet_ledger() -> None:
         _rl.close()
     except Exception as _rle:
         logger.warning("[DB] rejection_log create failed: %s", _rle)
+
+    # Heal rejection_log — add columns added in PR #415 that may be missing
+    # from the existing Railway table (created before PR #415 schema).
+    try:
+        _rl3 = _pg_conn()
+        with _rl3.cursor() as _rc3:
+            for _rldl in [
+                "ADD COLUMN IF NOT EXISTS agent_name  VARCHAR(80)",
+                "ADD COLUMN IF NOT EXISTS reason      VARCHAR(120)",
+                "ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ DEFAULT NOW()",
+            ]:
+                try:
+                    _rc3.execute(f"ALTER TABLE rejection_log {_rldl}")
+                except Exception:
+                    pass
+        _rl3.commit()
+        _rl3.close()
+    except Exception as _rl3e:
+        logger.debug("[DB] rejection_log heal: %s", _rl3e)
 
 
 def _log_rejection(player_name: str, prop_type: str, side: str, line: float,
