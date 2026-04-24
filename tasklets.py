@@ -289,6 +289,7 @@ MIN_PROB          = 0.57   # April 20 retrain: raised from 0.55 — first real m
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
+_BET_LEDGER_ENSURED: bool = False  # one-shot flag — prevents 240 Postgres round-trips/hour
 
 
 def _mem_set(key: str, ttl: int, data) -> None:
@@ -1667,6 +1668,9 @@ def _ensure_calibration_map() -> None:
 
 def _ensure_bet_ledger() -> None:
     """Create bet_ledger table if it doesn't exist. Called on startup."""
+    global _BET_LEDGER_ENSURED
+    if _BET_LEDGER_ENSURED:
+        return  # already ran this process — skip 240 redundant Postgres round-trips/hour
     try:
         conn = _pg_conn()
         with conn.cursor() as cur:
@@ -1785,6 +1789,8 @@ def _ensure_bet_ledger() -> None:
                 "ADD COLUMN IF NOT EXISTS entry_type      VARCHAR(20) DEFAULT 'STANDARD'",
                 "ADD COLUMN IF NOT EXISTS lookahead_safe  BOOLEAN DEFAULT TRUE",
                 "ADD COLUMN IF NOT EXISTS parlay_id       VARCHAR(64)",
+                "ADD COLUMN IF NOT EXISTS created_at     TIMESTAMP DEFAULT NOW()",
+                "ADD COLUMN IF NOT EXISTS model_source   VARCHAR(30)",
             ]:
                 try:
                     _cc.execute(f"ALTER TABLE bet_ledger {_col_ddl}")
@@ -1939,6 +1945,8 @@ def _ensure_bet_ledger() -> None:
     except Exception as _rl_exc:
         logger.debug("[DB] rejection_log table: %s", _rl_exc)
 
+    _BET_LEDGER_ENSURED = True  # PR #413: mark done — skip on all subsequent DataHub cycles
+
 
 def _log_rejection(agent_name: str, parlay: dict, reason: str) -> None:
     """Write a dropped parlay/slip to rejection_log for post-game gate analysis.
@@ -1982,7 +1990,7 @@ def run_data_hub_tasklet() -> None:
     Pre-match gate: skips any game already LIVE or FINAL so we never poll
     in-game data and waste API quota.
     """
-    _ensure_bet_ledger()       # ensure table exists on every startup
+    _ensure_bet_ledger()       # ensure table exists on every startup (one-shot via _BET_LEDGER_ENSURED flag)
     _ensure_calibration_map()  # bootstrap isotonic calibration map if missing
 
     # ── Steamer 2026 prefetch (once per day, Postgres-cached) ────────────────
