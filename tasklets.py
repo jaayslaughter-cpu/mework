@@ -289,7 +289,6 @@ MIN_PROB          = 0.57   # April 20 retrain: raised from 0.55 — first real m
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
 _MEM: dict = {}  # key → (expire_ts, data)
-_BET_LEDGER_ENSURED: bool = False  # PR #413: one-shot guard
 
 
 def _mem_set(key: str, ttl: int, data) -> None:
@@ -1666,11 +1665,18 @@ def _ensure_calibration_map() -> None:
                 pass
 
 
+# PR #413: guard so _ensure_bet_ledger() runs once at startup, not every 15s.
+# _ensure_bet_ledger() is called inside run_data_hub_tasklet() which fires every
+# 15 seconds — 240 Postgres round-trips/hour for no benefit after the first run.
+_BET_LEDGER_ENSURED: bool = False
+
+
 def _ensure_bet_ledger() -> None:
-    """Create bet_ledger table if it doesn't exist. Called on startup."""
+    """Create bet_ledger table if it doesn't exist. Called on startup (once only)."""
     global _BET_LEDGER_ENSURED
     if _BET_LEDGER_ENSURED:
-        return  # PR #413
+        return
+    _BET_LEDGER_ENSURED = True
     try:
         conn = _pg_conn()
         with conn.cursor() as cur:
@@ -1789,7 +1795,13 @@ def _ensure_bet_ledger() -> None:
                 "ADD COLUMN IF NOT EXISTS entry_type      VARCHAR(20) DEFAULT 'STANDARD'",
                 "ADD COLUMN IF NOT EXISTS lookahead_safe  BOOLEAN DEFAULT TRUE",
                 "ADD COLUMN IF NOT EXISTS parlay_id       VARCHAR(64)",
-                "ADD COLUMN IF NOT EXISTS model_source   VARCHAR(30)",
+                # PR #413: created_at was in CREATE TABLE but missing from ALTER migration
+                # → dedup preload (SELECT ... WHERE created_at >= NOW() - INTERVAL '18 hours')
+                # silently failed every restart → _AGENT_SENT_TODAY always empty
+                "ADD COLUMN IF NOT EXISTS created_at      TIMESTAMP DEFAULT NOW()",
+                # model_source was in CREATE TABLE but missing from ALTER migration
+                # → INSERT failures on any row that wrote model_source
+                "ADD COLUMN IF NOT EXISTS model_source    VARCHAR(30)",
             ]:
                 try:
                     _cc.execute(f"ALTER TABLE bet_ledger {_col_ddl}")
@@ -1920,7 +1932,55 @@ def _ensure_bet_ledger() -> None:
     except Exception as _xms:
         logger.warning("[DB] xgb_model_store create failed: %s", _xms)
 
-    _BET_LEDGER_ENSURED = True  # PR #413
+
+
+    # ── rejection_log — tracks legs dropped by gates ──────────────────────────
+    try:
+        _rl = _pg_conn()
+        with _rl.cursor() as _rc:
+            _rc.execute("""
+                CREATE TABLE IF NOT EXISTS rejection_log (
+                    id            SERIAL PRIMARY KEY,
+                    player_name   TEXT,
+                    prop_type     TEXT,
+                    side          TEXT,
+                    line          NUMERIC,
+                    model_prob    NUMERIC,
+                    ev_pct        NUMERIC,
+                    confidence    NUMERIC,
+                    reject_reason TEXT,
+                    reject_date   DATE DEFAULT CURRENT_DATE,
+                    created_at    TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        _rl.commit()
+        _rl.close()
+    except Exception as _rle:
+        logger.warning("[DB] rejection_log create failed: %s", _rle)
+
+
+def _log_rejection(player_name: str, prop_type: str, side: str, line: float,
+                   model_prob: float, ev_pct: float, confidence: float,
+                   reject_reason: str) -> None:
+    """Insert one row into rejection_log. Fire-and-forget — never raises."""
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO rejection_log
+                    (player_name, prop_type, side, line, model_prob, ev_pct,
+                     confidence, reject_reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (player_name, prop_type, side, float(line or 0),
+                 float(model_prob or 0), float(ev_pct or 0),
+                 float(confidence or 0), reject_reason)
+            )
+        conn.commit()
+        conn.close()
+    except Exception as _rle:
+        logger.debug("[rejection_log] insert failed: %s", _rle)
 
 
 
@@ -4739,6 +4799,11 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < 0:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < 0.",
                         agent_name, _combined_ev_check)
+            for _rl_lg in parlay.get("legs", []):
+                _log_rejection(_rl_lg.get("player_name","?"), _rl_lg.get("prop_type","?"),
+                               _rl_lg.get("side","?"), _rl_lg.get("line",0),
+                               _rl_lg.get("model_prob",0), _combined_ev_check,
+                               parlay.get("confidence",0), "combined_ev<0")
             continue
         # Minimum combined EV floor: slip must be worth playing, not just positive.
         # With correct multipliers (PP 2-leg=3x, PP 3-leg=5x, UD 2-leg=3x, UD 3-leg=6x)
@@ -4747,6 +4812,11 @@ def run_agent_tasklet() -> bool:
         if _combined_ev_check < _MIN_COMBINED_EV:
             logger.info("[AgentTasklet] %s dropped — combined_ev_pct %.1f%% < %.1f%% floor.",
                         agent_name, _combined_ev_check, _MIN_COMBINED_EV)
+            for _rl_lg in parlay.get("legs", []):
+                _log_rejection(_rl_lg.get("player_name","?"), _rl_lg.get("prop_type","?"),
+                               _rl_lg.get("side","?"), _rl_lg.get("line",0),
+                               _rl_lg.get("model_prob",0), _combined_ev_check,
+                               parlay.get("confidence",0), f"combined_ev<{_MIN_COMBINED_EV}%_floor")
             continue
         # Platform purity gate: every leg in the final slip must share one platform.
         _legs = parlay.get("legs", [])
@@ -4761,6 +4831,11 @@ def run_agent_tasklet() -> bool:
         if play_conf < MIN_CONFIDENCE:
             logger.info("[AgentTasklet] %s confidence %.1f < min %.0f — dropped.",
                          agent_name, play_conf, MIN_CONFIDENCE)
+            for _rl_lg in parlay.get("legs", []):
+                _log_rejection(_rl_lg.get("player_name","?"), _rl_lg.get("prop_type","?"),
+                               _rl_lg.get("side","?"), _rl_lg.get("line",0),
+                               _rl_lg.get("model_prob",0), _combined_ev_check,
+                               play_conf, f"confidence<{MIN_CONFIDENCE}")
             continue
 
         # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
@@ -4774,6 +4849,12 @@ def run_agent_tasklet() -> bool:
         if _low_legs:
             logger.info("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",
                          agent_name, _min_prob_pct, _low_legs)
+            for _rl_lg in parlay.get("legs", []):
+                _log_rejection(_rl_lg.get("player_name","?"), _rl_lg.get("prop_type","?"),
+                               _rl_lg.get("side","?"), _rl_lg.get("line",0),
+                               float(_rl_lg.get("model_prob",0) or 0),
+                               _combined_ev_check, 0,
+                               f"model_prob<{_min_prob_pct:.0f}%")
             continue
 
         # Keep only the single highest-EV parlay per agent this cycle
