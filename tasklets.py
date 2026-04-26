@@ -4816,7 +4816,7 @@ class _LineDriftAgent(_BaseAgent):
         Adds a small EV bonus when gap < -0.25.
 
     Both signals require sb_implied_prob > 0 (i.e. Odds API actually returned data).
-    Excludes props on the excluded list (stolen_bases, home_runs, walks, walks_allowed).
+    Excludes props on the excluded list (stolen_bases, home_runs). walks_allowed is REINSTATED (PR #364).
     """
     name = "LineDriftAgent"
 

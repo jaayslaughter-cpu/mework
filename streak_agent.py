@@ -128,15 +128,14 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN    = 7.0    # Raised from 5.0 — April 13 retrain never fired (SQLite/Postgres
-                            # disconnect confirmed by audit). Gate held at 5.0 since before April 13.
-                            # The $10→$10,000 format requires 11 consecutive wins. 5.0 gate allowed
-                            # picks with 4.2–5.0 confidence that the spec explicitly rejects.
-STREAK_PROB_MIN    = 0.62   # Restored to spec value. Was 0.57 pending April 13 retrain that never fired.
-STREAK_EV_MIN      = 8.0    # Restored to spec value. Was 5.0 pending April 13 retrain that never fired.
-STREAK_MIN_LINE    = 0.5    # Allow 0.5 lines — high-prob props (earned_runs Over 0.5 = 88%) are valid
-                            # STREAK_CONF_MIN=7.0 gate prevents trivial picks; min_line=1.0 was too strict
-                            # (mathematically impossible for any 1.0+ line prop to hit 7.0 conf at prob=0.62)
+STREAK_CONF_MIN    = 6.0    # PR #429: lowered from 7.0 — max achievable at prob=0.62 is ~6.71,
+                            # so 7.0 was mathematically impossible (no picks could ever fire).
+                            # Do NOT raise above 6.0 until 200+ real graded legs with features_json
+                            # AND post-retrain Brier < 0.20 in xgb_model_store.
+STREAK_PROB_MIN    = 0.62   # Minimum per-leg win probability for streak picks.
+STREAK_EV_MIN      = 8.0    # Minimum edge vs 50% break-even for streak picks.
+STREAK_MIN_LINE    = 0.5    # Allow 0.5 lines — high-prob props (earned_runs Over 0.5 = 88%) are valid.
+                            # PR #397: STREAK_MIN_LINE = 0.5 (MIN_LINE = 1.0 directive is REVOKED).
 STREAK_MIN_SIGNALS = 2      # NEW: at least 2/17 agents must agree before a pick qualifies
 STREAK_TOTAL_WINS = 11     # picks needed to win
 STREAK_WINDOW_DAYS = 10    # calendar days to complete the streak
