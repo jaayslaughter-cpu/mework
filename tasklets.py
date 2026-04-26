@@ -112,6 +112,13 @@ except ImportError:
     def _build_bullpen_scorer(): return None  # noqa: E704
 
 try:
+    from bvi_layer import get_bvi_map as _get_bvi_map
+    _BVI_AVAILABLE = True
+except ImportError:
+    _BVI_AVAILABLE = False
+    def _get_bvi_map(**kw) -> dict: return {}  # noqa: E704
+
+try:
     from sportsbook_reference_layer import build_sportsbook_reference as _build_sb_reference
     _SB_REFERENCE_AVAILABLE = True
 except ImportError:
@@ -473,6 +480,169 @@ def _no_vig(over_american: int, under_american: int) -> tuple[float, float]:
     # Normalise (should already sum to ~1.0 but floating point safety)
     total = fair_over + fair_under
     return fair_over / total, fair_under / total
+
+
+# ── Market-model blend weights by prop type (mc_upgrades Phase 6) ──────────
+# w = model weight; (1−w) = market weight.
+# Higher w → trust model more (less liquid/efficient market for this prop type).
+_MARKET_MODEL_WEIGHTS: dict[str, float] = {
+    "batter_hits":           0.35,
+    "batter_total_bases":    0.35,
+    "batter_home_runs":      0.30,
+    "pitcher_strikeouts":    0.30,
+    "batter_rbis":           0.40,
+    "batter_runs_scored":    0.40,
+    "batter_hits_runs_rbis": 0.40,
+    "batter_stolen_bases":   0.45,
+    "pitcher_outs":          0.38,
+    "pitcher_earned_runs":   0.42,
+    "pitcher_hits_allowed":  0.42,
+    "pitcher_walks_allowed": 0.45,
+    "default":               0.50,
+}
+
+
+def _logit_blend_prob(
+    p_model: float,
+    p_market: float,
+    market_key: str,
+    over_implied: float | None = None,
+    under_implied: float | None = None,
+) -> float:
+    """
+    Blend model and market probabilities in log-odds space (mc_upgrades Phase 6).
+    Source: Lopez/Matthews/Glickman arXiv:1701.05976; Trademate Sports.
+
+    Args:
+        p_model   — model probability (0–1 or 0–100; auto-detected)
+        p_market  — market implied probability (0–1)
+        market_key — prop type key for weight lookup
+        over_implied, under_implied — raw implied probs (pre-de-vig); if both
+                                      supplied, power-method de-vig applied first
+
+    Returns blended probability in same scale as p_model.
+    """
+    # Normalise to 0–1
+    pm = p_model / 100.0 if p_model > 1.0 else p_model
+    mk = p_market
+
+    # De-vig market if raw over/under supplied
+    if over_implied and under_implied and over_implied > 0 and under_implied > 0:
+        lo, hi = 0.5, 3.0
+        for _ in range(50):
+            k = (lo + hi) / 2.0
+            s = over_implied ** (1.0 / k) + under_implied ** (1.0 / k)
+            if s > 1.0:
+                hi = k
+            else:
+                lo = k
+        k = (lo + hi) / 2.0
+        mk = over_implied ** (1.0 / k)
+
+    if not mk or mk <= 0:
+        return p_model   # no market data — return model unchanged
+
+    w = _MARKET_MODEL_WEIGHTS.get(market_key, _MARKET_MODEL_WEIGHTS["default"])
+
+    def _logit(p: float) -> float:
+        p = max(0.001, min(0.999, p))
+        return math.log(p / (1.0 - p))
+
+    def _sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
+
+    blended = _sigmoid(w * _logit(pm) + (1.0 - w) * _logit(mk))
+    # Return in same scale as input
+    return round(blended * 100.0 if p_model > 1.0 else blended, 4)
+
+
+# ── Tango platoon regression constants ───────────────────────────────────────
+_PLATOON_M = {"L": 1000, "R": 2200, "S": 1620}   # stabilisation PA
+_LEAGUE_PLATOON_SPLITS = {
+    "L": 0.035,   # LHB hits .035 wOBA better vs RHP
+    "R": 0.023,   # RHB hits .023 wOBA better vs LHP
+    "S": 0.027,   # switch: use favourable side
+}
+_STAT_DEFAULTS_PLATOON = {
+    "avg": 0.245, "obp": 0.315, "slg": 0.390, "ops": 0.705, "woba": 0.320
+}
+
+
+def _platoon_blend_v2(batter: dict, pitcher_hand: str, stat: str) -> float:
+    """
+    Bayesian-regressed platoon blend (mc_upgrades Phase 3 / Tango canonical).
+    Regresses observed vs-hand splits toward season average using Tango M constants.
+    Replaces simple platoon adjustments with properly uncertainty-weighted values.
+
+    Args:
+        batter       — prop dict enriched with vs_r_*/vs_l_* split keys
+        pitcher_hand — "L" or "R"
+        stat         — "avg", "obp", "slg", "ops", or "woba"
+    """
+    bats = (batter.get("bats") or batter.get("_batter_hand") or "S").upper()
+    hand = (pitcher_hand or "R").upper()
+    if hand not in ("L", "R"):
+        hand = "R"
+
+    split_key = f"vs_{'l' if hand == 'L' else 'r'}_{stat}"
+    pa_key    = f"vs_{'l' if hand == 'L' else 'r'}_pa"
+
+    obs_split = batter.get(split_key)
+    split_pa  = int(batter.get(pa_key, 0) or 0)
+
+    season_map = {
+        "avg":  batter.get("season_avg")  or batter.get("fg_avg"),
+        "obp":  batter.get("season_obp")  or batter.get("fg_obp"),
+        "slg":  batter.get("season_slg")  or batter.get("fg_slg"),
+        "ops":  batter.get("season_ops"),
+        "woba": batter.get("fg_woba")     or batter.get("sv_xwoba"),
+    }
+    season_val = float(season_map.get(stat) or _STAT_DEFAULTS_PLATOON.get(stat, 0.0) or 0.0)
+
+    if obs_split is None or float(obs_split or 0) <= 0.0:
+        # No split data — apply theoretical half-edge
+        platoon_fav = (
+            (bats == "L" and hand == "R")
+            or (bats == "R" and hand == "L")
+            or bats == "S"
+        )
+        if stat in _STAT_DEFAULTS_PLATOON:
+            lg_edge = _LEAGUE_PLATOON_SPLITS.get(bats, 0.025)
+            return round(season_val + (lg_edge * 0.5 if platoon_fav else -lg_edge * 0.5), 4)
+        return season_val
+
+    obs_val = float(obs_split)
+    M       = _PLATOON_M.get(bats, 1620)
+    # Bayesian shrinkage: blend observed split with season total as prior
+    blended = (obs_val * split_pa + season_val * M) / (split_pa + M)
+    return round(blended, 4)
+
+
+def _relief_fatigue_penalty(days_pitched: list[int], pitches_last: int = 20) -> float:
+    """
+    Reliever back-to-back fatigue penalty in wOBA-against delta.
+    Source: mc_upgrades.py relief_fatigue_penalty() / Tango back-to-back research.
+
+    Research: B2B ≈ +10–15 wOBA pts; 3rd consecutive day ≈ +20–30 pts.
+
+    Args:
+        days_pitched — list of ints: days ago each appearance occurred (0=today, 1=yesterday)
+        pitches_last — pitch count in most recent outing
+
+    Returns: wOBA delta (positive = batters benefit) → convert to pp via / 0.030 × 2.5
+    """
+    if not days_pitched:
+        return 0.0
+    min_rest = min(days_pitched)
+    if min_rest == 0:
+        return 0.020 + min(0.015, pitches_last * 0.0003)
+    if min_rest == 1 and len([d for d in days_pitched if d <= 2]) >= 2:
+        return 0.015   # back-to-back with multiple recent appearances
+    if min_rest == 1:
+        return 0.010
+    if min_rest == 2 and pitches_last >= 35:
+        return 0.008   # heavy load 2 days ago
+    return 0.0
 
 
 def _kelly_units(edge: float, odds_american: int) -> float:
@@ -2301,6 +2471,32 @@ def run_data_hub_tasklet() -> None:
         except Exception:
             hub["bullpen_fatigue"] = {}
 
+    # ── BVI: Bullpen Volatility Index (TTL 4 h) ──────────────────────────────
+    bvi_key = "hub:bvi"
+    if not _hub_exists(r, bvi_key):
+        if _BVI_AVAILABLE:
+            try:
+                _bvi_map = _get_bvi_map(lookback_days=10)
+                if _bvi_map:
+                    hub["bullpen_bvi"] = _bvi_map
+                    try:
+                        r.setex(bvi_key, 14_400, json.dumps(_bvi_map))
+                    except Exception:
+                        pass
+                    logger.info("[DataHub] BVI map built for %d teams.", len(_bvi_map))
+                else:
+                    hub["bullpen_bvi"] = {}
+            except Exception as _bvi_err:
+                logger.debug("[DataHub] BVI build failed: %s", _bvi_err)
+                hub["bullpen_bvi"] = {}
+        else:
+            hub["bullpen_bvi"] = {}
+    else:
+        try:
+            hub["bullpen_bvi"] = json.loads(r.get(bvi_key) or "{}")
+        except Exception:
+            hub["bullpen_bvi"] = {}
+
     # ── Group 4: DFS targets (TTL 8 min) ──────────────────────────────────
     dfs_key = "hub:dfs"
     if not _hub_exists(r, dfs_key):
@@ -3361,12 +3557,23 @@ class _BullpenAgent(_BaseAgent):
                      "stolen_bases", "walks", "runs", "fantasy_score"}
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Targets hitter props when opposing bullpen is fatigued (0-4 scale).
-        Fatigue from context_modifiers.BullpenFatigueScorer when available,
-        otherwise defaults to neutral (2).
+        """Targets hitter props when opposing bullpen is fatigued or volatile.
+
+        Signal stack:
+          1. BullpenFatigueScorer (0–4 scale) — day-of workload from pitching logs
+          2. BVI (0–100) — structural volatility from live feed entry states,
+             inherited runner instability, and fatigue CV over last 10 days
+          3. _relief_fatigue_penalty() — per-pitcher B2B penalty (wOBA delta)
+
+        BVI interpretation:
+          >60 → volatile bullpen: confirm OVER, apply +3pp structural boost
+          <35 → stable bullpen:   confirm UNDER, apply +2pp structural boost
+          35–60 → neutral: no BVI adjustment
+
+        Fatigue scoring (unchanged): ≥3 → +6pp, ≥2 → +2pp.
         """
-        # Try hub bullpen_fatigue, then context_modifiers live calculation
         fatigue_map: dict = self.hub.get("bullpen_fatigue", {})
+        bvi_map:     dict = self.hub.get("bullpen_bvi", {})
         player    = prop.get("player", "")
         team      = prop.get("team", "")
         prop_type = prop.get("prop_type", "")
@@ -3374,39 +3581,65 @@ class _BullpenAgent(_BaseAgent):
         if _norm_stat(prop_type) not in self._HITTER_STATS:
             return None
 
-        # Get fatigue for opposing team (batter faces opponent's bullpen).
-        opp_team    = prop.get("opposing_team", "")
-        _raw_entry  = fatigue_map.get(opp_team, fatigue_map.get(team, -1))
+        # ── Opposing team (whose bullpen the batter faces) ────────────────────
+        opp_team     = prop.get("opposing_team", "")
+        opp_abbrev   = prop.get("_opp_team_abbrev", opp_team).upper()
+
+        # ── 1. Legacy fatigue score ───────────────────────────────────────────
+        _raw_entry = fatigue_map.get(opp_team, fatigue_map.get(team, -1))
         if isinstance(_raw_entry, dict):
             fatigue = float(_raw_entry.get("fatigue_score", 2.0))
         else:
-            fatigue = float(_raw_entry)  # legacy scalar or -1 sentinel
-        # pitching_logs DataFrame + target_date which aren't available here)
+            fatigue = float(_raw_entry)
         if fatigue < 0:
-            fatigue = 2  # neutral — no fatigue data available this cycle
+            fatigue = 2.0   # neutral when no data
+
+        # ── 2. BVI structural adjustment ─────────────────────────────────────
+        bvi_entry  = bvi_map.get(opp_abbrev, {})
+        bvi_score  = float(bvi_entry.get("bvi", 50.0)) if bvi_entry else 50.0
+        # Directional BVI boost: volatile bullpen → OVER; stable → UNDER
+        if bvi_score > 60.0:
+            bvi_over_adj  = round((bvi_score - 60.0) / 40.0 * 3.0, 2)   # max +3pp at BVI=100
+            bvi_under_adj = 0.0
+        elif bvi_score < 35.0:
+            bvi_over_adj  = 0.0
+            bvi_under_adj = round((35.0 - bvi_score) / 35.0 * 2.0, 2)   # max +2pp at BVI=0
+        else:
+            bvi_over_adj = bvi_under_adj = 0.0
+
+        # ── 3. Reliever B2B penalty (if workload data available) ──────────────
+        _days_pitched = prop.get("_opp_reliever_days_pitched", [])
+        _pitches_last = int(prop.get("_opp_reliever_pitches_last", 20) or 20)
+        rf_penalty_woba = _relief_fatigue_penalty(_days_pitched, _pitches_last)
+        # Convert wOBA delta → probability points (~0.030 wOBA ≈ 2.5pp)
+        rf_pp = round(rf_penalty_woba / 0.030 * 2.5, 2)
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
 
-        # Fatigue boost: tired bullpen = more runs for batters
+        # ── Apply fatigue boost ───────────────────────────────────────────────
         if fatigue >= 3:
             model_prob = min(model_prob + 6.0, 95.0)
         elif fatigue >= 2:
             model_prob = min(model_prob + 2.0, 95.0)
 
+        # ── Apply BVI + reliever B2B structural boosts ────────────────────────
+        model_prob_over  = min(model_prob + bvi_over_adj  + rf_pp, 95.0)
+        model_prob_under = min((100.0 - model_prob) + bvi_under_adj, 95.0)
+
         over_odds     = prop.get("over_american",  -110)
         under_odds    = prop.get("under_american", -110)
-        under_prob    = 100.0 - model_prob
         over_implied  = _american_to_implied(over_odds)  / 100
         under_implied = _american_to_implied(under_odds) / 100
-        ev_over  = (model_prob  / 100 - over_implied)  / over_implied
-        ev_under = (under_prob  / 100 - under_implied) / under_implied
+        ev_over  = (model_prob_over  / 100 - over_implied)  / over_implied
+        ev_under = (model_prob_under / 100 - under_implied) / under_implied
         _thresh  = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
-        # Fatigued bullpen → OVER. Rested elite bullpen → UNDER also valid.
+
+        # Fatigued/volatile bullpen → OVER. Stable/rested bullpen → UNDER.
         if ev_over >= _thresh and ev_over >= ev_under:
-            return self._build_bet(prop, "OVER",  model_prob,
+            return self._build_bet(prop, "OVER",  model_prob_over,
                                    over_implied  * 100, ev_over  * 100)
         if ev_under >= _thresh:
-            return self._build_bet(prop, "UNDER", under_prob,
+            return self._build_bet(prop, "UNDER", model_prob_under,
                                    under_implied * 100, ev_under * 100)
         return None
 
