@@ -46,10 +46,13 @@ PITCHER_LINES = {
     "strikeouts":    5.5,
     "earned_runs":   2.5,
     "pitching_outs": 14.5,
+    "walks_allowed": 1.5,
 }
 BATTER_LINES = {
-    "hits":          0.5,
-    "total_bases":   1.5,
+    "hits":              0.5,
+    "total_bases":       1.5,
+    "hitter_strikeouts": 0.5,
+    "hits_runs_rbis":    2.5,
 }
 
 # ── Minimum plate appearances / batters faced to include a game
@@ -173,11 +176,13 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
         ks   = int(st.get("strikeOuts",    0) or 0)
         er   = int(st.get("earnedRuns",    0) or 0)
         outs = int(st.get("outs",          0) or 0)
+        bb   = int(st.get("baseOnBalls",   0) or 0)  # walks allowed
 
         for prop_type, line, actual in [
             ("strikeouts",    PITCHER_LINES["strikeouts"],    ks),
             ("earned_runs",   PITCHER_LINES["earned_runs"],   er),
             ("pitching_outs", PITCHER_LINES["pitching_outs"], outs),
+            ("walks_allowed", PITCHER_LINES["walks_allowed"], bb),
         ]:
             for side, threshold in [("Over", line), ("Under", line)]:
                 if side == "Over":
@@ -199,6 +204,7 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
                     "ev_pct":         3.0,
                     "bet_date":       date_str,
                     "platform":       "historical",
+                    "discord_sent":   True,
                 })
     return rows
 
@@ -217,10 +223,16 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
 
         hits  = int(st.get("hits",       0) or 0)
         tb    = int(st.get("totalBases", 0) or 0)
+        bk    = int(st.get("strikeOuts", 0) or 0)   # batter Ks
+        runs  = int(st.get("runs",       0) or 0)
+        rbi   = int(st.get("rbi",        0) or 0)
+        hrbi  = hits + runs + rbi                    # hits_runs_rbis composite
 
         for prop_type, line, actual in [
-            ("hits",        BATTER_LINES["hits"],        hits),
-            ("total_bases", BATTER_LINES["total_bases"], tb),
+            ("hits",              BATTER_LINES["hits"],              hits),
+            ("total_bases",       BATTER_LINES["total_bases"],       tb),
+            ("hitter_strikeouts", BATTER_LINES["hitter_strikeouts"], bk),
+            ("hits_runs_rbis",    BATTER_LINES["hits_runs_rbis"],    hrbi),
         ]:
             for side, threshold in [("Over", line), ("Under", line)]:
                 if side == "Over":
@@ -242,6 +254,7 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
                     "ev_pct":         3.0,
                     "bet_date":       date_str,
                     "platform":       "historical",
+                    "discord_sent":   True,
                 })
     return rows
 
@@ -254,11 +267,13 @@ INSERT_SQL = """
 INSERT INTO bet_ledger (
     player_name, prop_type, line, side,
     agent_name, status, actual_outcome, actual_result,
-    profit_loss, model_prob, ev_pct, bet_date, platform
+    profit_loss, model_prob, ev_pct, bet_date, platform,
+    discord_sent
 ) VALUES (
     %(player_name)s, %(prop_type)s, %(line)s, %(side)s,
     %(agent_name)s, %(status)s, %(actual_outcome)s, %(actual_result)s,
-    %(profit_loss)s, %(model_prob)s, %(ev_pct)s, %(bet_date)s, %(platform)s
+    %(profit_loss)s, %(model_prob)s, %(ev_pct)s, %(bet_date)s, %(platform)s,
+    %(discord_sent)s
 )
 ON CONFLICT DO NOTHING
 """

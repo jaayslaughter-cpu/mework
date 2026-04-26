@@ -1197,70 +1197,90 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     # ── Tier 1: The Odds API (only if key is set) ──────────────────────────
     key = os.getenv("ODDS_API_KEY", "")
     if key:
+        # Skip entirely if we know quota is exhausted — check Redis backoff flag
+        _quota_backoff_key = "odds_api_quota_backoff"
         try:
-            resp = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
-                params={"apiKey": key, "regions": "us", "markets": "h2h,totals,spreads"},
-                timeout=20,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data:
-                    remaining = resp.headers.get("x-requests-remaining", "?")
-                    logger.info("[OddsAPI] %d games fetched. Quota remaining: %s", len(data), remaining)
-                    # Cache quota to Redis so bug_checker can read it without a live API call
+            _in_backoff = _redis().get(_quota_backoff_key)
+        except Exception:
+            _in_backoff = None
+
+        if _in_backoff:
+            logger.debug("[OddsAPI] Quota backoff active — skipping API call, using fallback")
+        else:
+            try:
+                resp = requests.get(
+                    f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
+                    params={"apiKey": key, "regions": "us", "markets": "h2h,totals,spreads"},
+                    timeout=20,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data:
+                        remaining = resp.headers.get("x-requests-remaining", "?")
+                        logger.info("[OddsAPI] %d games fetched. Quota remaining: %s", len(data), remaining)
+                        # Cache quota to Redis so bug_checker can read it without a live API call
+                        try:
+                            _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
+                        except Exception:
+                            pass
+                        # FIX: Real-time Discord alert when quota drops below threshold
+                        # Dedup: alert fires at most once per hour via Redis TTL key
+                        try:
+                            _remaining_int = int(remaining)
+                            if _remaining_int < 50:
+                                _alert_key = "odds_api_alert_critical"
+                                _already_alerted = _redis().get(_alert_key)
+                                if not _already_alerted:
+                                    from DiscordAlertService import discord_alert  # noqa: PLC0415
+                                    discord_alert._post({
+                                        "embeds": [{
+                                            "title": "🚨 Odds API Quota Critical",
+                                            "description": (
+                                                f"**{_remaining_int} requests remaining** — "
+                                                "switching to free ESPN fallback on next failure.\n"
+                                                "Add ODDS_API_KEY_2 to Railway or reduce scrape frequency."
+                                            ),
+                                            "color": 0xE74C3C,
+                                        }]
+                                    })
+                                    _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                    logger.warning("[OddsAPI] CRITICAL quota: %d remaining — Discord alerted", _remaining_int)
+                            elif _remaining_int < 200:
+                                _alert_key = "odds_api_alert_low"
+                                _already_alerted = _redis().get(_alert_key)
+                                if not _already_alerted:
+                                    from DiscordAlertService import discord_alert  # noqa: PLC0415
+                                    discord_alert._post({
+                                        "embeds": [{
+                                            "title": "⚠️ Odds API Quota Low",
+                                            "description": (
+                                                f"**{_remaining_int} requests remaining** — "
+                                                "monitor usage. Bug checker will flag at next 10 AM run."
+                                            ),
+                                            "color": 0xF39C12,
+                                        }]
+                                    })
+                                    _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                    logger.warning("[OddsAPI] Low quota: %d remaining — Discord alerted", _remaining_int)
+                        except Exception:
+                            pass  # never block on alert failure
+                        return data
+                elif resp.status_code in (401, 403, 429):
+                    # Quota exhausted or key invalid — set 6-hour Redis backoff so we stop
+                    # hammering the API every 15s and burning any remaining requests.
                     try:
-                        _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
+                        _redis().set(_quota_backoff_key, "1", ex=21600)  # 6 hours
+                        logger.warning(
+                            "[OddsAPI] HTTP %d — quota exhausted or key invalid. "
+                            "6-hour backoff set. Switching to free fallback.",
+                            resp.status_code,
+                        )
                     except Exception:
-                        pass
-                    # FIX: Real-time Discord alert when quota drops below threshold
-                    # Dedup: alert fires at most once per hour via Redis TTL key
-                    try:
-                        _remaining_int = int(remaining)
-                        if _remaining_int < 50:
-                            _alert_key = "odds_api_alert_critical"
-                            _already_alerted = _redis().get(_alert_key)
-                            if not _already_alerted:
-                                from DiscordAlertService import discord_alert  # noqa: PLC0415
-                                discord_alert._post({
-                                    "embeds": [{
-                                        "title": "🚨 Odds API Quota Critical",
-                                        "description": (
-                                            f"**{_remaining_int} requests remaining** — "
-                                            "switching to free ESPN fallback on next failure.\n"
-                                            "Add ODDS_API_KEY_2 to Railway or reduce scrape frequency."
-                                        ),
-                                        "color": 0xE74C3C,
-                                    }]
-                                })
-                                _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
-                                logger.warning("[OddsAPI] CRITICAL quota: %d remaining — Discord alerted", _remaining_int)
-                        elif _remaining_int < 200:
-                            _alert_key = "odds_api_alert_low"
-                            _already_alerted = _redis().get(_alert_key)
-                            if not _already_alerted:
-                                from DiscordAlertService import discord_alert  # noqa: PLC0415
-                                discord_alert._post({
-                                    "embeds": [{
-                                        "title": "⚠️ Odds API Quota Low",
-                                        "description": (
-                                            f"**{_remaining_int} requests remaining** — "
-                                            "monitor usage. Bug checker will flag at next 10 AM run."
-                                        ),
-                                        "color": 0xF39C12,
-                                    }]
-                                })
-                                _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
-                                logger.warning("[OddsAPI] Low quota: %d remaining — Discord alerted", _remaining_int)
-                    except Exception:
-                        pass  # never block on alert failure
-                    return data
-            elif resp.status_code in (401, 403, 422, 429):
-                logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
-            else:
-                logger.warning("[OddsAPI] HTTP %d — switching to free fallback", resp.status_code)
-        except Exception as e:
-            logger.warning("[OddsAPI] Request failed (%s) — switching to free fallback", e)
+                        logger.warning("[OddsAPI] HTTP %d — quota exhausted or key invalid, switching to free fallback", resp.status_code)
+                else:
+                    logger.warning("[OddsAPI] HTTP %d — switching to free fallback", resp.status_code)
+            except Exception as e:
+                logger.warning("[OddsAPI] Request failed (%s) — switching to free fallback", e)
 
     # ── Tier 2: DraftEdge free projections ────────────────────────────────
     try:
@@ -2088,31 +2108,75 @@ def run_data_hub_tasklet() -> None:
         # FIX Bug 8: fetch real Statcast CSW% / SwStr% / xFIP for today's probable starters
         # via pybaseball (free, no key). Populates pitch_arsenal so XGBoost feature slots
         # 4-5 (shadow_whiff, zone_mult) get real data instead of hardcoded 0.25 defaults.
+        # FIX: Only attempt once per day — FanGraphs 403s are persistent within a day,
+        # so retrying every 15s wastes cycles. Cache result in Redis for 20 hours.
         _statcast_arsenal: list[dict] = []
+        _fg_cache_key = f"fg_arsenal_{_today_pt().strftime('%Y-%m-%d')}"
         try:
-            import pybaseball as _pyb  # noqa: PLC0415
-            _pyb.cache.enable()
-            _today_yr = _today_pt().year
-            # Fetch season-to-date pitcher stats (CSW%, SwStr%, xFIP, K%)
-            _fg_pitchers = _pyb.pitching_stats(_today_yr, qual=1)  # qual=1 → any pitcher with ≥1 IP
-            if _fg_pitchers is not None and not _fg_pitchers.empty:
-                _cols_wanted = ["Name", "CSW%", "SwStr%", "xFIP", "K%", "BB%", "WHIP", "ERA"]
-                _cols_avail  = [c for c in _cols_wanted if c in _fg_pitchers.columns]
-                for _, _row in _fg_pitchers[_cols_avail].iterrows():
-                    _entry: dict = {"player": str(_row.get("Name", ""))}
-                    if "CSW%" in _row:   _entry["csw_pct"]   = float(_row["CSW%"]  or 0) / 100
-                    if "SwStr%" in _row: _entry["swstr_pct"] = float(_row["SwStr%"] or 0) / 100
-                    if "xFIP" in _row:   _entry["xfip"]      = float(_row["xFIP"]  or 4.0)
-                    if "K%" in _row:     _entry["k_rate"]    = float(_row["K%"]    or 0) / 100
-                    if "BB%" in _row:    _entry["bb_rate"]   = float(_row["BB%"]   or 0) / 100
-                    if "WHIP" in _row:   _entry["whip"]      = float(_row["WHIP"]  or 1.3)
-                    if "ERA" in _row:    _entry["era"]       = float(_row["ERA"]   or 4.0)
-                    if len(_entry) > 1:
-                        _statcast_arsenal.append(_entry)
-                logger.info("[DataHub] Statcast/FG arsenal: %d pitchers loaded (CSW%%, SwStr%%)",
-                            len(_statcast_arsenal))
-        except Exception as _sc_err:
-            logger.info("[DataHub] pybaseball arsenal fetch skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
+            _fg_cached = _redis().get(_fg_cache_key)
+        except Exception:
+            _fg_cached = None
+
+        if _fg_cached:
+            try:
+                import json as _json_fg  # noqa: PLC0415
+                _statcast_arsenal = _json_fg.loads(_fg_cached)
+                logger.debug("[DataHub] pybaseball arsenal loaded from Redis cache (%d pitchers).", len(_statcast_arsenal))
+            except Exception:
+                _statcast_arsenal = []
+        else:
+            # Check if we already had a 403 failure today — skip if so
+            _fg_blocked_key = f"fg_arsenal_blocked_{_today_pt().strftime('%Y-%m-%d')}"
+            try:
+                _fg_blocked = _redis().get(_fg_blocked_key)
+            except Exception:
+                _fg_blocked = None
+
+            if _fg_blocked:
+                logger.debug("[DataHub] pybaseball arsenal skipped — FanGraphs 403 block active today.")
+            else:
+                try:
+                    import pybaseball as _pyb  # noqa: PLC0415
+                    _pyb.cache.enable()
+                    _today_yr = _today_pt().year
+                    # Fetch season-to-date pitcher stats (CSW%, SwStr%, xFIP, K%)
+                    _fg_pitchers = _pyb.pitching_stats(_today_yr, qual=1)  # qual=1 → any pitcher with ≥1 IP
+                    if _fg_pitchers is not None and not _fg_pitchers.empty:
+                        _cols_wanted = ["Name", "CSW%", "SwStr%", "xFIP", "K%", "BB%", "WHIP", "ERA"]
+                        _cols_avail  = [c for c in _cols_wanted if c in _fg_pitchers.columns]
+                        for _, _row in _fg_pitchers[_cols_avail].iterrows():
+                            _entry: dict = {"player": str(_row.get("Name", ""))}
+                            if "CSW%" in _row:   _entry["csw_pct"]   = float(_row["CSW%"]  or 0) / 100
+                            if "SwStr%" in _row: _entry["swstr_pct"] = float(_row["SwStr%"] or 0) / 100
+                            if "xFIP" in _row:   _entry["xfip"]      = float(_row["xFIP"]  or 4.0)
+                            if "K%" in _row:     _entry["k_rate"]    = float(_row["K%"]    or 0) / 100
+                            if "BB%" in _row:    _entry["bb_rate"]   = float(_row["BB%"]   or 0) / 100
+                            if "WHIP" in _row:   _entry["whip"]      = float(_row["WHIP"]  or 1.3)
+                            if "ERA" in _row:    _entry["era"]       = float(_row["ERA"]   or 4.0)
+                            if len(_entry) > 1:
+                                _statcast_arsenal.append(_entry)
+                        logger.info("[DataHub] Statcast/FG arsenal: %d pitchers loaded (CSW%%, SwStr%%)",
+                                    len(_statcast_arsenal))
+                        # Cache successful result for 20 hours
+                        try:
+                            import json as _json_fg  # noqa: PLC0415
+                            _redis().set(_fg_cache_key, _json_fg.dumps(_statcast_arsenal), ex=72000)
+                        except Exception:
+                            pass
+                except Exception as _sc_err:
+                    _sc_err_str = str(_sc_err)
+                    if "403" in _sc_err_str or "status code 403" in _sc_err_str.lower():
+                        # FanGraphs is blocking us today — set a daily block flag so we stop retrying
+                        try:
+                            _redis().set(_fg_blocked_key, "1", ex=72000)  # 20 hours
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[DataHub] pybaseball arsenal fetch blocked (FanGraphs 403). "
+                            "Daily retry suppressed — feature slots 4-5 will use defaults."
+                        )
+                    else:
+                        logger.info("[DataHub] pybaseball arsenal fetch skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
 
         physics = {
             "pitch_arsenal":  _statcast_arsenal,  # FIX Bug 8: real CSW%/SwStr% from pybaseball
