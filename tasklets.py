@@ -5140,12 +5140,38 @@ def run_agent_tasklet() -> bool:
     logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
                 _entry_now.hour, _entry_now.minute)
 
-    # ── Send-window clock gate — only dispatch picks 11:00 AM–12:00 PM PT ────────
+    # ── Dynamic send-window gate — open 9:00 AM PT, close 30 min before first pitch ─
+    # Mirrors orchestrator.py gate logic exactly (pure HH:MM string comparison).
     _pt_now = _entry_now
-    if not (11 <= _pt_now.hour < 12):
-        logger.info("[AgentTasklet] Outside 11 AM–12 PM PT send window (%02d:%02d PT) — skipping cycle.",
+    _open_pt  = _pt_now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if _pt_now < _open_pt:
+        logger.info("[AgentTasklet] Before 9:00 AM PT open (%02d:%02d PT) — skipping cycle.",
                     _pt_now.hour, _pt_now.minute)
         return
+
+    # Compute cutoff from hub game_times (game_time_pt = "HH:MM" PT string)
+    _now_str     = f"{_pt_now.hour:02d}:{_pt_now.minute:02d}"
+    _game_times  = hub.get("context", {}).get("game_times", {})
+    _earliest_pt = None
+    for _ev in (_game_times.values() if isinstance(_game_times, dict) else _game_times):
+        _gtp = (_ev.get("game_time_pt", "") if isinstance(_ev, dict) else "")
+        if len(_gtp) == 5 and _gtp >= "09:00":
+            if _earliest_pt is None or _gtp < _earliest_pt:
+                _earliest_pt = _gtp
+
+    if _earliest_pt:
+        _h, _m = int(_earliest_pt[:2]), int(_earliest_pt[3:])
+        _tot   = _h * 60 + _m - 30
+        _cutoff = f"{_tot // 60:02d}:{_tot % 60:02d}"
+    else:
+        _cutoff = "12:30"   # fallback ceiling if no game time data in hub
+
+    if _now_str >= _cutoff:
+        logger.info("[AgentTasklet] Past cutoff %s PT (earliest pitch %s) — skipping cycle.",
+                    _cutoff, _earliest_pt or "unknown")
+        return
+
+    logger.info("[AgentTasklet] Inside dispatch window (now=%s, cutoff=%s PT).", _now_str, _cutoff)
 
     # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
     # at 3 AM when there are no games. Uses hub game_states (set by DataHubTasklet)
