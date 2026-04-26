@@ -3361,6 +3361,62 @@ class _F5Agent(_BaseAgent):
         ttop_woba  = min(0.050, ttop_woba * arsenal_scale + pitch_tail)
         return round(ttop_woba / 0.030 * 2.5, 2)  # ~0.030 wOBA ≈ 2.5pp
 
+    # ── Handedness K-rate adjustment table (pp) ───────────────────────────
+    # Source: BaseballBettingEdge PLATOON_K_DELTA
+    # Rows = pitcher_hand, cols = batter_hand.  Positive = K-over more likely.
+    # (L,L) = +2.0 : lefty batters have hardest time reading same-hand stuff.
+    # (L,R) = −1.5 : righties handle lefties better at the league level.
+    _PLATOON_K_DELTA: dict = {
+        ("R", "R"): +0.5,
+        ("R", "L"): -1.0,
+        ("L", "R"): -1.5,
+        ("L", "L"): +2.0,
+    }
+
+    @staticmethod
+    def _swstr_career_delta_adj(current_swstr: float,
+                                career_swstr: float,
+                                n_starts: int) -> float:
+        """Career-relative SwStr% delta → K9 probability adjustment (pp).
+        Source: BaseballBettingEdge calc_swstr_delta_k9().
+        Bayesian dampening: weight = n_starts / (n_starts + 10).
+          3 starts → 23% weight | 10 → 50% | 20 → 67%.
+        Positive return = pitcher above career baseline → K-over boost.
+        scale: 0.01 SwStr% delta × 30 = 0.30 K9 ≈ 1 pp per ~3% SwStr gap.
+        """
+        if n_starts <= 0:
+            return 0.0
+        weight    = n_starts / (n_starts + 10.0)
+        raw_delta = (current_swstr - career_swstr) * 30.0
+        return round(raw_delta * weight, 2)
+
+    @staticmethod
+    def _bayesian_opp_k(obs_k_rate: float,
+                        n_games: int,
+                        league_avg: float = 0.227) -> float:
+        """Bayesian shrinkage of opposing lineup K rate toward league average.
+        Source: BaseballBettingEdge bayesian_opp_k().
+        adj = (games × obs_k + 50 × league_avg) / (games + 50).
+          8 games  → 14% observed weight (heavy shrinkage early season).
+          30 games → 38% observed weight.
+          81 games → 62% observed weight (majority season, more trust).
+        Returns regressed K rate (0–1).
+        """
+        n = max(n_games, 0)
+        return (n * obs_k_rate + 50.0 * league_avg) / (n + 50.0)
+
+    @staticmethod
+    def _platoon_k_adj(pitcher_hand: str,
+                       lineup_hand: str,
+                       platoon_k_delta: dict) -> float:
+        """Per-start K% adjustment by pitcher × lineup dominant handedness.
+        Source: BaseballBettingEdge PLATOON_K_DELTA.
+        Positive = K-over more likely.
+        """
+        p = (pitcher_hand.upper() or "R")[:1]
+        b = (lineup_hand.upper() or "R")[:1]
+        return platoon_k_delta.get((p, b), 0.0)
+
     def evaluate(self, prop: dict) -> dict | None:
         """Pitcher performance props (K, outs, earned runs, hits allowed).
         Renamed from F5Agent — Underdog/PrizePicks don't offer F5 markets.
@@ -3386,6 +3442,49 @@ class _F5Agent(_BaseAgent):
             model_prob = min(model_prob + 3.0, 95.0)
         elif csw < 0.23:
             model_prob = max(model_prob - 2.0, 30.0)
+
+        # ── Career SwStr% delta (BBEdge calc_swstr_delta_k9) ─────────────────
+        # Compares current season SwStr% to pitcher's career baseline.
+        # career_swstr_pct comes from fangraphs_layer or prop enrichment;
+        # defaults to 0.115 (MLB average) when unavailable.
+        # Cap to ±3 pp to prevent runaway adjustments on small samples.
+        if prop_type == "strikeouts":
+            _cur_swstr    = float(prop.get("swstr_pct", 0.0) or 0.0)
+            _career_swstr = float(prop.get("career_swstr_pct",
+                                           prop.get("_career_swstr", 0.115)) or 0.115)
+            _n_starts     = int(prop.get("_n_starts", 10) or 10)
+            if _cur_swstr > 0:
+                _swstr_delta = self._swstr_career_delta_adj(
+                    _cur_swstr, _career_swstr, _n_starts)
+                _swstr_delta = max(-3.0, min(3.0, _swstr_delta))
+                model_prob   = max(5.0, min(95.0, model_prob + _swstr_delta))
+
+        # ── Bayesian opponent K-rate (BBEdge bayesian_opp_k) ─────────────────
+        # Regresses opposing lineup K% toward 22.7% league avg by games played.
+        # Early season (8 games) → 14% observed weight; by 81 games → 62%.
+        # Adjustment: each 1% K-rate delta ≈ 0.8 pp (empirical from BBEdge).
+        # Cap to ±3 pp.
+        if prop_type == "strikeouts":
+            _opp_k_raw  = float(prop.get("opp_k_rate",
+                                         prop.get("_opp_team_k_pct", 0.227)) or 0.227)
+            _opp_games  = int(prop.get("_opp_games_played",
+                                       prop.get("_season_games", 30)) or 30)
+            _adj_opp_k  = self._bayesian_opp_k(_opp_k_raw, _opp_games)
+            _opp_k_pp   = max(-3.0, min(3.0, (_adj_opp_k - 0.227) * 80.0))
+            model_prob  = max(5.0, min(95.0, model_prob + _opp_k_pp))
+
+        # ── Platoon K-rate adjustment (BBEdge PLATOON_K_DELTA) ───────────────
+        # Uses pitcher hand × lineup dominant hand to apply per-start K% delta.
+        # pitcher_hand / _pitcher_hand from prop enrichment (default R).
+        # _lineup_dominant_hand from lineup_chase_layer or batter_hand fallback.
+        if prop_type == "strikeouts":
+            _p_hand      = str(prop.get("pitcher_hand",
+                                        prop.get("_pitcher_hand", "R")) or "R")
+            _lineup_hand = str(prop.get("_lineup_dominant_hand",
+                                        prop.get("batter_hand", "R")) or "R")
+            _plat_adj    = self._platoon_k_adj(_p_hand, _lineup_hand,
+                                               self._PLATOON_K_DELTA)
+            model_prob   = max(5.0, min(95.0, model_prob + _plat_adj))
 
         # Pitcher type cluster nudge (set by prop_enrichment_layer)
         # Power pitchers get extra K-over bias on top of raw CSW%;
