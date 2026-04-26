@@ -590,6 +590,39 @@ class MarcelLayer:
                     logger.warning("[Marcel] statsapi fallback returned no leaders — Marcel disabled.")
             except Exception as _me:
                 logger.warning("[Marcel] statsapi fallback exception: %s — Marcel disabled.", _me)
+
+            # ── Batter fallback: mlb_stats_layer season-to-date stats ────────
+            # Mirrors the pitcher fallback above. Marcel batter output needs:
+            # k_pct, bb_pct, hr_pa, woba, iso — all derivable from MLB Stats API.
+            # mlb_stats_layer._parse_batter() already computes all of these.
+            try:
+                from mlb_stats_layer import _BATTER_CACHE as _mlb_bat_cache  # noqa: PLC0415
+                from mlb_stats_layer import load as _mlb_load                # noqa: PLC0415
+                _mlb_load()
+                if _mlb_bat_cache:
+                    _batter_mapped: dict = {}
+                    for _nm, _bd in _mlb_bat_cache.items():
+                        _hr_total = float(_bd.get("hr_total", 0) or 0)
+                        _hits     = float(_bd.get("hits_total", 0) or 0)
+                        _pa_est   = max(_hits * 3.5, 1.0)   # rough PA proxy from hits
+                        _hr_pa    = _hr_total / _pa_est if _pa_est > 0 else 0.033 / 162
+                        _batter_mapped[_nm] = {
+                            "k_pct":  _bd.get("k_pct",   0.223),
+                            "bb_pct": _bd.get("bb_pct",  0.087),
+                            "hr_pa":  round(_hr_pa, 5),
+                            "woba":   _bd.get("woba",    0.308),
+                            "iso":    _bd.get("iso",     0.150),
+                            "_source": "mlb_stats_api_fallback",
+                        }
+                    if _batter_mapped:
+                        self._batters = _batter_mapped
+                        logger.info(
+                            "[Marcel] Loaded %d batters from mlb_stats_layer fallback.",
+                            len(_batter_mapped),
+                        )
+            except Exception as _mbe:
+                logger.warning("[Marcel] mlb_stats_layer batter fallback failed: %s", _mbe)
+
             return
 
         self._batters  = _build_batter_projections(batter_rows,  self._year)

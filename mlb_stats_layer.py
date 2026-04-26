@@ -426,6 +426,9 @@ def _parse_batter(raw: dict, name: str) -> dict[str, float]:
     ab   = _safe(raw.get("atBats"),     1)
     pa   = _safe(raw.get("plateAppearances"), max(ab + bb, 1))
     g    = _safe(raw.get("games"),      1)
+    r    = _safe(raw.get("runs"),       0)
+    rbi  = _safe(raw.get("rbi"),        0)
+    sb   = _safe(raw.get("stolenBases"),0)
 
     s1b = max(0.0, h - hr - d2 - d3)
     iso = slg - avg
@@ -449,6 +452,13 @@ def _parse_batter(raw: dict, name: str) -> dict[str, float]:
     # xbh_per_game
     xbh_pg = (d2 + d3 + hr) / g if g > 0 else bd["xbh_per_game"]
 
+    # Per-game counting stat rates — used by steamer_layer as FanGraphs-free fallback.
+    # Season-to-date actuals are a valid proxy for the same player same season.
+    r_pg   = r   / g if g > 0 else 0.65   # league avg ~0.65 R/G per lineup spot
+    rbi_pg = rbi / g if g > 0 else 0.55
+    sb_pg  = sb  / g if g > 0 else 0.08
+    hr_pg  = hr  / g if g > 0 else 0.033
+
     # o_swing and z_contact: not available from MLB API — use league defaults
     # These are Statcast-only metrics; we flag them so agents know they're defaults
     return {
@@ -467,6 +477,14 @@ def _parse_batter(raw: dict, name: str) -> dict[str, float]:
         "obp":          round(obp, 4),
         "hr_total":     int(hr),
         "hits_total":   int(h),
+        # Counting stat per-game rates (steamer_layer FanGraphs fallback)
+        "r_pg":         round(r_pg,   4),
+        "rbi_pg":       round(rbi_pg, 4),
+        "sb_pg":        round(sb_pg,  4),
+        "hr_pg":        round(hr_pg,  4),
+        "r_total":      int(r),
+        "rbi_total":    int(rbi),
+        "sb_total":     int(sb),
         "_source":      "mlb_stats_api",
         "_name":        name,
     }

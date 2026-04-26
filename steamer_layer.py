@@ -321,7 +321,38 @@ def get_steamer(player_name: str) -> dict | None:
     Return Steamer projection dict for a player, or None if not found.
 
     Keys: avg, obp, slg, r, rbi, sb, hr, pa, g, r_pg, rbi_pg, sb_pg, hr_pg
+
+    Source priority:
+      1. mlb_stats_layer — MLB Stats API season-to-date actuals (always works on Railway).
+         r_pg/rbi_pg/sb_pg/hr_pg are derived from season totals / games played.
+         Same player, same season — no FanGraphs dependency.
+      2. FanGraphs Steamer cache — used if mlb_stats_layer returns no data yet
+         (e.g. very early season before enough PA accumulate).
     """
+    # ── Primary: MLB Stats API via mlb_stats_layer ───────────────────────
+    try:
+        from mlb_stats_layer import get_batter as _mlb_get_batter  # noqa: PLC0415
+        mlb = _mlb_get_batter(player_name)
+        if mlb and mlb.get("r_pg") is not None:
+            # Map mlb_stats_layer output to steamer schema
+            return {
+                "avg":    mlb.get("avg",   _LG["avg"]),
+                "obp":    mlb.get("obp",   _LG["obp"]),
+                "slg":    mlb.get("slg",   _LG["slg"]),
+                "r":      mlb.get("r_total",   0),
+                "rbi":    mlb.get("rbi_total",  0),
+                "sb":     mlb.get("sb_total",   0),
+                "hr":     mlb.get("hr_total",   0),
+                "r_pg":   mlb.get("r_pg",   _LG["r_pg"]),
+                "rbi_pg": mlb.get("rbi_pg", _LG["rbi_pg"]),
+                "sb_pg":  mlb.get("sb_pg",  _LG["sb_pg"]),
+                "hr_pg":  mlb.get("hr_pg",  _LG["hr_pg"]),
+                "_source": "mlb_stats_api",
+            }
+    except Exception:
+        pass  # fall through to FanGraphs cache
+
+    # ── Fallback: FanGraphs Steamer cache ────────────────────────────────
     cache = _get_cache()
     key = _norm(player_name)
     proj = cache.get(key)
