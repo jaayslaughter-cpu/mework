@@ -582,6 +582,15 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
 
     Returns [] if Bearer token not set (graceful degradation — _SharpFadeAgent falls
     through to game-level Path 2 automatically).
+
+    Fetch strategy (in order):
+      1. _next/data endpoint with dynamically resolved build_id
+         - Resolves build_id from AN homepage HTML (regex "buildId")
+         - Caches successful build_id in Redis for 12h to avoid homepage fetch every cycle
+         - Falls through to step 2 on any 404 / schema mismatch
+      2. REST API fallback: api.actionnetwork.com/web/v2/leagues/1/projections/available
+         - Stable endpoint, no build_id, never goes stale after AN deploys
+         - Different schema — remapped to same output format
     """
     global _PROP_PROJ_CACHE, _PROP_PROJ_CACHE_DATE
 
@@ -599,43 +608,109 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
         )
         return []
 
-    # Fetch build_id dynamically from AN homepage to survive deploys
-    build_id = _BUILD_ID
+    result = _fetch_prop_proj_nextdata(token, date_str)
+    if not result:
+        logger.info("[ActionNetwork] _next/data path empty — trying REST API fallback")
+        result = _fetch_prop_proj_rest(token)
+
+    if result:
+        _PROP_PROJ_CACHE      = result
+        _PROP_PROJ_CACHE_DATE = date_str
+        rlm_count = sum(1 for r in result if r["rlm_signal"])
+        logger.info(
+            "[ActionNetwork] PRO prop projections: %d player props | %d with RLM signal",
+            len(result), rlm_count,
+        )
+    return result
+
+
+def _resolve_build_id() -> str:
+    """
+    Resolve the current AN Next.js build_id.
+
+    Priority:
+      1. Redis cache (key: an_build_id) — set for 12h on successful resolution.
+         Prevents a homepage fetch every 15s when the build_id is stable.
+      2. Live homepage scrape — regex "buildId" from HTML.
+      3. Module-level fallback constant _BUILD_ID.
+    """
+    # Try Redis first
     try:
+        import redis as _redis_lib  # noqa: PLC0415
+        _r_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PRIVATE_URL", "")
+        if _r_url:
+            _rc = _redis_lib.from_url(_r_url, decode_responses=True)
+            cached = _rc.get("an_build_id")
+            if cached:
+                return cached
+    except Exception:
+        pass
+
+    # Scrape homepage
+    try:
+        import re as _re  # noqa: PLC0415
         _home = requests.get(
             "https://www.actionnetwork.com/mlb/prop-projections",
             headers=_PUBLIC_HEADERS,
             timeout=10,
         )
-        import re as _re
         _m = _re.search(r'"buildId"\s*:\s*"([^"]+)"', _home.text)
         if _m:
             build_id = _m.group(1)
+            # Cache in Redis for 12 hours
+            try:
+                _r_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PRIVATE_URL", "")
+                if _r_url:
+                    _rc = _redis_lib.from_url(_r_url, decode_responses=True)
+                    _rc.set("an_build_id", build_id, ex=43200)
+            except Exception:
+                pass
+            return build_id
     except Exception:
-        pass  # fall back to cached _BUILD_ID
+        pass
 
+    return _BUILD_ID
+
+
+def _fetch_prop_proj_nextdata(token: str, date_str: str) -> list[dict]:
+    """
+    Fetch prop projections via the Next.js _next/data endpoint.
+    Returns [] on any failure so caller can try the REST fallback.
+    """
+    build_id = _resolve_build_id()
     url = _PROP_PROJ_URL.format(build_id=build_id)
-    headers = {
-        **_NEXT_HEADERS,
-        "Authorization": f"Bearer {token}",
-    }
+    headers = {**_NEXT_HEADERS, "Authorization": f"Bearer {token}"}
 
     try:
         resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code == 404:
+            # Build ID is stale — clear Redis cache so next call re-scrapes
+            logger.warning(
+                "[ActionNetwork] _next/data 404 — build_id '%s' stale after AN deploy. "
+                "Clearing Redis cache, falling through to REST API.",
+                build_id,
+            )
+            try:
+                import redis as _redis_lib  # noqa: PLC0415
+                _r_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PRIVATE_URL", "")
+                if _r_url:
+                    _redis_lib.from_url(_r_url, decode_responses=True).delete("an_build_id")
+            except Exception:
+                pass
+            return []
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        logger.warning("[ActionNetwork] prop projections fetch failed: %s", exc)
+        logger.warning("[ActionNetwork] _next/data fetch failed: %s", exc)
         return []
 
-    # ── Navigate to playerProps ───────────────────────────────────────────────
     try:
         proj_resp = (
             data["pageProps"]["initialProjectionsConfig"]
                 ["projectionsResponse"]["response"]
         )
     except (KeyError, TypeError) as exc:
-        logger.warning("[ActionNetwork] prop projections unexpected schema: %s", exc)
+        logger.warning("[ActionNetwork] _next/data unexpected schema: %s — trying REST fallback", exc)
         return []
 
     player_props = proj_resp.get("playerProps", [])
@@ -648,7 +723,6 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
         )
         return []
 
-    # ── Build player_id → name lookup ────────────────────────────────────────
     _id_to_name: dict[int, str] = {}
     for p in players_meta:
         if isinstance(p, dict) and p.get("id"):
@@ -656,37 +730,89 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
             lname = p.get("last_name", "")
             _id_to_name[p["id"]] = f"{fname} {lname}".strip()
 
-    # ── Parse each playerProp entry ───────────────────────────────────────────
+    return _parse_prop_proj_entries(player_props, _id_to_name)
+
+
+def _fetch_prop_proj_rest(token: str) -> list[dict]:
+    """
+    Fallback: fetch prop projections from the stable REST API endpoint.
+    No build_id — never goes stale after AN deploys.
+
+    Endpoint: api.actionnetwork.com/web/v2/leagues/1/projections/available
+    Schema differs from _next/data — remapped to same output format.
+    """
+    headers = {**_PRO_REST_HEADERS, "Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.get(_LIVE_PROJ_URL, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("[ActionNetwork] REST API fallback also failed: %s", exc)
+        return []
+
+    raw = data.get("data", data) if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        return []
+
+    result: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        market_id  = entry.get("market_id") or entry.get("market_type", "")
+        prop_type  = _MARKET_TO_PROP_TYPE.get(str(market_id), "")
+        if not prop_type:
+            continue
+        player_id   = entry.get("player_id")
+        player_name = entry.get("player_name", entry.get("player", ""))
+        line        = entry.get("value") or entry.get("line")
+        over_t      = int(entry.get("over_ticket_pct",  entry.get("ticket_pct",  50)) or 50)
+        over_m      = int(entry.get("over_money_pct",   entry.get("money_pct",   50)) or 50)
+        under_t     = 100 - over_t
+        under_m     = 100 - over_m
+        rlm, rlm_dir = _rlm_signal(over_t, over_m)
+        result.append({
+            "player":           player_name,
+            "player_id":        player_id,
+            "prop_type":        prop_type,
+            "an_market_key":    str(market_id),
+            "line":             line,
+            "over_ticket_pct":  over_t,
+            "over_money_pct":   over_m,
+            "under_ticket_pct": under_t,
+            "under_money_pct":  under_m,
+            "ticket_pct":       over_t,
+            "money_pct":        over_m,
+            "rlm_signal":       rlm,
+            "rlm_direction":    rlm_dir,
+            "source":           "action_network_rest",
+        })
+    return result
+
+
+def _parse_prop_proj_entries(player_props: list, id_to_name: dict) -> list[dict]:
+    """Parse raw playerProps list from _next/data into output format."""
     result: list[dict] = []
     for pp in player_props:
         if not isinstance(pp, dict):
             continue
-
         market_key = pp.get("type", pp.get("market_type", ""))
         prop_type  = _MARKET_TO_PROP_TYPE.get(market_key, market_key)
         if not prop_type:
             continue
-
-        player_id  = pp.get("player_id") or pp.get("id")
-        player_name = _id_to_name.get(player_id, pp.get("player_name", ""))
+        player_id   = pp.get("player_id") or pp.get("id")
+        player_name = id_to_name.get(player_id, pp.get("player_name", ""))
         line        = pp.get("value") or pp.get("line")
-
-        # ── Extract ticket%/money% ────────────────────────────────────────────
-        bet_info   = pp.get("bet_info", {})
-        over_t     = int(bet_info.get("over_tickets",  {}).get("percent", 50) or 50)
-        over_m     = int(bet_info.get("over_money",    {}).get("percent", 50) or 50)
-        under_t    = int(bet_info.get("under_tickets", {}).get("percent", 50) or 50)
-        under_m    = int(bet_info.get("under_money",   {}).get("percent", 50) or 50)
-
-        # Fallback: some AN responses use flat ticket_pct / money_pct keys
+        bet_info    = pp.get("bet_info", {})
+        over_t      = int(bet_info.get("over_tickets",  {}).get("percent", 50) or 50)
+        over_m      = int(bet_info.get("over_money",    {}).get("percent", 50) or 50)
+        under_t     = int(bet_info.get("under_tickets", {}).get("percent", 50) or 50)
+        under_m     = int(bet_info.get("under_money",   {}).get("percent", 50) or 50)
         if over_t == 50 and under_t == 50:
             over_t  = int(pp.get("over_ticket_pct",  pp.get("ticket_pct",  50)) or 50)
             over_m  = int(pp.get("over_money_pct",   pp.get("money_pct",   50)) or 50)
             under_t = 100 - over_t
             under_m = 100 - over_m
-
         rlm, rlm_dir = _rlm_signal(over_t, over_m)
-
         result.append({
             "player":           player_name,
             "player_id":        player_id,
@@ -697,22 +823,12 @@ def fetch_mlb_prop_projections(date_str: str | None = None) -> list[dict]:
             "over_money_pct":   over_m,
             "under_ticket_pct": under_t,
             "under_money_pct":  under_m,
-            # _SharpFadeAgent compatibility aliases
             "ticket_pct":       over_t,
             "money_pct":        over_m,
             "rlm_signal":       rlm,
             "rlm_direction":    rlm_dir,
             "source":           "action_network_pro",
         })
-
-    _PROP_PROJ_CACHE      = result
-    _PROP_PROJ_CACHE_DATE = date_str
-
-    rlm_count = sum(1 for r in result if r["rlm_signal"])
-    logger.info(
-        "[ActionNetwork] PRO prop projections: %d player props | %d with RLM signal",
-        len(result), rlm_count,
-    )
     return result
 
 
