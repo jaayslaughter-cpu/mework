@@ -2105,78 +2105,57 @@ def run_data_hub_tasklet() -> None:
             except Exception as _gpe:
                 logger.warning("[DataHub] game_prediction_layer failed: %s", _gpe)
 
-        # FIX Bug 8: fetch real Statcast CSW% / SwStr% / xFIP for today's probable starters
-        # via pybaseball (free, no key). Populates pitch_arsenal so XGBoost feature slots
-        # 4-5 (shadow_whiff, zone_mult) get real data instead of hardcoded 0.25 defaults.
-        # FIX: Only attempt once per day — FanGraphs 403s are persistent within a day,
-        # so retrying every 15s wastes cycles. Cache result in Redis for 20 hours.
+        # FIX Bug 8 (revised): Build pitch_arsenal for today's probable starters using
+        # fangraphs_layer.get_pitcher(), which delegates through a compliant, Railway-safe
+        # pipeline:
+        #   Tier 0 — MLB Stats API (statsapi.mlb.com) + Baseball Savant
+        #            Derives csw_pct, swstr_pct, xfip, k_pct, bb_pct, era, whip
+        #            from season stats. No FanGraphs scraping, no Cloudflare risk.
+        #   Tier 1 — FanGraphs /api/leaders/major-league/data (different endpoint
+        #            from the blocked leaders-legacy.aspx; may work on Railway)
+        #   Tier 2 — ScraperAPI proxy (if SCRAPERAPI_KEY is set)
+        #   Cache  — disk (/tmp) + Postgres fg_cache — survives Railway restarts
+        #   Guard  — daily-attempt flag prevents retry loops on 403 days
+        #
+        # This replaces the old pybaseball call, which hit fangraphs.com/leaders-legacy.aspx
+        # and was permanently 403-blocked on Railway (logged every 15 s as a warning).
         _statcast_arsenal: list[dict] = []
-        _fg_cache_key = f"fg_arsenal_{_today_pt().strftime('%Y-%m-%d')}"
         try:
-            _fg_cached = _redis().get(_fg_cache_key)
-        except Exception:
-            _fg_cached = None
+            from fangraphs_layer import get_pitcher as _fg_get_pitcher  # noqa: PLC0415
 
-        if _fg_cached:
-            try:
-                import json as _json_fg  # noqa: PLC0415
-                _statcast_arsenal = _json_fg.loads(_fg_cached)
-                logger.debug("[DataHub] pybaseball arsenal loaded from Redis cache (%d pitchers).", len(_statcast_arsenal))
-            except Exception:
-                _statcast_arsenal = []
-        else:
-            # Check if we already had a 403 failure today — skip if so
-            _fg_blocked_key = f"fg_arsenal_blocked_{_today_pt().strftime('%Y-%m-%d')}"
-            try:
-                _fg_blocked = _redis().get(_fg_blocked_key)
-            except Exception:
-                _fg_blocked = None
+            # Probable starters are already in the hub at this point
+            _prob_starters = physics_ctx.get("projected_starters") if "physics_ctx" in dir() else []
+            if not _prob_starters:
+                _prob_starters = _fetch_mlb_probable_starters()
 
-            if _fg_blocked:
-                logger.debug("[DataHub] pybaseball arsenal skipped — FanGraphs 403 block active today.")
+            for _sp in _prob_starters:
+                _sp_name = _sp.get("full_name", "")
+                if not _sp_name:
+                    continue
+                _sp_stats = _fg_get_pitcher(_sp_name)
+                if not _sp_stats:
+                    continue
+                _entry: dict = {"player": _sp_name}
+                if _sp_stats.get("csw_pct"):   _entry["csw_pct"]   = float(_sp_stats["csw_pct"])
+                if _sp_stats.get("swstr_pct"): _entry["swstr_pct"] = float(_sp_stats["swstr_pct"])
+                if _sp_stats.get("xfip"):      _entry["xfip"]      = float(_sp_stats["xfip"])
+                if _sp_stats.get("k_pct"):     _entry["k_rate"]    = float(_sp_stats["k_pct"])
+                if _sp_stats.get("bb_pct"):    _entry["bb_rate"]   = float(_sp_stats["bb_pct"])
+                if _sp_stats.get("whip"):      _entry["whip"]      = float(_sp_stats["whip"])
+                if _sp_stats.get("era"):       _entry["era"]        = float(_sp_stats["era"])
+                if len(_entry) > 1:
+                    _statcast_arsenal.append(_entry)
+
+            if _statcast_arsenal:
+                _src = _statcast_arsenal[0].get("_source", "mlb_stats_api") if _statcast_arsenal else "mlb_stats_api"
+                logger.info(
+                    "[DataHub] Pitcher arsenal: %d starters loaded via fangraphs_layer (source: %s)",
+                    len(_statcast_arsenal), _sp_stats.get("_source", "mlb_stats_api") if _sp_stats else "unknown",
+                )
             else:
-                try:
-                    import pybaseball as _pyb  # noqa: PLC0415
-                    _pyb.cache.enable()
-                    _today_yr = _today_pt().year
-                    # Fetch season-to-date pitcher stats (CSW%, SwStr%, xFIP, K%)
-                    _fg_pitchers = _pyb.pitching_stats(_today_yr, qual=1)  # qual=1 → any pitcher with ≥1 IP
-                    if _fg_pitchers is not None and not _fg_pitchers.empty:
-                        _cols_wanted = ["Name", "CSW%", "SwStr%", "xFIP", "K%", "BB%", "WHIP", "ERA"]
-                        _cols_avail  = [c for c in _cols_wanted if c in _fg_pitchers.columns]
-                        for _, _row in _fg_pitchers[_cols_avail].iterrows():
-                            _entry: dict = {"player": str(_row.get("Name", ""))}
-                            if "CSW%" in _row:   _entry["csw_pct"]   = float(_row["CSW%"]  or 0) / 100
-                            if "SwStr%" in _row: _entry["swstr_pct"] = float(_row["SwStr%"] or 0) / 100
-                            if "xFIP" in _row:   _entry["xfip"]      = float(_row["xFIP"]  or 4.0)
-                            if "K%" in _row:     _entry["k_rate"]    = float(_row["K%"]    or 0) / 100
-                            if "BB%" in _row:    _entry["bb_rate"]   = float(_row["BB%"]   or 0) / 100
-                            if "WHIP" in _row:   _entry["whip"]      = float(_row["WHIP"]  or 1.3)
-                            if "ERA" in _row:    _entry["era"]       = float(_row["ERA"]   or 4.0)
-                            if len(_entry) > 1:
-                                _statcast_arsenal.append(_entry)
-                        logger.info("[DataHub] Statcast/FG arsenal: %d pitchers loaded (CSW%%, SwStr%%)",
-                                    len(_statcast_arsenal))
-                        # Cache successful result for 20 hours
-                        try:
-                            import json as _json_fg  # noqa: PLC0415
-                            _redis().set(_fg_cache_key, _json_fg.dumps(_statcast_arsenal), ex=72000)
-                        except Exception:
-                            pass
-                except Exception as _sc_err:
-                    _sc_err_str = str(_sc_err)
-                    if "403" in _sc_err_str or "status code 403" in _sc_err_str.lower():
-                        # FanGraphs is blocking us today — set a daily block flag so we stop retrying
-                        try:
-                            _redis().set(_fg_blocked_key, "1", ex=72000)  # 20 hours
-                        except Exception:
-                            pass
-                        logger.info(
-                            "[DataHub] pybaseball arsenal fetch blocked (FanGraphs 403). "
-                            "Daily retry suppressed — feature slots 4-5 will use defaults."
-                        )
-                    else:
-                        logger.info("[DataHub] pybaseball arsenal fetch skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
+                logger.debug("[DataHub] Pitcher arsenal: no starters matched — feature slots 4-5 using defaults.")
+        except Exception as _sc_err:
+            logger.debug("[DataHub] Pitcher arsenal skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
 
         physics = {
             "pitch_arsenal":  _statcast_arsenal,  # FIX Bug 8: real CSW%/SwStr% from pybaseball
