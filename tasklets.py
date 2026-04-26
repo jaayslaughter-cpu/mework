@@ -3406,6 +3406,110 @@ class _F5Agent(_BaseAgent):
         return (n * obs_k_rate + 50.0 * league_avg) / (n + 50.0)
 
     @staticmethod
+    def _lambda_gap_cap(model_prob: float, k_line: float,
+                        max_gap: float = 2.5) -> float:
+        """
+        Cap model_prob at the probability implied by λ = k_line ± max_gap.
+
+        BBEdge data: picks where |model_lambda − k_line| ≥ 3 win at only 21%.
+        The model over-reaches on extreme K predictions generating inflated EVs
+        that don't reflect real edge. Default gap = 2.5 (half-K headroom past
+        the empirical 3-K failure threshold).
+
+        Uses normal approximation to Poisson + math.erf (stdlib, no scipy).
+        Returns capped probability in 0–100 scale. No-op when gap ≤ max_gap.
+        """
+        import math
+
+        if k_line <= 0:
+            return model_prob
+
+        def _norm_inv(pp: float) -> float:
+            """Abramowitz & Stegun 26.2.17 rational approx for Φ⁻¹(p)."""
+            if pp <= 0.0:
+                return -8.0
+            if pp >= 1.0:
+                return 8.0
+            if pp > 0.5:
+                return -_norm_inv(1.0 - pp)
+            t = math.sqrt(-2.0 * math.log(pp))
+            c0, c1, c2 = 2.515517, 0.802853, 0.010328
+            d1, d2, d3 = 1.432788, 0.189269, 0.001308
+            return -(t - (c0 + t * (c1 + t * c2)) /
+                        (1.0 + t * (d1 + t * (d2 + t * d3))))
+
+        p = max(0.001, min(0.999, model_prob / 100.0))
+        z = _norm_inv(p)
+        lam_approx = k_line + 0.5 + z * math.sqrt(max(k_line, 1.0))
+
+        gap = lam_approx - k_line
+        if abs(gap) <= max_gap:
+            return model_prob
+
+        lam_capped = max(0.5, k_line + math.copysign(max_gap, gap))
+        z_cap = (lam_capped - k_line - 0.5) / math.sqrt(max(lam_capped, 1.0))
+        p_cap = 0.5 * (1.0 + math.erf(z_cap / math.sqrt(2.0)))
+        return round(max(5.0, min(95.0, p_cap * 100.0)), 2)
+
+    @staticmethod
+    def _line_movement_conf(
+        player: str,
+        prop_type: str,
+        current_line: float,
+        side: str,
+        noise_floor: float = 0.5,
+        full_fade: float = 1.5,
+    ) -> float:
+        """
+        Confidence multiplier (0.0–1.0) based on UD/PP prop-line movement
+        AGAINST the bet direction since the first snapshot of the day.
+
+        Adapted from BBEdge calc_movement_confidence() — uses UD/PP line
+        deltas from line_stream.db (is_opening=1 rows) instead of American
+        odds price deltas. No OddsAPI dependency.
+
+        Line moving UP   (6.5→7.0) is unfavourable for OVER  → penalty
+        Line moving DOWN (6.5→6.0) is unfavourable for UNDER → penalty
+
+        Linear decay: 1.0 at noise_floor (0.5 lines) → 0.0 at full_fade (1.5 lines).
+        Returns 1.0 when line_stream.db is unavailable or no opening row found.
+        """
+        import os, sqlite3 as _sq3, datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        db_path = os.environ.get("LINE_STREAM_DB_PATH", "/app/data/line_stream.db")
+        if not os.path.exists(db_path):
+            return 1.0
+        try:
+            today_pt = _dt.datetime.now(tz=ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+            with _sq3.connect(db_path, timeout=2) as _conn:
+                row = _conn.execute(
+                    """
+                    SELECT line FROM line_snapshots
+                     WHERE game_date = ?
+                       AND is_opening = 1
+                       AND LOWER(player_name) = LOWER(?)
+                       AND prop_type = ?
+                     ORDER BY snapshot_ts ASC
+                     LIMIT 1
+                    """,
+                    (today_pt, player.strip(), prop_type),
+                ).fetchone()
+            if row is None:
+                return 1.0
+
+            delta = current_line - float(row[0])   # + = line went up
+            adverse = max(0.0, delta) if side.upper() == "OVER" else max(0.0, -delta)
+
+            if adverse <= noise_floor:
+                return 1.0
+            if adverse >= full_fade:
+                return 0.0
+            return round(1.0 - (adverse - noise_floor) / (full_fade - noise_floor), 4)
+        except Exception:
+            return 1.0
+
+    @staticmethod
     def _platoon_k_adj(pitcher_hand: str,
                        lineup_hand: str,
                        platoon_k_delta: dict) -> float:
@@ -3485,6 +3589,33 @@ class _F5Agent(_BaseAgent):
             _plat_adj    = self._platoon_k_adj(_p_hand, _lineup_hand,
                                                self._PLATOON_K_DELTA)
             model_prob   = max(5.0, min(95.0, model_prob + _plat_adj))
+
+        # ── MAX_LAMBDA_LINE_GAP cap (BBEdge) ──────────────────────────────────
+        # Picks where model lambda disagrees with K line by ≥3 win at 21%.
+        # Cap model_prob at the probability implied by λ = line ± 2.5.
+        # Applies to strikeouts and pitching_outs props only.
+        if prop_type in ("strikeouts", "pitching_outs"):
+            _k_line = float(prop.get("line", 0) or 0)
+            if _k_line > 0:
+                model_prob = self._lambda_gap_cap(model_prob, _k_line, max_gap=2.5)
+
+        # ── Line-movement confidence (BBEdge adapted) ─────────────────────────
+        # If UD/PP prop line has moved AGAINST the bet direction since
+        # this morning's first snapshot, apply a confidence decay multiplier.
+        # noise_floor = 0.5 lines (half-K movement ignored as routine);
+        # full_fade   = 1.5 lines (1.5-K adverse move kills the pick).
+        # Source: line_stream.db is_opening rows. Returns 1.0 when unavailable.
+        if prop_type in ("strikeouts", "pitching_outs", "hits", "earned_runs",
+                         "hits_allowed", "walks_allowed", "hitter_strikeouts"):
+            _cur_line   = float(prop.get("line", 0) or 0)
+            _bet_side   = prop.get("_pre_side", "OVER")  # side chosen before final gate
+            _move_conf  = self._line_movement_conf(
+                prop.get("player", ""), prop_type, _cur_line, _bet_side)
+            if _move_conf < 1.0:
+                # Apply as a probability drag: shrink edge toward 50% by (1 - conf)
+                _edge      = model_prob - 50.0
+                model_prob = round(50.0 + _edge * _move_conf, 2)
+                model_prob = max(5.0, min(95.0, model_prob))
 
         # Pitcher type cluster nudge (set by prop_enrichment_layer)
         # Power pitchers get extra K-over bias on top of raw CSW%;
