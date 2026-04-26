@@ -354,13 +354,19 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 10:00 AM PT, before the main dispatch window opens at 9 AM."""
+    """Streak pick — runs at 10:00 AM PT, within the main dispatch window (opens 9 AM)."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
-        await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
-        logger.info("[StreakAgent] Pick posted.")
+        result = await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
+        if result:
+            logger.info("[StreakAgent] Pick posted — streak_id=%s picks=%d",
+                        result.get("streak_id"), len(result.get("picks", [])))
+        else:
+            logger.warning("[StreakAgent] run_streak_pick returned None — "
+                           "no qualifying pick today (conf/prob gate, no props, or DB error). "
+                           "Check streak_agent logs above for details.")
     except Exception as exc:
-        logger.warning("[StreakAgent] Failed: %s", exc)
+        logger.error("[StreakAgent] FAILED: %s", exc, exc_info=True)
 
 
 @asynccontextmanager
