@@ -449,11 +449,30 @@ def _american_to_implied(american: int) -> float:
 
 
 def _no_vig(over_american: int, under_american: int) -> tuple[float, float]:
-    """Return (over_fair_prob, under_fair_prob) stripped of vig."""
+    """Return (over_fair_prob, under_fair_prob) stripped of vig.
+    Uses power method (Shin 1993) for asymmetric lines — more accurate than
+    simple additive de-vig, especially when lines are far from -110/-110.
+    Source: mc_upgrades.py devig_power() / baseball-sims confidence_shrinkage.
+    """
     over_imp  = _american_to_implied(over_american)  / 100
     under_imp = _american_to_implied(under_american) / 100
-    juice = over_imp + under_imp
-    return over_imp / juice, under_imp / juice
+    if over_imp <= 0 or under_imp <= 0:
+        return 0.5, 0.5
+    # Power method: find k such that over_imp^(1/k) + under_imp^(1/k) = 1
+    lo, hi = 0.5, 3.0
+    for _ in range(50):
+        k = (lo + hi) / 2.0
+        s = over_imp ** (1.0 / k) + under_imp ** (1.0 / k)
+        if s > 1.0:
+            hi = k
+        else:
+            lo = k
+    k = (lo + hi) / 2.0
+    fair_over  = over_imp  ** (1.0 / k)
+    fair_under = under_imp ** (1.0 / k)
+    # Normalise (should already sum to ~1.0 but floating point safety)
+    total = fair_over + fair_under
+    return fair_over / total, fair_under / total
 
 
 def _kelly_units(edge: float, odds_american: int) -> float:
@@ -3126,6 +3145,26 @@ class _UmpireAgent(_BaseAgent):
 class _F5Agent(_BaseAgent):
     name = "F5Agent"
 
+    @staticmethod
+    def _ttop_penalty(batters_faced: int, pitches_thrown: int, arsenal_size: int = 3) -> float:
+        """
+        Continuous Times-Through-Order Penalty as probability percentage points.
+        Source: Tango/Lichtman, Brill JQAS 2023.
+        Positive return = batter has an advantage (pitcher fading).
+        """
+        ttop_woba = min(0.030, (batters_faced / 27.0) ** 1.4 * 0.030)
+        if arsenal_size <= 1:
+            arsenal_scale = 1.7
+        elif arsenal_size <= 2:
+            arsenal_scale = 1.2
+        elif arsenal_size >= 4:
+            arsenal_scale = 0.8
+        else:
+            arsenal_scale = 1.0
+        pitch_tail = max(0.0, (pitches_thrown - 75) * 0.00015)
+        ttop_woba  = min(0.050, ttop_woba * arsenal_scale + pitch_tail)
+        return round(ttop_woba / 0.030 * 2.5, 2)  # ~0.030 wOBA ≈ 2.5pp
+
     def evaluate(self, prop: dict) -> dict | None:
         """Pitcher performance props (K, outs, earned runs, hits allowed).
         Renamed from F5Agent — Underdog/PrizePicks don't offer F5 markets.
@@ -3168,6 +3207,21 @@ class _F5Agent(_BaseAgent):
         _pc_adj   = float(prop.get("_pitch_count_adj", 0.0))
         if _rest_adj or _pc_adj:
             model_prob = max(5.0, min(95.0, model_prob + _rest_adj + _pc_adj))
+
+        # ── Continuous TTOP decay (Tango/Brill 2023) ──────────────────────
+        # Batters improve each time through the order — adjust pitcher props.
+        # For K-props: pitcher fades → Under gets a boost.
+        # For ER/hits_allowed: pitcher fades → Over gets a boost.
+        _bf      = int(prop.get("_batters_faced", 0) or 0)
+        _pc      = int(prop.get("_pitches_thrown", 0) or 0)
+        _arsenal = int(prop.get("_arsenal_size", 3) or 3)
+        if _bf > 0 or _pc > 0:
+            _ttop_pp = self._ttop_penalty(_bf, _pc, _arsenal)
+            if _ttop_pp > 0.5:
+                if prop_type == "strikeouts":
+                    model_prob = max(5.0, model_prob - _ttop_pp)
+                elif prop_type in ("earned_runs", "hits_allowed"):
+                    model_prob = min(95.0, model_prob + _ttop_pp)
 
         over_odds     = prop.get("over_american",  -110)
         under_odds    = prop.get("under_american", -110)
@@ -3359,14 +3413,45 @@ class _BullpenAgent(_BaseAgent):
 
 class _WeatherAgent(_BaseAgent):
     name = "WeatherAgent"
-    # Note: apply_thermal_correction() from calibration_layer used for HR/total props.
+
+    # Venues with humidors — suppress HR beyond standard park factor
+    _HUMIDOR_VENUES = {"Chase Field", "Coors Field"}
+
+    # Primary outfield compass direction per park (wind along this axis = "out")
+    _OUTFIELD_COMPASS = {
+        "Wrigley Field":  90,   # E toward Lake Michigan
+        "Coors Field":   270,   # W (Rocky Mountain breeze)
+        "Fenway Park":    90,   # E to right/center
+        "Oracle Park":   315,   # NW to McCovey Cove
+    }
+    _COMPASS_DEG = {
+        "N":0,"NNE":22.5,"NE":45,"ENE":67.5,"E":90,"ESE":112.5,
+        "SE":135,"SSE":157.5,"S":180,"SSW":202.5,"SW":225,"WSW":247.5,
+        "W":270,"WNW":292.5,"NW":315,"NNW":337.5,
+    }
+
+    @staticmethod
+    def _wind_along_spray(wind_spd: float, wind_dir: str, stadium: str,
+                          outfield_compass: dict, compass_deg: dict) -> float:
+        """Signed wind speed along primary batted-ball spray axis.
+        Positive = out (HR boost), negative = in (HR suppression).
+        Source: mc_upgrades.py build_weather_multipliers().
+        """
+        import math as _m
+        if not wind_dir or wind_spd <= 0:
+            return 0.0
+        out_deg  = outfield_compass.get(stadium, 180.0)   # default: S = out to CF
+        wind_deg = compass_deg.get(wind_dir.strip().upper(), 0.0)
+        diff_rad = _m.radians(wind_deg - out_deg)
+        return wind_spd * _m.cos(diff_rad)
 
     def evaluate(self, prop: dict) -> dict | None:
-        """Wind/park/temperature combos for power hitter props.
-        Wind data from prop dict (set by prop_enrichment_layer) — no hub lookup needed.
-        Dome games are skipped (no wind effect indoors).
+        """Physics-grade weather adjustments for power and contact props.
+        Temperature: +0.8%/°F HR, +0.4%/°F runs (Nathan 2017 / mc_upgrades v1).
+        Wind: along-spray-axis signed component (mc_upgrades Phase 1A).
+        Humidor parks: HR suppression applied on top of park factor.
+        Dome games: skip entirely.
         """
-        # Skip dome games — prop_enrichment_layer sets is_dome
         if prop.get("is_dome"):
             return None
 
@@ -3374,64 +3459,81 @@ class _WeatherAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         venue     = prop.get("venue", "")
 
-        # Get wind from enriched prop dict first (fastest), then hub weather list
+        # Resolve wind and temperature from enriched prop or hub weather list
         wind_mph = float(prop.get("_wind_speed", 0) or 0)
         wind_dir = str(prop.get("_wind_direction", "") or "")
+        temp_f   = float(prop.get("_temp_f", 72) or 72)
 
-        # Fallback: scan hub weather list
         if wind_mph == 0:
             for w in self.hub.get("context", {}).get("weather", []):
                 if not isinstance(w, dict):
                     continue
                 team = prop.get("team", "")
-                if (venue and venue.lower() in str(w).lower()) or                    (team and team.lower() in str(w.get("team","")).lower()):
+                if (venue and venue.lower() in str(w).lower()) or \
+                   (team and team.lower() in str(w.get("team", "")).lower()):
                     wind_mph = float(w.get("wind_speed_mph", w.get("wind_speed", 0)) or 0)
                     wind_dir = str(w.get("wind_direction", "") or "")
+                    temp_f   = float(w.get("temp_f", 72) or 72)
                     break
 
-        _POWER_PROPS  = {"home_runs", "total_bases", "hits_runs_rbis",
-                         "fantasy_hitter", "fantasy_pitcher"}
+        _POWER_PROPS   = {"home_runs", "total_bases", "hits_runs_rbis",
+                          "fantasy_hitter", "fantasy_pitcher"}
         _CONTACT_PROPS = {"hits", "rbis", "runs"}
-
         pt_norm = _norm_stat(prop_type)
 
-        # Wind blowing out ≥10mph → boost OVER on power props
-        if wind_mph >= 10 and "out" in wind_dir.lower() and pt_norm in _POWER_PROPS:
-            model_prob = self._model_prob(player, prop_type, prop=prop)
-            # Scale boost: 10mph=+4pp, 15mph=+6pp, 20mph+=+8pp
-            boost = min(8.0, (wind_mph - 10) * 0.4 + 4.0)
-            model_prob = min(model_prob + boost, 95.0)
-            over_odds  = prop.get("over_american", -110)
-            implied    = _american_to_implied(over_odds) / 100
-            ev_pct     = (model_prob / 100 - implied) / implied
-            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-                return self._build_bet(prop, "OVER", model_prob,
-                                       implied * 100, ev_pct * 100)
+        if pt_norm not in (_POWER_PROPS | _CONTACT_PROPS):
+            return None
 
-        # Wind blowing IN ≥10mph → boost UNDER on power props
-        if wind_mph >= 10 and "in" in wind_dir.lower() and "out" not in wind_dir.lower() and pt_norm in _POWER_PROPS:
-            model_prob = self._model_prob(player, prop_type, prop=prop)
-            boost      = min(8.0, (wind_mph - 10) * 0.4 + 4.0)
-            under_prob = min(100.0 - model_prob + boost, 95.0)
-            under_odds = prop.get("under_american", -110)
-            implied    = _american_to_implied(under_odds) / 100
-            ev_pct     = (under_prob / 100 - implied) / implied
-            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-                return self._build_bet(prop, "UNDER", under_prob,
-                                       implied * 100, ev_pct * 100)
+        model_prob = self._model_prob(player, prop_type, prop=prop)
 
-        # Hot temperature (>85°F) → boost all hitter props
-        temp_f = float(prop.get("_temp_f", 72) or 72)
-        if temp_f >= 85 and pt_norm in (_POWER_PROPS | _CONTACT_PROPS):
-            model_prob = self._model_prob(player, prop_type, prop=prop)
-            model_prob = min(model_prob + 3.0, 95.0)
-            over_odds  = prop.get("over_american", -110)
-            implied    = _american_to_implied(over_odds) / 100
-            ev_pct     = (model_prob / 100 - implied) / implied
-            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-                return self._build_bet(prop, "OVER", model_prob,
-                                       implied * 100, ev_pct * 100)
+        # ── Temperature adjustment (delta from 70°F baseline) ──────────────
+        # Nathan 2017: +1.0%/°F HR; empirical compromise 0.8%/°F HR, 0.4%/°F runs
+        temp_f     = max(20.0, min(110.0, temp_f))
+        temp_delta = temp_f - 70.0
+        if pt_norm in _POWER_PROPS:
+            # HR/power: +0.8%/°F above 70°F
+            temp_boost = temp_delta * 0.8
+        else:
+            # Contact: milder, +0.4%/°F
+            temp_boost = temp_delta * 0.4
 
+        # ── Wind: signed component along spray axis ─────────────────────────
+        stadium    = _TEAM_TO_STADIUM.get(prop.get("team", ""), venue)
+        along      = self._wind_along_spray(
+            wind_mph, wind_dir, stadium,
+            self._OUTFIELD_COMPASS, self._COMPASS_DEG,
+        )
+        # +3.5 ft carry per mph outward → ~+0.4%pp HR prob per mph out
+        wind_hr_boost = along * 0.4  # positive = out (boost), negative = in (suppress)
+
+        # ── Humidor suppression ─────────────────────────────────────────────
+        humidor_adj = -3.0 if stadium in self._HUMIDOR_VENUES else 0.0
+
+        # ── Total adjustment ────────────────────────────────────────────────
+        total_adj = temp_boost + wind_hr_boost + humidor_adj
+
+        # Apply: power props get full adjustment; contact props get halved
+        if pt_norm in _CONTACT_PROPS:
+            total_adj *= 0.5
+
+        if abs(total_adj) < 1.0:
+            return None  # sub-1pp adjustment — not worth betting on weather alone
+
+        side      = "OVER" if total_adj > 0 else "UNDER"
+        adj_prob  = model_prob + total_adj if side == "OVER" else (100.0 - model_prob) + abs(total_adj)
+        adj_prob  = max(5.0, min(95.0, adj_prob))
+
+        if side == "OVER":
+            odds    = prop.get("over_american", -110)
+            implied = _american_to_implied(odds) / 100
+            ev_pct  = (adj_prob / 100 - implied) / implied
+        else:
+            odds    = prop.get("under_american", -110)
+            implied = _american_to_implied(odds) / 100
+            ev_pct  = (adj_prob / 100 - implied) / implied
+
+        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+            return self._build_bet(prop, side, adj_prob, implied * 100, ev_pct * 100)
         return None
 
 
