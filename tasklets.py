@@ -3583,6 +3583,7 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
             # for pitching outs and hitter strikeout props
             "pitching_outs":     "pitcher_outs",
             "hitter_strikeouts": "batter_strikeouts",
+            "hits_allowed":      "pitcher_hits_allowed",
         }
         market_key = _PT_TO_MARKET.get(prop_type, prop_type)
 
