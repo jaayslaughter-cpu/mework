@@ -227,24 +227,54 @@ async def job_agents():
     global _last_agent_run
     loop = asyncio.get_event_loop()
 
-    # ── Post-window duplicate guard ─────────────────────────────────────────────
-    # If it's after 12 PM PT (outside the dispatch window) AND dispatch already
-    # ran today (dispatch_date_log has today's date), skip entirely.
-    # Prevents Railway restarts from re-sending already-sent picks.
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
 
-    # ── Pre-window gate: don't burn CPU before 11 AM PT ──────────────────────
-    if _pt_ck.hour < 11:
+    # ── Dynamic dispatch window ───────────────────────────────────────────────
+    # Open : 9:00 AM PT (props are posted, no games live yet)
+    # Close: 30 min before the earliest scheduled first pitch of the day
+    # Fallback ceiling: 12:30 PM PT if game time data isn't in the hub yet
+    #
+    # Why not 11 AM: Sunday east-coast first pitch is 10:05 AM PT. The old
+    # 11 AM floor meant agents fired AFTER games started — LockGate correctly
+    # killed every prop for those games, leaving nothing to send.
+    _open_pt  = _pt_ck.replace(hour=9, minute=0, second=0, microsecond=0)
+    if _pt_ck < _open_pt:
         logger.debug(
-            "[orchestrator] Pre-window cycle at %02d:%02d PT — dispatch window opens 11 AM. Skipping.",
+            "[orchestrator] Pre-window at %02d:%02d PT — opens 9:00 AM. Skipping.",
             _pt_ck.hour, _pt_ck.minute,
         )
         return
 
-    if _pt_ck.hour >= 12:
+    # Compute cutoff from hub game_times (game_time_pt = "HH:MM" PT string)
+    _hub_snap  = read_hub()
+    _game_times = (_hub_snap.get("context") or {}).get("game_times", {})
+    _earliest_pt_str = None
+    for _e in _game_times.values():
+        _gtp = _e.get("game_time_pt", "")
+        if not _gtp:
+            continue
+        if _e.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
+            continue
+        if _earliest_pt_str is None or _gtp < _earliest_pt_str:
+            _earliest_pt_str = _gtp
+
+    if _earliest_pt_str:
+        _fh, _fm   = int(_earliest_pt_str[:2]), int(_earliest_pt_str[3:])
+        _cut_total  = _fh * 60 + _fm - 30
+        _cutoff_pt  = _pt_ck.replace(
+            hour=_cut_total // 60, minute=_cut_total % 60,
+            second=0, microsecond=0,
+        )
+    else:
+        _cutoff_pt = _pt_ck.replace(hour=12, minute=30, second=0, microsecond=0)
+
+    if _pt_ck >= _cutoff_pt:
         logger.debug(
-            "[orchestrator] Post-window at %02d:%02d PT — dispatch locked until 11 AM tomorrow. Skipping.",
+            "[orchestrator] Post-window at %02d:%02d PT — cutoff %02d:%02d PT "
+            "(first pitch %s PT). Skipping.",
             _pt_ck.hour, _pt_ck.minute,
+            _cutoff_pt.hour, _cutoff_pt.minute,
+            _earliest_pt_str or "unknown",
         )
         return
 
@@ -324,13 +354,62 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 10:00 AM PT, before the main 11 AM dispatch window."""
+    """Streak pick — runs at 10:00 AM PT, within the 9 AM dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
         logger.info("[StreakAgent] Pick posted.")
     except Exception as exc:
         logger.warning("[StreakAgent] Failed: %s", exc)
+
+
+async def job_predict_plus_prefetch():
+    """9:55 AM PT daily — pre-compute Predict+ scores for today's starting pitchers.
+
+    PredictPlusLayer.prefetch() fetches prior-season Savant pitch data per pitcher,
+    fits a LogisticRegression full/baseline model pair, and normalises the resulting
+    surprise ratio into a Predict+ score (mean=100, SD=10).  The weekly on-disk cache
+    means Railway restarts within the same ISO week are free (< 1 ms).
+
+    Runs 5 minutes before the dispatch window opens so _get_predict_plus_adj() in
+    prop enrichment always finds a warm cache.  Falls back gracefully if scikit-learn
+    is unavailable or the hub has no pitcher props yet.
+    """
+    try:
+        from predict_plus_layer import PredictPlusLayer  # noqa: PLC0415
+        hub_snap  = read_hub()
+        props     = hub_snap.get("player_props", [])
+
+        # Collect unique starting pitchers that have mlbam_id stamped by enrichment.
+        _PITCHER_PROP_TYPES = frozenset({
+            "strikeouts", "pitching_outs", "hits_allowed",
+            "earned_runs", "walks_allowed",
+        })
+        seen: set[int] = set()
+        pitcher_ids: list[tuple[int, str]] = []
+        for p in props:
+            if p.get("prop_type") not in _PITCHER_PROP_TYPES:
+                continue
+            mid = int(p.get("mlbam_id") or p.get("pitcher_mlbam_id") or 0)
+            if mid <= 0 or mid in seen:
+                continue
+            seen.add(mid)
+            pitcher_ids.append((mid, str(p.get("player_name", "unknown"))))
+
+        if not pitcher_ids:
+            logger.info("[PredictPlus] No pitcher props in hub — prefetch skipped.")
+            return
+
+        logger.info(
+            "[PredictPlus] Prefetching scores for %d unique pitchers...", len(pitcher_ids)
+        )
+        layer = PredictPlusLayer()
+        loop  = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: layer.prefetch(pitcher_ids))
+        logger.info("[PredictPlus] Prefetch complete — %d pitchers cached.", len(pitcher_ids))
+
+    except Exception as exc:
+        logger.warning("[PredictPlus] Prefetch failed (non-fatal): %s", exc)
 
 
 @asynccontextmanager
@@ -368,14 +447,23 @@ async def lifespan(_app: FastAPI):
         id="bug_checker",
     )
 
-    # ── Streak pick — 10:00 AM PT (before main 11 AM dispatch window) ────────
+    # ── Predict+ prefetch — 9:55 AM PT (5 min before dispatch window opens) ─────
+    # Pre-computes pitcher unpredictability scores so _get_predict_plus_adj()
+    # in prop enrichment always finds a warm weekly cache.
+    scheduler.add_job(
+        job_predict_plus_prefetch,
+        CronTrigger(hour=9, minute=55, timezone="America/Los_Angeles"),
+        id="predict_plus_prefetch",
+    )
+
+    # ── Streak pick — 10:00 AM PT (within main dispatch window, before first pitch) ──
     scheduler.add_job(
         job_streak,
         CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
         id="streak",
     )
 
-    # ── Log watcher summary — 10:10 AM PT (after streak, before main dispatch) ─
+    # ── Log watcher summary — 10:10 AM PT (after streak, within dispatch window) ──
     scheduler.add_job(
         job_log_watcher,
         CronTrigger(hour=10, minute=10, timezone="America/Los_Angeles"),
@@ -399,6 +487,7 @@ async def lifespan(_app: FastAPI):
 
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
+        "predict_plus_prefetch@9:55AM, streak@10:00AM, log_watcher@10:10AM, "
         "line_stream@30min, leaderboard@monthly, "
         "backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
     )
