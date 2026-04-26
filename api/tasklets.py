@@ -2158,7 +2158,7 @@ def run_data_hub_tasklet() -> None:
             logger.debug("[DataHub] Pitcher arsenal skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
 
         physics = {
-            "pitch_arsenal":  _statcast_arsenal,  # CSW%/SwStr%/xFIP via fangraphs_layer (MLB Stats API + Savant)
+            "pitch_arsenal":  _statcast_arsenal,  # FIX Bug 8: real CSW%/SwStr% from pybaseball
             "advanced_stats": [],
             "bvp":            [],
             "batted_ball":    [],
@@ -3192,9 +3192,12 @@ class _FadeAgent(_BaseAgent):
     def evaluate(self, prop: dict) -> dict | None:
         """Fades heavy public action using SportsBettingDime real BET%/MONEY% data.
 
-        Threshold: 65% public tickets on Over → fade signal.
+        Fades BOTH directions:
+          - Public ≥65% Over tickets  → fade to Under
+          - Public ≤35% Over tickets  → public is heavy Under → fade to Over
         """
         SBD_THRESHOLD = 65.0
+        SBD_UNDER_THRESHOLD = 35.0  # mirror: public heavy Under = fade to Over
         market   = self.hub.get("market", {})
         pub_data = market.get("public_betting", {})
         player   = prop.get("player", "")
@@ -3214,18 +3217,30 @@ class _FadeAgent(_BaseAgent):
             player, team, prop_type, game_df, prop_df, threshold=SBD_THRESHOLD
         )
 
-        if pub_pct < SBD_THRESHOLD:
-            return None
-
         model_prob = self._model_prob(player, prop_type, prop=prop)
-        fade_boost = 6.0 if signal_src == "player_prop" else 5.0
-        fade_prob  = 100 - model_prob + fade_boost
-        under_odds = prop.get("under_american", -110)
-        implied    = _american_to_implied(under_odds) / 100
-        ev_pct     = (fade_prob / 100 - implied) / implied
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "UNDER", fade_prob,
-                                   implied * 100, ev_pct * 100)
+
+        # ── Fade heavy public Over → bet Under ───────────────────────────────
+        if pub_pct >= SBD_THRESHOLD:
+            fade_boost = 6.0 if signal_src == "player_prop" else 5.0
+            fade_prob  = 100 - model_prob + fade_boost
+            under_odds = prop.get("under_american", -110)
+            implied    = _american_to_implied(under_odds) / 100
+            ev_pct     = (fade_prob / 100 - implied) / implied
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, "UNDER", fade_prob,
+                                       implied * 100, ev_pct * 100)
+
+        # ── Fade heavy public Under → bet Over ───────────────────────────────
+        if pub_pct <= SBD_UNDER_THRESHOLD and pub_pct > 0:
+            fade_boost = 6.0 if signal_src == "player_prop" else 5.0
+            fade_prob  = model_prob + fade_boost
+            over_odds  = prop.get("over_american", -110)
+            implied    = _american_to_implied(over_odds) / 100
+            ev_pct     = (fade_prob / 100 - implied) / implied
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, "OVER", fade_prob,
+                                       implied * 100, ev_pct * 100)
+
         return None
 
 
@@ -4575,80 +4590,22 @@ def run_agent_tasklet() -> bool:
     logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
                 _entry_now.hour, _entry_now.minute)
 
-    # ── Dynamic dispatch window ───────────────────────────────────────────────
-    # Open : 9:00 AM PT
-    # Close: 30 min before earliest scheduled first pitch (from hub game_times)
-    # Fallback ceiling: 12:30 PM PT
-    _pt_now   = _entry_now
-    _open_pt  = _pt_now.replace(hour=9, minute=0, second=0, microsecond=0)
-    if _pt_now < _open_pt:
-        logger.info(
-            "[AgentTasklet] Pre-window at %02d:%02d PT — opens 9:00 AM. Skipping.",
-            _pt_now.hour, _pt_now.minute,
-        )
+    # ── Send-window clock gate — only dispatch picks 11:00 AM–12:00 PM PT ────────
+    _pt_now = _entry_now
+    if not (11 <= _pt_now.hour < 12):
+        logger.info("[AgentTasklet] Outside 11 AM–12 PM PT send window (%02d:%02d PT) — skipping cycle.",
+                    _pt_now.hour, _pt_now.minute)
         return
 
-    _game_times_w    = (hub.get("context") or {}).get("game_times", {})
-    _earliest_pt_str = None
-    for _e in _game_times_w.values():
-        _gtp = _e.get("game_time_pt", "")
-        if not _gtp or _e.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
-            continue
-        if _earliest_pt_str is None or _gtp < _earliest_pt_str:
-            _earliest_pt_str = _gtp
-
-    if _earliest_pt_str:
-        _fh, _fm   = int(_earliest_pt_str[:2]), int(_earliest_pt_str[3:])
-        _cut_total  = _fh * 60 + _fm - 30
-        _cutoff_pt  = _pt_now.replace(
-            hour=_cut_total // 60, minute=_cut_total % 60,
-            second=0, microsecond=0,
-        )
-    else:
-        _cutoff_pt = _pt_now.replace(hour=12, minute=30, second=0, microsecond=0)
-
-    if _pt_now >= _cutoff_pt:
-        logger.warning(
-            "[AgentTasklet] Window closed at %02d:%02d PT — cutoff %02d:%02d PT "
-            "(first pitch %s PT). Picks should have gone out earlier this window.",
-            _pt_now.hour, _pt_now.minute,
-            _cutoff_pt.hour, _cutoff_pt.minute,
-            _earliest_pt_str or "unknown",
-        )
-        return
-
-    # ── Game-state guard ─────────────────────────────────────────────────────
-    # If hub shows all-Final/Postponed, force a live ESPN fetch before giving up —
-    # the hub may be stale (ESPN rolls the schedule at a non-deterministic time).
-    _gs           = hub.get("game_states", {})
+    # ── Game-state time gate — skip cycles when no MLB action is live/upcoming ──
+    # at 3 AM when there are no games. Uses hub game_states (set by DataHubTasklet)
+    _gs = hub.get("game_states", {})
     _active_states = {"Scheduled", "InProgress", "Live", "Pre-Game", "Warmup", "Delayed"}
-    _has_active   = any(s in _active_states for s in _gs.values())
-    if _gs and not _has_active:
-        logger.warning(
-            "[AgentTasklet] Hub shows all-Final/Postponed at %02d:%02d PT — "
-            "forcing fresh ESPN fetch before skipping.",
-            _pt_now.hour, _pt_now.minute,
-        )
-        try:
-            _fresh = _fetch_espn_games()
-            _fresh_states = {g["Status"] for g in _fresh.values()}
-            _has_active   = any(s in _active_states for s in _fresh_states)
-            if _has_active:
-                logger.info(
-                    "[AgentTasklet] Fresh ESPN found today's schedule %s — proceeding.",
-                    {s: list(_fresh.values()).count(s) for s in _fresh_states},
-                )
-                _gs = {gid: g["Status"] for gid, g in _fresh.items()}
-            else:
-                logger.warning(
-                    "[AgentTasklet] Fresh ESPN also shows no active games %s — "
-                    "no MLB today. Skipping.",
-                    {s: list(_fresh.values()).count(s) for s in _fresh_states},
-                )
-                return
-        except Exception as _espn_exc:
-            logger.warning("[AgentTasklet] Fresh ESPN fetch failed: %s — skipping.", _espn_exc)
-            return
+    _has_active_games = any(s in _active_states for s in _gs.values())
+    if _gs and not _has_active_games:
+        # Games exist in hub but none are active — all Final/Postponed
+        logger.info("[AgentTasklet] No active or upcoming games this cycle (all Final/Postponed) — skipping.")
+        return
 
     # Decision logger — audit trail for every prop evaluation
     _DL = None
