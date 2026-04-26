@@ -2158,7 +2158,7 @@ def run_data_hub_tasklet() -> None:
             logger.debug("[DataHub] Pitcher arsenal skipped: %s — feature slots 4-5 will use defaults.", _sc_err)
 
         physics = {
-            "pitch_arsenal":  _statcast_arsenal,  # FIX Bug 8: real CSW%/SwStr% from pybaseball
+            "pitch_arsenal":  _statcast_arsenal,  # CSW%/SwStr%/xFIP via fangraphs_layer (MLB Stats API + Savant)
             "advanced_stats": [],
             "bvp":            [],
             "batted_ball":    [],
