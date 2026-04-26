@@ -229,54 +229,54 @@ async def job_agents():
 
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
 
-    # ── Dynamic dispatch window ───────────────────────────────────────────────
-    # Open : 9:00 AM PT (props are posted, no games live yet)
-    # Close: 30 min before the earliest scheduled first pitch of the day
-    # Fallback ceiling: 12:30 PM PT if game time data isn't in the hub yet
-    #
-    # Why not 11 AM: Sunday east-coast first pitch is 10:05 AM PT. The old
-    # 11 AM floor meant agents fired AFTER games started — LockGate correctly
-    # killed every prop for those games, leaving nothing to send.
-    _open_pt  = _pt_ck.replace(hour=9, minute=0, second=0, microsecond=0)
-    if _pt_ck < _open_pt:
+    # ── Pre-window gate: don't burn CPU before 9 AM PT ───────────────────────
+    # Window opens at 9 AM PT so props are evaluated well before first pitch.
+    # Sunday east-coast first pitch is ~10:05 AM PT — we need ≥60 min of runway.
+    if _pt_ck.hour < 9:
         logger.debug(
-            "[orchestrator] Pre-window at %02d:%02d PT — opens 9:00 AM. Skipping.",
+            "[orchestrator] Pre-window cycle at %02d:%02d PT — dispatch window opens 9 AM. Skipping.",
             _pt_ck.hour, _pt_ck.minute,
         )
         return
 
-    # Compute cutoff from hub game_times (game_time_pt = "HH:MM" PT string)
-    _hub_snap  = read_hub()
+    # ── Dynamic close: shut down 30 min before first pitch of the day ────────
+    # Reads game_time_pt ("HH:MM" PT) from the hub — set by lock_time_gate.
+    # No UTC conversion needed here. Fallback ceiling: 12:30 PM PT.
+    _hub_snap = read_hub()
     _game_times = (_hub_snap.get("context") or {}).get("game_times", {})
-    _earliest_pt_str = None
-    for _e in _game_times.values():
-        _gtp = _e.get("game_time_pt", "")
-        if not _gtp:
-            continue
-        if _e.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
-            continue
-        if _earliest_pt_str is None or _gtp < _earliest_pt_str:
-            _earliest_pt_str = _gtp
+    _earliest_pt_str = None  # "HH:MM" of first pre-game pitch in PT
+    if _game_times:
+        for _entry in _game_times.values():
+            _gt_pt = _entry.get("game_time_pt", "")
+            if not _gt_pt:
+                continue
+            # Skip already-live or finished games
+            if _entry.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
+                continue
+            if _earliest_pt_str is None or _gt_pt < _earliest_pt_str:
+                _earliest_pt_str = _gt_pt
+
+    _now_hhmm = f"{_pt_ck.hour:02d}:{_pt_ck.minute:02d}"
 
     if _earliest_pt_str:
-        _fh, _fm   = int(_earliest_pt_str[:2]), int(_earliest_pt_str[3:])
-        _cut_total  = _fh * 60 + _fm - 30
-        _cutoff_pt  = _pt_ck.replace(
-            hour=_cut_total // 60, minute=_cut_total % 60,
-            second=0, microsecond=0,
-        )
+        # Subtract 30 min from "HH:MM" string
+        _fh, _fm = int(_earliest_pt_str[:2]), int(_earliest_pt_str[3:])
+        _close_total = _fh * 60 + _fm - 30
+        _close_hhmm  = f"{_close_total // 60:02d}:{_close_total % 60:02d}"
+        if _now_hhmm >= _close_hhmm:
+            logger.debug(
+                "[orchestrator] Post-window at %s PT — first pitch %s PT, cutoff %s PT. Skipping.",
+                _now_hhmm, _earliest_pt_str, _close_hhmm,
+            )
+            return
     else:
-        _cutoff_pt = _pt_ck.replace(hour=12, minute=30, second=0, microsecond=0)
-
-    if _pt_ck >= _cutoff_pt:
-        logger.debug(
-            "[orchestrator] Post-window at %02d:%02d PT — cutoff %02d:%02d PT "
-            "(first pitch %s PT). Skipping.",
-            _pt_ck.hour, _pt_ck.minute,
-            _cutoff_pt.hour, _cutoff_pt.minute,
-            _earliest_pt_str or "unknown",
-        )
-        return
+        # No game time data yet — hard ceiling 12:30 PT
+        if _now_hhmm >= "12:30":
+            logger.debug(
+                "[orchestrator] Post-window at %s PT (no game times, using 12:30 ceiling). Skipping.",
+                _now_hhmm,
+            )
+            return
 
     try:
         logger.info("[orchestrator] Running AgentTasklet...")

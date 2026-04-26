@@ -4575,75 +4575,72 @@ def run_agent_tasklet() -> bool:
     logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
                 _entry_now.hour, _entry_now.minute)
 
-    # ── Dynamic dispatch window ───────────────────────────────────────────────
-    # Open : 9:00 AM PT
-    # Close: 30 min before earliest scheduled first pitch (from hub game_times)
-    # Fallback ceiling: 12:30 PM PT
-    _pt_now   = _entry_now
-    _open_pt  = _pt_now.replace(hour=9, minute=0, second=0, microsecond=0)
-    if _pt_now < _open_pt:
+    _pt_now = _entry_now
+    if _pt_now.hour < 9:
         logger.info(
-            "[AgentTasklet] Pre-window at %02d:%02d PT — opens 9:00 AM. Skipping.",
+            "[AgentTasklet] Pre-window at %02d:%02d PT — opens 9 AM. Skipping.",
             _pt_now.hour, _pt_now.minute,
         )
         return
 
-    _game_times_w    = (hub.get("context") or {}).get("game_times", {})
+    # Determine close time from game_time_pt strings already in hub — no UTC math.
+    _game_times_w = (hub.get("context") or {}).get("game_times", {})
     _earliest_pt_str = None
     for _e in _game_times_w.values():
-        _gtp = _e.get("game_time_pt", "")
-        if not _gtp or _e.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
+        _gt_pt = _e.get("game_time_pt", "")
+        if not _gt_pt or _e.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
             continue
-        if _earliest_pt_str is None or _gtp < _earliest_pt_str:
-            _earliest_pt_str = _gtp
+        if _earliest_pt_str is None or _gt_pt < _earliest_pt_str:
+            _earliest_pt_str = _gt_pt
+
+    _now_hhmm = f"{_pt_now.hour:02d}:{_pt_now.minute:02d}"
 
     if _earliest_pt_str:
-        _fh, _fm   = int(_earliest_pt_str[:2]), int(_earliest_pt_str[3:])
-        _cut_total  = _fh * 60 + _fm - 30
-        _cutoff_pt  = _pt_now.replace(
-            hour=_cut_total // 60, minute=_cut_total % 60,
-            second=0, microsecond=0,
-        )
+        _fh, _fm = int(_earliest_pt_str[:2]), int(_earliest_pt_str[3:])
+        _close_total = _fh * 60 + _fm - 30
+        _close_hhmm  = f"{_close_total // 60:02d}:{_close_total % 60:02d}"
+        if _now_hhmm >= _close_hhmm:
+            logger.warning(
+                "[AgentTasklet] Window closed — now %s PT, first pitch %s PT, cutoff was %s PT. "
+                "Picks should have dispatched earlier this window.",
+                _now_hhmm, _earliest_pt_str, _close_hhmm,
+            )
+            return
     else:
-        _cutoff_pt = _pt_now.replace(hour=12, minute=30, second=0, microsecond=0)
+        # No game_time_pt in hub yet — hard ceiling 12:30 PT
+        if _now_hhmm >= "12:30":
+            logger.warning(
+                "[AgentTasklet] Post-ceiling at %s PT (no game time data). Skipping.", _now_hhmm
+            )
+            return
 
-    if _pt_now >= _cutoff_pt:
-        logger.warning(
-            "[AgentTasklet] Window closed at %02d:%02d PT — cutoff %02d:%02d PT "
-            "(first pitch %s PT). Picks should have gone out earlier this window.",
-            _pt_now.hour, _pt_now.minute,
-            _cutoff_pt.hour, _cutoff_pt.minute,
-            _earliest_pt_str or "unknown",
-        )
-        return
-
-    # ── Game-state guard ─────────────────────────────────────────────────────
-    # If hub shows all-Final/Postponed, force a live ESPN fetch before giving up —
-    # the hub may be stale (ESPN rolls the schedule at a non-deterministic time).
-    _gs           = hub.get("game_states", {})
+    # ── Game-state guard — skip only when genuinely no games today ───────────
+    # If hub shows all-Final/Postponed, force a fresh ESPN fetch before giving up.
+    # The hub may be stale: ESPN rolls the daily schedule at a non-deterministic time.
+    _gs = hub.get("game_states", {})
     _active_states = {"Scheduled", "InProgress", "Live", "Pre-Game", "Warmup", "Delayed"}
-    _has_active   = any(s in _active_states for s in _gs.values())
-    if _gs and not _has_active:
+    _has_active_games = any(s in _active_states for s in _gs.values())
+    if _gs and not _has_active_games:
         logger.warning(
             "[AgentTasklet] Hub shows all-Final/Postponed at %02d:%02d PT — "
             "forcing fresh ESPN fetch before skipping.",
             _pt_now.hour, _pt_now.minute,
         )
         try:
-            _fresh = _fetch_espn_games()
-            _fresh_states = {g["Status"] for g in _fresh.values()}
-            _has_active   = any(s in _active_states for s in _fresh_states)
-            if _has_active:
+            _fresh_games = _fetch_espn_games()
+            _fresh_states = {g["Status"] for g in _fresh_games.values()}
+            _has_active_games = any(s in _active_states for s in _fresh_states)
+            if _has_active_games:
                 logger.info(
-                    "[AgentTasklet] Fresh ESPN found today's schedule %s — proceeding.",
-                    {s: list(_fresh.values()).count(s) for s in _fresh_states},
+                    "[AgentTasklet] Fresh ESPN fetch found today's schedule %s — proceeding.",
+                    {s: list(_fresh_games.values()).count(s) for s in _fresh_states},
                 )
-                _gs = {gid: g["Status"] for gid, g in _fresh.items()}
+                _gs = {gid: g["Status"] for gid, g in _fresh_games.items()}
             else:
                 logger.warning(
                     "[AgentTasklet] Fresh ESPN also shows no active games %s — "
-                    "no MLB today. Skipping.",
-                    {s: list(_fresh.values()).count(s) for s in _fresh_states},
+                    "genuinely no MLB today. Skipping.",
+                    {s: list(_fresh_games.values()).count(s) for s in _fresh_states},
                 )
                 return
         except Exception as _espn_exc:
