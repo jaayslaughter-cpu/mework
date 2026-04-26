@@ -213,19 +213,16 @@ def fetch_game_times_today() -> dict[str, dict]:
 
                 for team, opponent in ((home_team, away_team), (away_team, home_team)):
                     if team:
-                        # Convert UTC game time to PT string "HH:MM" for easy comparison
                         _game_time_pt_str = ""
                         try:
-                            import datetime as _dt2  # noqa: PLC0415
                             from zoneinfo import ZoneInfo as _ZI  # noqa: PLC0415
-                            _gdt = _dt2.datetime.fromisoformat(game_time_raw.replace("Z", "+00:00"))
-                            _gdt_pt = _gdt.astimezone(_ZI("America/Los_Angeles"))
-                            _game_time_pt_str = _gdt_pt.strftime("%H:%M")
+                            _gdt = _dt.datetime.fromisoformat(game_time_raw.replace("Z", "+00:00"))
+                            _game_time_pt_str = _gdt.astimezone(_ZI("America/Los_Angeles")).strftime("%H:%M")
                         except Exception:
                             pass
                         result[team] = {
                             "game_time_utc":  game_time_raw,
-                            "game_time_pt":   _game_time_pt_str,  # "HH:MM" in PT, e.g. "10:05"
+                            "game_time_pt":   _game_time_pt_str,  # "HH:MM" PT — used by dispatch window
                             "abstract_state": abstract_state,
                             "opponent":       opponent,
                             "venue":          venue,
