@@ -285,7 +285,7 @@ def _get_cache() -> dict[str, dict]:
     else:
         logger.warning(
             "[Steamer] All fetch paths failed for %s -- model will use league-average "
-            "priors until tomorrow. Check FanGraphs access and pybaseball fallback logs.",
+            "priors until tomorrow.",
             today,
         )
 

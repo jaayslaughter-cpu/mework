@@ -976,27 +976,15 @@ def _fetch_mlb_standings() -> list[dict]:
 def _resilient_get(url: str, headers: dict, params: dict | None = None,
                    timeout: int = 15) -> "requests.Response":
     """
-    GET with automatic ScraperAPI fallback on 403/429.
-    If SCRAPERAPI_KEY env var is set and direct call fails, retries via proxy.
-    ScraperAPI free tier: 1,000 calls/month — only used as fallback.
+    GET with retry on transient failures.
+    Returns the response regardless of status — callers check status_code.
     """
-    import os as _os
-    resp = requests.get(url, headers=headers, params=params, timeout=timeout)
-    if resp.status_code in (403, 429, 407):
-        scraper_key = _os.getenv("SCRAPERAPI_KEY", "")
-        if scraper_key:
-            proxy_url = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
-            proxies = {"http": proxy_url, "https": proxy_url}
-            logger.info("[DataHub] Direct fetch %d — retrying via ScraperAPI proxy", resp.status_code)
-            resp = requests.get(url, headers=headers, params=params,
-                                timeout=30, proxies=proxies, verify=False)
-    return resp
+    return requests.get(url, headers=headers, params=params, timeout=timeout)
 
 
 def _fetch_prizepicks_direct() -> list[dict]:
     """Fetch PrizePicks MLB props via partner-api (public, no key required).
     Uses partner-api.prizepicks.com — confirmed public endpoint with no bot block.
-    Falls back to ScraperAPI proxy on 403 if SCRAPERAPI_KEY env var is set.
     """
     _PP_HEADERS = {
         "User-Agent": (
@@ -1106,9 +1094,7 @@ def _fetch_prizepicks_direct() -> list[dict]:
 
 
 def _fetch_underdog_props_direct() -> list[dict]:
-    """Fetch Underdog Fantasy MLB over/under lines (free, no key required).
-    Falls back to ScraperAPI proxy on 403 if SCRAPERAPI_KEY env var is set.
-    """
+    """Fetch Underdog Fantasy MLB over/under lines (free, no key required)."""
     # Headers confirmed working by aidanhall21/underdog-fantasy-pickem-scraper
     _UD_HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -2302,7 +2288,7 @@ def run_data_hub_tasklet() -> None:
         #            from season stats. No FanGraphs scraping, no Cloudflare risk.
         #   Tier 1 — FanGraphs /api/leaders/major-league/data (different endpoint
         #            from the blocked leaders-legacy.aspx; may work on Railway)
-        #   Tier 2 — ScraperAPI proxy (if SCRAPERAPI_KEY is set)
+        #   Tier 2 — pybaseball (Baseball Reference backend — always works)
         #   Cache  — disk (/tmp) + Postgres fg_cache — survives Railway restarts
         #   Guard  — daily-attempt flag prevents retry loops on 403 days
         #

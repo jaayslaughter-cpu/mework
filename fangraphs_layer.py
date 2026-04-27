@@ -202,7 +202,7 @@ _BATTER_CACHE: dict[str, dict[str, float]] = {}
 _PITCHER_CACHE: dict[str, dict[str, float]] = {}
 _loaded: bool = False
 _data_year: int = 0
-# Daily-attempt guard — prevents hammering FanGraphs/ScraperAPI every 15s on 403 days.
+# Daily-attempt guard — prevents hammering FanGraphs every 15s on 403 days.
 _FG_FETCH_ATTEMPTED_DATE: str = ""  # "YYYY-MM-DD" once attempted, "" resets next day
 
 # ─── League-average baselines (2025 season) ──────────────────────────────────
@@ -241,25 +241,6 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
 # ---------------------------------------------------------------------------
 
 
-def _fetch_via_scraperapi(url: str, params: dict, timeout: int = 30) -> list[dict]:
-    """Route FanGraphs request through ScraperAPI when direct access is 403-blocked on Railway."""
-    import urllib.parse  # noqa: PLC0415
-    key = os.environ.get("SCRAPERAPI_KEY", "")
-    if not key:
-        return []
-    full_url = url + "?" + urllib.parse.urlencode(params)
-    proxy_url = f"http://api.scraperapi.com?api_key={key}&url={urllib.parse.quote(full_url)}"
-    try:
-        resp = requests.get(proxy_url, timeout=timeout)
-        resp.raise_for_status()
-        payload = resp.json()
-        rows = payload.get("data") or []
-        logger.info("[FG] ScraperAPI fallback returned %d rows", len(rows))
-        return rows
-    except Exception as exc:
-        logger.warning("[FG] ScraperAPI fallback failed: %s", exc)
-        return []
-
 def _fetch_season(stats: str, season: int) -> list[dict]:
     """Fetch one season of batter or pitcher data from FanGraphs API.
     Returns list of player dicts, or empty list on failure.
@@ -278,10 +259,7 @@ def _fetch_season(stats: str, season: int) -> list[dict]:
         payload = resp.json()
         return payload.get("data") or []
     except Exception as exc:
-        logger.warning("[FG] API fetch failed (stats=%s, season=%d): %s — trying ScraperAPI", stats, season, exc)
-        scraperapi_rows = _fetch_via_scraperapi(_FG_API_BASE, params)
-        if scraperapi_rows:
-            return scraperapi_rows
+        logger.warning("[FG] API fetch failed (stats=%s, season=%d): %s", stats, season, exc)
         return []
 
 
@@ -354,15 +332,12 @@ def _load() -> None:
         csw_pct, xfip, siera, o_swing, z_contact — true FG metrics
         Enriches OVER the MLB Stats baseline; does not replace it.
 
-    Tier 2 — ScraperAPI proxy (residential IPs; may still 403 if FG blocks proxy ranges):
-        Same fields as Tier 1.
-
-    Tier 3 — pybaseball (Baseball Reference backend — no Cloudflare, always works):
+    Tier 2 — pybaseball (Baseball Reference backend — no Cloudflare, always works):
         Subset of FG metrics; xfip/siera not available but k%, bb%, fip are.
 
     Daily-attempt guard: once any live network fetch is tried for today, subsequent
     calls within the same day skip the network and use whatever is cached.
-    Prevents 240 ScraperAPI calls/day when FanGraphs is 403-blocking Railway.
+    Prevents repeated FanGraphs hammering when Railway IPs are 403-blocked.
     """
     global _BATTER_CACHE, _PITCHER_CACHE, _loaded, _data_year, _FG_FETCH_ATTEMPTED_DATE
 
