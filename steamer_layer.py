@@ -147,26 +147,6 @@ def _save_to_pg(data: dict, today: str) -> None:
         logger.debug("[Steamer] pg_cache_set failed: %s", exc)
 
 
-
-
-def _fetch_via_scraperapi_steamer(timeout: int = 30) -> list[dict]:
-    """ScraperAPI fallback for Steamer FanGraphs requests."""
-    import urllib.parse  # noqa: PLC0415
-    key = os.environ.get("SCRAPERAPI_KEY", "")
-    if not key:
-        return []
-    full_url = _FG_BASE + "?" + urllib.parse.urlencode(_STEAMER_PARAMS)
-    proxy_url = f"http://api.scraperapi.com?api_key={key}&url={urllib.parse.quote(full_url)}"
-    try:
-        resp = requests.get(proxy_url, timeout=timeout)
-        resp.raise_for_status()
-        rows = resp.json().get("data") or []
-        logger.info("[Steamer] ScraperAPI fallback returned %d rows", len(rows))
-        return rows
-    except Exception as exc:
-        logger.warning("[Steamer] ScraperAPI fallback failed: %s", exc)
-        return []
-
 def _fetch_steamer_pybaseball() -> dict[str, dict]:
     """Pybaseball fallback when FanGraphs API is 403-blocked on Railway."""
     try:
@@ -222,12 +202,8 @@ def _fetch_steamer() -> dict[str, dict]:
         resp.raise_for_status()
         rows = (resp.json().get("data") or [])
     except Exception as exc:
-        logger.warning("[Steamer] FanGraphs fetch failed: %s — trying ScraperAPI then pybaseball", exc)
-        scraperapi_rows = _fetch_via_scraperapi_steamer()
-        if scraperapi_rows:
-            rows = scraperapi_rows
-        else:
-            return _fetch_steamer_pybaseball()
+        logger.warning("[Steamer] FanGraphs fetch failed: %s — falling back to pybaseball", exc)
+        return _fetch_steamer_pybaseball()
 
     projections: dict[str, dict] = {}
     for row in rows:
@@ -309,7 +285,7 @@ def _get_cache() -> dict[str, dict]:
     else:
         logger.warning(
             "[Steamer] All fetch paths failed for %s -- model will use league-average "
-            "priors until tomorrow. Check SCRAPERAPI_KEY env var and FanGraphs access.",
+            "priors until tomorrow. Check FanGraphs access and pybaseball fallback logs.",
             today,
         )
 
