@@ -704,28 +704,61 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
         k_rate   = float(prop.get("k_rate",   prop.get("k_pct",   0.0)) or 0.0)
         csw_pct  = float(prop.get("csw_pct",  0.0) or 0.0)
         whiff    = float(prop.get("sc_whiff_rate", prop.get("swstr_pct", 0.0)) or 0.0)
-        # Need at least one strong signal
         if k_rate < 0.01 and csw_pct < 0.01:
             return None
-        # Estimate K/9 and convert to K-count probability
-        # For 6 IP (18 outs ≈ 18 PA), expected Ks = k_rate * 18
-        expected_k = k_rate * 18.0   # expected Ks over typical start
-        if csw_pct > 0.30:
-            expected_k *= (1.0 + (csw_pct - 0.28) * 2.0)
-        if whiff > 0.12:
-            expected_k *= (1.0 + (whiff - 0.11) * 1.5)
-        # Poisson approximation: P(K >= line) = 1 - CDF(line-1, lambda=expected_k)
-        import math
-        lam = max(0.01, expected_k)
-        # P(K < line) = sum_{k=0}^{line-1} e^{-lam} * lam^k / k!
+
+        # ── pa_model odds-ratio matchup blender ──────────────────────────────
+        # Replaces flat k_rate * 18 with a proper pitcher × batter × league
+        # odds-ratio estimate that accounts for the specific opposing lineup's
+        # K tendency. Lineup-level avg_k_pct is set by lineup_chase_layer
+        # on _opp_avg_k_pct; fallback to league avg 0.227.
+        import math as _math  # noqa: PLC0415
+        try:
+            from pa_model import odds_ratio_blend, LEAGUE_RATES  # noqa: PLC0415
+            _lg_k       = LEAGUE_RATES["K"]                 # 0.223
+            _opp_k_pct  = float(prop.get("_opp_avg_k_pct", _lg_k) or _lg_k)
+
+            # Build minimal pitcher profile for the K outcome
+            _pitcher_profile = {"K": min(0.40, k_rate if k_rate > 0.01 else _lg_k)}
+
+            # Build minimal batter profile from opposing lineup K tendency
+            _batter_profile  = {"K": min(0.40, _opp_k_pct)}
+
+            # Odds-ratio blended K probability per PA
+            _blended_k_pa = odds_ratio_blend(
+                _batter_profile["K"],
+                _pitcher_profile["K"],
+                _lg_k,
+            )
+
+            # CSW% and whiff adjustments on top of the blended rate
+            if csw_pct > 0.30:
+                _blended_k_pa *= (1.0 + (csw_pct - 0.28) * 2.0)
+            if whiff > 0.12:
+                _blended_k_pa *= (1.0 + (whiff - 0.11) * 1.5)
+            _blended_k_pa = min(0.45, _blended_k_pa)
+
+            # Expected Ks over a typical start (22 BF = 2025 MLB avg ~5.3 IP × 4.1 BF/inn)
+            _bf    = float(prop.get("_batters_faced_avg", 22.0) or 22.0)
+            lam    = max(0.01, _blended_k_pa * _bf)
+
+        except Exception:
+            # Fallback to original flat estimate if pa_model unavailable
+            lam = max(0.01, k_rate * 18.0)
+            if csw_pct > 0.30:
+                lam *= (1.0 + (csw_pct - 0.28) * 2.0)
+            if whiff > 0.12:
+                lam *= (1.0 + (whiff - 0.11) * 1.5)
+            _math = __import__("math")
+
+        # Poisson P(K >= line)
         p_under = sum(
-            math.exp(-lam) * (lam ** k) / math.factorial(int(k))
+            _math.exp(-lam) * (lam ** k) / _math.factorial(int(k))
             for k in range(int(line))
         )
         p_over = 1.0 - min(0.99, p_under)
         p = p_over if is_over else (1.0 - p_over)
-        # Only override if it differs meaningfully from population avg
-        if k_rate > 0.20 or csw_pct > 0.27:   # real signal, not defaults
+        if k_rate > 0.20 or csw_pct > 0.27:
             return round(p, 4)
         return None
 
@@ -1330,6 +1363,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _chase_cache[opp_team] = _get_chase_score(opp_team, hub)
             chase = _chase_cache[opp_team]
             prop["_lineup_chase_adj"] = float(chase.get("k_prob_adjustment", 0.0))
+            # Expose opposing lineup's avg K rate for pa_model odds-ratio blender
+            prop["_opp_avg_k_pct"]    = float(chase.get("avg_k_pct", 0.227) or 0.227)
             prop["_opp_o_swing_avg"]  = float(chase.get("avg_chase_rate",    0.316))
             prop["_lineup_difficulty"] = chase.get("lineup_difficulty", "NEUTRAL")
 
