@@ -1359,7 +1359,10 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
 
     Priority chain (first success wins, all free):
       1. The Odds API      — real sportsbook lines (h2h, totals, spreads)
-                             Only called if ODDS_API_KEY is set AND quota not exhausted
+                             Only called if ODDS_API_KEY is set AND quota not exhausted.
+                             DAILY CACHE: result stored in Redis for 12h so the free
+                             tier (500 req/month ≈ 16/day) is never exceeded.
+                             Without cache this fired every 15s = 5,760 calls/day.
       2. DraftEdge JSON    — batter/pitcher projections converted to pseudo-odds
                              Free, no key, daily parquet cache, zero quota cost
       3. TheRundown API    — real sportsbook K prop lines (free 100/day with key)
@@ -1372,8 +1375,22 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
     # ── Tier 1: The Odds API (only if key is set) ──────────────────────────
     key = os.getenv("ODDS_API_KEY", "")
     if key:
-        # Skip entirely if we know quota is exhausted — check Redis backoff flag
         _quota_backoff_key = "odds_api_quota_backoff"
+        _daily_cache_key   = f"odds_api_daily_{_today_pt().strftime('%Y%m%d')}"
+
+        # ── Daily cache check (read) — prevents 5,760 calls/day on free tier ──
+        try:
+            _cached = _redis().get(_daily_cache_key)
+            if _cached:
+                import json as _json  # noqa: PLC0415
+                _cached_data = _json.loads(_cached)
+                if _cached_data:
+                    logger.debug("[OddsAPI] Returning daily cache (%d games) — no API call made.", len(_cached_data))
+                    return _cached_data
+        except Exception:
+            pass  # Redis miss or unavailable — fall through to live fetch
+
+        # ── Quota backoff check ────────────────────────────────────────────
         try:
             _in_backoff = _redis().get(_quota_backoff_key)
         except Exception:
@@ -1393,13 +1410,21 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                     if data:
                         remaining = resp.headers.get("x-requests-remaining", "?")
                         logger.info("[OddsAPI] %d games fetched. Quota remaining: %s", len(data), remaining)
-                        # Cache quota to Redis so bug_checker can read it without a live API call
+
+                        # ── Daily cache write — TTL 12h so it refreshes twice a day ──
+                        try:
+                            import json as _json  # noqa: PLC0415
+                            _redis().set(_daily_cache_key, _json.dumps(data), ex=43200)  # 12 hours
+                        except Exception:
+                            pass
+
+                        # Cache quota to Redis so bug_checker can read it
                         try:
                             _redis().set("odds_api_quota_remaining", str(remaining), ex=86400)
                         except Exception:
                             pass
-                        # FIX: Real-time Discord alert when quota drops below threshold
-                        # Dedup: alert fires at most once per hour via Redis TTL key
+
+                        # Real-time Discord alert when quota drops below threshold
                         try:
                             _remaining_int = int(remaining)
                             if _remaining_int < 50:
@@ -1418,7 +1443,7 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                                             "color": 0xE74C3C,
                                         }]
                                     })
-                                    _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                    _redis().set(_alert_key, "1", ex=3600)
                                     logger.warning("[OddsAPI] CRITICAL quota: %d remaining — Discord alerted", _remaining_int)
                             elif _remaining_int < 200:
                                 _alert_key = "odds_api_alert_low"
@@ -1435,14 +1460,12 @@ def _odds_api_get(sport: str = "baseball_mlb") -> list[dict]:
                                             "color": 0xF39C12,
                                         }]
                                     })
-                                    _redis().set(_alert_key, "1", ex=3600)  # suppress for 1 hour
+                                    _redis().set(_alert_key, "1", ex=3600)
                                     logger.warning("[OddsAPI] Low quota: %d remaining — Discord alerted", _remaining_int)
                         except Exception:
                             pass  # never block on alert failure
                         return data
                 elif resp.status_code in (401, 403, 429):
-                    # Quota exhausted or key invalid — set 6-hour Redis backoff so we stop
-                    # hammering the API every 15s and burning any remaining requests.
                     try:
                         _redis().set(_quota_backoff_key, "1", ex=21600)  # 6 hours
                         logger.warning(
