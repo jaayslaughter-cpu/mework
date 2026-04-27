@@ -672,6 +672,46 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
             ]
             _pg_save(date_int, flat)
 
+    # ── Covers.com fallback — Tier 3 (after Pinnacle direct, before DraftEdge) ─
+    # Covers aggregates DK/FD/BetMGM/Caesars lines pre-game and also provides
+    # THE BAT X projections. Covers only covers props during the pre-game window;
+    # it returns empty once games go live (handled gracefully by covers_layer).
+    # Props covered: strikeouts, hits, hits+runs+rbi, earned_runs, hitter_strikeouts.
+    if not _mem_ref:
+        try:
+            from covers_layer import fetch_covers_reference as _covers_fetch  # noqa: PLC0415
+
+            _covers_raw = _covers_fetch(date_int)
+            if _covers_raw:
+                covers_ref: dict = {}
+                _PT_COVERS_MAP = {
+                    "strikeouts":         "pitcher_outs",   # maps to sharp consensus key
+                    "hits":               "hits",
+                    "hits+runs+rbi":      "hits+runs+rbi",
+                    "earned_runs":        "earned_runs",
+                    "hitter_strikeouts":  "batter_strikeouts",
+                }
+                for raw_key, entry in _covers_raw.items():
+                    player_norm, prop_type = raw_key.rsplit("|", 1)
+                    mk = _PT_COVERS_MAP.get(prop_type, prop_type)
+                    prob = float(entry.get("sb_implied_prob", 0.5) or 0.5)
+                    line = float(entry.get("sb_line") or 0.5)
+                    for side, si in [("Over", prob), ("Under", round(1.0 - prob, 4))]:
+                        covers_ref[(player_norm, mk, side)] = {
+                            "sb_implied_prob": round(si, 4),
+                            "line":            line,
+                            "bookmaker":       entry.get("bookmaker", "covers"),
+                            "over_odds":       None,
+                            "under_odds":      None,
+                            "covers_batx_proj": entry.get("batx_proj"),
+                        }
+                if covers_ref:
+                    log.info("[SBRef] Covers fallback: %d entries", len(covers_ref))
+                    _mem_ref    = covers_ref
+                    _fetch_date = date_int
+        except Exception as _covers_err:
+            log.debug("[SBRef] Covers fallback failed: %s", _covers_err)
+
     # ── DraftEdge fallback — when Odds API has no props yet ──────────────────
     # DraftEdge gives projected_prob per player/prop. Used when sharp book
     # lines aren't available (props not yet posted for the day). Less precise
