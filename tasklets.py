@@ -3916,38 +3916,55 @@ class _WeatherAgent(_BaseAgent):
     # lhh_hr_boost: True when a short porch gives LHH pull hitters a structural edge.
     # wind_critical: True when wind is the dominant game variable (Wrigley).
     # Source: baseball-analytics/src/weather.py PARK_DATA (2024 season).
-    _PARK_FACTORS: dict[str, dict] = {
-        "Angels Stadium":           {"hr_factor": 98,  "lhh_hr_boost": False, "wind_critical": False},
-        "Chase Field":              {"hr_factor": 97,  "lhh_hr_boost": False, "wind_critical": False},  # humidor
-        "Camden Yards":             {"hr_factor": 111, "lhh_hr_boost": True,  "wind_critical": False},  # short RF 318ft
-        "Fenway Park":              {"hr_factor": 93,  "lhh_hr_boost": False, "wind_critical": False},  # Green Monster
-        "Wrigley Field":            {"hr_factor": 106, "lhh_hr_boost": False, "wind_critical": True},
-        "Guaranteed Rate Field":    {"hr_factor": 104, "lhh_hr_boost": False, "wind_critical": False},
-        "Great American Ball Park": {"hr_factor": 115, "lhh_hr_boost": True,  "wind_critical": False},
-        "Progressive Field":        {"hr_factor": 96,  "lhh_hr_boost": False, "wind_critical": False},
-        "Coors Field":              {"hr_factor": 122, "lhh_hr_boost": False, "wind_critical": False},  # altitude
-        "Comerica Park":            {"hr_factor": 88,  "lhh_hr_boost": False, "wind_critical": False},  # very deep
-        "Minute Maid Park":         {"hr_factor": 97,  "lhh_hr_boost": False, "wind_critical": False},
-        "Kauffman Stadium":         {"hr_factor": 93,  "lhh_hr_boost": False, "wind_critical": False},
-        "Dodger Stadium":           {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
-        "LoanDepot Park":           {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
-        "American Family Field":    {"hr_factor": 101, "lhh_hr_boost": False, "wind_critical": False},
-        "Target Field":             {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
-        "Citi Field":               {"hr_factor": 92,  "lhh_hr_boost": False, "wind_critical": False},
-        "Yankee Stadium":           {"hr_factor": 112, "lhh_hr_boost": True,  "wind_critical": False},  # RF porch 314ft
-        "Oakland Coliseum":         {"hr_factor": 96,  "lhh_hr_boost": False, "wind_critical": False},
-        "Citizens Bank Park":       {"hr_factor": 109, "lhh_hr_boost": False, "wind_critical": False},
-        "PNC Park":                 {"hr_factor": 96,  "lhh_hr_boost": False, "wind_critical": False},
-        "Petco Park":               {"hr_factor": 86,  "lhh_hr_boost": False, "wind_critical": False},  # marine layer
-        "Oracle Park":              {"hr_factor": 88,  "lhh_hr_boost": False, "wind_critical": False},  # SF Bay air
-        "T-Mobile Park":            {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
-        "Busch Stadium":            {"hr_factor": 98,  "lhh_hr_boost": False, "wind_critical": False},
-        "Tropicana Field":          {"hr_factor": 95,  "lhh_hr_boost": False, "wind_critical": False},
-        "Globe Life Field":         {"hr_factor": 103, "lhh_hr_boost": False, "wind_critical": False},
-        "Rogers Centre":            {"hr_factor": 104, "lhh_hr_boost": False, "wind_critical": False},
-        "Nationals Park":           {"hr_factor": 103, "lhh_hr_boost": False, "wind_critical": False},
-        "Truist Park":              {"hr_factor": 103, "lhh_hr_boost": False, "wind_critical": False},
+    # Park metadata: lhh_hr_boost and wind_critical flags per stadium.
+    # HR factors are read dynamically from park_factors.py (the canonical source)
+    # so _WeatherAgent and XGBoost training always use the same park numbers.
+    _PARK_META: dict[str, dict] = {
+        "Angels Stadium":           {"lhh_hr_boost": False, "wind_critical": False},
+        "Chase Field":              {"lhh_hr_boost": False, "wind_critical": False},
+        "Camden Yards":             {"lhh_hr_boost": True,  "wind_critical": False},
+        "Fenway Park":              {"lhh_hr_boost": False, "wind_critical": False},
+        "Wrigley Field":            {"lhh_hr_boost": False, "wind_critical": True},
+        "Guaranteed Rate Field":    {"lhh_hr_boost": False, "wind_critical": False},
+        "Great American Ball Park": {"lhh_hr_boost": True,  "wind_critical": False},
+        "Progressive Field":        {"lhh_hr_boost": False, "wind_critical": False},
+        "Coors Field":              {"lhh_hr_boost": False, "wind_critical": False},
+        "Comerica Park":            {"lhh_hr_boost": False, "wind_critical": False},
+        "Minute Maid Park":         {"lhh_hr_boost": False, "wind_critical": False},
+        "Kauffman Stadium":         {"lhh_hr_boost": False, "wind_critical": False},
+        "Dodger Stadium":           {"lhh_hr_boost": False, "wind_critical": False},
+        "LoanDepot Park":           {"lhh_hr_boost": False, "wind_critical": False},
+        "American Family Field":    {"lhh_hr_boost": False, "wind_critical": False},
+        "Target Field":             {"lhh_hr_boost": False, "wind_critical": False},
+        "Citi Field":               {"lhh_hr_boost": False, "wind_critical": False},
+        "Yankee Stadium":           {"lhh_hr_boost": True,  "wind_critical": False},
+        "Oakland Coliseum":         {"lhh_hr_boost": False, "wind_critical": False},
+        "Citizens Bank Park":       {"lhh_hr_boost": False, "wind_critical": False},
+        "PNC Park":                 {"lhh_hr_boost": False, "wind_critical": False},
+        "Petco Park":               {"lhh_hr_boost": False, "wind_critical": False},
+        "Oracle Park":              {"lhh_hr_boost": False, "wind_critical": False},
+        "T-Mobile Park":            {"lhh_hr_boost": False, "wind_critical": False},
+        "Busch Stadium":            {"lhh_hr_boost": False, "wind_critical": False},
+        "Tropicana Field":          {"lhh_hr_boost": False, "wind_critical": False},
+        "Globe Life Field":         {"lhh_hr_boost": False, "wind_critical": False},
+        "Rogers Centre":            {"lhh_hr_boost": False, "wind_critical": False},
+        "Nationals Park":           {"lhh_hr_boost": False, "wind_critical": False},
+        "Truist Park":              {"lhh_hr_boost": False, "wind_critical": False},
     }
+
+    @staticmethod
+    def _get_park_hr_factor(stadium: str) -> float:
+        """Read HR park factor from park_factors.py (canonical source).
+        Returns 100.0 (league average) if stadium not found.
+        Converts park_factors.py multiplier (1.13 = +13%) to BRef-style
+        integer-scale (113) for consistent comparison in park_hr_adj calc.
+        """
+        try:
+            from park_factors import get_park_factor as _gpf  # noqa: PLC0415
+            pf = _gpf(stadium, "home_runs")
+            return round(pf * 100.0, 1)   # 1.13 → 113.0
+        except Exception:
+            return 100.0  # neutral fallback
 
     # Primary outfield compass direction per park (wind along this axis = "out")
     _OUTFIELD_COMPASS = {
@@ -4023,7 +4040,8 @@ class _WeatherAgent(_BaseAgent):
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
         stadium    = _TEAM_TO_STADIUM.get(prop.get("team", ""), venue)
-        park       = self._PARK_FACTORS.get(stadium, {})
+        park       = self._PARK_META.get(stadium, {})
+        hr_factor  = self._get_park_hr_factor(stadium)
 
         # ── 1. Temperature ──────────────────────────────────────────────────
         temp_f     = max(20.0, min(110.0, temp_f))
@@ -4035,9 +4053,8 @@ class _WeatherAgent(_BaseAgent):
         )
         wind_hr_boost = along * 0.4   # +0.4pp per mph outward
 
-        # ── 3. Park HR factor (data-driven, replaces flat humidor hardcode) ─
+        # ── 3. Park HR factor from park_factors.py (canonical source) ───────
         # Each 1pt of hr_factor delta from 100 ≈ 0.12pp on a prop probability.
-        hr_factor   = park.get("hr_factor", 100)
         park_hr_adj = (hr_factor - 100) * 0.12
         if pt_norm in _CONTACT_PROPS:
             park_hr_adj *= 0.4   # contact props get 40% of park HR effect
