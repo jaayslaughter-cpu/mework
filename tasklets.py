@@ -3877,8 +3877,43 @@ class _BullpenAgent(_BaseAgent):
 class _WeatherAgent(_BaseAgent):
     name = "WeatherAgent"
 
-    # Venues with humidors — suppress HR beyond standard park factor
-    _HUMIDOR_VENUES = {"Chase Field", "Coors Field"}
+    # ── Park data keyed by stadium name (matches _TEAM_TO_STADIUM values) ─
+    # hr_factor: Baseball Reference park HR factor (100 = league avg).
+    # lhh_hr_boost: True when a short porch gives LHH pull hitters a structural edge.
+    # wind_critical: True when wind is the dominant game variable (Wrigley).
+    # Source: baseball-analytics/src/weather.py PARK_DATA (2024 season).
+    _PARK_FACTORS: dict[str, dict] = {
+        "Angels Stadium":           {"hr_factor": 98,  "lhh_hr_boost": False, "wind_critical": False},
+        "Chase Field":              {"hr_factor": 97,  "lhh_hr_boost": False, "wind_critical": False},  # humidor
+        "Camden Yards":             {"hr_factor": 111, "lhh_hr_boost": True,  "wind_critical": False},  # short RF 318ft
+        "Fenway Park":              {"hr_factor": 93,  "lhh_hr_boost": False, "wind_critical": False},  # Green Monster
+        "Wrigley Field":            {"hr_factor": 106, "lhh_hr_boost": False, "wind_critical": True},
+        "Guaranteed Rate Field":    {"hr_factor": 104, "lhh_hr_boost": False, "wind_critical": False},
+        "Great American Ball Park": {"hr_factor": 115, "lhh_hr_boost": True,  "wind_critical": False},
+        "Progressive Field":        {"hr_factor": 96,  "lhh_hr_boost": False, "wind_critical": False},
+        "Coors Field":              {"hr_factor": 122, "lhh_hr_boost": False, "wind_critical": False},  # altitude
+        "Comerica Park":            {"hr_factor": 88,  "lhh_hr_boost": False, "wind_critical": False},  # very deep
+        "Minute Maid Park":         {"hr_factor": 97,  "lhh_hr_boost": False, "wind_critical": False},
+        "Kauffman Stadium":         {"hr_factor": 93,  "lhh_hr_boost": False, "wind_critical": False},
+        "Dodger Stadium":           {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
+        "LoanDepot Park":           {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
+        "American Family Field":    {"hr_factor": 101, "lhh_hr_boost": False, "wind_critical": False},
+        "Target Field":             {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
+        "Citi Field":               {"hr_factor": 92,  "lhh_hr_boost": False, "wind_critical": False},
+        "Yankee Stadium":           {"hr_factor": 112, "lhh_hr_boost": True,  "wind_critical": False},  # RF porch 314ft
+        "Oakland Coliseum":         {"hr_factor": 96,  "lhh_hr_boost": False, "wind_critical": False},
+        "Citizens Bank Park":       {"hr_factor": 109, "lhh_hr_boost": False, "wind_critical": False},
+        "PNC Park":                 {"hr_factor": 96,  "lhh_hr_boost": False, "wind_critical": False},
+        "Petco Park":               {"hr_factor": 86,  "lhh_hr_boost": False, "wind_critical": False},  # marine layer
+        "Oracle Park":              {"hr_factor": 88,  "lhh_hr_boost": False, "wind_critical": False},  # SF Bay air
+        "T-Mobile Park":            {"hr_factor": 94,  "lhh_hr_boost": False, "wind_critical": False},
+        "Busch Stadium":            {"hr_factor": 98,  "lhh_hr_boost": False, "wind_critical": False},
+        "Tropicana Field":          {"hr_factor": 95,  "lhh_hr_boost": False, "wind_critical": False},
+        "Globe Life Field":         {"hr_factor": 103, "lhh_hr_boost": False, "wind_critical": False},
+        "Rogers Centre":            {"hr_factor": 104, "lhh_hr_boost": False, "wind_critical": False},
+        "Nationals Park":           {"hr_factor": 103, "lhh_hr_boost": False, "wind_critical": False},
+        "Truist Park":              {"hr_factor": 103, "lhh_hr_boost": False, "wind_critical": False},
+    }
 
     # Primary outfield compass direction per park (wind along this axis = "out")
     _OUTFIELD_COMPASS = {
@@ -3903,17 +3938,23 @@ class _WeatherAgent(_BaseAgent):
         import math as _m
         if not wind_dir or wind_spd <= 0:
             return 0.0
-        out_deg  = outfield_compass.get(stadium, 180.0)   # default: S = out to CF
+        out_deg  = outfield_compass.get(stadium, 180.0)
         wind_deg = compass_deg.get(wind_dir.strip().upper(), 0.0)
         diff_rad = _m.radians(wind_deg - out_deg)
         return wind_spd * _m.cos(diff_rad)
 
     def evaluate(self, prop: dict) -> dict | None:
         """Physics-grade weather adjustments for power and contact props.
-        Temperature: +0.8%/°F HR, +0.4%/°F runs (Nathan 2017 / mc_upgrades v1).
-        Wind: along-spray-axis signed component (mc_upgrades Phase 1A).
-        Humidor parks: HR suppression applied on top of park factor.
-        Dome games: skip entirely.
+
+        Adjustments applied in order:
+          1. Temperature  — Nathan 2017: +0.8pp/°F HR, +0.4pp/°F contact vs 70°F baseline
+          2. Wind         — signed component along park spray axis (mc_upgrades Phase 1A)
+          3. Park HR factor — data-driven per-park HR suppression/boost vs league average.
+             Replaces flat -3pp humidor hardcode. Scale: each 1pt hr_factor ≈ 0.12pp.
+             Petco hr_factor=86 → -1.68pp | Coors hr_factor=122 → +2.64pp
+          4. LHH HR boost — +1.5pp for left-handed pull hitters at porch parks
+             (Yankee Stadium RF 314ft, Camden Yards RF 318ft, Great American BF)
+          5. Wrigley wind amplifier — wind adjustment ×1.5 when wind_critical and ≥10mph
         """
         if prop.get("is_dome"):
             return None
@@ -3922,7 +3963,6 @@ class _WeatherAgent(_BaseAgent):
         prop_type = prop.get("prop_type", "")
         venue     = prop.get("venue", "")
 
-        # Resolve wind and temperature from enriched prop or hub weather list
         wind_mph = float(prop.get("_wind_speed", 0) or 0)
         wind_dir = str(prop.get("_wind_direction", "") or "")
         temp_f   = float(prop.get("_temp_f", 72) or 72)
@@ -3948,43 +3988,51 @@ class _WeatherAgent(_BaseAgent):
             return None
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
-
-        # ── Temperature adjustment (delta from 70°F baseline) ──────────────
-        # Nathan 2017: +1.0%/°F HR; empirical compromise 0.8%/°F HR, 0.4%/°F runs
-        temp_f     = max(20.0, min(110.0, temp_f))
-        temp_delta = temp_f - 70.0
-        if pt_norm in _POWER_PROPS:
-            # HR/power: +0.8%/°F above 70°F
-            temp_boost = temp_delta * 0.8
-        else:
-            # Contact: milder, +0.4%/°F
-            temp_boost = temp_delta * 0.4
-
-        # ── Wind: signed component along spray axis ─────────────────────────
         stadium    = _TEAM_TO_STADIUM.get(prop.get("team", ""), venue)
-        along      = self._wind_along_spray(
-            wind_mph, wind_dir, stadium,
-            self._OUTFIELD_COMPASS, self._COMPASS_DEG,
+        park       = self._PARK_FACTORS.get(stadium, {})
+
+        # ── 1. Temperature ──────────────────────────────────────────────────
+        temp_f     = max(20.0, min(110.0, temp_f))
+        temp_boost = (temp_f - 70.0) * (0.8 if pt_norm in _POWER_PROPS else 0.4)
+
+        # ── 2. Wind: signed component along spray axis ──────────────────────
+        along         = self._wind_along_spray(
+            wind_mph, wind_dir, stadium, self._OUTFIELD_COMPASS, self._COMPASS_DEG,
         )
-        # +3.5 ft carry per mph outward → ~+0.4%pp HR prob per mph out
-        wind_hr_boost = along * 0.4  # positive = out (boost), negative = in (suppress)
+        wind_hr_boost = along * 0.4   # +0.4pp per mph outward
 
-        # ── Humidor suppression ─────────────────────────────────────────────
-        humidor_adj = -3.0 if stadium in self._HUMIDOR_VENUES else 0.0
-
-        # ── Total adjustment ────────────────────────────────────────────────
-        total_adj = temp_boost + wind_hr_boost + humidor_adj
-
-        # Apply: power props get full adjustment; contact props get halved
+        # ── 3. Park HR factor (data-driven, replaces flat humidor hardcode) ─
+        # Each 1pt of hr_factor delta from 100 ≈ 0.12pp on a prop probability.
+        hr_factor   = park.get("hr_factor", 100)
+        park_hr_adj = (hr_factor - 100) * 0.12
         if pt_norm in _CONTACT_PROPS:
-            total_adj *= 0.5
+            park_hr_adj *= 0.4   # contact props get 40% of park HR effect
+
+        # ── 4. LHH structural porch advantage ──────────────────────────────
+        # +1.5pp for left-handed pull hitters at parks with short RF/LF porches.
+        lhh_adj = 0.0
+        if (park.get("lhh_hr_boost")
+                and pt_norm in _POWER_PROPS
+                and str(prop.get("_batter_hand", "") or "").upper() == "L"):
+            lhh_adj = 1.5
+
+        # ── 5. Wrigley wind amplifier ───────────────────────────────────────
+        if park.get("wind_critical") and wind_mph >= 10:
+            wind_hr_boost *= 1.5
+
+        # ── Combine ─────────────────────────────────────────────────────────
+        total_adj = temp_boost + wind_hr_boost + park_hr_adj + lhh_adj
 
         if abs(total_adj) < 1.0:
-            return None  # sub-1pp adjustment — not worth betting on weather alone
+            return None
 
         side      = "OVER" if total_adj > 0 else "UNDER"
-        adj_prob  = model_prob + total_adj if side == "OVER" else (100.0 - model_prob) + abs(total_adj)
-        adj_prob  = max(5.0, min(95.0, adj_prob))
+        adj_prob  = (
+            model_prob + total_adj
+            if side == "OVER"
+            else (100.0 - model_prob) + abs(total_adj)
+        )
+        adj_prob = max(5.0, min(95.0, adj_prob))
 
         if side == "OVER":
             odds    = prop.get("over_american", -110)
