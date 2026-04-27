@@ -685,7 +685,7 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
             if _covers_raw:
                 covers_ref: dict = {}
                 _PT_COVERS_MAP = {
-                    "strikeouts":         "pitcher_outs",   # maps to sharp consensus key
+                    "strikeouts":         "pitcher_strikeouts",  # pitcher Ks → pitcher_strikeouts
                     "hits":               "hits",
                     "hits+runs+rbi":      "hits+runs+rbi",
                     "earned_runs":        "earned_runs",
@@ -863,6 +863,44 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
                     _fetch_date = date_int
         except Exception as _rd_err:
             log.debug("[SBRef] TheRundown fallback failed: %s", _rd_err)
+
+    # ── VegasInsider supplement — fill missing pitcher_strikeouts entries ────
+    # VegasInsider scrapes 30+ pitchers from 7 real sportsbooks (Bet365/DK/FD/
+    # BetMGM/Caesars/HardRock/Fanatics) pre-game. Server-rendered HTML — no JS.
+    # Runs EVERY call (not guarded by `if not _mem_ref`) so it fills gaps even
+    # when OddsAPI succeeded but didn't have every starter.  OddsAPI/Pinnacle
+    # entries always take priority — VI only adds what is missing.
+    if _mem_ref is not None:
+        try:
+            from vegasinsider_layer import VegasInsiderLayer as _VILayer  # noqa: PLC0415
+            _vi_consensus = _VILayer().get_strikeouts_consensus()
+            _vi_added = 0
+            for _vi_player, _vi_entry in _vi_consensus.items():
+                _vi_line = _vi_entry["consensus_line"]
+                _vi_prob = _vi_entry["vi_over_prob"]
+                _vi_norm = _normalize(_vi_player)
+                _vi_over_key  = (_vi_norm, "pitcher_strikeouts", "Over")
+                _vi_under_key = (_vi_norm, "pitcher_strikeouts", "Under")
+                if _vi_over_key not in _mem_ref:
+                    _mem_ref[_vi_over_key] = {
+                        "sb_implied_prob": _vi_prob,
+                        "line":            _vi_line,
+                        "bookmaker":       "vegasinsider",
+                        "over_odds":       None,
+                        "under_odds":      None,
+                    }
+                    _mem_ref[_vi_under_key] = {
+                        "sb_implied_prob": round(1.0 - _vi_prob, 4),
+                        "line":            _vi_line,
+                        "bookmaker":       "vegasinsider",
+                        "over_odds":       None,
+                        "under_odds":      None,
+                    }
+                    _vi_added += 1
+            if _vi_added:
+                log.info("[SBRef] VegasInsider supplement: +%d pitcher_strikeouts entries", _vi_added)
+        except Exception as _vi_err:
+            log.debug("[SBRef] VegasInsider supplement failed: %s", _vi_err)
 
     return _mem_ref
 
