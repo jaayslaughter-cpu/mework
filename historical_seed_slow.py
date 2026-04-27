@@ -44,7 +44,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 MLBAPI   = "https://statsapi.mlb.com/api/v1"
-SEASONS  = [2022, 2023, 2024, 2025]
+SEASONS  = [2025, 2024, 2023, 2022]  # Priority: most recent first; 2022 pitchers done, batters finish last
 BATCH_SIZE      = 100   # rows per commit
 PLAYERS_PER_RUN = 150   # stop after this many players per invocation
 SLEEP_BETWEEN   = 1.5   # seconds between players
