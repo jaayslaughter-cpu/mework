@@ -902,6 +902,63 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         except Exception as _vi_err:
             log.debug("[SBRef] VegasInsider supplement failed: %s", _vi_err)
 
+    # ── RotoWire supplement — multi-book lines for strikeouts + earned_runs ──
+    # RotoWire embeds JSON data server-side (no JS renderer) with up to 9 books
+    # for pitcher_strikeouts and 5 books for pitcher_er.  Outlier F5 books are
+    # filtered by median; consensus line is the median of remaining books.
+    # Adds entries not already populated by OddsAPI/Pinnacle/Covers/VI.
+    # Maps to sb_implied_prob via simple Poisson CDF approximation (line ± 0.5).
+    if _mem_ref is not None:
+        try:
+            import math as _math  # noqa: PLC0415
+            from rotowire_layer import fetch_rotowire_props as _rw_fetch  # noqa: PLC0415
+
+            _rw_data = _rw_fetch()
+            _rw_added = 0
+
+            _rw_market_map = {
+                "pitcher_strikeouts": "pitcher_strikeouts",
+                "pitcher_er":         "pitcher_er",
+            }
+
+            def _poisson_over_prob(line: float, lam: float) -> float:
+                """P(X > line) where X ~ Poisson(lam). line is typically x.5."""
+                k_floor = int(line)
+                p_le = 0.0
+                for k in range(k_floor + 1):
+                    p_le += (lam ** k) * _math.exp(-lam) / _math.factorial(k)
+                return round(max(0.01, min(0.99, 1.0 - p_le)), 4)
+
+            for _rw_prop, _rw_market in _rw_market_map.items():
+                prop_players = _rw_data.get(_rw_prop, {})
+                for _rw_name, _rw_info in prop_players.items():
+                    _rw_line = _rw_info["line"]
+                    _rw_norm = _normalize(_rw_name)
+                    _rw_over_key  = (_rw_norm, _rw_market, "Over")
+                    _rw_under_key = (_rw_norm, _rw_market, "Under")
+                    if _rw_over_key not in _mem_ref:
+                        _rw_over_p = _poisson_over_prob(_rw_line, _rw_line)
+                        _mem_ref[_rw_over_key] = {
+                            "sb_implied_prob": _rw_over_p,
+                            "line":            _rw_line,
+                            "bookmaker":       f"rotowire_{_rw_info['books']}books",
+                            "over_odds":       None,
+                            "under_odds":      None,
+                        }
+                        _mem_ref[_rw_under_key] = {
+                            "sb_implied_prob": round(1.0 - _rw_over_p, 4),
+                            "line":            _rw_line,
+                            "bookmaker":       f"rotowire_{_rw_info['books']}books",
+                            "over_odds":       None,
+                            "under_odds":      None,
+                        }
+                        _rw_added += 1
+
+            if _rw_added:
+                log.info("[SBRef] RotoWire supplement: +%d entries (strikeouts+er)", _rw_added)
+        except Exception as _rw_err:
+            log.debug("[SBRef] RotoWire supplement failed: %s", _rw_err)
+
     return _mem_ref
 
 
