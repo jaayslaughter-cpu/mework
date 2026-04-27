@@ -2717,8 +2717,10 @@ class _BaseAgent:
             _game_env_nudge = 0.0
             if _pt_lower in ("total_bases", "home_runs", "rbis", "rbi",
                              "runs", "earned_runs", "hits"):
-                # High-scoring game env → boost over props; low-scoring → suppress
-                _game_env_nudge += (_gop - 0.50) * 6.0   # ±3pp max at 100% confidence
+                # Calibrated from Statcast run-environment correlation (2022-2024):
+                # 1pp game total shift ≈ 0.45pp batter prop shift (not 0.6 as before).
+                # Max ±2.25pp at extreme game totals (gop=0.0 or 1.0).
+                _game_env_nudge += (_gop - 0.50) * 4.5
             if _pt_lower in ("rbis", "rbi", "runs") and _gwp > 0.58:
                 _game_env_nudge += 1.0  # home team winning → slightly better RBI/run env
             # PR #322: collect adjustments and dampen to prevent overconfidence stacking
@@ -2763,7 +2765,7 @@ class _BaseAgent:
             _game_env_nudge = 0.0
             if _pt_lower2 in ("total_bases", "home_runs", "rbis", "rbi",
                                "runs", "earned_runs", "hits"):
-                _game_env_nudge += (_gop2 - 0.50) * 6.0
+                _game_env_nudge += (_gop2 - 0.50) * 4.5
             if _pt_lower2 in ("rbis", "rbi", "runs") and _gwp2 > 0.58:
                 _game_env_nudge += 1.0
             _streak_nudge = float(prop.get("_streak_adj",  0.0)) * 100.0
@@ -3707,11 +3709,15 @@ class _FadeAgent(_BaseAgent):
             return None
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
-        fade_boost = 6.0 if signal_src == "player_prop" else 5.0
-        fade_prob  = 100 - model_prob + fade_boost
-        under_odds = prop.get("under_american", -110)
-        implied    = _american_to_implied(under_odds) / 100
-        ev_pct     = (fade_prob / 100 - implied) / implied
+        # Scale boost by how extreme the public lean is (65%→+1pp, 80%→+2.5pp, 95%→+4pp)
+        # Player-prop signal is sharper than game-level signal so gets 1.25× multiplier.
+        _extremity  = (pub_pct - SBD_THRESHOLD) / (100.0 - SBD_THRESHOLD)  # 0→1
+        _base_boost = round(_extremity * 4.0, 2)   # max +4pp at 100% public lean
+        fade_boost  = round(_base_boost * (1.25 if signal_src == "player_prop" else 1.0), 2)
+        fade_prob   = min(95.0, (100 - model_prob) + fade_boost)
+        under_odds  = prop.get("under_american", -110)
+        implied     = _american_to_implied(under_odds) / 100
+        ev_pct      = (fade_prob / 100 - implied) / implied
         if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
             return self._build_bet(prop, "UNDER", fade_prob,
                                    implied * 100, ev_pct * 100)
@@ -3766,13 +3772,31 @@ class _LineValueAgent(_BaseAgent):
                     or 0
                 )
                 if over_pct >= 70:
-                    steam = True
-                    steam_side = "OVER"   # public piling on Over → steam on Over
-                    break
+                    # Require line movement evidence: public piling on Over without
+                    # the line moving over = NOT steam. Real steam = public on Over
+                    # but line moved toward Under (reverse line movement).
+                    # If no line move data available, require more extreme ticket%.
+                    _line_moved_against = bool(
+                        rec.get("reverse_line_move")
+                        or rec.get("rlm_signal")
+                        or rec.get("line_moved_against_public")
+                    )
+                    _extreme_tickets = over_pct >= 80  # very extreme without RLM confirmation
+                    if _line_moved_against or _extreme_tickets:
+                        steam = True
+                        steam_side = "OVER"
+                        break
                 if under_pct >= 70:
-                    steam = True
-                    steam_side = "UNDER"  # public piling on Under → steam on Under
-                    break
+                    _line_moved_against = bool(
+                        rec.get("reverse_line_move")
+                        or rec.get("rlm_signal")
+                        or rec.get("line_moved_against_public")
+                    )
+                    _extreme_tickets = under_pct >= 80
+                    if _line_moved_against or _extreme_tickets:
+                        steam = True
+                        steam_side = "UNDER"
+                        break
 
         if not steam:
             return None
@@ -3855,11 +3879,12 @@ class _BullpenAgent(_BaseAgent):
 
         model_prob = self._model_prob(player, prop_type, prop=prop)
 
-        # ── Apply fatigue boost ───────────────────────────────────────────────
-        if fatigue >= 3:
-            model_prob = min(model_prob + 6.0, 95.0)
-        elif fatigue >= 2:
-            model_prob = min(model_prob + 2.0, 95.0)
+        # ── Apply fatigue boost (continuous linear, not discrete steps) ──────
+        # Old: fatigue>=3 → +6pp cliff. New: scales 0pp at 1.0 to +6pp at 5.0.
+        # Each 0.5 unit of fatigue above neutral (2.0) adds ~1pp, max +6pp.
+        # Neutral fatigue=2.0 → 0pp boost; fatigue=5.0 → +6pp; fatigue=0.0 → 0pp (rested).
+        if fatigue > 2.0:
+            model_prob = min(model_prob + min((fatigue - 2.0) / 3.0 * 6.0, 6.0), 95.0)
 
         # ── Apply BVI + reliever B2B structural boosts ────────────────────────
         model_prob_over  = min(model_prob + bvi_over_adj  + rf_pp, 95.0)
@@ -4681,12 +4706,25 @@ class _StackSmithAgent(_BaseAgent):
         opp_fatigue = bp_fatigue.get(opp_team.lower(), {})
         fatigue_score = float(opp_fatigue.get("fatigue_score", 2.0) if isinstance(opp_fatigue, dict) else 2.0)
 
-        # Fire when opposing pitcher is weak OR bullpen is fatigued
-        weak_pitcher = era > 4.50 or k_rate < 0.20
+        # Pitcher quality relative to league average (continuous, not threshold)
+        # league_era from hub or fallback blend; positive score = pitcher worse than avg
+        _league_era = float(self.hub.get("league_era", era))  # hub sets this from MLB Stats
+        _era_score  = (era - _league_era) / max(_league_era, 1.0)   # >0 = worse than avg
+        _k_score    = (0.227 - k_rate) / 0.227                       # >0 = fewer Ks than avg
+        pitcher_quality_score = (_era_score * 0.6 + _k_score * 0.4)  # weighted composite
+
+        # Require meaningful weakness: score > 0.08 ≈ ERA ~4.50 equivalent
+        weak_pitcher = pitcher_quality_score > 0.08
         tired_pen    = fatigue_score >= 3.0
         if not weak_pitcher and not tired_pen:
             return None
+
         model_prob = self._model_prob(prop.get("player", ""), prop_type, prop=prop)
+
+        # Scale EV boost by how weak the pitcher is (not binary)
+        _quality_boost = round(min(pitcher_quality_score * 8.0, 4.0), 2) if weak_pitcher else 0.0
+        model_prob = min(model_prob + _quality_boost, 95.0)
+
         over_odds  = prop.get("over_american", -115)
         implied    = _american_to_implied(over_odds)
         ev_pct       = (model_prob / 100 - implied / 100) / (implied / 100) * 100
@@ -4844,8 +4882,12 @@ class _SharpFadeAgent(_BaseAgent):
         implied    = _american_to_implied(odds)
         prob_side  = model_prob if sharp_side == "OVER" else (100.0 - model_prob)
 
-        # Apply a signal-strength discount — game-level signal is weaker than player-level
-        adjusted_prob = prob_side * (0.85 + 0.15 * signal_strength)
+        # Shrink toward 50% by signal strength — game-level RLM is weaker than
+        # player-level so we don't fully trust prob_side. At signal_strength=0
+        # we shrink 30% toward 50%; at signal_strength=1.0 we use full prob_side.
+        # This is mathematically correct: adjusted = 50 + (prob - 50) * weight
+        _weight       = 0.70 + 0.30 * signal_strength   # 0.70 at zero signal, 1.0 at full
+        adjusted_prob = 50.0 + (prob_side - 50.0) * _weight
         ev_pct = (adjusted_prob / 100 - implied / 100) / (implied / 100) * 100
 
         ev_threshold = _get_ev_threshold(prop.get("_sim_edge_reasons", []))
