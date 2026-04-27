@@ -52,11 +52,16 @@ log = logging.getLogger(__name__)
 _PT = pytz.timezone("America/Los_Angeles")
 
 # ── Odds API config ────────────────────────────────────────────────────────────
-_ODDS_KEY: str = os.getenv("ODDS_API_KEY_2") or os.getenv("ODDS_API_KEY_3") or ""
+_ODDS_KEY: str = (
+    os.getenv("ODDS_API_KEY") or
+    os.getenv("ODDS_API_KEY_2") or
+    os.getenv("ODDS_API_KEY_3") or
+    ""
+)
 if not _ODDS_KEY:
-    log.error(
-        "[SBRef] ODDS_API_KEY_2 / ODDS_API_KEY_3 not set — sportsbook reference layer "
-        "will return empty dicts. Set these in Railway environment variables. "
+    log.warning(
+        "[SBRef] ODDS_API_KEY / ODDS_API_KEY_2 / ODDS_API_KEY_3 not set — "
+        "OddsAPI path disabled. Pinnacle direct (PINNACLE_API_KEY) will be tried as fallback. "
         "NEVER hardcode API keys in source code."
     )
 _BASE_URL = "https://api.the-odds-api.com/v4"
@@ -395,6 +400,150 @@ def _fetch_event_props(event_id: str) -> list[dict]:
     return list(rows_by_key.values())
 
 
+def _fetch_pinnacle_direct() -> dict:
+    """
+    Direct Pinnacle API — fires when OddsAPI key is expired/empty.
+    Pinnacle is the sharpest book in the world; their lines are what every other
+    book copies. Returns the same dict format as the OddsAPI path.
+
+    Setup: set PINNACLE_API_KEY in Railway = base64(username:password)
+    To encode: python3 -c "import base64; print(base64.b64encode(b'user:pass').decode())"
+
+    Pinnacle leagueId 246 = MLB. sportId 3 = Baseball.
+    """
+    import base64  # noqa: PLC0415
+    pk = os.getenv("PINNACLE_API_KEY", "")
+    if not pk:
+        return {}
+
+    headers = {
+        "Authorization": f"Basic {pk}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    # Pinnacle stat name (from special name suffix) → our market key
+    _PINNACLE_STAT_MAP: dict[str, str] = {
+        "strikeouts":            "pitcher_strikeouts",
+        "pitcher strikeouts":    "pitcher_strikeouts",
+        "hits allowed":          "pitcher_hits_allowed",
+        "earned runs":           "pitcher_earned_runs",
+        "outs":                  "pitcher_outs",
+        "pitcher outs":          "pitcher_outs",
+        "pitching outs":         "pitcher_outs",
+        "hits":                  "batter_hits",
+        "total bases":           "batter_total_bases",
+        "rbis":                  "batter_rbis",
+        "rbi":                   "batter_rbis",
+        "runs":                  "batter_runs_scored",
+        "runs scored":           "batter_runs_scored",
+        "batter strikeouts":     "batter_strikeouts",
+        "strikeouts (batter)":   "batter_strikeouts",
+        "hitter strikeouts":     "batter_strikeouts",
+        "walks allowed":         "pitcher_walks_allowed",
+        "walks":                 "pitcher_walks_allowed",
+    }
+
+    try:
+        resp = requests.get(
+            "https://api.pinnacle.com/v2/leagues/246/specials",
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code == 401:
+            log.warning("[SBRef] Pinnacle direct: 401 — check PINNACLE_API_KEY in Railway")
+            return {}
+        if resp.status_code == 404:
+            log.debug("[SBRef] Pinnacle specials 404 — props not yet posted")
+            return {}
+        resp.raise_for_status()
+        specials = resp.json().get("specials", [])
+    except Exception as exc:
+        log.debug("[SBRef] Pinnacle direct specials fetch failed: %s", exc)
+        return {}
+
+    if not specials:
+        return {}
+
+    # Fetch odds for all specials in one call (Pinnacle supports comma-list)
+    special_ids = [str(s["id"]) for s in specials if "id" in s]
+    if not special_ids:
+        return {}
+
+    try:
+        odds_resp = requests.get(
+            "https://api.pinnacle.com/v2/leagues/246/specials/odds",
+            headers=headers,
+            params={"specialIds": ",".join(special_ids[:300])},
+            timeout=15,
+        )
+        odds_resp.raise_for_status()
+        odds_list = odds_resp.json().get("specials", [])
+    except Exception as exc:
+        log.debug("[SBRef] Pinnacle special odds failed: %s", exc)
+        return {}
+
+    odds_by_id: dict[str, dict] = {str(o["id"]): o for o in odds_list if "id" in o}
+
+    ref: dict = {}
+    for special in specials:
+        sid      = str(special.get("id", ""))
+        name     = special.get("name", "")          # e.g. "Shohei Ohtani - Strikeouts"
+        units    = special.get("units", "").lower().strip()
+
+        if " - " not in name:
+            continue
+
+        player_raw, stat_raw = name.rsplit(" - ", 1)
+        player_norm = _normalize(player_raw)
+        stat_lower  = stat_raw.lower().strip()
+        market_key  = _PINNACLE_STAT_MAP.get(stat_lower) or _PINNACLE_STAT_MAP.get(units)
+
+        if not market_key or not player_norm:
+            continue
+
+        odds = odds_by_id.get(sid, {})
+        contestants = odds.get("contestants", [])
+
+        over_price = under_price = line = None
+        for c in contestants:
+            cname     = (c.get("name") or "").lower().strip()
+            price     = c.get("price")
+            handicap  = c.get("handicap")
+            if handicap is not None and line is None:
+                try:
+                    line = float(handicap)
+                except (TypeError, ValueError):
+                    pass
+            if cname in ("over", "higher") and price is not None:
+                try:
+                    over_price = int(float(price))
+                except (TypeError, ValueError):
+                    pass
+            elif cname in ("under", "lower") and price is not None:
+                try:
+                    under_price = int(float(price))
+                except (TypeError, ValueError):
+                    pass
+
+        if over_price is None or under_price is None or line is None:
+            continue
+
+        ovi, uvi = _vig_strip(over_price, under_price)
+        for side, si in [("Over", ovi), ("Under", uvi)]:
+            ref[(player_norm, market_key, side)] = {
+                "sb_implied_prob": si,
+                "line":            line,
+                "bookmaker":       "pinnacle",
+                "over_odds":       over_price,
+                "under_odds":      under_price,
+            }
+
+    if ref:
+        log.info("[SBRef] Pinnacle direct: %d prop entries (OddsAPI bypassed)", len(ref))
+    return ref
+
+
 def _fetch_live(date_int: int) -> dict:
     """Full live fetch: events → per-event props.  Returns reference dict."""
     events = _fetch_events()
@@ -506,6 +655,22 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         log.info("[SBRef] Built and cached %d entries for %d", len(ref), date_int)
     else:
         log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
+
+    # ── Pinnacle direct fallback — when OddsAPI key expired or quota empty ───
+    # Pinnacle is the sharpest book globally; their lines ARE the market.
+    # Requires PINNACLE_API_KEY = base64(username:password) in Railway.
+    # Full player coverage — functionally equivalent to OddsAPI Pinnacle tier.
+    if not _mem_ref:
+        ref = _fetch_pinnacle_direct()
+        if ref:
+            _mem_ref = ref
+            _fetch_date = date_int
+            _file_save(date_int, ref)
+            flat = [
+                {"player_name": pn, "market_key": mk, "side": side, **v}
+                for (pn, mk, side), v in ref.items()
+            ]
+            _pg_save(date_int, flat)
 
     # ── DraftEdge fallback — when Odds API has no props yet ──────────────────
     # DraftEdge gives projected_prob per player/prop. Used when sharp book
