@@ -3694,9 +3694,13 @@ class _FadeAgent(_BaseAgent):
     def evaluate(self, prop: dict) -> dict | None:
         """Fades heavy public action using SportsBettingDime real BET%/MONEY% data.
 
-        Threshold: 65% public tickets on Over → fade signal.
+        Fades BOTH directions:
+          - Public ≥65% Over tickets  → fade to Under
+          - Public ≤35% Over tickets  → public is heavy Under → fade to Over
+        Boost scales with how extreme the lean is (65%→+0pp, 80%→+1.5pp, 95%→+3.5pp).
         """
-        SBD_THRESHOLD = 65.0
+        SBD_THRESHOLD       = 65.0
+        SBD_UNDER_THRESHOLD = 35.0  # mirror: public heavy Under → fade to Over
         market   = self.hub.get("market", {})
         pub_data = market.get("public_betting", {})
         player   = prop.get("player", "")
@@ -3710,28 +3714,39 @@ class _FadeAgent(_BaseAgent):
             game_df = pd.DataFrame(game_records) if game_records else pd.DataFrame()
             prop_df = pd.DataFrame(prop_records) if prop_records else pd.DataFrame()
         except ImportError:
-            return None  # pandas not available
+            return None
 
         pub_pct, signal_src = get_fade_signal(
             player, team, prop_type, game_df, prop_df, threshold=SBD_THRESHOLD
         )
 
-        if pub_pct < SBD_THRESHOLD:
-            return None
-
         model_prob = self._model_prob(player, prop_type, prop=prop)
-        # Scale boost by how extreme the public lean is (65%→+1pp, 80%→+2.5pp, 95%→+4pp)
-        # Player-prop signal is sharper than game-level signal so gets 1.25× multiplier.
-        _extremity  = (pub_pct - SBD_THRESHOLD) / (100.0 - SBD_THRESHOLD)  # 0→1
-        _base_boost = round(_extremity * 4.0, 2)   # max +4pp at 100% public lean
-        fade_boost  = round(_base_boost * (1.25 if signal_src == "player_prop" else 1.0), 2)
-        fade_prob   = min(95.0, (100 - model_prob) + fade_boost)
-        under_odds  = prop.get("under_american", -110)
-        implied     = _american_to_implied(under_odds) / 100
-        ev_pct      = (fade_prob / 100 - implied) / implied
-        if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
-            return self._build_bet(prop, "UNDER", fade_prob,
-                                   implied * 100, ev_pct * 100)
+        _multiplier = 1.25 if signal_src == "player_prop" else 1.0
+
+        # ── Fade heavy public Over → bet Under ───────────────────────────────
+        if pub_pct >= SBD_THRESHOLD:
+            _extremity  = (pub_pct - SBD_THRESHOLD) / (100.0 - SBD_THRESHOLD)
+            fade_boost  = round(_extremity * 4.0 * _multiplier, 2)
+            fade_prob   = min(95.0, (100 - model_prob) + fade_boost)
+            under_odds  = prop.get("under_american", -110)
+            implied     = _american_to_implied(under_odds) / 100
+            ev_pct      = (fade_prob / 100 - implied) / implied
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, "UNDER", fade_prob,
+                                       implied * 100, ev_pct * 100)
+
+        # ── Fade heavy public Under → bet Over ───────────────────────────────
+        if pub_pct <= SBD_UNDER_THRESHOLD and pub_pct > 0:
+            _extremity  = (SBD_UNDER_THRESHOLD - pub_pct) / SBD_UNDER_THRESHOLD
+            fade_boost  = round(_extremity * 4.0 * _multiplier, 2)
+            fade_prob   = min(95.0, model_prob + fade_boost)
+            over_odds   = prop.get("over_american", -110)
+            implied     = _american_to_implied(over_odds) / 100
+            ev_pct      = (fade_prob / 100 - implied) / implied
+            if ev_pct >= _get_ev_threshold(prop.get("_sim_edge_reasons", [])):
+                return self._build_bet(prop, "OVER", fade_prob,
+                                       implied * 100, ev_pct * 100)
+
         return None
 
 

@@ -47,12 +47,14 @@ PITCHER_LINES = {
     "earned_runs":   2.5,
     "pitching_outs": 14.5,
     "walks_allowed": 1.5,
+    "hits_allowed":  4.5,   # was missing — caused xgb_sample_counts hits_allowed=1
 }
 BATTER_LINES = {
     "hits":              0.5,
     "total_bases":       1.5,
     "hitter_strikeouts": 0.5,
     "hits_runs_rbis":    2.5,
+    "runs":              0.5,  # was missing — caused xgb_sample_counts runs=1
 }
 
 # ── Minimum plate appearances / batters faced to include a game
@@ -177,12 +179,14 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
         er   = int(st.get("earnedRuns",    0) or 0)
         outs = int(st.get("outs",          0) or 0)
         bb   = int(st.get("baseOnBalls",   0) or 0)  # walks allowed
+        ha   = int(st.get("hits",          0) or 0)  # hits allowed (pitcher)
 
         for prop_type, line, actual in [
             ("strikeouts",    PITCHER_LINES["strikeouts"],    ks),
             ("earned_runs",   PITCHER_LINES["earned_runs"],   er),
             ("pitching_outs", PITCHER_LINES["pitching_outs"], outs),
             ("walks_allowed", PITCHER_LINES["walks_allowed"], bb),
+            ("hits_allowed",  PITCHER_LINES["hits_allowed"],  ha),
         ]:
             for side, threshold in [("Over", line), ("Under", line)]:
                 if side == "Over":
@@ -233,6 +237,7 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
             ("total_bases",       BATTER_LINES["total_bases"],       tb),
             ("hitter_strikeouts", BATTER_LINES["hitter_strikeouts"], bk),
             ("hits_runs_rbis",    BATTER_LINES["hits_runs_rbis"],    hrbi),
+            ("runs",              BATTER_LINES["runs"],              runs),
         ]:
             for side, threshold in [("Over", line), ("Under", line)]:
                 if side == "Over":

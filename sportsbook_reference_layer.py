@@ -400,6 +400,121 @@ def _fetch_event_props(event_id: str) -> list[dict]:
     return list(rows_by_key.values())
 
 
+def _fetch_prop_odds(api_key: str, date_int: int) -> dict:
+    """
+    Fetch MLB player prop lines from PropOdds API (prop-odds.com).
+    Free tier: 100 calls/day. Flow: /beta/games/mlb → /beta/props/{game_id} per game.
+    Vig-strips paired Over/Under prices using existing _vig_strip() helper.
+    Returns dict keyed by (player_norm, market_key, side) — same format as OddsAPI path.
+    """
+    _PO_BASE = "https://api.prop-odds.com/beta"
+    _PO_MARKET_MAP: dict[str, str] = {
+        "pitcher_strikeouts": "pitcher_strikeouts", "strikeouts": "pitcher_strikeouts",
+        "pitcher strikeouts": "pitcher_strikeouts",
+        "pitcher_hits_allowed": "pitcher_hits_allowed", "hits allowed": "pitcher_hits_allowed",
+        "pitcher_earned_runs": "pitcher_earned_runs", "earned runs allowed": "pitcher_earned_runs",
+        "pitcher_outs": "pitcher_outs", "pitching outs": "pitcher_outs",
+        "batter_hits": "batter_hits", "hits": "batter_hits",
+        "batter_total_bases": "batter_total_bases", "total bases": "batter_total_bases",
+        "batter_rbis": "batter_rbis", "rbis": "batter_rbis",
+        "batter_runs_scored": "batter_runs_scored", "runs scored": "batter_runs_scored",
+        "batter_strikeouts": "batter_strikeouts", "hitter strikeouts": "batter_strikeouts",
+    }
+    _PO_BOOK_PRIORITY: dict[str, int] = {
+        "draftkings": 0, "fanduel": 1, "betmgm": 2, "caesars": 3,
+        "pointsbet": 4, "betrivers": 5,
+    }
+    today_str = datetime.now(_PT).strftime("%Y-%m-%d")
+    ref: dict = {}
+
+    try:
+        games_resp = requests.get(
+            f"{_PO_BASE}/games/mlb",
+            params={"date": today_str, "tz": "America/New_York", "api_key": api_key},
+            timeout=15,
+        )
+        if games_resp.status_code == 401:
+            log.warning("[PropOdds] Invalid API key — check PROP_ODDS_API_KEY in Railway")
+            return {}
+        if games_resp.status_code == 429:
+            log.warning("[PropOdds] Daily quota exhausted (100 calls/day on free tier)")
+            return {}
+        if games_resp.status_code != 200:
+            log.warning("[PropOdds] Games endpoint HTTP %d", games_resp.status_code)
+            return {}
+        game_ids: list[str] = [
+            g.get("game_id", "") for g in games_resp.json().get("games", []) if g.get("game_id")
+        ]
+        log.info("[PropOdds] %d MLB games for %s", len(game_ids), today_str)
+    except Exception as exc:
+        log.warning("[PropOdds] Games fetch failed: %s", exc)
+        return {}
+
+    if not game_ids:
+        return {}
+
+    raw_by_key: dict[tuple, dict] = {}
+    for game_id in game_ids:
+        try:
+            props_resp = requests.get(f"{_PO_BASE}/props/{game_id}",
+                                       params={"api_key": api_key}, timeout=15)
+            if props_resp.status_code == 429:
+                log.warning("[PropOdds] Quota exhausted mid-fetch")
+                break
+            if props_resp.status_code != 200:
+                continue
+            markets = props_resp.json().get("sportsbooks", [])
+        except Exception:
+            continue
+
+        for sportsbook in markets:
+            bk = sportsbook.get("sportsbook", "").lower().replace(" ", "")
+            if bk not in _PO_BOOK_PRIORITY:
+                continue
+            for market in sportsbook.get("markets", []):
+                mkt_key = _PO_MARKET_MAP.get(market.get("market_name", "").lower().strip())
+                if not mkt_key:
+                    continue
+                for outcome in market.get("outcomes", []):
+                    player_raw = str(outcome.get("participant", "") or outcome.get("name", "") or "")
+                    if not player_raw:
+                        continue
+                    player_norm = _normalize(player_raw)
+                    side_raw = str(outcome.get("type", "")).strip().lower()
+                    side = "Over" if side_raw in ("over", "o") else "Under" if side_raw in ("under", "u") else None
+                    if not side:
+                        continue
+                    try:
+                        line  = float(outcome.get("handicap") or outcome.get("line") or 0)
+                        price = int(float(str(outcome.get("price", "-110")).replace("+", "")))
+                    except (ValueError, TypeError):
+                        continue
+                    raw_key = (player_norm, mkt_key, side, bk, line)
+                    existing = raw_by_key.get(raw_key)
+                    if existing is None or _PO_BOOK_PRIORITY.get(bk, 99) < _PO_BOOK_PRIORITY.get(existing["bk"], 99):
+                        raw_by_key[raw_key] = {"price": price, "bk": bk, "line": line}
+
+    processed: set = set()
+    for (player, mkt, side, bk, line), data in raw_by_key.items():
+        if (player, mkt, bk, line) in processed:
+            continue
+        other_side = "Under" if side == "Over" else "Over"
+        partner = raw_by_key.get((player, mkt, other_side, bk, line))
+        if partner:
+            over_price  = data["price"] if side == "Over" else partner["price"]
+            under_price = data["price"] if side == "Under" else partner["price"]
+            fair_over, fair_under = _vig_strip(over_price, under_price)
+            for s, fp in [("Over", fair_over), ("Under", fair_under)]:
+                k = (player, mkt, s)
+                if k not in ref or _PO_BOOK_PRIORITY.get(bk, 99) < _PO_BOOK_PRIORITY.get(ref[k].get("bookmaker", ""), 99):
+                    ref[k] = {"sb_implied_prob": round(fp, 4), "line": line,
+                               "bookmaker": f"propodds_{bk}"}
+            processed.add((player, mkt, bk, line))
+
+    log.info("[PropOdds] Parsed %d prop entries from %d games", len(ref), len(game_ids))
+    return ref
+
+
 def _fetch_pinnacle_direct() -> dict:
     """
     Direct Pinnacle API — fires when OddsAPI key is expired/empty.
@@ -655,6 +770,29 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         log.info("[SBRef] Built and cached %d entries for %d", len(ref), date_int)
     else:
         log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
+
+    # ── PropOdds fallback — fires when OddsAPI key empty/exhausted ───────────
+    # Free tier: 100 calls/day. Set PROP_ODDS_API_KEY in Railway (prop-odds.com).
+    # ~16 calls/day (1 games list + 1 per game). Covers DK/FD/BetMGM/Caesars.
+    if not _mem_ref:
+        try:
+            _po_key = os.getenv("PROP_ODDS_API_KEY", "")
+            if _po_key:
+                _po_ref = _fetch_prop_odds(_po_key, date_int)
+                if _po_ref:
+                    log.info("[SBRef] PropOdds fallback: %d entries", len(_po_ref))
+                    _mem_ref    = _po_ref
+                    _fetch_date = date_int
+                    _file_save(date_int, _po_ref)
+                    flat = [
+                        {"player_name": pn, "market_key": mk, "side": side, **v}
+                        for (pn, mk, side), v in _po_ref.items()
+                    ]
+                    _pg_save(date_int, flat)
+            else:
+                log.debug("[SBRef] PROP_ODDS_API_KEY not set — PropOdds skipped")
+        except Exception as _po_err:
+            log.debug("[SBRef] PropOdds fallback failed: %s", _po_err)
 
     # ── Pinnacle direct fallback — when OddsAPI key expired or quota empty ───
     # Pinnacle is the sharpest book globally; their lines ARE the market.
