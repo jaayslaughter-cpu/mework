@@ -449,7 +449,18 @@ def _today_pt() -> "datetime.date":
     return datetime.datetime.now(_zi.ZoneInfo("America/Los_Angeles")).date()
 
 
-def _american_to_implied(american: int) -> float:
+def _american_to_implied(american) -> float:
+    """Convert American odds to implied probability percentage.
+    Returns 52.4 (≡ -110) as a safe default for None/zero/invalid input.
+    """
+    if american is None:
+        return 52.4
+    try:
+        american = int(american)
+    except (TypeError, ValueError):
+        return 52.4
+    if american == 0:
+        return 52.4
     if american > 0:
         return 100.0 / (american + 100) * 100
     return abs(american) / (abs(american) + 100) * 100

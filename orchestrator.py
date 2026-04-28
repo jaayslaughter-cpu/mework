@@ -351,13 +351,18 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 10:00 AM PT, within the 8:30 AM dispatch window."""
+    """Streak pick — runs at 8:45 AM PT, within the 8:30 AM dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
-        await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
-        logger.info("[StreakAgent] Pick posted.")
+        result = await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
+        if result:
+            logger.info("[StreakAgent] Pick posted — streak_id=%s picks=%d",
+                        result.get("streak_id"), len(result.get("picks", [])))
+        else:
+            logger.warning("[StreakAgent] run_streak_pick returned None — "
+                           "no qualifying pick today (conf/prob gate, no props, or DB error).")
     except Exception as exc:
-        logger.warning("[StreakAgent] Failed: %s", exc)
+        logger.error("[StreakAgent] FAILED: %s", exc, exc_info=True)
 
 
 async def job_predict_plus_prefetch():
@@ -499,26 +504,26 @@ async def lifespan(_app: FastAPI):
         id="bug_checker",
     )
 
-    # ── Predict+ prefetch — 9:55 AM PT (5 min before dispatch window opens) ─────
+    # ── Predict+ prefetch — 8:15 AM PT (15 min before dispatch window opens at 8:30) ──
     # Pre-computes pitcher unpredictability scores so _get_predict_plus_adj()
     # in prop enrichment always finds a warm weekly cache.
     scheduler.add_job(
         job_predict_plus_prefetch,
-        CronTrigger(hour=9, minute=55, timezone="America/Los_Angeles"),
+        CronTrigger(hour=8, minute=15, timezone="America/Los_Angeles"),
         id="predict_plus_prefetch",
     )
 
-    # ── Streak pick — 10:00 AM PT (within main dispatch window, before first pitch) ──
+    # ── Streak pick — 8:45 AM PT (within dispatch window, well before first pitch) ──
     scheduler.add_job(
         job_streak,
-        CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
+        CronTrigger(hour=8, minute=45, timezone="America/Los_Angeles"),
         id="streak",
     )
 
-    # ── Log watcher summary — 10:10 AM PT (after streak, within dispatch window) ──
+    # ── Log watcher summary — 9:15 AM PT (after streak, within dispatch window) ──
     scheduler.add_job(
         job_log_watcher,
-        CronTrigger(hour=10, minute=10, timezone="America/Los_Angeles"),
+        CronTrigger(hour=9, minute=15, timezone="America/Los_Angeles"),
         id="log_watcher",
     )
 
@@ -539,7 +544,7 @@ async def lifespan(_app: FastAPI):
 
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
-        "predict_plus_prefetch@9:55AM, streak@10:00AM, log_watcher@10:10AM, "
+        "predict_plus_prefetch@8:15AM, streak@8:45AM, log_watcher@9:15AM, "
         "line_stream@30min, leaderboard@monthly, "
         "backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
     )
