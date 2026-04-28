@@ -1,5 +1,6 @@
--- Migration V36: Fix schema mismatches. Already applied live to Railway DB.
--- Safe to re-run.
+-- Migration V36: Fix schema mismatches.
+-- NOTE: The comment "Already applied live" was INCORRECT — errors in PG logs
+-- from Apr 23-28 confirm this migration never ran. Safe to re-run (IF NOT EXISTS).
 
 ALTER TABLE xgb_model_store ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 UPDATE xgb_model_store SET created_at = trained_at WHERE created_at IS NULL AND trained_at IS NOT NULL;

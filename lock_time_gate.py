@@ -179,6 +179,17 @@ def is_final(team: str, game_times: dict) -> bool:
 
 
 # ── Game-times fetch (called from DataHub) ────────────────────────────────────
+def _to_pt_hhmm(utc_iso: str) -> str:
+    """Convert ISO 8601 UTC string to 'HH:MM' in PT. Returns '' on failure."""
+    try:
+        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+        from zoneinfo import ZoneInfo as _ZI                    # noqa: PLC0415
+        gdt = _dt.fromisoformat(utc_iso.replace("Z", "+00:00"))
+        return gdt.astimezone(_ZI("America/Los_Angeles")).strftime("%H:%M")
+    except Exception:
+        return ""
+
+
 def fetch_game_times_today() -> dict[str, dict]:
     """
     Fetch first-pitch times and abstract game states for all MLB games today.
@@ -215,6 +226,7 @@ def fetch_game_times_today() -> dict[str, dict]:
                     if team:
                         result[team] = {
                             "game_time_utc":  game_time_raw,
+                            "game_time_pt":   _to_pt_hhmm(game_time_raw),
                             "abstract_state": abstract_state,
                             "opponent":       opponent,
                             "venue":          venue,

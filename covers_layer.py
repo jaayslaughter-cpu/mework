@@ -337,26 +337,10 @@ def _read_cache(date_int: int) -> Optional[dict]:
     """Read covers reference from layer_cache table (Postgres). Returns None on miss."""
     try:
         import json
-        import psycopg2
-
-        db_url = os.environ.get("DATABASE_URL", "")
-        if not db_url:
-            return None
-
-        with psycopg2.connect(db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT value FROM layer_cache
-                    WHERE key = %s
-                      AND created_at > NOW() - INTERVAL '%s seconds'
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (_cache_key(date_int), _CACHE_TTL_SECONDS),
-                )
-                row = cur.fetchone()
-                if row:
-                    return json.loads(row[0])
+        from layer_cache_helper import pg_cache_get  # noqa: PLC0415
+        cached = pg_cache_get("covers_ref", _cache_key(date_int))
+        if cached:
+            return cached
         return None
     except Exception as exc:
         log.debug("[Covers] Cache read failed: %s", exc)
@@ -364,27 +348,10 @@ def _read_cache(date_int: int) -> Optional[dict]:
 
 
 def _write_cache(date_int: int, data: dict) -> None:
-    """Write covers reference to layer_cache table (Postgres)."""
+    """Write covers reference to layer_cache via layer_cache_helper (correct schema)."""
     try:
-        import json
-        import psycopg2
-
-        db_url = os.environ.get("DATABASE_URL", "")
-        if not db_url:
-            return
-
-        payload = json.dumps(data)
-        with psycopg2.connect(db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO layer_cache (key, value, created_at)
-                    VALUES (%s, %s, NOW())
-                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, created_at = NOW()
-                    """,
-                    (_cache_key(date_int), payload),
-                )
-            conn.commit()
+        from layer_cache_helper import pg_cache_set  # noqa: PLC0415
+        pg_cache_set("covers_ref", _cache_key(date_int), data)
     except Exception as exc:
         log.debug("[Covers] Cache write failed: %s", exc)
 

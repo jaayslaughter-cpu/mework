@@ -5256,12 +5256,12 @@ def run_agent_tasklet() -> bool:
     logger.info("[AgentTasklet] Cycle entered at %02d:%02d PT — evaluating send window.",
                 _entry_now.hour, _entry_now.minute)
 
-    # ── Dynamic send-window gate — open 9:00 AM PT, close 30 min before first pitch ─
+    # ── Dynamic send-window gate — open 8:30 AM PT, close 30 min before first pitch ─
     # Mirrors orchestrator.py gate logic exactly (pure HH:MM string comparison).
     _pt_now = _entry_now
-    _open_pt  = _pt_now.replace(hour=9, minute=0, second=0, microsecond=0)
+    _open_pt  = _pt_now.replace(hour=8, minute=30, second=0, microsecond=0)
     if _pt_now < _open_pt:
-        logger.info("[AgentTasklet] Before 9:00 AM PT open (%02d:%02d PT) — skipping cycle.",
+        logger.info("[AgentTasklet] Before 8:30 AM PT open (%02d:%02d PT) — skipping cycle.",
                     _pt_now.hour, _pt_now.minute)
         return
 

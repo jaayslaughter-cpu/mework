@@ -231,16 +231,13 @@ async def job_agents():
 
     # ── Dynamic dispatch window ───────────────────────────────────────────────
     # Open : 9:00 AM PT (props are posted, no games live yet)
+    # Open : 8:30 AM PT
     # Close: 30 min before the earliest scheduled first pitch of the day
     # Fallback ceiling: 12:30 PM PT if game time data isn't in the hub yet
-    #
-    # Why not 11 AM: Sunday east-coast first pitch is 10:05 AM PT. The old
-    # 11 AM floor meant agents fired AFTER games started — LockGate correctly
-    # killed every prop for those games, leaving nothing to send.
-    _open_pt  = _pt_ck.replace(hour=9, minute=0, second=0, microsecond=0)
+    _open_pt  = _pt_ck.replace(hour=8, minute=30, second=0, microsecond=0)
     if _pt_ck < _open_pt:
         logger.debug(
-            "[orchestrator] Pre-window at %02d:%02d PT — opens 9:00 AM. Skipping.",
+            "[orchestrator] Pre-window at %02d:%02d PT — opens 8:30 AM. Skipping.",
             _pt_ck.hour, _pt_ck.minute,
         )
         return
@@ -354,7 +351,7 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 10:00 AM PT, within the 9 AM dispatch window."""
+    """Streak pick — runs at 10:00 AM PT, within the 8:30 AM dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
@@ -371,7 +368,7 @@ async def job_predict_plus_prefetch():
     surprise ratio into a Predict+ score (mean=100, SD=10).  The weekly on-disk cache
     means Railway restarts within the same ISO week are free (< 1 ms).
 
-    Runs 5 minutes before the dispatch window opens so _get_predict_plus_adj() in
+    Runs 25 minutes before the dispatch window opens so _get_predict_plus_adj() in
     prop enrichment always finds a warm cache.  Falls back gracefully if scikit-learn
     is unavailable or the hub has no pitcher props yet.
     """
@@ -415,6 +412,61 @@ async def job_predict_plus_prefetch():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
+
+    # ── Run pending SQL migrations ────────────────────────────────────────────
+    # No Flyway process is attached to this Railway deployment — migrations in
+    # the migrations/ folder were never being applied. This runner applies any
+    # .sql file that hasn't been recorded in migration_history yet.
+    # Safe to run on every startup: all SQL uses IF NOT EXISTS / CREATE OR REPLACE.
+    try:
+        import glob as _glob  # noqa: PLC0415
+        import psycopg2 as _pg  # noqa: PLC0415
+
+        _db_url = os.getenv("DATABASE_URL", "")
+        if _db_url:
+            with _pg.connect(_db_url) as _mc:
+                with _mc.cursor() as _cur:
+                    # Create migration history table if it doesn't exist
+                    _cur.execute("""
+                        CREATE TABLE IF NOT EXISTS migration_history (
+                            filename   TEXT PRIMARY KEY,
+                            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                    """)
+                    _mc.commit()
+
+                    # Find all migration files in order
+                    _mig_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
+                    _sql_files = sorted(_glob.glob(os.path.join(_mig_dir, "V*.sql")))
+
+                    _applied = 0
+                    for _sql_path in _sql_files:
+                        _fname = os.path.basename(_sql_path)
+                        _cur.execute("SELECT 1 FROM migration_history WHERE filename = %s", (_fname,))
+                        if _cur.fetchone():
+                            continue  # already applied
+                        try:
+                            with open(_sql_path) as _f:
+                                _sql = _f.read()
+                            _cur.execute(_sql)
+                            _cur.execute(
+                                "INSERT INTO migration_history (filename) VALUES (%s) ON CONFLICT DO NOTHING",
+                                (_fname,),
+                            )
+                            _mc.commit()
+                            logger.info("[Migrations] Applied: %s", _fname)
+                            _applied += 1
+                        except Exception as _mig_exc:
+                            _mc.rollback()
+                            logger.error("[Migrations] FAILED %s: %s", _fname, _mig_exc)
+
+                    if _applied == 0:
+                        logger.info("[Migrations] All migrations already applied.")
+                    else:
+                        logger.info("[Migrations] %d migration(s) applied on startup.", _applied)
+    except Exception as _mig_outer:
+        logger.error("[Migrations] Migration runner failed: %s", _mig_outer)
+        # Never block startup on a migration failure
 
     # ── Tasklet interval jobs ─────────────────────────────────────────────────
     scheduler.add_job(job_data_hub,   IntervalTrigger(seconds=15), id="data_hub")
