@@ -6361,7 +6361,8 @@ def run_grading_tasklet() -> None:
                        COALESCE(entry_type, 'STANDARD') AS entry_type,
                        COALESCE(units_wagered, ABS(kelly_units), 1.0) AS stake_units,
                        features_json,
-                       parlay_id
+                       parlay_id,
+                       clv  -- PR #462: pass stored dispatch-time CLV so 2AM grading uses it directly
                 FROM bet_ledger
                 WHERE status = 'OPEN' AND bet_date <= %s AND discord_sent = TRUE  -- FIX PR#276: <= catches all historical OPEN rows
                 """,
@@ -6392,6 +6393,7 @@ def run_grading_tasklet() -> None:
                 _stake_units    = float(row_data[13]) if len(row_data) > 13 and row_data[13] else float(abs(units) or 1.0)
                 _stored_feats   = row_data[14] if len(row_data) > 14 else None  # existing features_json
                 _parlay_id      = row_data[15] if len(row_data) > 15 else None  # slip grouping key
+                _stored_clv     = float(row_data[16]) if len(row_data) > 16 and row_data[16] is not None else None  # PR #462: dispatch-time CLV
                 # mlbam_id must be fetched from bet_ledger (stored at bet time)
                 _bid_mlbam = None
                 try:
@@ -6482,8 +6484,15 @@ def run_grading_tasklet() -> None:
                         pl = 0.0
 
                 closing_odds = _fetch_closing_odds(player, ptype, side) or odds
-                # CLV = model edge over closing line (both in decimal 0-1 scale)
-                clv = round(float(model_prob or 50) - _american_to_implied(int(closing_odds or -110)), 4)
+                # CLV = model edge over closing line (both in decimal 0-1 scale).
+                # PR #462: prefer dispatch-time CLV stored in bet_ledger.clv.
+                # At 2 AM hub:market is always expired, so _fetch_closing_odds returns None
+                # and closing_odds falls back to pick-time odds — making CLV ≈ ev_pct.
+                # The dispatch-time CLV was computed while market data was live and is more accurate.
+                if _stored_clv is not None:
+                    clv = _stored_clv
+                else:
+                    clv = round(float(model_prob or 50) - _american_to_implied(int(closing_odds or -110)), 4)
 
                 # actual_outcome: 1=WIN, 0=LOSS (used by XGBoost retraining)
                 actual_outcome = 1 if status == "WIN" else 0 if status == "LOSS" else None
@@ -6566,7 +6575,7 @@ def run_grading_tasklet() -> None:
                         agent_name   = agent,
                     )
                 except Exception as _clv_ie:
-                    logger.debug("[GradingTasklet] clv_records insert: %s", _clv_ie)
+                    logger.warning("[GradingTasklet] clv_records insert FAILED: %s", _clv_ie, exc_info=True)
                 results.append({
                     "id": bid, "player": player, "prop_type": ptype,
                     "line": line, "side": side, "actual": actual,
