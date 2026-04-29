@@ -4469,36 +4469,13 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
 
     # Streaks are Underdog-only — never assign STREAKS to a PP slip
     entry_type_forced = None
-    if parlay_platform == "underdog":
-        _ud_streak_count = 0
-        try:
-            _sc = _pg_conn()
-            with _sc.cursor() as _scc:
-                _scc.execute("SELECT current_count FROM ud_streak_state LIMIT 1")
-                _srow = _scc.fetchone()
-                if _srow:
-                    _ud_streak_count = int(_srow[0])
-            _sc.close()
-        except Exception:
-            pass
 
-        if _ud_streak_count == 0:
-            _streak_phase       = "pick-2"
-            _streak_legs_needed = 2
-        else:
-            _streak_phase       = "pick-1"
-            _streak_legs_needed = 1
-
-        _qualifying_streak_legs = [
-            lg for lg in enriched_legs
-            if check_streaks_gate(
-                min(0.95, max(0.05, lg.get("model_prob", 0.0) / 100)),
-                phase=_streak_phase,
-            )[0]
-        ]
-        if len(_qualifying_streak_legs) >= _streak_legs_needed:
-            enriched_legs     = _qualifying_streak_legs[:_streak_legs_needed]
-            entry_type_forced = "STREAKS"
+    # Safety net: re-check leg count — the Streaks block used to trim
+    # 2-leg slips to 1-leg here, producing "1-Leg FlexPlay Slips".
+    # Streaks are now handled exclusively by streak_agent.py.
+    if len(enriched_legs) < 2:
+        logger.info("[_make_parlay] %s: fewer than 2 legs after filtering — skipping.", agent_name)
+        return []
 
     # ── Step 3: build the single parlay ──────────────────────────────────────
     n      = len(enriched_legs)
@@ -5571,6 +5548,47 @@ def run_agent_tasklet() -> bool:
     for parlay in all_parlays:
         agent_name = parlay.get("agent", "unknown")
 
+        # ── Minimum leg count gate ────────────────────────────────────────────
+        # Belt-and-suspenders: _make_parlay already enforces min_legs=2 and has
+        # a post-filter safety guard, but catch any 1-leg slip that somehow escaped.
+        _parlay_legs = parlay.get("legs", [])
+        if len(_parlay_legs) < 2:
+            logger.warning(
+                "[AgentTasklet] %s: 1-leg slip blocked at send gate — "
+                "only 2+ leg slips are allowed. Prop: %s",
+                agent_name,
+                _parlay_legs[0].get("player", "?") if _parlay_legs else "none",
+            )
+            continue
+
+        # ── Cross-agent prop dedup ────────────────────────────────────────────
+        # Prevents the same player+prop+side from being sent by multiple agents
+        # in different 30s cycles (e.g. EVHunter at 8:33 AM, F5Agent at 1:56 PM).
+        # Key: prop_sent:{player}:{prop_type}:{side}:{date} — expires after 25h.
+        _prop_already_sent = False
+        try:
+            for _dup_leg in _parlay_legs:
+                _prop_key = (
+                    f"prop_sent:{_dup_leg.get('player','').lower()}:"
+                    f"{_dup_leg.get('prop_type','')}:"
+                    f"{_dup_leg.get('side','').upper()}:"
+                    f"{today_str}"
+                )
+                if r_dedup.exists(_prop_key):
+                    logger.info(
+                        "[AgentTasklet] %s — %s %s %s already sent today by another agent. Skipping.",
+                        agent_name,
+                        _dup_leg.get("player", "?"),
+                        _dup_leg.get("prop_type", ""),
+                        _dup_leg.get("side", ""),
+                    )
+                    _prop_already_sent = True
+                    break
+        except Exception:
+            pass  # Redis down — allow through, rely on in-memory gate
+        if _prop_already_sent:
+            continue
+
         # In-memory gate (primary — works without Redis)
         if _AGENT_SENT_TODAY.get(agent_name) == today_str:
             logger.info("[AgentTasklet] %s already sent today (in-memory) — skipping.", agent_name)
@@ -5734,6 +5752,18 @@ def run_agent_tasklet() -> bool:
                 _AGENT_SENT_TODAY[agent_name] = today_str   # sync in-memory
                 logger.info("[AgentTasklet] %s claimed by another replica (Redis NX) — skipping.", agent_name)
                 continue
+            # Stamp prop-level dedup keys so other agents can't resend same legs today
+            try:
+                for _pl in parlay.get("legs", []):
+                    _pk = (
+                        f"prop_sent:{_pl.get('player','').lower()}:"
+                        f"{_pl.get('prop_type','')}:"
+                        f"{_pl.get('side','').upper()}:"
+                        f"{today_str}"
+                    )
+                    r_dedup.set(_pk, agent_name, ex=_DAY_TTL)
+            except Exception:
+                pass
         except Exception:
             # Redis down — fall through and rely on in-memory gate only
             _redis_claimed = True  # assume we have the slot if Redis is unavailable
