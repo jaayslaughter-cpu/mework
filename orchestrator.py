@@ -58,14 +58,31 @@ except ImportError:
     def _run_monthly_leaderboard():
         raise NotImplementedError("monthly_leaderboard module not available")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("propiq_army.log", mode="a"),
-    ]
+# ── Railway-compatible JSON log formatter ─────────────────────────────────────
+# Railway reads structured JSON from stdout and maps the "level" field to its
+# severity filter. Plain-text output causes Railway to tag every line as "error"
+# regardless of actual Python log level, breaking severity-based filtering.
+import json as _json_log
+class _RailwayFormatter(logging.Formatter):
+    _LEVEL_MAP = {
+        "DEBUG": "debug", "INFO": "info",
+        "WARNING": "warning", "ERROR": "error", "CRITICAL": "critical",
+    }
+    def format(self, record: logging.LogRecord) -> str:
+        return _json_log.dumps({
+            "level":   self._LEVEL_MAP.get(record.levelname, "info"),
+            "message": self.formatMessage(record),
+            "logger":  record.name,
+            "time":    self.formatTime(record),
+        }, ensure_ascii=False)
+
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(_RailwayFormatter())
+_file_handler = logging.FileHandler("propiq_army.log", mode="a")
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
 )
+logging.basicConfig(level=logging.INFO, handlers=[_stdout_handler, _file_handler])
 logger = logging.getLogger("propiq.orchestrator")
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
