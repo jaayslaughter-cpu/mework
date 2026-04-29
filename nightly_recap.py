@@ -3,13 +3,18 @@ nightly_recap.py
 ================
 Runs at 11:00 PM PT every night.
 
-1. Fetches actual MLB player stats from ESPN for yesterday's games
+1. Fetches actual MLB player stats from ESPN for TODAY's games
 2. Settles all PENDING parlays from that date (WIN / LOSS / PUSH)
 3. Posts a summary recap embed to Discord
 4. Updates the propiq_season_record table with final results
 
 Run directly: python3 nightly_recap.py [YYYY-MM-DD]
-If no date given, defaults to yesterday (America/Los_Angeles, DST-aware).
+If no date given, defaults to today (America/Los_Angeles, DST-aware).
+
+PR #463 FIX: Was using _yesterday_pt() — at 11 PM on April 28 this returned
+April 27, causing ESPN to fetch wrong-day stats and all April 28 bets to
+grade as PUSH. Changed to _today_pt() since 11 PM PT is after all MLB games
+finish and we're settling TODAY's bets, not yesterday's.
 """
 
 from __future__ import annotations
@@ -88,23 +93,28 @@ _OUTCOME_EMOJI = {"WIN": "\u2705", "LOSS": "\u274c", "PUSH": "\u23e9"}
 
 
 # ---------------------------------------------------------------------------
-# DST-aware "yesterday in PT" helper
+# PR #463 FIX: DST-aware "today in PT" helper (was _yesterday_pt — wrong)
+# The 11 PM settlement grades TODAY's games, not yesterday's.
 # ---------------------------------------------------------------------------
 
-def _yesterday_pt() -> str:
-    """Return yesterday's date as YYYY-MM-DD in America/Los_Angeles, DST-aware."""
-    try:
-        import pytz  # noqa: PLC0415
-        pt_tz = pytz.timezone("America/Los_Angeles")
-        now_pt = datetime.now(pt_tz)
-        yesterday_pt = now_pt - timedelta(days=1)
-        return yesterday_pt.strftime("%Y-%m-%d")
-    except ImportError:
-        pass
+def _today_pt() -> str:
+    """Return today's date as YYYY-MM-DD in America/Los_Angeles, DST-aware.
+
+    PR #463: renamed from _yesterday_pt() — at 11 PM we settle TODAY's bets.
+    The old function subtracted 1 day, causing all picks to grade as PUSH
+    because ESPN was fetching yesterday's box scores for today's games.
+    """
     from zoneinfo import ZoneInfo as _ZI  # noqa: PLC0415
-    now_pt_approx = datetime.now(_ZI("America/Los_Angeles"))
-    yesterday_approx = now_pt_approx - timedelta(days=1)
-    return yesterday_approx.strftime("%Y-%m-%d")
+    now_pt = datetime.now(_ZI("America/Los_Angeles"))
+    return now_pt.strftime("%Y-%m-%d")
+
+
+# Keep _yesterday_pt as an alias in case any other code calls it
+def _yesterday_pt() -> str:
+    """Kept for backward compat — use _today_pt() for settlement."""
+    from zoneinfo import ZoneInfo as _ZI  # noqa: PLC0415
+    now_pt = datetime.now(_ZI("America/Los_Angeles"))
+    return (now_pt - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +267,7 @@ def _build_recap_embed(
     season_record = f"{_sw}W-{_sl}L-{_sp}P"
 
     # PR #393 FIX: use net_profit (WIN+LOSS payouts combined) not total_payout-total_staked
-    # net_profit already accounts for both winning payouts and losing stakes
+    # PR #463 FIX: net_profit now correctly stores profit-only (not stake+profit)
     season_units  = round(season_stats.get("net_profit", 0.0), 1)
     season_roi    = season_stats.get("roi_pct",   0.0)
     pending_count = season_stats.get("pending",   0)
@@ -290,8 +300,9 @@ def _build_recap_embed(
 # ---------------------------------------------------------------------------
 
 def run(settle_date: Optional[str] = None) -> None:
+    # PR #463 FIX: default to TODAY (not yesterday) — 11 PM settles today's games
     if settle_date is None:
-        settle_date = _yesterday_pt()
+        settle_date = _today_pt()
 
     logger.info("=== PropIQ Nightly Settlement: %s ===", settle_date)
 

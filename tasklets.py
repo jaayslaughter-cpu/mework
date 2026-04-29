@@ -6764,7 +6764,7 @@ def run_grading_tasklet() -> None:
                     _stats["wins"] + _stats["losses"] + _stats["pushes"],
                     # FIX: use actual tier stake from agent_unit_sizing, not hardcoded 5.00
                     round(_stats.get("stake", 5.0), 2),
-                    round(_stats.get("stake", 5.0) + _stats["profit"], 2),
+                    round(_stats["profit"], 2),  # PR #463: net profit only (was stake+profit → inflated ROI)
                     _status,
                     json.dumps({"wins": _stats["wins"], "losses": _stats["losses"],
                                 "pushes": _stats["pushes"]}),

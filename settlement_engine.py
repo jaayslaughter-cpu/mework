@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # Platform payout multipliers
 # ---------------------------------------------------------------------------
 
-# Underdog PowerPlay
-_UD_MULTIPLIERS: dict[int, float] = {2: 3.0, 3: 6.0, 5: 10.0}
+# Underdog PowerPlay — PR #463: 2-leg fixed 3.0→3.5 (matches PR #458 dispatch)
+_UD_MULTIPLIERS: dict[int, float] = {2: 3.5, 3: 6.0, 5: 10.0}
 
 # PrizePicks Power
 _PP_MULTIPLIERS: dict[int, float] = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
