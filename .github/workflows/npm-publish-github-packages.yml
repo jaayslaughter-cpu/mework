@@ -1,4 +1,5 @@
 # This workflow will run tests using node and then publish a package to GitHub Packages when a release is created
+# This workflow will run tests using node and then publish a package to GitHub Packages when a release is created
 # For more information see: https://docs.github.com/en/actions/publishing-packages/publishing-nodejs-packages
 
 name: Node.js Package
@@ -16,7 +17,9 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+        working-directory: hub
       - run: npm test
+        working-directory: hub
 
   publish-gpr:
     needs: build
@@ -31,6 +34,8 @@ jobs:
           node-version: 20
           registry-url: https://npm.pkg.github.com/
       - run: npm ci
+        working-directory: hub
       - run: npm publish
+        working-directory: hub
         env:
           NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
