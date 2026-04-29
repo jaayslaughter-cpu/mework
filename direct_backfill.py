@@ -243,7 +243,10 @@ def run(dry_run: bool):
             player, prop_type, line, side,
             model_prob, ev_pct, agent,
             status, bet_date, platform,
-            json.dumps({"backfilled": True, "source": "discord_history"}),
+            # Store neutral 27-slot feature vector so XGBoost training can use
+            # these rows without crashing. The grading tasklet will overwrite
+            # features_json with real player signals when it grades this row.
+            json.dumps([0.5] * 27),  # neutral defaults — rebuilt at grade time
             stake,
             profit_loss, actual, actual_outcome,
             graded_at,
