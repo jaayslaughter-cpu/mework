@@ -561,9 +561,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# SECURITY: Restrict CORS to known origins. Add your Railway/Vercel frontend URL
+# as the FRONTEND_URL environment variable (e.g. https://mework.up.railway.app).
+# Multiple origins can be comma-separated: "https://a.com,https://b.com"
+_cors_env = os.getenv("FRONTEND_URL", "")
+_allowed_origins: list[str] = (
+    [o.strip() for o in _cors_env.split(",") if o.strip()]
+    if _cors_env
+    else ["http://localhost:3000", "http://localhost:3002"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

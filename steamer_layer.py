@@ -184,7 +184,13 @@ def _fetch_steamer_pybaseball() -> dict[str, dict]:
         logger.info("[Steamer] pybaseball fallback: %d batters (2026 actuals)", len(projections))
         return projections
     except Exception as exc:
-        logger.warning("[Steamer] pybaseball fallback failed: %s", exc)
+        import traceback as _tb
+        logger.warning(
+            "[Steamer] pybaseball fallback failed (%s: %s)\n%s",
+            type(exc).__name__,
+            exc,
+            _tb.format_exc(limit=3),
+        )
         return {}
 
 def _fetch_steamer() -> dict[str, dict]:
@@ -202,7 +208,15 @@ def _fetch_steamer() -> dict[str, dict]:
         resp.raise_for_status()
         rows = (resp.json().get("data") or [])
     except Exception as exc:
-        logger.warning("[Steamer] FanGraphs fetch failed: %s — falling back to pybaseball", exc)
+        # Log the full exception detail (including HTTP status code) so we can
+        # diagnose whether this is a 403 IP block, rate limit, timeout, etc.
+        import traceback as _tb
+        logger.warning(
+            "[Steamer] FanGraphs fetch failed (%s: %s) — falling back to pybaseball\n%s",
+            type(exc).__name__,
+            exc,
+            _tb.format_exc(limit=3),
+        )
         return _fetch_steamer_pybaseball()
 
     projections: dict[str, dict] = {}
