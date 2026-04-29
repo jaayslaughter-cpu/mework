@@ -1,9 +1,12 @@
 # Environment files (never commit secrets)
 .env
+.env.local
+.env.*.local
 
 # Node.js
 node_modules/
 npm-debug.log*
+yarn-error.log*
 
 # Python
 __pycache__/
@@ -11,16 +14,39 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+*.egg-info/
+dist/
+build/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.orig
 
 # OS
 .DS_Store
-Thumbs.db
+Thumbbs.db
 
 # Docker
 *.log
+
+# Scratch / temp files accidentally committed
+# (files named 'claude', 'more', 'cleaning', 'credentials', 'claude code', etc.)
+claude
+claude\ code
+more
+cleaning
+credentials
+
+# Backtest outputs and model artifacts (large generated files)
+backtest_results/
+backtest_v2_results.json
+calibration_map.json
+*.pkl
+*.joblib
+
+# Next.js build output
+frontend/.next/
+frontend/out/

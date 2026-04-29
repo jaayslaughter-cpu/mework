@@ -1,6 +1,12 @@
 import { OddsEvent, GameOdds, PlayerProp } from '../types';
 
-const API_KEY = 'e4e30098807a9eece674d85e30471f03';
+// SECURITY: Never hardcode API keys. Set NEXT_PUBLIC_ODDS_API_KEY in your Railway/Vercel
+// environment variables. For production, prefer proxying through your FastAPI backend
+// so the key never reaches the browser at all.
+const API_KEY = process.env.NEXT_PUBLIC_ODDS_API_KEY ?? '';
+if (!API_KEY) {
+  console.warn('[api] NEXT_PUBLIC_ODDS_API_KEY is not set — odds fetches will fail.');
+}
 const BASE = 'https://api.the-odds-api.com/v4/sports/baseball_mlb';
 
 const PROP_MARKETS = [
