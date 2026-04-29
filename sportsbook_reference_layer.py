@@ -751,25 +751,29 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         return ref
 
     # ── 4. Live fetch (once per day) ──────────────────────────────────────────
-    if not _ODDS_KEY:
-        log.warning("[SBRef] No Odds API key configured — sportsbook reference unavailable")
-        _mem_ref = {}
+    # NOTE: if ODDS_API_KEY is not set we skip straight to fallbacks rather than
+    # returning early. The fallback chain (PropOdds → Pinnacle → Covers → DraftEdge
+    # → ActionNetwork → TheRundown → VegasInsider) can produce a full reference
+    # even without an Odds API key.
+    if _ODDS_KEY:
+        ref = _fetch_live(date_int)
+        _mem_ref = ref
         _fetch_date = date_int
-        return {}
 
-    ref = _fetch_live(date_int)
-    _mem_ref = ref
-    _fetch_date = date_int
-
-    if ref:
-        _file_save(date_int, ref)
-        flat: list[dict] = []
-        for (pn, mk, side), v in ref.items():
-            flat.append({"player_name": pn, "market_key": mk, "side": side, **v})
-        _pg_save(date_int, flat)
-        log.info("[SBRef] Built and cached %d entries for %d", len(ref), date_int)
+        if ref:
+            _file_save(date_int, ref)
+            flat: list[dict] = []
+            for (pn, mk, side), v in ref.items():
+                flat.append({"player_name": pn, "market_key": mk, "side": side, **v})
+            _pg_save(date_int, flat)
+            log.info("[SBRef] Built and cached %d entries for %d", len(ref), date_int)
+        else:
+            log.warning("[SBRef] No prop data returned from Odds API for %d — trying fallbacks", date_int)
     else:
-        log.warning("[SBRef] No prop data returned from Odds API for %d", date_int)
+        log.warning(
+            "[SBRef] ODDS_API_KEY not set — skipping OddsAPI live fetch, "
+            "trying PropOdds / Pinnacle / Covers / DraftEdge / ActionNetwork fallbacks"
+        )
 
     # ── PropOdds fallback — fires when OddsAPI key empty/exhausted ───────────
     # Free tier: 100 calls/day. Set PROP_ODDS_API_KEY in Railway (prop-odds.com).
