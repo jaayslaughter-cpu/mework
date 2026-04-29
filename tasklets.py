@@ -2229,7 +2229,7 @@ def _log_rejection(player_name: str, prop_type: str, side: str, line: float,
         conn.commit()
         conn.close()
     except Exception as _rle:
-        logger.debug("[rejection_log] insert failed: %s", _rle)
+        logger.warning("[rejection_log] insert failed: %s", _rle, exc_info=True)
 
 
 
@@ -5383,6 +5383,11 @@ def run_agent_tasklet() -> bool:
             logger.info("[AgentTasklet] Skipping frozen agent: %s", agent.name)
             continue
         agent_hits: list[dict] = []
+        # PR #455 — per-agent rejection counters for rejection_log summary
+        _rj_eval_none = 0
+        _rj_vig       = 0
+        _rj_no_sharp  = 0
+        _rj_ev_low    = 0
 
         for prop in props:
             player    = prop.get("player", "")
@@ -5391,6 +5396,7 @@ def run_agent_tasklet() -> bool:
             try:
                 bet = agent.evaluate(prop)
                 if not bet:
+                    _rj_eval_none += 1
                     continue
 
                 # WagerBrain: skip props with excessive vig before EV math
@@ -5404,6 +5410,7 @@ def run_agent_tasklet() -> bool:
                             _bookmaker_margin(_over_o, _under_o) * 100,
                             _MAX_VIG * 100,
                         )
+                        _rj_vig += 1
                         continue
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
@@ -5415,6 +5422,7 @@ def run_agent_tasklet() -> bool:
                         "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
                         agent.name, player, prop_type,
                     )
+                    _rj_no_sharp += 1
                     continue
 
                 side    = bet["side"]
@@ -5423,6 +5431,7 @@ def run_agent_tasklet() -> bool:
                            else prop.get("under_american", -120))
                 edge = _underdog_edge(ud_odds, sharp_prob)
                 if edge < MIN_EV_THRESH * 100:
+                    _rj_ev_low += 1
                     continue
 
                 # WagerBrain: also compute dollar EV for logging
@@ -5445,8 +5454,19 @@ def run_agent_tasklet() -> bool:
                              agent.name, player, e)
 
         if len(agent_hits) < 2:
-            logger.info("[AgentTasklet] %s — %d hit(s) (need ≥2 for a slip).",
-                         agent.name, len(agent_hits))
+            logger.info(
+                "[AgentTasklet] %s — %d hit(s) (need ≥2). "
+                "Drops: eval_none=%d, vig=%d, no_sharp=%d, ev_low=%d",
+                agent.name, len(agent_hits),
+                _rj_eval_none, _rj_vig, _rj_no_sharp, _rj_ev_low,
+            )
+            # PR #455 — write one summary row so rejection_log is never empty
+            _log_rejection(
+                agent.name, "summary", "N/A", 0.0, 0.0, 0.0, 0.0,
+                f"insufficient_hits:{len(agent_hits)}/2;"
+                f"eval_none={_rj_eval_none},vig={_rj_vig},"
+                f"no_sharp={_rj_no_sharp},ev_low={_rj_ev_low}",
+            )
             continue
 
         agent_parlays = _build_agent_parlays(agent_hits, agent.name)
@@ -6862,7 +6882,7 @@ def run_grading_tasklet() -> None:
         if _voided > 0:
             logger.info("[GradingTasklet] Voided %d stale OPEN bets (postponed/no boxscore >7 days).", _voided)
     except Exception as _void_err:
-        logger.debug("[GradingTasklet] Stale OPEN void sweep failed: %s", _void_err)
+        logger.warning("[GradingTasklet] Stale OPEN void sweep failed: %s", _void_err, exc_info=True)
 
     # ── Nightly Parquet archival — durable backup for XGBoost retraining ──────
     # Postgres is the primary store; Parquet is the backup.  If DB is wiped, we
@@ -7150,6 +7170,10 @@ def run_xgboost_tasklet() -> None:
                   AND discord_sent = TRUE
                   AND features_json IS NOT NULL
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
+                  AND prop_type NOT IN (
+                      'fantasy_score', 'fantasy_hitter', 'fantasy_pitcher',
+                      'fantasy_pts', 'hitter_fantasy_score', 'pitcher_fantasy_score'
+                  )
                 ORDER BY COALESCE(graded_at, NOW()) DESC
                 LIMIT 25000
                 """
