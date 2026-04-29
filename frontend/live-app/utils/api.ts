@@ -1,6 +1,12 @@
 import { OddsEvent, GameOdds, PlayerProp } from '../types';
 
-const API_KEY = 'e4e30098807a9eece674d85e30471f03';
+// SECURITY: Never hardcode API keys. Set NEXT_PUBLIC_ODDS_API_KEY in your Railway/Vercel
+// environment variables. For production, prefer proxying through your FastAPI backend
+// so the key never reaches the browser at all.
+const API_KEY = process.env.NEXT_PUBLIC_ODDS_API_KEY ?? '';
+if (!API_KEY) {
+  console.warn('[api] NEXT_PUBLIC_ODDS_API_KEY is not set — odds fetches will fail.');
+}
 const BASE = 'https://api.the-odds-api.com/v4/sports/baseball_mlb';
 
 const PROP_MARKETS = [
@@ -62,15 +68,16 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
   } as const;
 
   const handlers: Record<string, (mkt: any, bm: any) => any> = {
-    h2h: (mkt, bm) => {
-      const home = mkt.outcomes.find((o: any) => o.name === event.home_team);
-      const away = mkt.outcomes.find((o: any) => o.name === event.away_team);
+    h2h: (mkt: any, bm: any) => {
+      const home = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.home_team);
+      const away = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.away_team);
       if (home && away) {
-        return { home: home.price, away: away.price, book: bm.title };
+        return { home: home.price, away: away.price, line: home.point ?? 0, book: bm.title };
       }
+      return null;
     },
-    spreads: (mkt, bm) => {
-      const home = mkt.outcomes.find((o: any) => o.name === event.home_team);
+    spreads: (mkt: any, bm: any) => {
+      const home = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.home_team);
       const away = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.away_team);
       if (home && away) {
         return {
@@ -81,43 +88,7 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
       }
       return null;
     },
-    totals: (mkt, bm) => {
-      const over = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Over');
-      const under = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Under');
-      if (over && under) {
-        return {
-          over: { total: over.point, price: over.price },
-          under: { total: under.point, price: under.price },
-          book: bm.title,
-        };
-      }
-      return null;
-    },
-    spread: (mkt, bm) => {
-    },
-  };
-
-  for (const bm of data.bookmakers) {
-    for (const mkt of bm.markets) {
-      const mapKey = keyMap[mkt.key as keyof typeof keyMap];
-      const handler = handlers[mkt.key];
-      if (mapKey && handler) {
-        result[mapKey] = handler(mkt, bm);
-      }
-    }
-  }
-
-  return result;
-}
-    moneyline: (mkt, bm) => {
-      const home = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.home_team);
-      const away = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === event.away_team);
-      if (home && away) {
-        return { home: home.price, away: away.price, line: home.point ?? 0, book: bm.title };
-      }
-      return null;
-    },
-    totals: (mkt, bm) => {
+    totals: (mkt: any, bm: any) => {
       const over = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Over');
       const under = mkt.outcomes.find((o: { name: string; point?: number; price: number }) => o.name === 'Under');
       if (over && under) {
@@ -129,7 +100,7 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
 
   for (const bm of data.bookmakers || []) {
     for (const mkt of bm.markets) {
-      const prop = keyMap[mkt.key];
+      const prop = keyMap[mkt.key as keyof typeof keyMap];
       if (prop && result[prop] === null) {
         const value = handlers[mkt.key]?.(mkt, bm);
         if (value) {
@@ -138,7 +109,7 @@ export async function fetchGameOdds(event: OddsEvent): Promise<GameOdds> {
       }
     }
     if (result.moneyline && result.spread && result.total) {
-      break;
+      break; // all markets found — stop iterating bookmakers
     }
   }
 
