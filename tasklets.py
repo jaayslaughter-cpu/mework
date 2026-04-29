@@ -4493,10 +4493,13 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
             if not entry_type_forced:
                 entry_type = _eval.recommended_entry_type
         except Exception:
-            # Correct Underdog PowerPlay multipliers (not 3.5x — that was wrong)
-            _UD_MULTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
-            mult = _UD_MULTS.get(n, 3.0)
+            # Fallback when UnderdogMathEngine unavailable.
+            # Standard (PowerPlay) multipliers: 2-pick=3.5x, 3-pick=6x, 4-pick=10x
+            # STANDARD → DiscordAlertService maps this to "PowerPlay" correctly
+            _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 20.0}
+            mult = _UD_MULTS.get(n, 3.5)
             combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
+            entry_type = "STANDARD"  # ensures PowerPlay label in Discord
     else:  # PrizePicks Power Play
         entry_type  = "Power Play"
         # Correct PP Power Play multipliers: 2-pick=3x, 3-pick=5x (NOT 6x), 4-pick=10x
@@ -5361,16 +5364,6 @@ def run_agent_tasklet() -> bool:
         if dropped:
             logger.info("[LockGate] Dropped %d props (game Live/Final).", dropped)
 
-    # Warn once per cycle if sharp reference is unavailable — operators need to know
-    # this means picks are dispatched on model_prob alone (soft gate mode).
-    _ref_available = _SB_REFERENCE_AVAILABLE and bool(_build_sb_reference())
-    if not _ref_available:
-        logger.warning(
-            "[AgentTasklet] Sharp consensus reference unavailable (ODDS_API_KEY not set or quota "
-            "exhausted). Picks will dispatch using model_prob as implied probability. "
-            "Set ODDS_API_KEY in Railway to enable full sharp-gate validation."
-        )
-
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
     # Log breakdown by prop type so we can see what's available
     _type_counts = {}
@@ -5425,33 +5418,16 @@ def run_agent_tasklet() -> bool:
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is None:
-                    # Sharp book data not available for this prop.
-                    # Determine whether this is because:
-                    #   (a) The sportsbook reference module is unavailable or all key
-                    #       sources returned empty today (API key missing/quota drained)
-                    #       → SOFT gate: use model_prob as the implied probability so
-                    #         EV can still be computed. Agents still apply their own
-                    #         evaluate() logic — plays can still dispatch.
-                    #   (b) Reference data exists but no line found for this specific
-                    #       player/prop (player inactive, prop not yet posted, name mismatch)
-                    #       → HARD gate: cannot compute edge without market anchor.
-                    _ref_available = _SB_REFERENCE_AVAILABLE and bool(_build_sb_reference())
-                    if not _ref_available:
-                        # Soft gate — fall back to model probability
-                        _model_p = bet.get("model_prob", 50.0) or 50.0
-                        sharp_prob = float(_model_p) if float(_model_p) > 1.0 else float(_model_p) * 100.0
-                        logger.debug(
-                            "[AgentTasklet] %s %s %s — sharp ref unavailable, using model_prob=%.1f%%",
-                            agent.name, player, prop_type, sharp_prob,
-                        )
-                    else:
-                        # Hard gate — reference has data but no match for this prop
-                        logger.debug(
-                            "[AgentTasklet] %s %s %s — no sharp match in reference, skipping",
-                            agent.name, player, prop_type,
-                        )
-                        _rj_no_sharp += 1
-                        continue
+                    # No sharp book data for this specific player/prop.
+                    # The reference chain (OddsAPI → PropOdds → Pinnacle → Covers →
+                    # DraftEdge → ActionNetwork → TheRundown) already ran — if it's
+                    # still None this prop genuinely has no coverage today.
+                    logger.debug(
+                        "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
+                        agent.name, player, prop_type,
+                    )
+                    _rj_no_sharp += 1
+                    continue
 
                 side    = bet["side"]
                 ud_odds = (prop.get("over_american", -120)
@@ -5597,13 +5573,17 @@ def run_agent_tasklet() -> bool:
         agent_name = parlay.get("agent", "unknown")
 
         # ── Minimum leg count gate ────────────────────────────────────────────
-        # Belt-and-suspenders: _make_parlay already enforces min_legs=2 and has
-        # a post-filter safety guard, but catch any 1-leg slip that somehow escaped.
+        # Regular agent parlays MUST be 2-3 legs. Single picks are ONLY
+        # allowed for Underdog Streaks continuation (picks 3-11), which are
+        # dispatched exclusively by streak_agent.py via its own code path
+        # (run_streak_pick → post_pick_alert), never through this loop.
+        # Any 1-leg slip reaching here is a bug — block it.
         _parlay_legs = parlay.get("legs", [])
         if len(_parlay_legs) < 2:
             logger.warning(
                 "[AgentTasklet] %s: 1-leg slip blocked at send gate — "
-                "only 2+ leg slips are allowed. Prop: %s",
+                "regular parlays require 2+ legs. Single picks are only "
+                "valid for Underdog Streaks (streak_agent.py). Prop: %s",
                 agent_name,
                 _parlay_legs[0].get("player", "?") if _parlay_legs else "none",
             )
