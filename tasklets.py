@@ -6215,11 +6215,23 @@ def run_backtest_tasklet() -> None:
     shap_values  = explainer.shap_values(X_test[:200])
     feat_importance = np.abs(shap_values).mean(axis=0)
     n_features   = X.shape[1]
-    dropped      = []
-    for i in range(n_features):
-        feat_acc = float(accuracy) if feat_importance[i] > feat_importance.mean() else 0.70
-        if feat_acc < ACCURACY_THRESHOLD:
-            dropped.append(i)
+
+    # Drop only features whose SHAP importance is below 5% of mean importance.
+    # The old logic (feat_acc = accuracy if imp > mean else 0.70) was broken:
+    # it always dropped exactly the bottom half of features regardless of whether
+    # they were genuinely low-signal. This zeroed out ~13 of 27 features at
+    # inference time every cycle, severely degrading model signal.
+    _mean_importance = feat_importance.mean()
+    _drop_threshold  = _mean_importance * 0.05   # must be < 5% of mean to drop
+    dropped = [
+        i for i in range(n_features)
+        if feat_importance[i] < _drop_threshold
+    ]
+    logger.info(
+        "[BacktestTasklet] Feature importance — mean=%.4f, drop_threshold=%.4f, "
+        "dropping %d/%d features below threshold.",
+        _mean_importance, _drop_threshold, len(dropped), n_features,
+    )
 
     r = _redis()
     r.setex("backtest_result", 86400, json.dumps({
@@ -7231,10 +7243,30 @@ def run_xgboost_tasklet() -> None:
         X, y, sample_weights, test_size=0.2, random_state=42, stratify=y
     )
 
+    # Log class balance — imbalanced training data causes systematic OVER/UNDER bias
+    _n_pos = int(y_train.sum())
+    _n_neg = int(len(y_train) - _n_pos)
+    _pos_rate = _n_pos / max(len(y_train), 1)
+    logger.info(
+        "[XGBoostTasklet] Training class balance: %d WIN (%.1f%%) | %d LOSS (%.1f%%)",
+        _n_pos, _pos_rate * 100, _n_neg, (1 - _pos_rate) * 100,
+    )
+    # scale_pos_weight corrects for class imbalance: if OVERs win 45% of the time,
+    # set scale_pos_weight = n_neg / n_pos to prevent the model from predicting UNDER
+    # on everything. Neutral at 1.0 when classes are balanced (50/50).
+    _scale_pos = _n_neg / max(_n_pos, 1)
+    if not (0.8 <= _scale_pos <= 1.25):
+        logger.warning(
+            "[XGBoostTasklet] Class imbalance detected (scale_pos_weight=%.2f) — "
+            "model will correct. If this persists, check EV gate thresholds.",
+            _scale_pos,
+        )
+
     model = xgb.XGBClassifier(
         n_estimators=400, max_depth=6, learning_rate=0.03,
         subsample=0.8, colsample_bytree=0.8,
         min_child_weight=5, gamma=0.1,
+        scale_pos_weight=_scale_pos,   # corrects WIN/LOSS class imbalance
         use_label_encoder=False, eval_metric="logloss",
         random_state=42, n_jobs=-1,
     )
