@@ -7265,10 +7265,8 @@ def run_xgboost_tasklet() -> None:
     if _backfill_count:
         logger.warning(
             "[XGBoostTasklet] %d rows had placeholder dict features_json (from direct_backfill.py). "
-            "These use neutral [0.5] defaults and contribute noise to training. "
-            "Run a one-time UPDATE to set features_json = NULL for these rows so they're rebuilt "
-            "by the grading tasklet: UPDATE bet_ledger SET features_json = NULL "
-            "WHERE features_json LIKE '{"backfilled"%';",
+            "Using neutral [0.5] defaults. V40 migration should have nulled these rows — "
+            "check that migrations/V40__fix_backfill_features_json.sql ran successfully.",
             _backfill_count,
         )
 
