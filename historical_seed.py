@@ -42,19 +42,26 @@ MLBAPI = "https://statsapi.mlb.com/api/v1"
 SEASONS = [2022, 2023, 2024]
 
 # ── Prop lines: median DFS line for each stat (used as the historical "line")
+# NOTE: These are fixed median lines applied uniformly to all players in all seasons.
+# This introduces label noise — e.g. an ace like Gerrit Cole with a real line of 8.5
+# is evaluated against 5.5, making nearly every start a "WIN". The model learns
+# that pitchers always go Over on strikeouts, which is not a real edge.
+# For the highest ROI: re-run this seed using actual historical DFS lines from
+# Underdog/PrizePicks (if available) or use per-player rolling median lines.
+# Until then, the model treats these as base rate calibration data, not true picks.
 PITCHER_LINES = {
-    "strikeouts":    5.5,
-    "earned_runs":   2.5,
-    "pitching_outs": 14.5,
-    "walks_allowed": 1.5,
-    "hits_allowed":  4.5,   # was missing — caused xgb_sample_counts hits_allowed=1
+    "strikeouts":    5.5,   # ~league median; use 4.5 for backend starters, 6.5+ for aces
+    "earned_runs":   2.5,   # ~league median per start
+    "pitching_outs": 14.5,  # ~4.8 IP × 3 outs/IP
+    "walks_allowed": 1.5,   # ~league median
+    "hits_allowed":  4.5,   # ~league median per start
 }
 BATTER_LINES = {
-    "hits":              0.5,
-    "total_bases":       1.5,
-    "hitter_strikeouts": 0.5,
-    "hits_runs_rbis":    2.5,
-    "runs":              0.5,  # was missing — caused xgb_sample_counts runs=1
+    "hits":              0.5,   # binary: did they get ≥1 hit?
+    "total_bases":       1.5,   # did they get ≥2 total bases?
+    "hitter_strikeouts": 0.5,   # did they strike out?
+    "hits_runs_rbis":    2.5,   # ~league median composite
+    "runs":              0.5,   # did they score?
 }
 
 # ── Minimum plate appearances / batters faced to include a game
@@ -209,6 +216,8 @@ def build_pitcher_rows(name: str, splits: list[dict]) -> list[dict]:
                     "bet_date":       date_str,
                     "platform":       "historical",
                     "discord_sent":   True,
+                    "features_json":  _NEUTRAL_FEATURES_JSON,
+                    "lookahead_safe": True,
                 })
     return rows
 
@@ -260,6 +269,8 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
                     "bet_date":       date_str,
                     "platform":       "historical",
                     "discord_sent":   True,
+                    "features_json":  _NEUTRAL_FEATURES_JSON,
+                    "lookahead_safe": True,
                 })
     return rows
 
@@ -268,17 +279,26 @@ def build_batter_rows(name: str, splits: list[dict]) -> list[dict]:
 # DB insert
 # ────────────────────────────────────────────────────────────
 
+# Neutral 27-slot feature vector stored with historical rows.
+# Slots 0-10: physics/weather signals — 0.5 = league average (neutral)
+# Slot 11: model_prob — will be overwritten to actual value at grade time
+# Slots 20-26: enrichment signals — 0.5 = no adjustment
+# The grading tasklet rebuilds features_json with real player signals when grading.
+_NEUTRAL_FEATURES = [0.5] * 27
+import json as _json
+_NEUTRAL_FEATURES_JSON = _json.dumps(_NEUTRAL_FEATURES)
+
 INSERT_SQL = """
 INSERT INTO bet_ledger (
     player_name, prop_type, line, side,
     agent_name, status, actual_outcome, actual_result,
     profit_loss, model_prob, ev_pct, bet_date, platform,
-    discord_sent
+    discord_sent, features_json, lookahead_safe
 ) VALUES (
     %(player_name)s, %(prop_type)s, %(line)s, %(side)s,
     %(agent_name)s, %(status)s, %(actual_outcome)s, %(actual_result)s,
     %(profit_loss)s, %(model_prob)s, %(ev_pct)s, %(bet_date)s, %(platform)s,
-    %(discord_sent)s
+    %(discord_sent)s, %(features_json)s, %(lookahead_safe)s
 )
 ON CONFLICT DO NOTHING
 """
