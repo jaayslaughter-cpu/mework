@@ -6142,9 +6142,11 @@ def run_backtest_tasklet() -> None:
                 SELECT features_json, actual_outcome
                 FROM bet_ledger
                 WHERE graded_at IS NOT NULL
-                  AND features_json IS NOT NULL
+                  AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
+                  AND actual_outcome IS NOT NULL
+                  AND discord_sent = TRUE
                 ORDER BY graded_at DESC
-                LIMIT 5000
+                LIMIT 25000
                 """
             )
             rows = cur.fetchall()
@@ -6210,9 +6212,19 @@ def run_backtest_tasklet() -> None:
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
 
+    _n_pos = int(y_train.sum())
+    _n_neg = int(len(y_train) - _n_pos)
+    _pos_rate = _n_pos / max(len(y_train), 1)
+    logger.info(
+        "[XGBoostTasklet] Class balance: %d WIN (%.1f%%) | %d LOSS (%.1f%%)",
+        _n_pos, _pos_rate * 100, _n_neg, (1 - _pos_rate) * 100,
+    )
+    _scale_pos = _n_neg / max(_n_pos, 1)
+
     model = xgb.XGBClassifier(
         n_estimators=200, max_depth=6, learning_rate=0.05,
         subsample=0.8, colsample_bytree=0.8,
+        scale_pos_weight=_scale_pos,
         use_label_encoder=False, eval_metric="logloss",
         random_state=42,
     )
