@@ -6166,26 +6166,41 @@ def run_backtest_tasklet() -> None:
     }
     _padded: list = []
     _null_feat_count = 0
+    _backfill_count_bt = 0
     for r in rows:
-        if r[0] is not None:
-            f = json.loads(r[0])
-        else:
-            # Seed row missing features_json — build league-average default vector
+        raw = r[0]
+        if raw is None:
             _null_feat_count += 1
             _mp   = float(r[5] or 57.0) / 100.0 if (r[5] or 0) > 1 else float(r[5] or 0.57)
             _side = 1.0 if str(r[4] or "").upper() == "OVER" else 0.0
             _pt   = _PROP_IDX.get(str(r[3] or "").lower(), 0.5)
             _ln   = min(float(r[6] or 2.0) / 10.0, 1.0)
             f = [0.5] * 27
-            f[0] = max(0.0, min(1.0, (_mp - 0.5) * 2))  # ev proxy
-            f[1] = _mp      # rolling_avg proxy
-            f[5] = _side    # side encoding
-            f[6] = _pt      # prop type encoding
-            f[7] = _ln      # line value normalized
+            f[0] = max(0.0, min(1.0, (_mp - 0.5) * 2))
+            f[1] = _mp
+            f[5] = _side
+            f[6] = _pt
+            f[7] = _ln
+        else:
+            try:
+                f = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                _null_feat_count += 1
+                f = [0.5] * _TARGET_FEATS
+                _padded.append(f)
+                continue
+            # Skip placeholder dicts from direct_backfill.py
+            if isinstance(f, dict):
+                _backfill_count_bt += 1
+                f = [0.5] * _TARGET_FEATS
+        if not isinstance(f, list):
+            f = [0.5] * _TARGET_FEATS
         _padded.append(
             f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
             else f[:_TARGET_FEATS]
         )
+    if _backfill_count_bt:
+        logger.warning("[BacktestTasklet] %d placeholder dict rows from direct_backfill — using neutral defaults", _backfill_count_bt)
     logger.info("[XGBoostTasklet] Feature vectors: %d real, %d default (seed rows)",
                 len(rows) - _null_feat_count, _null_feat_count)
     X = np.array(_padded, dtype=np.float32)
@@ -7211,20 +7226,54 @@ def run_xgboost_tasklet() -> None:
     _TARGET_FEATS = 27
     _null_feat_count = 0
     _raw_feats = []
+    _null_feat_count = 0
+    _backfill_count = 0
     for r in rows:
-        if r[0] is not None:
-            _raw_feats.append(json.loads(r[0]))
-        else:
-            # Seed row missing features_json (pre-fix rows) — use neutral defaults
+        raw = r[0]
+        if raw is None:
+            # NULL features_json — use neutral defaults
             _null_feat_count += 1
             _raw_feats.append([0.5] * _TARGET_FEATS)
+            continue
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            _null_feat_count += 1
+            _raw_feats.append([0.5] * _TARGET_FEATS)
+            continue
+        # Skip placeholder dicts from direct_backfill.py
+        # {"backfilled": True, "source": "discord_history"} is not a real feature vector.
+        # These rows were seeded from Discord history without real features and
+        # crash the list comprehension (dict + list is a TypeError).
+        if isinstance(parsed, dict):
+            _backfill_count += 1
+            _raw_feats.append([0.5] * _TARGET_FEATS)  # neutral defaults
+            continue
+        _raw_feats.append(parsed)
+
     if _null_feat_count:
-        logger.info("[XGBoostTasklet] %d rows had NULL features_json — using neutral defaults", _null_feat_count)
-    _padded = [
-        f + [0.0] * (_TARGET_FEATS - len(f)) if len(f) < _TARGET_FEATS
-        else f[:_TARGET_FEATS]
-        for f in _raw_feats
-    ]
+        logger.info("[XGBoostTasklet] %d rows had NULL/invalid features_json — using neutral defaults",
+                    _null_feat_count)
+    if _backfill_count:
+        logger.warning(
+            "[XGBoostTasklet] %d rows had placeholder dict features_json (from direct_backfill.py). "
+            "These use neutral [0.5] defaults and contribute noise to training. "
+            "Run a one-time UPDATE to set features_json = NULL for these rows so they're rebuilt "
+            "by the grading tasklet: UPDATE bet_ledger SET features_json = NULL "
+            "WHERE features_json LIKE '{"backfilled"%';",
+            _backfill_count,
+        )
+
+    _padded = []
+    for f in _raw_feats:
+        if not isinstance(f, list):
+            _padded.append([0.5] * _TARGET_FEATS)
+            continue
+        if len(f) < _TARGET_FEATS:
+            _padded.append(f + [0.0] * (_TARGET_FEATS - len(f)))
+        else:
+            _padded.append(f[:_TARGET_FEATS])
+
     X = np.array(_padded, dtype=np.float32)
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
