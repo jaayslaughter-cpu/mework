@@ -184,16 +184,51 @@ def _fetch_steamer_pybaseball() -> dict[str, dict]:
         logger.info("[Steamer] pybaseball fallback: %d batters (2026 actuals)", len(projections))
         return projections
     except Exception as exc:
-        logger.warning("[Steamer] pybaseball fallback failed: %s", exc)
+        import traceback as _tb
+        logger.warning(
+            "[Steamer] pybaseball fallback failed (%s: %s)\n%s",
+            type(exc).__name__,
+            exc,
+            _tb.format_exc(limit=3),
+        )
         return {}
+
+def _scraperapi_get(url: str, params: dict, headers: dict, timeout: int = 30) -> "requests.Response":
+    """
+    GET with automatic ScraperAPI fallback on 403/429.
+    If SCRAPERAPI_KEY env var is set and the direct call is blocked, retries
+    via ScraperAPI residential proxy. Free tier: 1,000 calls/month.
+    """
+    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+    if resp.status_code in (403, 429, 407):
+        scraper_key = os.getenv("SCRAPERAPI_KEY", "")
+        if scraper_key:
+            proxy = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+            proxies = {"http": proxy, "https": proxy}
+            logger.info("[Steamer] Direct fetch %d — retrying via ScraperAPI proxy", resp.status_code)
+            resp = requests.get(
+                url, params=params, headers=headers,
+                timeout=60, proxies=proxies, verify=False,
+            )
+        else:
+            logger.warning(
+                "[Steamer] Got %d from FanGraphs and SCRAPERAPI_KEY is not set. "
+                "Add SCRAPERAPI_KEY to Railway env vars to bypass the IP block.",
+                resp.status_code,
+            )
+    return resp
+
 
 def _fetch_steamer() -> dict[str, dict]:
     """
     Fetch Steamer 2026 batter projections from FanGraphs API.
     Returns {name_key: {avg, obp, slg, r, rbi, sb, hr, pa, r_pg, rbi_pg, sb_pg, hr_pg}}.
+    Tier 1: direct FanGraphs API
+    Tier 2: ScraperAPI residential proxy (if SCRAPERAPI_KEY set and direct is 403/429)
+    Tier 3: pybaseball fallback (2026 actuals)
     """
     try:
-        resp = requests.get(
+        resp = _scraperapi_get(
             _FG_BASE,
             params=_STEAMER_PARAMS,
             headers=_fg_headers(),
@@ -202,7 +237,15 @@ def _fetch_steamer() -> dict[str, dict]:
         resp.raise_for_status()
         rows = (resp.json().get("data") or [])
     except Exception as exc:
-        logger.warning("[Steamer] FanGraphs fetch failed: %s — falling back to pybaseball", exc)
+        # Log the full exception detail (including HTTP status code) so we can
+        # diagnose whether this is a 403 IP block, rate limit, timeout, etc.
+        import traceback as _tb
+        logger.warning(
+            "[Steamer] FanGraphs fetch failed (%s: %s) — falling back to pybaseball\n%s",
+            type(exc).__name__,
+            exc,
+            _tb.format_exc(limit=3),
+        )
         return _fetch_steamer_pybaseball()
 
     projections: dict[str, dict] = {}
