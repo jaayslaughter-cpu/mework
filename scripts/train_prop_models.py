@@ -61,18 +61,37 @@ FAMILY_MODEL_PATHS = {
 DEFAULT_MIN_ROWS = 50
 
 
-# ── Feature columns (must match tasklets.py FEATURE_COLS, slots 0–26) ────────
-
+# ── Feature slots (positional — must match _build_feature_vector() in tasklets.py) ──
+# features_json is stored as a JSON LIST, not a dict. Do NOT use .get(name).
+# Slot order must be kept in sync with _build_feature_vector() vec = [...] assignment.
 FEATURE_COLS = [
-    "model_prob", "line", "ev_pct", "confidence",
-    "csw_pct", "swstr_pct",                                # slots 4-5 (pitching physics)
-    "k_pct", "bb_pct", "era_adj", "fip_adj",
-    "wrc_plus", "iso", "xwoba", "babip",                   # batter stats
-    "barrel_pct", "hard_hit_pct", "exit_velo",             # Statcast
-    "park_factor", "weather_score", "umpire_k_rate",
-    "sb_implied_prob", "sb_line_gap",                       # sportsbook reference
-    "rolling_avg", "rolling_trend", "lineup_position",
-    "temp_f", "wind_mph",
+    "k_rate",         # 0  pitcher k_rate or batter wRC+/200
+    "bb_rate",        # 1  pitcher bb_rate or batter iso/xbh_per_game
+    "era",            # 2  pitcher era/9 or batter SLG/BABIP
+    "whip",           # 3  pitcher whip/3 or batter bb_pct
+    "shadow_whiff",   # 4  csw_pct/swstr_pct or batter k_pct
+    "zone_mult",      # 5  zone integrity × pitcher type cluster
+    "chase_adj",      # 6  lineup chase rate adj
+    "o_swing",        # 7  opponent o-swing avg
+    "wind_speed",     # 8  wind speed / 30
+    "temp",           # 9  (temp_f - 32) / 80
+    "is_spring",      # 10 spring training flag
+    "model_prob",     # 11 XGBoost/sim model probability (0-1)
+    "ev_pct",         # 12 EV % normalised
+    "kelly",          # 13 kelly fraction / 3
+    "line_val",       # 14 line / 10
+    "impl_prob",      # 15 sharp-book implied prob (or UD implied)
+    "pt_enc",         # 16 prop type encoding / 9
+    "side_enc",       # 17 0=OVER 1=UNDER
+    "brier",          # 18 current Brier score (calibration quality)
+    "sb_line_gap",    # 19 sharp-book line gap normalised
+    "form_adj",       # 20 hot/cold form streak adj
+    "cv_nudge",       # 21 CV consistency nudge
+    "bayesian_nudge", # 22 Bayesian update nudge
+    "marcel_adj",     # 23 Marcel projection adj
+    "predict_plus",   # 24 Predict+ arsenal adj
+    "ps_prob",        # 25 player-specific Poisson/binomial prob
+    "bat_order",      # 26 batting order slot / 9
 ]
 
 
@@ -116,7 +135,15 @@ def _load_training_rows(prop_types: list[str], min_rows: int) -> tuple[list, lis
     for features_json, outcome in rows:
         try:
             feats = json.loads(features_json) if isinstance(features_json, str) else features_json
-            vec = [float(feats.get(col, 0.0) or 0.0) for col in FEATURE_COLS]
+            # features_json is a positional list — access by index, not by name
+            if isinstance(feats, list):
+                # Pad to 27 slots if needed (older rows may have fewer)
+                _padded = feats + [0.0] * (len(FEATURE_COLS) - len(feats))
+                vec = [float(v or 0.0) for v in _padded[:len(FEATURE_COLS)]]
+            else:
+                # Legacy dict format (pre-fix rows) — use slot index as key
+                vec = [float(feats.get(str(i), feats.get(col, 0.0)) or 0.0)
+                       for i, col in enumerate(FEATURE_COLS)]
             X.append(vec)
             y.append(int(outcome))
         except Exception:
