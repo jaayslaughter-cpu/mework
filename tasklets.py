@@ -5361,6 +5361,16 @@ def run_agent_tasklet() -> bool:
         if dropped:
             logger.info("[LockGate] Dropped %d props (game Live/Final).", dropped)
 
+    # Warn once per cycle if sharp reference is unavailable — operators need to know
+    # this means picks are dispatched on model_prob alone (soft gate mode).
+    _ref_available = _SB_REFERENCE_AVAILABLE and bool(_build_sb_reference())
+    if not _ref_available:
+        logger.warning(
+            "[AgentTasklet] Sharp consensus reference unavailable (ODDS_API_KEY not set or quota "
+            "exhausted). Picks will dispatch using model_prob as implied probability. "
+            "Set ODDS_API_KEY in Railway to enable full sharp-gate validation."
+        )
+
     logger.info("[AgentTasklet] %d props enriched and ready for agents.", len(props))
     # Log breakdown by prop type so we can see what's available
     _type_counts = {}
@@ -5415,15 +5425,33 @@ def run_agent_tasklet() -> bool:
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is None:
-                    # No sharp book data available for this prop — drop it.
-                    # Without a verified consensus line we cannot compute a
-                    # real edge, so the bet must not be sent to Discord.
-                    logger.debug(
-                        "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
-                        agent.name, player, prop_type,
-                    )
-                    _rj_no_sharp += 1
-                    continue
+                    # Sharp book data not available for this prop.
+                    # Determine whether this is because:
+                    #   (a) The sportsbook reference module is unavailable or all key
+                    #       sources returned empty today (API key missing/quota drained)
+                    #       → SOFT gate: use model_prob as the implied probability so
+                    #         EV can still be computed. Agents still apply their own
+                    #         evaluate() logic — plays can still dispatch.
+                    #   (b) Reference data exists but no line found for this specific
+                    #       player/prop (player inactive, prop not yet posted, name mismatch)
+                    #       → HARD gate: cannot compute edge without market anchor.
+                    _ref_available = _SB_REFERENCE_AVAILABLE and bool(_build_sb_reference())
+                    if not _ref_available:
+                        # Soft gate — fall back to model probability
+                        _model_p = bet.get("model_prob", 50.0) or 50.0
+                        sharp_prob = float(_model_p) if float(_model_p) > 1.0 else float(_model_p) * 100.0
+                        logger.debug(
+                            "[AgentTasklet] %s %s %s — sharp ref unavailable, using model_prob=%.1f%%",
+                            agent.name, player, prop_type, sharp_prob,
+                        )
+                    else:
+                        # Hard gate — reference has data but no match for this prop
+                        logger.debug(
+                            "[AgentTasklet] %s %s %s — no sharp match in reference, skipping",
+                            agent.name, player, prop_type,
+                        )
+                        _rj_no_sharp += 1
+                        continue
 
                 side    = bet["side"]
                 ud_odds = (prop.get("over_american", -120)
