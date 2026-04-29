@@ -1,14 +1,26 @@
-fastapi==0.110.0
-uvicorn==0.27.1
-sqlalchemy==2.0.28
-asyncpg==0.29.0
-pybaseball==2.2.7
-pandas==2.2.1
-numpy==1.26.4
-lxml==6.1.0
-xgboost==2.0.3
-scikit-learn==1.5.0
-pydantic==2.6.3
-requests==2.33.0
-httpx==0.27.0
-python-dotenv==1.2.2
+# PropIQ API service — production dependencies
+# Synced with root requirements.txt — both files should stay identical.
+# If you add a package here, add it to the root requirements.txt too.
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+requests>=2.31.0
+httpx>=0.27.0
+psycopg2-binary>=2.9.9
+asyncpg>=0.29.0
+SQLAlchemy>=2.0.30
+python-dotenv>=1.0.1
+pandas>=2.2.2
+numpy>=1.26.4
+scikit-learn>=1.4.2
+xgboost>=2.0.3
+optuna>=3.6.1
+joblib>=1.4.2
+scipy>=1.13.0
+pytz>=2024.1
+PyYAML>=6.0.1
+pybaseball>=2.2.7
+pydantic>=2.6.3
+lxml>=5.2.0
+redis>=5.0.4
+apscheduler>=3.10.4

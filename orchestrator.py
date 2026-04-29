@@ -58,14 +58,31 @@ except ImportError:
     def _run_monthly_leaderboard():
         raise NotImplementedError("monthly_leaderboard module not available")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("propiq_army.log", mode="a"),
-    ]
+# ── Railway-compatible JSON log formatter ─────────────────────────────────────
+# Railway reads structured JSON from stdout and maps the "level" field to its
+# severity filter. Plain-text output causes Railway to tag every line as "error"
+# regardless of actual Python log level, breaking severity-based filtering.
+import json as _json_log
+class _RailwayFormatter(logging.Formatter):
+    _LEVEL_MAP = {
+        "DEBUG": "debug", "INFO": "info",
+        "WARNING": "warning", "ERROR": "error", "CRITICAL": "critical",
+    }
+    def format(self, record: logging.LogRecord) -> str:
+        return _json_log.dumps({
+            "level":   self._LEVEL_MAP.get(record.levelname, "info"),
+            "message": self.formatMessage(record),
+            "logger":  record.name,
+            "time":    self.formatTime(record),
+        }, ensure_ascii=False)
+
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(_RailwayFormatter())
+_file_handler = logging.FileHandler("propiq_army.log", mode="a")
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
 )
+logging.basicConfig(level=logging.INFO, handlers=[_stdout_handler, _file_handler])
 logger = logging.getLogger("propiq.orchestrator")
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
@@ -561,9 +578,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# SECURITY: Restrict CORS to known origins. Add your Railway/Vercel frontend URL
+# as the FRONTEND_URL environment variable (e.g. https://mework.up.railway.app).
+# Multiple origins can be comma-separated: "https://a.com,https://b.com"
+_cors_env = os.getenv("FRONTEND_URL", "")
+_allowed_origins: list[str] = (
+    [o.strip() for o in _cors_env.split(",") if o.strip()]
+    if _cors_env
+    else ["http://localhost:3000", "http://localhost:3002"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
