@@ -100,6 +100,36 @@ def _fg_headers() -> dict:
 # Backward-compat alias for any call sites that reference _FG_HEADERS directly
 _FG_HEADERS = _fg_headers()
 
+def _scraperapi_get_fg(url: str, params: dict, headers: dict, timeout: int = 30):
+    """GET with automatic ScraperAPI fallback on 403/429 from FanGraphs.
+    Railway datacenter IPs are 403-blocked by FanGraphs/Cloudflare.
+    If SCRAPERAPI_KEY is set, retries through residential proxy on block.
+    """
+    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+    if resp.status_code in (403, 429, 407):
+        scraper_key = os.getenv("SCRAPERAPI_KEY", "")
+        if scraper_key:
+            proxy = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+            proxies = {"http": proxy, "https": proxy}
+            logger.info(
+                "[FG] Direct fetch %d — retrying via ScraperAPI residential proxy",
+                resp.status_code,
+            )
+            try:
+                resp = requests.get(
+                    url, params=params, headers=headers,
+                    timeout=60, proxies=proxies, verify=False,
+                )
+            except Exception as _proxy_err:
+                logger.warning("[FG] ScraperAPI proxy failed: %s", _proxy_err)
+        else:
+            logger.warning(
+                "[FG] Got %d from FanGraphs — SCRAPERAPI_KEY not set. "
+                "Set it in Railway to bypass the IP block and get real pitcher/batter stats.",
+                resp.status_code,
+            )
+    return resp
+
 _BATTING_PARAMS = {
     "age": "0",
     "pos": "all",
@@ -249,7 +279,7 @@ def _fetch_season(stats: str, season: int) -> list[dict]:
     params["season"] = str(season)
     params["season1"] = str(season)
     try:
-        resp = requests.get(
+        resp = _scraperapi_get_fg(
             _FG_API_BASE,
             params=params,
             headers=_fg_headers(),
