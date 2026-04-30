@@ -79,6 +79,37 @@ _HEADERS = {"User-Agent": "PropIQ/1.0 (analytics)"}
 _TIMEOUT = 20          # seconds for FanGraphs HTTP request
 _REQUEST_DELAY = 1.5   # pause between batter/pitcher fetches
 
+
+def _scraperapi_get_marcel(url: str, params: dict, headers: dict, timeout: int = 30):
+    """GET with automatic ScraperAPI fallback on 403/429 from FanGraphs.
+    Marcel projections require 3 seasons of FanGraphs data — all are 403-blocked
+    on Railway. ScraperAPI residential proxy bypasses the Cloudflare block.
+    """
+    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+    if resp.status_code in (403, 429, 407):
+        scraper_key = os.getenv("SCRAPERAPI_KEY", "")
+        if scraper_key:
+            proxy = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+            proxies = {"http": proxy, "https": proxy}
+            logger.info(
+                "[Marcel] Direct fetch %d — retrying via ScraperAPI residential proxy",
+                resp.status_code,
+            )
+            try:
+                resp = requests.get(
+                    url, params=params, headers=headers,
+                    timeout=60, proxies=proxies, verify=False,
+                )
+            except Exception as _proxy_err:
+                logger.warning("[Marcel] ScraperAPI proxy failed: %s", _proxy_err)
+        else:
+            logger.warning(
+                "[Marcel] Got %d from FanGraphs — SCRAPERAPI_KEY not set. "
+                "Marcel projections will fall back to statsapi baseline.",
+                resp.status_code,
+            )
+    return resp
+
 _AGE_PEAK       = 27   # peak age from Marcel spec
 _AGE_YOUNG_RATE = 0.006  # +0.6%/yr improvement under 27
 _AGE_OLD_RATE   = 0.003  # -0.3%/yr decline over 27
@@ -158,7 +189,7 @@ def _fetch_fg_data(stats: str, season_start: int, season_end: int) -> list[dict]
         "type":    "8",       # advanced stats
     }
     try:
-        resp = requests.get(
+        resp = _scraperapi_get_marcel(
             _FG_BASE_URL, params=params, headers=_HEADERS, timeout=_TIMEOUT
         )
         if resp.status_code != 200:
