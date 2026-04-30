@@ -45,11 +45,10 @@ _COLOUR_BLUE   = 0x3498DB   # bet alert
 _COLOUR_GOLD   = 0xF1C40F   # daily recap
 _COLOUR_GREY   = 0x95A5A6   # push / neutral
 
-# ── Fallback webhook (used when DISCORD_WEBHOOK_URL env var is absent) ────────────
-_FALLBACK_WEBHOOK = (
-    "https://discordapp.com/api/webhooks/1484795164961800374/"
-    "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
-)
+# ── Webhook URL — always read from DISCORD_WEBHOOK_URL env var ──────────────────────
+# Never hardcode tokens here — they are public in the GitHub repo.
+# Set DISCORD_WEBHOOK_URL in Railway service variables.
+_FALLBACK_WEBHOOK = ""  # intentionally empty — fails loudly if env var missing
 
 # ── Platform emoji map ────────────────────────────────────────────────────────────────────
 _PLATFORM_EMOJI = {

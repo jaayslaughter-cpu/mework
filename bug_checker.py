@@ -345,6 +345,52 @@ def _post_discord_embed(results: list[tuple[str, str, str]]) -> None:
         logger.error("[BugChecker] Failed to post Discord embed: %s", exc)
 
 
+
+def _check_fangraphs_data() -> tuple[str, str, str]:
+    """Check whether FanGraphs data loaded or is using league-average fallback.
+    When Railway IPs are 403-blocked and SCRAPERAPI_KEY is missing, every player
+    uses league-average stats — all props evaluate to ~54% probability and no
+    picks fire. This is the most common cause of zero plays dispatched.
+    """
+    try:
+        import redis as _rd
+        import json as _j
+        url = os.getenv("REDIS_URL", os.getenv("REDIS_PRIVATE_URL", ""))
+        if not url:
+            return "FanGraphs/Steamer", "warn", "Redis unavailable — cannot check"
+        r = _rd.from_url(url, socket_timeout=3)
+        raw = r.get("mlb_hub")
+        if not raw:
+            return "FanGraphs/Steamer", "warn", "Hub not loaded yet"
+        hub = _j.loads(raw)
+        # Check if Steamer has loaded projections (non-empty means FG worked)
+        steamer_ok = bool(hub.get("physics", {}).get("steamer_projections"))
+        fg_pitchers = len(hub.get("physics", {}).get("pitchers", {}))
+        fg_batters  = len(hub.get("physics", {}).get("batters", {}))
+        scraperapi_set = bool(os.getenv("SCRAPERAPI_KEY", ""))
+
+        if fg_pitchers == 0 and fg_batters == 0:
+            msg = "FanGraphs returned 0 players — league-average fallback active. "
+            if not scraperapi_set:
+                msg += "SCRAPERAPI_KEY not set — set it to bypass Railway 403 block."
+            else:
+                msg += "SCRAPERAPI_KEY is set but data still missing — check proxy."
+            return "FanGraphs/Steamer", "fail", msg
+
+        if not steamer_ok:
+            return "FanGraphs/Steamer", "warn", (
+                f"FG data present ({fg_pitchers}P/{fg_batters}B) but Steamer projections missing. "
+                "Simulation engine using MLB Stats API baseline only."
+            )
+
+        return "FanGraphs/Steamer", "ok", (
+            f"{fg_pitchers} pitchers / {fg_batters} batters loaded"
+            + (" (Steamer OK)" if steamer_ok else "")
+        )
+    except Exception as exc:
+        return "FanGraphs/Steamer", "warn", str(exc)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def run_bug_checker() -> None:
@@ -352,6 +398,7 @@ def run_bug_checker() -> None:
 
     checks = [
         _check_postgres,
+        _check_fangraphs_data,
         _check_redis,
         _check_datahub,
         _check_dispatch_fired,

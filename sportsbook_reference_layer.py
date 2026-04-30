@@ -953,7 +953,10 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
     if not _mem_ref:
         try:
             import time as _time_rd
-            _rd_key  = os.getenv("RUNDOWN_API_KEY", "a455831fa40a562b43d7f7830f6ab467fa38074d46d078e0d47de324b46bea79")
+            _rd_key  = os.getenv("RUNDOWN_API_KEY", "")  # Set RUNDOWN_API_KEY in Railway — free key at therundown.io
+            if not _rd_key:
+                log.debug("[SBRef] RUNDOWN_API_KEY not set — TheRundown skipped")
+                raise ValueError("no key")
             _rd_date = datetime.now(_PT).strftime("%Y-%m-%d")
             _rd_resp = requests.get(
                 f"https://therundown.io/api/v2/sports/3/events/{_rd_date}",
