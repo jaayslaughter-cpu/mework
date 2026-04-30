@@ -2188,15 +2188,28 @@ def _ensure_bet_ledger() -> None:
     except Exception as _rle:
         logger.warning("[DB] rejection_log create failed: %s", _rle)
 
-    # Heal rejection_log — add columns added in PR #415 that may be missing
-    # from the existing Railway table (created before PR #415 schema).
+    # Heal rejection_log — add all columns that may be missing from tables
+    # created before schema was finalised. Idempotent: IF NOT EXISTS guards.
     try:
         _rl3 = _pg_conn()
         with _rl3.cursor() as _rc3:
             for _rldl in [
+                # PR #415 columns
                 "ADD COLUMN IF NOT EXISTS agent_name  VARCHAR(80)",
                 "ADD COLUMN IF NOT EXISTS reason      VARCHAR(120)",
                 "ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ DEFAULT NOW()",
+                # Columns present in CREATE TABLE above but missing from old tables
+                # (the table was originally created without player_name/prop_type/etc.)
+                "ADD COLUMN IF NOT EXISTS player_name TEXT",
+                "ADD COLUMN IF NOT EXISTS prop_type   TEXT",
+                "ADD COLUMN IF NOT EXISTS side        TEXT",
+                "ADD COLUMN IF NOT EXISTS line        NUMERIC",
+                "ADD COLUMN IF NOT EXISTS model_prob  NUMERIC",
+                "ADD COLUMN IF NOT EXISTS ev_pct      NUMERIC",
+                "ADD COLUMN IF NOT EXISTS confidence  NUMERIC",
+                "ADD COLUMN IF NOT EXISTS reject_reason TEXT",
+                "ADD COLUMN IF NOT EXISTS reject_date DATE DEFAULT CURRENT_DATE",
+                "ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT NOW()",
             ]:
                 try:
                     _rc3.execute(f"ALTER TABLE rejection_log {_rldl}")
@@ -2204,8 +2217,9 @@ def _ensure_bet_ledger() -> None:
                     pass
         _rl3.commit()
         _rl3.close()
+        logger.info("[DB] rejection_log schema heal complete.")
     except Exception as _rl3e:
-        logger.debug("[DB] rejection_log heal: %s", _rl3e)
+        logger.warning("[DB] rejection_log heal failed: %s", _rl3e)
 
 
 def _log_rejection(player_name: str, prop_type: str, side: str, line: float,
