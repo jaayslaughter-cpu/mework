@@ -26,7 +26,7 @@ Three phases per run:
              Mark last pre-game snapshot as closing lines.
 
   CLV        Once closing lines are recorded, compute CLV for every
-             parlay leg sent at dispatch time. Positive CLV = we beat the close.
+             parlay leg sent at 11 AM. Positive CLV = we beat the close.
              Store results in clv_records table in line_stream.db.
              Post CLV report to Discord.
 
@@ -63,8 +63,7 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 
 _WEBHOOK_FALLBACK = (
-    "https://discordapp.com/api/webhooks/1484795164961800374/"
-    "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
+    os.getenv("DISCORD_WEBHOOK_URL", "")
 )
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", _WEBHOOK_FALLBACK)
 

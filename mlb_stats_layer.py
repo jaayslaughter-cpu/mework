@@ -693,13 +693,6 @@ def load(hub: dict | None = None) -> None:
     new_pitchers: dict[str, dict] = {}
     new_batters:  dict[str, dict] = {}
 
-    # ── Batch-fetch handedness for all today's players (1-2 API calls) ──────
-    _hand_ids = list({p["player_id"] for p in starters} | {b["player_id"] for b in batters})
-    _hand_ids = [i for i in _hand_ids if i and str(i) not in _HANDEDNESS_CACHE]
-    if _hand_ids:
-        _fetch_handedness_batch(_hand_ids)
-        logger.debug("[MLBStats] Handedness pre-fetched for %d players", len(_hand_ids))
-
     # ── Fetch pitcher stats ──────────────────────────────────────────────────
     for p in starters:
         pid  = p["player_id"]
@@ -803,83 +796,6 @@ get_pitcher_stats = get_pitcher
 
 
 # ---------------------------------------------------------------------------
-# Batch handedness lookup (PR #476)
-# ---------------------------------------------------------------------------
-# Fetches bat-side / pitch-hand for up to 50 players per statsapi request.
-# Saves 50+ sequential /people/{id} calls → 1-2 batch calls per dispatch cycle.
-# ---------------------------------------------------------------------------
-
-_HANDEDNESS_CACHE: dict[str, dict] = {}   # str(mlbam_id) -> {"bats": ..., "throws": ...}
-
-
-def _fetch_handedness_batch(ids: list[int]) -> None:
-    """
-    Batch-fetch bat/throw side for a list of MLBAM IDs.
-    Fills _HANDEDNESS_CACHE in-place. Max 50 IDs per statsapi request.
-    """
-    from itertools import islice
-
-    def _chunks(lst: list, n: int):
-        it = iter(lst)
-        while chunk := list(islice(it, n)):
-            yield chunk
-
-    uncached = [i for i in ids if str(i) not in _HANDEDNESS_CACHE]
-    if not uncached:
-        return
-
-    for batch in _chunks(uncached, 50):
-        id_str = ",".join(str(i) for i in batch)
-        data = _get("/people", {"personIds": id_str, "hydrate": "batSide,pitchHand"})
-        if not data:
-            for pid in batch:
-                _HANDEDNESS_CACHE.setdefault(str(pid), {"bats": None, "throws": None})
-            continue
-        found: set[str] = set()
-        for person in data.get("people", []):
-            pid = str(person.get("id", ""))
-            if not pid:
-                continue
-            _HANDEDNESS_CACHE[pid] = {
-                "bats":   person.get("batSide",   {}).get("code"),
-                "throws": person.get("pitchHand", {}).get("code"),
-            }
-            found.add(pid)
-        for pid in batch:
-            _HANDEDNESS_CACHE.setdefault(str(pid), {"bats": None, "throws": None})
-        logger.debug(
-            "[MLBStats] Handedness batch: %d/%d resolved", len(found), len(batch)
-        )
-
-
-def get_handedness(mlbam_id) -> dict:
-    """
-    Return bat/throw handedness for a player by MLBAM ID.
-    Returns {"bats": "L"|"R"|"S"|None, "throws": "L"|"R"|None}.
-
-    Example:
-        get_handedness(660271)  # Shohei Ohtani -> {"bats": "L", "throws": "R"}
-    """
-    pid = str(int(mlbam_id)) if mlbam_id else ""
-    if not pid:
-        return {"bats": None, "throws": None}
-
-    if pid not in _HANDEDNESS_CACHE:
-        data = _get(f"/people/{pid}", {"hydrate": "batSide,pitchHand"})
-        people = (data or {}).get("people", [])
-        if people:
-            p = people[0]
-            _HANDEDNESS_CACHE[pid] = {
-                "bats":   p.get("batSide",   {}).get("code"),
-                "throws": p.get("pitchHand", {}).get("code"),
-            }
-        else:
-            _HANDEDNESS_CACHE[pid] = {"bats": None, "throws": None}
-
-    return dict(_HANDEDNESS_CACHE.get(pid, {"bats": None, "throws": None}))
-
-
-# ---------------------------------------------------------------------------
 # DataHub hook — call this from DataHub instead of fangraphs_layer._load()
 # ---------------------------------------------------------------------------
 
@@ -902,3 +818,150 @@ def warm_cache(hub: dict | None = None) -> None:
 # because fangraphs_layer.get_pitcher() delegates here when _loaded is False.
 # But any code that does `import mlb_stats_layer` gets the fast path directly.
 
+
+
+# ---------------------------------------------------------------------------
+# Career stats cache — provides weighted multi-season averages when
+# current-season sample is too small (< 20 IP for pitchers, < 50 PA for batters).
+# Uses statsapi.mlb.com /people/{id}/stats?stats=yearByYear — free, no key.
+# ---------------------------------------------------------------------------
+
+_CAREER_PITCHER_CACHE: dict[int, dict] = {}
+_CAREER_BATTER_CACHE:  dict[int, dict] = {}
+
+def get_career_pitcher(player_id: int) -> dict[str, float]:
+    """
+    Fetch career-weighted pitcher stats from MLB Stats API yearByYear endpoint.
+    Weights recent seasons more heavily (2025 = 40%, 2024 = 35%, 2023 = 25%).
+    Falls back to current season if career data unavailable.
+    Returns LEAGUE_DEFAULTS on complete failure.
+    """
+    if player_id in _CAREER_PITCHER_CACHE:
+        return _CAREER_PITCHER_CACHE[player_id]
+
+    try:
+        import requests as _req
+        resp = _req.get(
+            f"{_API_BASE}/people/{player_id}/stats",
+            params={"stats": "yearByYear", "group": "pitching"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            _CAREER_PITCHER_CACHE[player_id] = {}
+            return {}
+
+        season_weights = {2025: 0.40, 2024: 0.35, 2023: 0.25}
+        weighted = {"k_rate": 0.0, "bb_rate": 0.0, "era": 0.0, "whip": 0.0}
+        total_weight = 0.0
+
+        for sg in resp.json().get("stats", []):
+            for split in sg.get("splits", []):
+                yr = int(split.get("season", 0) or 0)
+                w = season_weights.get(yr, 0)
+                if w == 0:
+                    continue
+                s  = split.get("stat", {})
+                ip = float(s.get("inningsPitched", 0) or 0)
+                so = float(s.get("strikeOuts",     0) or 0)
+                bb = float(s.get("baseOnBalls",    0) or 0)
+                er = float(s.get("earnedRuns",     0) or 0)
+                h  = float(s.get("hits",           0) or 0)
+                if ip < 5:
+                    continue
+                # Estimate batters faced from IP (average ~4.35 BF/IP for starters)
+                bf_est = max(ip * 4.35, 1)
+                weighted["k_rate"]  += w * (so / bf_est)
+                weighted["bb_rate"] += w * (bb / bf_est)
+                weighted["era"]     += w * (er / ip * 9 if ip else 4.06)
+                weighted["whip"]    += w * ((h + bb) / ip if ip else 1.28)
+                total_weight += w
+
+        if total_weight == 0:
+            _CAREER_PITCHER_CACHE[player_id] = {}
+            return {}
+
+        result = {
+            "k_rate":    round(weighted["k_rate"]  / total_weight, 4),
+            "bb_rate":   round(weighted["bb_rate"] / total_weight, 4),
+            "era":       round(weighted["era"]     / total_weight, 2),
+            "whip":      round(weighted["whip"]    / total_weight, 3),
+            "_source":   "mlbapi_career",
+        }
+        logger.info(
+            "[MLBStats] Career stats for pitcher %d: k_rate=%.3f era=%.2f (weight=%.2f)",
+            player_id, result["k_rate"], result["era"], total_weight,
+        )
+        _CAREER_PITCHER_CACHE[player_id] = result
+        return result
+
+    except Exception as exc:
+        logger.debug("[MLBStats] Career pitcher fetch failed for %d: %s", player_id, exc)
+        _CAREER_PITCHER_CACHE[player_id] = {}
+        return {}
+
+
+def get_career_batter(player_id: int) -> dict[str, float]:
+    """
+    Fetch career-weighted batter stats from MLB Stats API yearByYear endpoint.
+    Weights: 2025=40%, 2024=35%, 2023=25%.
+    """
+    if player_id in _CAREER_BATTER_CACHE:
+        return _CAREER_BATTER_CACHE[player_id]
+
+    try:
+        import requests as _req
+        resp = _req.get(
+            f"{_API_BASE}/people/{player_id}/stats",
+            params={"stats": "yearByYear", "group": "hitting"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            _CAREER_BATTER_CACHE[player_id] = {}
+            return {}
+
+        season_weights = {2025: 0.40, 2024: 0.35, 2023: 0.25}
+        weighted = {"avg": 0.0, "slg": 0.0, "obp": 0.0, "k_pct": 0.0, "bb_pct": 0.0}
+        total_weight = 0.0
+
+        for sg in resp.json().get("stats", []):
+            for split in sg.get("splits", []):
+                yr = int(split.get("season", 0) or 0)
+                w = season_weights.get(yr, 0)
+                if w == 0:
+                    continue
+                s  = split.get("stat", {})
+                pa = float(s.get("plateAppearances", 0) or 0)
+                if pa < 30:
+                    continue
+                so = float(s.get("strikeOuts", 0) or 0)
+                bb = float(s.get("baseOnBalls", 0) or 0)
+                weighted["avg"]    += w * float(s.get("avg",  0) or 0)
+                weighted["slg"]    += w * float(s.get("slg",  0) or 0)
+                weighted["obp"]    += w * float(s.get("obp",  0) or 0)
+                weighted["k_pct"]  += w * (so / pa if pa else 0.223)
+                weighted["bb_pct"] += w * (bb / pa if pa else 0.087)
+                total_weight += w
+
+        if total_weight == 0:
+            _CAREER_BATTER_CACHE[player_id] = {}
+            return {}
+
+        result = {
+            "avg":     round(weighted["avg"]    / total_weight, 3),
+            "slg":     round(weighted["slg"]    / total_weight, 3),
+            "obp":     round(weighted["obp"]    / total_weight, 3),
+            "k_pct":   round(weighted["k_pct"]  / total_weight, 4),
+            "bb_pct":  round(weighted["bb_pct"] / total_weight, 4),
+            "_source": "mlbapi_career",
+        }
+        logger.info(
+            "[MLBStats] Career stats for batter %d: avg=%.3f k_pct=%.3f (weight=%.2f)",
+            player_id, result["avg"], result["k_pct"], total_weight,
+        )
+        _CAREER_BATTER_CACHE[player_id] = result
+        return result
+
+    except Exception as exc:
+        logger.debug("[MLBStats] Career batter fetch failed for %d: %s", player_id, exc)
+        _CAREER_BATTER_CACHE[player_id] = {}
+        return {}
