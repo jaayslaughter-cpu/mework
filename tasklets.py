@@ -933,15 +933,16 @@ def _fetch_umpires_today() -> list[dict]:
                         rates = {"k_rate": 8.8, "bb_rate": 3.1,
                                  "k_mod": 1.0, "bb_mod": 1.0, "known": False}
                     umpires.append({
-                        "name":      name,
-                        "home_team": game["teams"]["home"]["team"].get("name", ""),
-                        "away_team": game["teams"]["away"]["team"].get("name", ""),
-                        "k_rate":    rates.get("k_rate", 8.8),
-                        "bb_rate":   rates.get("bb_rate", 3.1),
-                        "k_mod":     rates.get("k_mod", 1.0),
-                        "bb_mod":    rates.get("bb_mod", 1.0),
-                        "known":     rates.get("known", False),
-                        "run_env":   1.0,
+                        "name":       name,
+                        "home_team":  game["teams"]["home"]["team"].get("name", ""),
+                        "away_team":  game["teams"]["away"]["team"].get("name", ""),
+                        "k_rate":     rates.get("k_rate", 8.8),
+                        "bb_rate":    rates.get("bb_rate", 3.1),
+                        "k_mod":      rates.get("k_mod", 1.0),
+                        "bb_mod":     rates.get("bb_mod", 1.0),
+                        "known":      rates.get("known", False),
+                        "run_impact": rates.get("run_impact", 0.0),  # + = hitter-friendly zone
+                        "run_env":    1.0,
                     })
         if umpires:
             logger.info("[DataHub] Umpires: %d home plate umpires loaded (%d known)",
@@ -2869,6 +2870,21 @@ class _BaseAgent:
                 except Exception:
                     for _, d in _fb_adjs:
                         raw_p += d
+        # ── Per-line XGBoost K model blend (xgb_k_layer) ─────────────────
+        # Separate model per K line (3.5/4.5/5.5/6.5). 80/20 blend with
+        # the simulation-formula result. No-op when models not yet trained.
+        if prop_type == "strikeouts":
+            try:
+                from xgb_k_layer import xgb_k_ready, xgb_k_prob as _xgb_k_prob  # noqa: PLC0415
+                if xgb_k_ready():
+                    _k_line_val = float(prop.get("line", 4.5) or 4.5)
+                    _xkp = _xgb_k_prob(prop, line=_k_line_val)
+                    if _xkp is not None:
+                        raw_p = round(0.80 * raw_p + 0.20 * _xkp * 100, 2)
+                        raw_p = max(5.0, min(95.0, raw_p))
+            except ImportError:
+                pass
+
         raw_prob = round(max(5.0, min(95.0, raw_p)), 2)
         return self._apply_temperature(raw_prob)
 
@@ -3375,15 +3391,16 @@ class _UmpireAgent(_BaseAgent):
                                     _ump_rates = {"k_rate": 8.8, "bb_rate": 3.1,
                                                   "k_mod": 1.0, "bb_mod": 1.0, "known": False}
                                 umpires.append({
-                                    "name":      _ump_name,
-                                    "home_team": _g["teams"]["home"]["team"].get("name",""),
-                                    "away_team": _g["teams"]["away"]["team"].get("name",""),
-                                    "k_rate":    _ump_rates["k_rate"],
-                                    "bb_rate":   _ump_rates.get("bb_rate", 3.1),
-                                    "k_mod":     _ump_rates["k_mod"],
-                                    "bb_mod":    _ump_rates.get("bb_mod", 1.0),
-                                    "known":     _ump_rates.get("known", False),
-                                    "run_env":   1.0,
+                                    "name":       _ump_name,
+                                    "home_team":  _g["teams"]["home"]["team"].get("name",""),
+                                    "away_team":  _g["teams"]["away"]["team"].get("name",""),
+                                    "k_rate":     _ump_rates["k_rate"],
+                                    "bb_rate":    _ump_rates.get("bb_rate", 3.1),
+                                    "k_mod":      _ump_rates["k_mod"],
+                                    "bb_mod":     _ump_rates.get("bb_mod", 1.0),
+                                    "known":      _ump_rates.get("known", False),
+                                    "run_impact": _ump_rates.get("run_impact", 0.0),
+                                    "run_env":    1.0,
                                 })
             except Exception:
                 pass
@@ -3406,6 +3423,13 @@ class _UmpireAgent(_BaseAgent):
                 k_mod = 1.0 + (k_mod - 1.0) * 0.5
             # Apply historical K-rate modifier first
             model_prob = min(model_prob * k_mod, 95.0)
+            # run_impact: UmpScorecards run-impact signal (+hitter-friendly, -pitcher-friendly)
+            # Capped at ±2pp to avoid overshadowing the primary K-rate modifier
+            _run_impact = float(_ump.get("run_impact", 0.0) or 0.0)
+            if _run_impact > 0.5:    # hitter-friendly zone → suppress K probability
+                model_prob = max(5.0, model_prob - min(_run_impact * 0.8, 2.0))
+            elif _run_impact < -0.5: # pitcher-friendly zone → boost K probability
+                model_prob = min(95.0, model_prob + min(abs(_run_impact) * 0.8, 2.0))
             # Layer ABS overturn rate on top (2026-specific signal)
             try:
                 from abs_layer import get_umpire_abs_rate as _guar  # noqa: PLC0415
@@ -3756,25 +3780,6 @@ class _F5Agent(_BaseAgent):
                     model_prob = max(5.0, model_prob - _ttop_pp)
                 elif prop_type in ("earned_runs", "hits_allowed"):
                     model_prob = min(95.0, model_prob + _ttop_pp)
-
-        # ── Per-line XGBoost K model blend (xgb_k_layer) ──────────────────
-        # Separate XGBoost model trained per K line (3.5/4.5/5.5/6.5).
-        # More calibrated than the general 27-feature model at any specific line.
-        # Blend: 80% formula / 20% per-line model until Brier < 0.20 gate.
-        # Returns None and is a no-op when models not yet trained.
-        # Source: mlb-analytics-hub/xgb_prop_scorer.py architecture (PR #473)
-        if prop_type == "strikeouts":
-            try:
-                from xgb_k_layer import xgb_k_ready, xgb_k_prob as _xgb_k_prob
-                if xgb_k_ready():
-                    _k_line_val = float(prop.get("line", 4.5) or 4.5)
-                    _xkp = _xgb_k_prob(prop, line=_k_line_val)
-                    if _xkp is not None:
-                        # _xkp is [0,1]; model_prob is [0,100]
-                        model_prob = round(0.80 * model_prob + 0.20 * _xkp * 100, 2)
-                        model_prob = max(5.0, min(95.0, model_prob))
-            except ImportError:
-                pass
 
         over_odds     = prop.get("over_american",  -110)
         under_odds    = prop.get("under_american", -110)
@@ -4926,21 +4931,21 @@ class _ChalkBusterAgent(_BaseAgent):
 
 
         # Fade if public is piling on overs (>68%) — contrarian under edge
-        if pub_over > 68:
-            model_prob = self._model_prob(player, prop_type, prop=prop)
-            under_odds = prop.get("under_american", -115)
-            implied    = _american_to_implied(under_odds)
-            under_prob   = 100.0 - model_prob
-            ev_pct       = (under_prob / 100 - implied / 100) / (implied / 100) * 100
-            # Bidirectional: if public is heavy UNDER instead, fade to OVER
-            over_odds_cb    = prop.get("over_american", -115)
-            over_implied_cb = _american_to_implied(over_odds_cb)
-            ev_over_pct     = (model_prob / 100 - over_implied_cb / 100) / (over_implied_cb / 100) * 100
-            if pub_over < 35.0 and ev_over_pct >= MIN_EV_THRESH_PCT:
-                # Public pounding UNDER → fade to OVER
-                return self._build_bet(prop, "OVER", model_prob, over_implied_cb, ev_over_pct * 100)
-            if ev_pct >= MIN_EV_THRESH_PCT:  # original: public heavy OVER → fade to UNDER
-                return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct * 100)
+        model_prob      = self._model_prob(player, prop_type, prop=prop)
+        over_odds_cb    = prop.get("over_american", -115)
+        over_implied_cb = _american_to_implied(over_odds_cb)
+        ev_over_pct     = (model_prob / 100 - over_implied_cb / 100) / (over_implied_cb / 100) * 100
+        under_odds      = prop.get("under_american", -115)
+        implied         = _american_to_implied(under_odds)
+        under_prob      = 100.0 - model_prob
+        ev_pct          = (under_prob / 100 - implied / 100) / (implied / 100) * 100
+
+        if pub_over > 68 and ev_pct >= MIN_EV_THRESH_PCT:
+            # Public pounding OVER → fade to UNDER
+            return self._build_bet(prop, "UNDER", under_prob, implied, ev_pct * 100)
+        if pub_over < 35.0 and pub_over > 0 and ev_over_pct >= MIN_EV_THRESH_PCT:
+            # Public pounding UNDER → fade to OVER
+            return self._build_bet(prop, "OVER", model_prob, over_implied_cb, ev_over_pct * 100)
         return None
 
 

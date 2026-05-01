@@ -693,6 +693,13 @@ def load(hub: dict | None = None) -> None:
     new_pitchers: dict[str, dict] = {}
     new_batters:  dict[str, dict] = {}
 
+    # ── Batch-fetch handedness for all today's players (1-2 API calls) ──────
+    _hand_ids = list({p["player_id"] for p in starters} | {b["player_id"] for b in batters})
+    _hand_ids = [i for i in _hand_ids if i and str(i) not in _HANDEDNESS_CACHE]
+    if _hand_ids:
+        _fetch_handedness_batch(_hand_ids)
+        logger.debug("[MLBStats] Handedness pre-fetched for %d players", len(_hand_ids))
+
     # ── Fetch pitcher stats ──────────────────────────────────────────────────
     for p in starters:
         pid  = p["player_id"]
@@ -793,6 +800,83 @@ def get_batter(name: str) -> dict[str, float]:
 # Alias so fangraphs_layer callers work without changes
 get_batter_stats  = get_batter
 get_pitcher_stats = get_pitcher
+
+
+# ---------------------------------------------------------------------------
+# Batch handedness lookup (PR #476)
+# ---------------------------------------------------------------------------
+# Fetches bat-side / pitch-hand for up to 50 players per statsapi request.
+# Saves 50+ sequential /people/{id} calls → 1-2 batch calls per dispatch cycle.
+# ---------------------------------------------------------------------------
+
+_HANDEDNESS_CACHE: dict[str, dict] = {}   # str(mlbam_id) -> {"bats": ..., "throws": ...}
+
+
+def _fetch_handedness_batch(ids: list[int]) -> None:
+    """
+    Batch-fetch bat/throw side for a list of MLBAM IDs.
+    Fills _HANDEDNESS_CACHE in-place. Max 50 IDs per statsapi request.
+    """
+    from itertools import islice
+
+    def _chunks(lst: list, n: int):
+        it = iter(lst)
+        while chunk := list(islice(it, n)):
+            yield chunk
+
+    uncached = [i for i in ids if str(i) not in _HANDEDNESS_CACHE]
+    if not uncached:
+        return
+
+    for batch in _chunks(uncached, 50):
+        id_str = ",".join(str(i) for i in batch)
+        data = _get("/people", {"personIds": id_str, "hydrate": "batSide,pitchHand"})
+        if not data:
+            for pid in batch:
+                _HANDEDNESS_CACHE.setdefault(str(pid), {"bats": None, "throws": None})
+            continue
+        found: set[str] = set()
+        for person in data.get("people", []):
+            pid = str(person.get("id", ""))
+            if not pid:
+                continue
+            _HANDEDNESS_CACHE[pid] = {
+                "bats":   person.get("batSide",   {}).get("code"),
+                "throws": person.get("pitchHand", {}).get("code"),
+            }
+            found.add(pid)
+        for pid in batch:
+            _HANDEDNESS_CACHE.setdefault(str(pid), {"bats": None, "throws": None})
+        logger.debug(
+            "[MLBStats] Handedness batch: %d/%d resolved", len(found), len(batch)
+        )
+
+
+def get_handedness(mlbam_id) -> dict:
+    """
+    Return bat/throw handedness for a player by MLBAM ID.
+    Returns {"bats": "L"|"R"|"S"|None, "throws": "L"|"R"|None}.
+
+    Example:
+        get_handedness(660271)  # Shohei Ohtani -> {"bats": "L", "throws": "R"}
+    """
+    pid = str(int(mlbam_id)) if mlbam_id else ""
+    if not pid:
+        return {"bats": None, "throws": None}
+
+    if pid not in _HANDEDNESS_CACHE:
+        data = _get(f"/people/{pid}", {"hydrate": "batSide,pitchHand"})
+        people = (data or {}).get("people", [])
+        if people:
+            p = people[0]
+            _HANDEDNESS_CACHE[pid] = {
+                "bats":   p.get("batSide",   {}).get("code"),
+                "throws": p.get("pitchHand", {}).get("code"),
+            }
+        else:
+            _HANDEDNESS_CACHE[pid] = {"bats": None, "throws": None}
+
+    return dict(_HANDEDNESS_CACHE.get(pid, {"bats": None, "throws": None}))
 
 
 # ---------------------------------------------------------------------------
