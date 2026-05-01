@@ -904,6 +904,54 @@ def _fetch_mlb_lineups_today() -> list[dict]:
         return []
 
 
+def _fetch_umpires_today() -> list[dict]:
+    """Fetch today's home plate umpires from MLB Stats API with umpire_rates enrichment.
+    Free, no auth required — same endpoint used by UmpireAgent per-prop fallback,
+    now pre-populated into hub.context.umpires so the flag umpire_ok is True.
+    """
+    try:
+        import requests as _req
+        from umpire_rates import get_umpire_rates as _gur  # noqa: PLC0415
+        today = _today_pt().strftime("%Y-%m-%d")
+        sched = _req.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "date": today, "hydrate": "officials", "gameType": "R"},
+            timeout=8,
+        ).json()
+        umpires: list[dict] = []
+        for date_block in sched.get("dates", []):
+            for game in date_block.get("games", []):
+                for official in game.get("officials", []):
+                    if official.get("officialType") != "Home Plate":
+                        continue
+                    name = official.get("official", {}).get("fullName", "")
+                    if not name:
+                        continue
+                    try:
+                        rates = _gur(name)
+                    except Exception:
+                        rates = {"k_rate": 8.8, "bb_rate": 3.1,
+                                 "k_mod": 1.0, "bb_mod": 1.0, "known": False}
+                    umpires.append({
+                        "name":      name,
+                        "home_team": game["teams"]["home"]["team"].get("name", ""),
+                        "away_team": game["teams"]["away"]["team"].get("name", ""),
+                        "k_rate":    rates.get("k_rate", 8.8),
+                        "bb_rate":   rates.get("bb_rate", 3.1),
+                        "k_mod":     rates.get("k_mod", 1.0),
+                        "bb_mod":    rates.get("bb_mod", 1.0),
+                        "known":     rates.get("known", False),
+                        "run_env":   1.0,
+                    })
+        if umpires:
+            logger.info("[DataHub] Umpires: %d home plate umpires loaded (%d known)",
+                        len(umpires), sum(1 for u in umpires if u["known"]))
+        return umpires
+    except Exception as exc:
+        logger.debug("[DataHub] Umpire fetch failed: %s", exc)
+        return []
+
+
 def _fetch_mlb_probable_starters() -> list[dict]:
     """Fetch today's probable starting pitchers from MLB Stats API (free, no key)."""
     import datetime as _dt  # noqa: PLC0415
@@ -2404,7 +2452,7 @@ def run_data_hub_tasklet() -> None:
         try:
             context = {
                 "weather":            _fetch_weather_today(),    # Open-Meteo free
-                "umpires":            [],  # no source yet
+                "umpires":            _fetch_umpires_today(),  # MLB Stats API /schedule?hydrate=officials
                 "injuries":           _fetch_injuries_today(),  # injury_layer
                 "lineups":            _fetch_mlb_lineups_today(),
                 "projected_starters": _fetch_mlb_probable_starters(),
@@ -2821,8 +2869,26 @@ class _BaseAgent:
                 except Exception:
                     for _, d in _fb_adjs:
                         raw_p += d
-        return round(max(5.0, min(95.0, raw_p)), 2)
+        raw_prob = round(max(5.0, min(95.0, raw_p)), 2)
+        return self._apply_temperature(raw_prob)
 
+
+    def _apply_temperature(self, raw_prob: float) -> float:
+        """Apply per-agent Platt temperature scaling to raw probability.
+        T > 1 compresses overconfident probs toward 50% (most agents land here).
+        T = 1 means no change. T scalar fitted nightly by temperature_calibration.py,
+        stored in agent_unit_sizing.temperature, cached on self._T_scalar at cycle start.
+        """
+        try:
+            T = float(getattr(self, "_T_scalar", 1.5))
+            if T <= 0 or abs(T - 1.0) < 0.01:
+                return raw_prob
+            import math as _m
+            p = max(0.005, min(0.995, raw_prob / 100.0))
+            calibrated = 1.0 / (1.0 + _m.exp(-_m.log(p / (1.0 - p)) / T))
+            return round(max(5.0, min(95.0, calibrated * 100.0)), 2)
+        except Exception:
+            return raw_prob
 
     # ─────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────────────────
@@ -3690,6 +3756,25 @@ class _F5Agent(_BaseAgent):
                     model_prob = max(5.0, model_prob - _ttop_pp)
                 elif prop_type in ("earned_runs", "hits_allowed"):
                     model_prob = min(95.0, model_prob + _ttop_pp)
+
+        # ── Per-line XGBoost K model blend (xgb_k_layer) ──────────────────
+        # Separate XGBoost model trained per K line (3.5/4.5/5.5/6.5).
+        # More calibrated than the general 27-feature model at any specific line.
+        # Blend: 80% formula / 20% per-line model until Brier < 0.20 gate.
+        # Returns None and is a no-op when models not yet trained.
+        # Source: mlb-analytics-hub/xgb_prop_scorer.py architecture (PR #473)
+        if prop_type == "strikeouts":
+            try:
+                from xgb_k_layer import xgb_k_ready, xgb_k_prob as _xgb_k_prob
+                if xgb_k_ready():
+                    _k_line_val = float(prop.get("line", 4.5) or 4.5)
+                    _xkp = _xgb_k_prob(prop, line=_k_line_val)
+                    if _xkp is not None:
+                        # _xkp is [0,1]; model_prob is [0,100]
+                        model_prob = round(0.80 * model_prob + 0.20 * _xkp * 100, 2)
+                        model_prob = max(5.0, min(95.0, model_prob))
+            except ImportError:
+                pass
 
         over_odds     = prop.get("over_american",  -110)
         under_odds    = prop.get("under_american", -110)
@@ -5399,8 +5484,21 @@ def run_agent_tasklet() -> bool:
     if _frozen_agents:
         logger.info("[AgentTasklet] Frozen agents (skipped this cycle): %s", sorted(_frozen_agents))
 
+    # Pre-load temperature T scalars for all agents (fitted by temperature_calibration.py)
+    _agent_T_scalars: dict[str, float] = {}
+    try:
+        _t_pg = _pg_conn()
+        with _t_pg.cursor() as _tc:
+            _tc.execute("SELECT agent_name, temperature FROM agent_unit_sizing")
+            _agent_T_scalars = {r[0]: float(r[1]) for r in _tc.fetchall() if r[1]}
+        _t_pg.close()
+    except Exception as _tse:
+        logger.debug("[AgentTasklet] T scalar load skipped: %s", _tse)
+
     for cls in _AGENT_CLASSES:
         agent      = cls(hub, model)
+        # Attach per-agent T scalar — compresses overconfident probabilities toward 50%
+        agent._T_scalar = _agent_T_scalars.get(agent.name, 1.5)
         # CRIT-2: Skip frozen agents entirely
         if agent.name in _frozen_agents:
             logger.info("[AgentTasklet] Skipping frozen agent: %s", agent.name)
@@ -6027,6 +6125,16 @@ def run_agent_tasklet() -> bool:
                 best["agent"], best["leg_count"], best["combined_ev_pct"])
     logger.info("[AgentTasklet] === DISPATCH SUMMARY: %d picks sent, saved to bet_ledger, confirmed on Discord ===",
                 len(best_per_agent))
+
+    # Flush decision log — batch-insert all evaluated props to decision_log table
+    if _DL:
+        try:
+            n_logged = _dl_flush()
+            if n_logged:
+                logger.debug("[AgentTasklet] decision_logger: %d prop evaluations written to decision_log", n_logged)
+        except Exception as _dl_err:
+            logger.debug("[AgentTasklet] decision_logger flush failed: %s", _dl_err)
+
     return True  # FIX: signals orchestrator that picks were actually sent
 
 
@@ -6865,7 +6973,7 @@ def run_grading_tasklet() -> None:
         _edge_run(days=30, quiet=True)
         logger.info("[GradingTasklet] Edge health monitor complete.")
     except Exception as _edge_err:
-        logger.debug("[GradingTasklet] Edge health monitor skipped: %s", _edge_err)
+        logger.warning("[GradingTasklet] Edge health monitor failed: %s", _edge_err)
 
     # Update drift monitor with today's Brier score
     if results:
@@ -6908,6 +7016,19 @@ def run_grading_tasklet() -> None:
                     record_brier(brier, n_samples=len(brier_inputs), agent_name="global")
                     logger.info("[GradingTasklet] Brier score recorded: %.4f (%d samples)",
                                 brier, len(brier_inputs))
+                    # Check for drift — fires Discord alert if Brier degraded >15% week-over-week
+                    try:
+                        from drift_monitor import check_drift as _check_drift  # noqa: PLC0415
+                        _drift_result = _check_drift()
+                        if _drift_result and _drift_result.get("alert_fired"):
+                            logger.warning(
+                                "[GradingTasklet] DRIFT ALERT fired — Brier %.4f → %.4f (%.1f%% change)",
+                                _drift_result.get("old_brier", 0),
+                                _drift_result.get("new_brier", brier),
+                                _drift_result.get("drift_pct", 0),
+                            )
+                    except Exception as _drift_err:
+                        logger.debug("[GradingTasklet] Drift check failed: %s", _drift_err)
             elif brier_inputs:
                 logger.info(
                     "[GradingTasklet] Brier skipped — only %d graded rows (need %d). "
