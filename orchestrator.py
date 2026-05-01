@@ -507,6 +507,24 @@ async def lifespan(_app: FastAPI):
         id="line_stream",
     )
 
+    # ── Weekly calibration map rebuild (every Monday 6:00 AM PT) ─────────────
+    def job_calibrate_model():
+        try:
+            from calibrate_model import generate_calibration_map_from_db  # noqa: PLC0415
+            result = generate_calibration_map_from_db()
+            logger.info("[Scheduler] Calibration map: %s",
+                        f"{len(result)} buckets updated" if result else "insufficient data (<100 graded rows)")
+        except Exception as exc:
+            logger.warning("[Scheduler] Calibration map rebuild failed: %s", exc)
+
+    scheduler.add_job(
+        job_calibrate_model,
+        CronTrigger(day_of_week="mon", hour=6, minute=0, timezone=PT),
+        id="job_calibrate_model",
+        name="Weekly calibration map rebuild",
+        replace_existing=True,
+    )
+
     # ── Monthly leaderboard — 1st of month 9 AM PT ───────────────────────────
     scheduler.add_job(
         job_monthly_leaderboard,

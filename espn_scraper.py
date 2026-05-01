@@ -263,10 +263,17 @@ def _fetch_mlb_gamelog_stats(date_str: str) -> dict[str, dict]:
                                 extra[name] = {}
                             pit_outs = float(pit.get("outs", 0) or 0)
                             pit_er   = float(pit.get("earnedRuns", 0) or 0)
+                            pit_k    = float(pit.get("strikeOuts", 0) or 0)
+                            pit_bb   = float(pit.get("baseOnBalls", 0) or 0)
+                            pit_h    = float(pit.get("hits", 0) or 0)
                             extra[name].update({
-                                "pitching_outs": pit_outs,
-                                "earned_runs":   pit_er,
-                                # FIX: Quality Start = 18+ outs AND 3 or fewer ER
+                                "pitching_outs":  pit_outs,
+                                "earned_runs":    pit_er,
+                                "pitcher_k":      pit_k,      # TRUE pitcher strikeouts
+                                "walks_allowed":  pit_bb,
+                                "hits_allowed":   pit_h,
+                                "_is_pitcher":    True,
+                                # Quality Start = 18+ outs AND 3 or fewer ER
                                 "quality_start": 1.0 if pit_outs >= 18 and pit_er <= 3 else 0.0,
                             })
 
@@ -427,16 +434,17 @@ def get_all_player_stats(date_str: str) -> dict[str, dict]:
             }
             injected += 1
         elif "pitching_outs" in extra:
-            po = extra["pitching_outs"]
+            po  = extra["pitching_outs"]
+            p_k = extra.get("pitcher_k", 0.0)   # TRUE pitcher Ks from pitching stats block
             all_stats[name_lower] = {
                 "full_name":      name_lower.title(),
                 "is_pitcher":     True,
                 "pitching_outs":  po,
                 "innings_pitched":po / 3,
-                "hits_allowed":   0.0,
-                "earned_runs":    0.0,
-                "base_on_balls":  0.0,
-                "strikeouts":     0.0,
+                "hits_allowed":   extra.get("hits_allowed",  0.0),
+                "earned_runs":    extra.get("earned_runs",   0.0),
+                "base_on_balls":  extra.get("walks_allowed", 0.0),
+                "strikeouts":     p_k,
                 "_source":        "mlb_api_fallback",
             }
             injected += 1

@@ -904,6 +904,31 @@ def _fetch_mlb_lineups_today() -> list[dict]:
         return []
 
 
+def _warm_team_form_background() -> bool:
+    """Warm team form cache once per PT calendar day in a background thread.
+    Returns True if warm was triggered, False if already warmed today.
+    Non-blocking — hub continues building immediately.
+    """
+    try:
+        from team_form_layer import warm_team_form_cache, _CACHE_DATE  # noqa: PLC0415
+        today = _today_pt().isoformat()
+        if _CACHE_DATE == today:
+            return False  # already warmed today
+        import threading as _threading
+        _t = _threading.Thread(
+            target=warm_team_form_cache,
+            kwargs={"sleep_ms": 0.15},
+            daemon=True,
+            name="team_form_warm",
+        )
+        _t.start()
+        logger.info("[DataHub] Team form cache warming in background thread")
+        return True
+    except Exception as exc:
+        logger.debug("[DataHub] team_form warm skipped: %s", exc)
+        return False
+
+
 def _fetch_umpires_today() -> list[dict]:
     """Fetch today's home plate umpires from MLB Stats API with umpire_rates enrichment.
     Free, no auth required — same endpoint used by UmpireAgent per-prop fallback,
@@ -2315,6 +2340,31 @@ def run_data_hub_tasklet() -> None:
         from steamer_layer import prefetch as _steamer_prefetch  # noqa: PLC0415
         # Pass hub so Steamer can use DraftEdge as Tier 4 when FanGraphs/ScraperAPI fail
         _sc = _steamer_prefetch(hub=_hub_data if "_hub_data" in dir() else None)
+
+        # Pre-warm career stats cache for today's players (avoids 8s per-prop latency)
+        # Background thread — doesn't block hub build
+        try:
+            from mlb_stats_layer import get_career_pitcher, get_career_batter  # noqa: PLC0415
+            import threading as _thr
+            def _prewarm_career_stats():
+                ctx = _hub_data.get("context", {}) if "_hub_data" in dir() else {}
+                for entry in ctx.get("lineups", []) + ctx.get("projected_starters", []):
+                    pid = entry.get("player_id")
+                    if not pid:
+                        continue
+                    try:
+                        pos = str(entry.get("position", "")).upper()
+                        if pos == "P" or "pitcher" in str(entry.get("type", "")).lower():
+                            get_career_pitcher(int(pid))
+                        else:
+                            get_career_batter(int(pid))
+                    except Exception:
+                        pass
+            _thr.Thread(target=_prewarm_career_stats, daemon=True,
+                        name="career_stats_prewarm").start()
+            logger.debug("[DataHub] Career stats pre-warm thread started")
+        except Exception as _cse:
+            logger.debug("[DataHub] Career stats pre-warm skipped: %s", _cse)
         if _sc:
             logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
         else:
@@ -2454,6 +2504,7 @@ def run_data_hub_tasklet() -> None:
             context = {
                 "weather":            _fetch_weather_today(),    # Open-Meteo free
                 "umpires":            _fetch_umpires_today(),  # MLB Stats API /schedule?hydrate=officials
+                "team_form_warmed":   _warm_team_form_background(),  # L15 W/L + RPG flags
                 "injuries":           _fetch_injuries_today(),  # injury_layer
                 "lineups":            _fetch_mlb_lineups_today(),
                 "projected_starters": _fetch_mlb_probable_starters(),
@@ -4149,6 +4200,22 @@ class _WeatherAgent(_BaseAgent):
         player    = prop.get("player", "")
         prop_type = prop.get("prop_type", "")
         venue     = prop.get("venue", "")
+        _wa_team  = prop.get("team", "")
+
+        # Team form — L15 hot/cold offense context for run/hit props
+        if prop_type in {"runs", "hits", "total_bases", "hits_runs_rbis"} and _wa_team:
+            try:
+                from team_form_layer import get_team_form as _gtf  # noqa: PLC0415
+                _form = _gtf(abbrev=_wa_team)
+                if _form.get("season_games", 0) >= 10:
+                    _l15 = _form.get("l15_rpg") or 0
+                    _ssn = _form.get("season_rpg") or 0
+                    if _l15 and _ssn:
+                        _boost = round(max(-3.0, min(3.0, (_l15 - _ssn) * 1.5)), 2)
+                        if abs(_boost) >= 0.5:
+                            prop["_team_form_boost"] = _boost
+            except Exception:
+                pass
 
         wind_mph = float(prop.get("_wind_speed", 0) or 0)
         wind_dir = str(prop.get("_wind_direction", "") or "")
@@ -4777,6 +4844,24 @@ class _CorrelatedParlayAgent(_BaseAgent):
         opp_team  = prop.get("opposing_team", "")
         if not (team and opp_team):
             return None
+
+        # Team form filter — prefer hot-offense teams for batter props,
+        # prefer hot-defense opponents for pitcher K props
+        try:
+            from team_form_layer import get_team_form  # noqa: PLC0415
+            if prop_type in {"hits", "total_bases", "runs", "hits_runs_rbis"}:
+                form = get_team_form(abbrev=team)
+                if form.get("season_games", 0) >= 10 and form.get("hot_offense") is False:
+                    # Team running cold offensively — skip batter props on this team
+                    return None
+            if prop_type in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
+                opp_form = get_team_form(abbrev=opp_team)
+                if opp_form.get("season_games", 0) >= 10 and opp_form.get("hot_offense") is True:
+                    # Opposing team is hot offensively — pitcher K props less favorable
+                    pass  # don't block, but noted for future weighting
+        except Exception:
+            pass
+
         # Pitcher strikeout correlation: high K-lineup + chase-heavy opponent
         if prop_type in {"strikeouts", "pitcher_strikeouts", "k", "ks"}:
             chase_adj = float(prop.get("_lineup_chase_adj", 0.0))
