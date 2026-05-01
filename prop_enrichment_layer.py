@@ -165,6 +165,15 @@ def _get_fg_pitcher(name: str) -> dict:
         return {}
 
 
+def _get_fg_batter_static(name: str) -> dict:
+    """Tier 1.5: 2025 FanGraphs batter stats from static cache. No API call."""
+    try:
+        from fangraphs_layer import get_batter_static_2025  # noqa: PLC0415
+        return get_batter_static_2025(name) or {}
+    except Exception:
+        return {}
+
+
 def _get_fg_batter(name: str) -> dict:
     try:
         from fangraphs_layer import get_batter  # noqa: PLC0415
@@ -782,47 +791,6 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
             return round(p, 4)
         return None
 
-    # ── Batter hitter_strikeouts ──────────────────────────────────────────
-    if prop_type == "hitter_strikeouts":
-        import math as _math  # noqa: PLC0415
-        # Try FG projected K% first (most reliable for batter K props)
-        _batter_name = prop.get("player_name", "")
-        _batter_fg_k = None
-        if _batter_name:
-            try:
-                from statcast_static_layer import get_batter_fg_proj as _sc_fg  # noqa: PLC0415
-                _fg = _sc_fg(_batter_name)
-                if _fg and _fg.get("k_pct", 0) > 0:
-                    _batter_fg_k = _fg["k_pct"]  # already decimal, e.g. 0.227
-            except Exception:
-                pass
-
-        # Fallback: use prop-stamped batter_k_pct or league avg 0.222
-        _k_pa = _batter_fg_k or float(prop.get("_batter_k_pct", 0.0) or 0.0) or 0.222
-
-        # Typical 4 PA per game for a batter
-        _pa   = float(prop.get("_batter_pa_avg", 4.0) or 4.0)
-        _lam  = max(0.01, _k_pa * _pa)
-
-        _p_under = sum(
-            _math.exp(-_lam) * (_lam ** k) / _math.factorial(int(k))
-            for k in range(int(line))
-        )
-        _p_over = 1.0 - min(0.99, _p_under)
-        p = _p_over if is_over else (1.0 - _p_over)
-        # ABS challenge edge: K flips saved by batter (positive = Under K edge)
-        try:
-            from statcast_static_layer import get_batter_abs_k_edge as _abs_edge  # noqa: PLC0415
-            _abs_adj = _abs_edge(prop.get("player_name", "") or prop.get("player", "") or "")
-            # Negative adj if batter flips Ks to balls (reduces K probability)
-            p = max(0.05, min(0.95, p - _abs_adj * 0.5))
-        except Exception:
-            pass
-        # Only return if we have a real K rate (not just the 22.2% fallback)
-        if _batter_fg_k or float(prop.get("_batter_k_pct", 0.0) or 0.0) > 0:
-            return round(p, 4)
-        return None
-
     # ── Batter H+R+RBI composite ───────────────────────────────────────────
     # Now uses wRC+ and wOBA for a per-player Bayesian estimate.
     if prop_type == "hits_runs_rbis":
@@ -1104,25 +1072,47 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _player_id = prop.get("player_id") or prop.get("mlbam_id")
                 _mlbapi = _get_mlbapi_pitcher(player, _player_id)
 
-                # Tier 2.0: Statcast 2026 arsenal K% — real per-pitch data, Railway-safe
-                if not _mlbapi.get("k_rate") and _player_id:
+                # Tier 0: Statcast static CSV — highest fidelity, no API call
+                if _player_id:
                     try:
                         from statcast_static_layer import (  # noqa: PLC0415
-                            get_pitcher_k_rate as _sc_kr,
-                            get_pitcher_whiff_rate as _sc_wr,
+                            get_pitcher_k_rate as _sc_k, get_pitcher_whiff_rate as _sc_w,
                             get_pitcher_xera as _sc_xera,
                         )
-                        _sc_k = _sc_kr(int(_player_id))
-                        if _sc_k:
-                            _mlbapi["k_rate"]    = _sc_k
-                            _mlbapi["swstr_pct"] = _sc_wr(int(_player_id)) or 0.110
-                            _mlbapi["xfip"]      = _sc_xera(int(_player_id)) or 4.06
-                            logger.debug(
-                                "[Enrichment] Statcast arsenal k_rate=%.3f for %s",
-                                _sc_k, player,
-                            )
+                        _pid_int = int(_player_id)
+                        _sc_k_val = _sc_k(_pid_int)
+                        if _sc_k_val is not None:
+                            prop.setdefault("k_rate",   _sc_k_val)
+                            _w = _sc_w(_pid_int)
+                            if _w: prop.setdefault("csw_pct",  _w)
+                            _x = _sc_xera(_pid_int)
+                            if _x: prop.setdefault("xfip", _x)
                     except Exception:
                         pass
+
+                # Poisson K probability — set on prop for agents to read
+                try:
+                    if prop.get("prop_type", "").lower() in {"strikeouts", "k", "ks"}:
+                        from poisson_k_model import get_k_probability as _pkp  # noqa: PLC0415
+                        _k9_now    = float(_mlbapi.get("k_rate", 0.223) or 0.223) * 27  # k_rate is per-BF → k/9
+                        _ip_est    = float(_mlbapi.get("season_ip", 0) or 0)
+                        _ip_start  = round(_ip_est / max(_mlbapi.get("season_starts", 5) or 5, 1), 2)
+                        _ip_start  = max(4.0, min(_ip_start, 6.5))
+                        _park_m    = float(prop.get("_park_k_mult", 1.0) or 1.0)
+                        _ump_m     = float(prop.get("_umpire_k_mod", 1.0) or 1.0)
+                        _kres = _pkp(
+                            prop, _k9_now, k9_career=0.0,
+                            starts_2026=int(_mlbapi.get("season_starts", 0) or 0),
+                            total_ip=_ip_est, ip_per_start=_ip_start,
+                            park_mult=_park_m, umpire_mod=_ump_m,
+                        )
+                        prop["_poisson_prob_over"]  = _kres["prob_over"]
+                        prop["_poisson_prob_under"] = _kres["prob_under"]
+                        prop["_poisson_expected_k"] = _kres["expected_ks"]
+                        prop["_poisson_reliability"] = _kres["reliability"]
+                        prop["_poisson_trend"]       = _kres["trend"]
+                except Exception:
+                    pass
 
                 # Tier 2.5: Career-weighted stats (2023-2025 blend) — better than league avg
                 # Fills gap when current-season sample too small (< 5 IP in 2026)
@@ -1139,6 +1129,17 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _sc_whiff  = float(prop.get("sc_whiff_rate",    0.0) or 0.0)
                 _sc_hard   = float(prop.get("sc_hard_hit_rate", 0.0) or 0.0)
                 _sc_barrel = float(prop.get("sc_barrel_rate",   0.0) or 0.0)
+
+                # Park K factor — strikeout-specific multiplier per ballpark
+                try:
+                    from park_k_factors import get_park_k_mult as _pkm  # noqa: PLC0415
+                    _home_team = prop.get("home_team", prop.get("team", ""))
+                    if _home_team:
+                        _park_mult, _park_label = _pkm(_home_team)
+                        prop["_park_k_mult"]  = _park_mult
+                        prop["_park_k_label"] = _park_label
+                except Exception:
+                    pass
 
                 # k_rate: statsapi SO/BF ratio (most accurate) → Statcast whiff proxy
                 if _mlbapi.get("k_rate", 0) > 0:
@@ -1176,7 +1177,14 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
 
         if is_batter_prop:
             if pn not in _fg_batter_cache:
-                _fg_batter_cache[pn] = _get_fg_batter(player)
+                # Tier 1: Live FanGraphs (403-blocked on Railway without ScraperAPI)
+                _live = _get_fg_batter(player)
+                if _live:
+                    _fg_batter_cache[pn] = _live
+                else:
+                    # Tier 1.5: Static 2025 FanGraphs cache — 446 batters, no API call
+                    _static = _get_fg_batter_static(player)
+                    _fg_batter_cache[pn] = _static
             fg = _fg_batter_cache[pn]
             if fg:
                 fg_hits += 1
@@ -1229,6 +1237,30 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _player_id = prop.get("player_id") or prop.get("mlbam_id")
                 _mlbapi_b = _get_mlbapi_batter(player, _player_id)
 
+                # Tier 0: Statcast static CSV — bat tracking, xStats, discipline
+                if _player_id:
+                    try:
+                        from statcast_static_layer import (  # noqa: PLC0415
+                            get_batter_k_susceptibility as _sc_ks,
+                            get_batter_xstats as _sc_xs,
+                            get_batter_discipline as _sc_disc,
+                            get_batter_ev_profile as _sc_ev,
+                        )
+                        _pid_int = int(_player_id)
+                        _ks = _sc_ks(_pid_int)
+                        if _ks is not None:
+                            prop.setdefault("_sc_whiff_rate", _ks)
+                        _xs = _sc_xs(_pid_int)
+                        if _xs:
+                            prop.setdefault("woba",  _xs.get("xwoba"))
+                            prop.setdefault("xba",   _xs.get("xba"))
+                        _ev = _sc_ev(_pid_int)
+                        if _ev:
+                            prop.setdefault("exit_velo",  _ev.get("ev50"))
+                            prop.setdefault("brl_pct",    _ev.get("brl_percent"))
+                    except Exception:
+                        pass
+
                 # Tier 2.5: Career-weighted stats (2023-2025 blend) when season sample too small
                 if not _mlbapi_b and _player_id:
                     try:
@@ -1237,28 +1269,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                         if _career_b.get("k_pct") or _career_b.get("avg"):
                             _mlbapi_b = _career_b
                             logger.debug("[Enrichment] Career stats for batter %s", player)
-                    except Exception:
-                        pass
-
-                # Tier 2.0: Statcast batter metrics — whiff susceptibility + xStats
-                if _player_id:
-                    try:
-                        from statcast_static_layer import (  # noqa: PLC0415
-                            get_batter_k_susceptibility as _sc_bw,
-                            get_batter_xstats as _sc_bx,
-                            get_batter_ev_profile as _sc_ev,
-                        )
-                        _b_whiff = _sc_bw(int(_player_id))
-                        _b_xs    = _sc_bx(int(_player_id))
-                        _b_ev    = _sc_ev(int(_player_id))
-                        if _b_whiff:
-                            prop["_batter_whiff_rate"] = _b_whiff
-                        if _b_xs.get("xba"):
-                            prop.setdefault("xba",   _b_xs["xba"])
-                            prop.setdefault("xwoba", _b_xs.get("xwoba", 0.32))
-                        if _b_ev.get("ev50"):
-                            prop.setdefault("_batter_ev50",    _b_ev["ev50"])
-                            prop.setdefault("_batter_brl_pct", _b_ev.get("brl_percent", 0.0))
                     except Exception:
                         pass
 

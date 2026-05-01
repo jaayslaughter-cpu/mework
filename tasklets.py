@@ -2921,6 +2921,33 @@ class _BaseAgent:
                 except Exception:
                     for _, d in _fb_adjs:
                         raw_p += d
+        # ── Bernoulli Drama penalty (K props only) ────────────────────────
+        # Pitchers with high Drama% have unpredictable per-start variance.
+        # Reduces model confidence on K props for high-entropy pitchers.
+        if prop_type in {"strikeouts", "k", "ks"} and prop:
+            try:
+                from bernoulli_drama_layer import (  # noqa: PLC0415
+                    get_drama_penalty as _gdp,
+                )
+                _hub_rankings = getattr(self, "_bernoulli_rankings", {})
+                if _hub_rankings:
+                    _dp, _dn = _gdp(player, _hub_rankings)
+                    if _dp != 0.0:
+                        raw_p = max(5.0, min(95.0, raw_p + _dp))
+            except Exception:
+                pass
+
+        # ── Poisson K override — use Poisson model when available ─────────
+        # If prop_enrichment pre-computed Poisson probability, blend it 70/30
+        # with the simulation result (Poisson is more precise for discrete Ks).
+        if prop_type in {"strikeouts", "k", "ks"} and prop:
+            _pois_over = prop.get("_poisson_prob_over")
+            if _pois_over is not None:
+                _side = prop.get("side", "OVER").upper()
+                _pois_p = float(_pois_over) * 100 if _side == "OVER" else (1.0 - float(_pois_over)) * 100
+                raw_p = round(0.70 * raw_p + 0.30 * _pois_p, 2)
+                raw_p = max(5.0, min(95.0, raw_p))
+
         # ── Per-line XGBoost K model blend (xgb_k_layer) ─────────────────
         # Separate model per K line (3.5/4.5/5.5/6.5). 80/20 blend with
         # the simulation-formula result. No-op when models not yet trained.
