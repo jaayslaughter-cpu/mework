@@ -3757,6 +3757,25 @@ class _F5Agent(_BaseAgent):
                 elif prop_type in ("earned_runs", "hits_allowed"):
                     model_prob = min(95.0, model_prob + _ttop_pp)
 
+        # ── Per-line XGBoost K model blend (xgb_k_layer) ──────────────────
+        # Separate XGBoost model trained per K line (3.5/4.5/5.5/6.5).
+        # More calibrated than the general 27-feature model at any specific line.
+        # Blend: 80% formula / 20% per-line model until Brier < 0.20 gate.
+        # Returns None and is a no-op when models not yet trained.
+        # Source: mlb-analytics-hub/xgb_prop_scorer.py architecture (PR #473)
+        if prop_type == "strikeouts":
+            try:
+                from xgb_k_layer import xgb_k_ready, xgb_k_prob as _xgb_k_prob
+                if xgb_k_ready():
+                    _k_line_val = float(prop.get("line", 4.5) or 4.5)
+                    _xkp = _xgb_k_prob(prop, line=_k_line_val)
+                    if _xkp is not None:
+                        # _xkp is [0,1]; model_prob is [0,100]
+                        model_prob = round(0.80 * model_prob + 0.20 * _xkp * 100, 2)
+                        model_prob = max(5.0, min(95.0, model_prob))
+            except ImportError:
+                pass
+
         over_odds     = prop.get("over_american",  -110)
         under_odds    = prop.get("under_american", -110)
         under_prob    = 100.0 - model_prob
