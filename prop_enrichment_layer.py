@@ -810,6 +810,14 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
         )
         _p_over = 1.0 - min(0.99, _p_under)
         p = _p_over if is_over else (1.0 - _p_over)
+        # ABS challenge edge: K flips saved by batter (positive = Under K edge)
+        try:
+            from statcast_static_layer import get_batter_abs_k_edge as _abs_edge  # noqa: PLC0415
+            _abs_adj = _abs_edge(prop.get("player_name", "") or prop.get("player", "") or "")
+            # Negative adj if batter flips Ks to balls (reduces K probability)
+            p = max(0.05, min(0.95, p - _abs_adj * 0.5))
+        except Exception:
+            pass
         # Only return if we have a real K rate (not just the 22.2% fallback)
         if _batter_fg_k or float(prop.get("_batter_k_pct", 0.0) or 0.0) > 0:
             return round(p, 4)
