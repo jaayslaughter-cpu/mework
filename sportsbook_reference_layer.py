@@ -991,68 +991,55 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
             pitchers_df = de_all.get("pitchers")
             de_ref: dict = {}
 
-            def _de_pois_over(lam: float, line: float) -> float:
-                """P(X >= floor(line)+1) where X ~ Poisson(lam)."""
-                k = int(line)
-                p_le = 0.0
-                for _i in range(k + 1):
-                    p_le += _de_math.exp(-lam) * (lam ** _i) / _de_math.factorial(_i)
-                return round(max(0.05, min(0.95, 1.0 - p_le)), 4)
-
             # Batters: hit_pct / run_pct / rbi_pct = P(≥1 today) ≈ P(Over 0.5)
             if batters_df is not None and not batters_df.empty:
                 for _, _brow in batters_df.iterrows():
                     _pname = _normalize(str(_brow.get("player_name") or ""))
                     if not _pname:
                         continue
-                    for _mk, _pf in [
-                        ("batter_hits",        "hit_pct"),
-                        ("batter_runs_scored", "run_pct"),
-                        ("batter_rbis",        "rbi_pct"),
-                    ]:
-                        _prob = float(_brow.get(_pf) or 0)
-                        if _prob < 0.10 or _prob > 0.95:
+                    _BATTER_PROPS = {
+                        "batter_hits":        _brow.get("hit_pct"),
+                        "batter_runs_scored": _brow.get("run_pct"),
+                        "batter_rbis":        _brow.get("rbi_pct"),
+                        "batter_total_bases": _brow.get("hit_pct"),
+                        "batter_strikeouts":  _brow.get("batter_k_pct"),
+                    }
+                    for _mk, _raw_prob in _BATTER_PROPS.items():
+                        if _raw_prob is None:
                             continue
-                        _prob = max(0.35, min(0.75, _prob))
-                        for _s, _si in [("Over", _prob), ("Under", round(1.0 - _prob, 4))]:
-                            de_ref[(_pname, _mk, _s)] = {
+                        _p = max(0.35, min(0.75, float(_raw_prob)))
+                        _line = float(_brow.get("line", 0.5) or 0.5)
+                        for _side, _si in [("Over", _p), ("Under", round(1.0 - _p, 4))]:
+                            de_ref[(_pname, _mk, _side)] = {
                                 "sb_implied_prob": round(_si, 4),
-                                "line":            0.5,
+                                "line":            _line,
                                 "bookmaker":       "draftedge",
                                 "over_odds":       None,
                                 "under_odds":      None,
                             }
 
-            # Pitchers: k_pct = per-PA K rate → Poisson expected Ks per start
+            # Pitchers: k_pct is P(strikeout event) — use as direct implied prob
             if pitchers_df is not None and not pitchers_df.empty:
                 for _, _prow in pitchers_df.iterrows():
                     _pname = _normalize(str(_prow.get("player_name") or ""))
                     if not _pname:
                         continue
-                    _k_pct   = float(_prow.get("k_pct")    or 0)
-                    _pitches = float(_prow.get("pitches_proj") or 85.0)
-                    _h_pct   = float(_prow.get("hit_allowed_pct") or 0)
-                    _bf = max(10.0, _pitches / 3.85)
-                    if _k_pct > 0.08:
-                        _lam_k = _k_pct * _bf
-                        _sb_k  = max(2.5, int(_lam_k) + 0.5)  # half-pt line above λ
-                        _ov_k  = _de_pois_over(_lam_k, _sb_k)
-                        for _s, _si in [("Over", _ov_k), ("Under", round(1.0 - _ov_k, 4))]:
-                            de_ref[(_pname, "pitcher_strikeouts", _s)] = {
-                                "sb_implied_prob": _si,
-                                "line":            _sb_k,
-                                "bookmaker":       "draftedge",
-                                "over_odds":       None,
-                                "under_odds":      None,
-                            }
-                    if _h_pct > 0.05:
-                        _lam_h = _h_pct * _bf
-                        _sb_h  = max(1.5, int(_lam_h) + 0.5)
-                        _ov_h  = _de_pois_over(_lam_h, _sb_h)
-                        for _s, _si in [("Over", _ov_h), ("Under", round(1.0 - _ov_h, 4))]:
-                            de_ref[(_pname, "pitcher_hits_allowed", _s)] = {
-                                "sb_implied_prob": _si,
-                                "line":            _sb_h,
+                    _PITCHER_PROPS = {
+                        "pitcher_strikeouts":    _prow.get("k_pct"),
+                        "pitcher_earned_runs":   _prow.get("er_pct"),
+                        "pitcher_walks_allowed": _prow.get("bb_pct"),
+                        "pitcher_outs":          _prow.get("outs_pct"),
+                        "pitcher_hits_allowed":  _prow.get("hit_pct"),
+                    }
+                    for _mk, _raw_prob in _PITCHER_PROPS.items():
+                        if _raw_prob is None:
+                            continue
+                        _p = max(0.35, min(0.75, float(_raw_prob)))
+                        _line = float(_prow.get("line", 0.5) or 0.5)
+                        for _side, _si in [("Over", _p), ("Under", round(1.0 - _p, 4))]:
+                            de_ref[(_pname, _mk, _side)] = {
+                                "sb_implied_prob": round(_si, 4),
+                                "line":            _line,
                                 "bookmaker":       "draftedge",
                                 "over_odds":       None,
                                 "under_odds":      None,
@@ -1062,10 +1049,8 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
                 log.info("[SBRef] DraftEdge fallback: %d entries", len(de_ref))
                 _mem_ref    = de_ref
                 _fetch_date = date_int
-            else:
-                log.warning("[SBRef] DraftEdge: 0 entries — DataFrames may be empty")
         except Exception as _de_err:
-            log.warning("[SBRef] DraftEdge fallback failed: %s", _de_err)
+            log.debug("[SBRef] DraftEdge fallback failed: %s", _de_err)
 
     # ── ActionNetwork money% fallback — when Odds API AND DraftEdge are empty ─
     # Converts sharp money% into an implied probability proxy.
