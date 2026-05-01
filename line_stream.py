@@ -63,8 +63,7 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 
 _WEBHOOK_FALLBACK = (
-    "https://discordapp.com/api/webhooks/1484795164961800374/"
-    "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM"
+    os.getenv("DISCORD_WEBHOOK_URL", "")
 )
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", _WEBHOOK_FALLBACK)
 

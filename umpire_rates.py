@@ -261,6 +261,9 @@ def get_umpire_rates(name: str) -> dict:
     live_stats = live.get(_norm(name), {})
 
     run_impact = live_stats.get("run_impact")   # None if umpire not in live data
+    # Fallback to static research table when live fetch 403s on Railway
+    if run_impact is None:
+        run_impact = _STATIC_RUN_IMPACT.get(_norm(name), 0.0)
     accuracy   = live_stats.get("accuracy")
 
     return {
