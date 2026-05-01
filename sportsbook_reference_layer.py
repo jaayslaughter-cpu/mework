@@ -134,6 +134,52 @@ _DEFAULT_SHIFT = 0.035  # fallback for unknown market keys
 _mem_ref: dict = {}
 _fetch_date: int = 0       # YYYYMMDD int; 0 = not yet fetched this session
 
+# ── Redis client (PR #477: Redis caching to survive Railway restarts) ────────
+try:
+    import redis as _redis_lib
+    _redis_url = os.getenv("REDIS_URL", "")
+    _r: object = _redis_lib.from_url(_redis_url, decode_responses=True, socket_timeout=3) if _redis_url else None
+except Exception:
+    _r = None
+
+def _redis_get(key: str) -> str | None:
+    try:
+        return _r.get(key) if _r else None  # type: ignore[union-attr]
+    except Exception:
+        return None
+
+def _redis_setex(key: str, ttl: int, value: str) -> None:
+    try:
+        if _r:
+            _r.setex(key, ttl, value)  # type: ignore[union-attr]
+    except Exception:
+        pass
+
+# ── Multi-key rotation (PR #477: auto-rotate when quota exhausted) ────────────
+_ODDS_KEYS: list[str] = [k for k in [
+    os.getenv("ODDS_API_KEY"),
+    os.getenv("ODDS_API_KEY_2"),
+    os.getenv("ODDS_API_KEY_3"),
+] if k]
+_current_key_idx: int = 0
+
+def _active_odds_key() -> str:
+    """Return the currently active OddsAPI key (may have rotated from key1)."""
+    return _ODDS_KEYS[_current_key_idx] if _ODDS_KEYS else ""
+
+def _rotate_odds_key() -> bool:
+    """Rotate to next available key when quota exhausted. Returns True if rotated."""
+    global _current_key_idx, _ODDS_KEY
+    if _current_key_idx + 1 < len(_ODDS_KEYS):
+        _current_key_idx += 1
+        _ODDS_KEY = _ODDS_KEYS[_current_key_idx]
+        log.warning(
+            "[SBRef] OddsAPI quota exhausted — rotated to key %d/%d",
+            _current_key_idx + 1, len(_ODDS_KEYS),
+        )
+        return True
+    return False
+
 
 # ── Utility helpers ────────────────────────────────────────────────────────────
 
@@ -292,17 +338,40 @@ def _file_save(date_int: int, ref: dict) -> None:
 
 def _fetch_events() -> list[dict]:
     """Step 1: retrieve today's MLB event IDs."""
-    if not _ODDS_KEY:
+    key = _active_odds_key()
+    if not key:
         return []
     try:
         resp = requests.get(
             f"{_BASE_URL}/sports/baseball_mlb/events",
-            params={"apiKey": _ODDS_KEY},
+            params={"apiKey": key},
             timeout=20,
         )
+        if resp.status_code in (401, 402, 429):
+            log.warning("[SBRef] OddsAPI key %d returned HTTP %d — attempting key rotation", _current_key_idx + 1, resp.status_code)
+            if _rotate_odds_key():
+                # Retry with new key
+                resp = requests.get(
+                    f"{_BASE_URL}/sports/baseball_mlb/events",
+                    params={"apiKey": _active_odds_key()},
+                    timeout=20,
+                )
+            else:
+                log.warning("[SBRef] No more OddsAPI keys to rotate — all quota exhausted")
+                return []
         resp.raise_for_status()
         events: list[dict] = resp.json()
-        log.info("[SBRef] %d MLB events from Odds API", len(events))
+        # Track remaining quota
+        remaining = resp.headers.get("x-requests-remaining")
+        if remaining:
+            _redis_setex("odds_api_quota_remaining", 86400, remaining)
+            try:
+                remaining_int = int(remaining)
+                if remaining_int < 50 and _rotate_odds_key():
+                    log.warning("[SBRef] Quota low (%d) — pre-emptively rotated to next key", remaining_int)
+            except (ValueError, TypeError):
+                pass
+        log.info("[SBRef] %d MLB events from Odds API (quota remaining: %s)", len(events), remaining or "?")
         return events
     except Exception as exc:
         log.error("[SBRef] Event fetch failed: %s", exc)
@@ -317,7 +386,7 @@ def _fetch_event_props(event_id: str) -> list[dict]:
         resp = requests.get(
             f"{_BASE_URL}/sports/baseball_mlb/events/{event_id}/odds",
             params={
-                "apiKey": _ODDS_KEY,
+                "apiKey": _active_odds_key(),
                 "regions": "us",
                 "markets": _MARKETS_STR,
                 "bookmakers": _BOOKMAKERS,
@@ -733,7 +802,22 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
 
     _ensure_table()
 
-    # ── 2. File cache ─────────────────────────────────────────────────────────
+    # ── 2. Redis cache (survives Railway restarts — PR #477) ─────────────────
+    _redis_key = f"sb_ref_{date_int}"
+    _cached_json = _redis_get(_redis_key)
+    if _cached_json:
+        try:
+            raw = json.loads(_cached_json)
+            ref = {tuple(k): v for k, v in raw.items()}
+            if ref:
+                _mem_ref = ref
+                _fetch_date = date_int
+                log.info("[SBRef] Loaded %d entries from Redis for %d", len(ref), date_int)
+                return ref
+        except Exception as _re:
+            log.debug("[SBRef] Redis cache parse failed: %s", _re)
+
+    # ── 3. File cache ─────────────────────────────────────────────────────────
     ref = _file_load(date_int)
     if ref:
         _mem_ref = ref
@@ -741,7 +825,7 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         log.info("[SBRef] Loaded %d entries from file cache for %d", len(ref), date_int)
         return ref
 
-    # ── 3. Postgres cache ─────────────────────────────────────────────────────
+    # ── 4. Postgres cache ─────────────────────────────────────────────────────
     ref = _pg_load(date_int)
     if ref:
         _mem_ref = ref
@@ -755,13 +839,21 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
     # returning early. The fallback chain (PropOdds → Pinnacle → Covers → DraftEdge
     # → ActionNetwork → TheRundown → VegasInsider) can produce a full reference
     # even without an Odds API key.
-    if _ODDS_KEY:
+    _active_key = _active_odds_key()
+    if _active_key:
         ref = _fetch_live(date_int)
         _mem_ref = ref
         _fetch_date = date_int
 
         if ref:
             _file_save(date_int, ref)
+            # ── Save to Redis (12-hour TTL) — survives Railway restarts ──────
+            try:
+                _serialisable = {json.dumps(list(k)): v for k, v in ref.items()}
+                _redis_setex(f"sb_ref_{date_int}", 43200, json.dumps(_serialisable))
+                log.info("[SBRef] Saved %d entries to Redis (12h TTL)", len(ref))
+            except Exception as _rse:
+                log.debug("[SBRef] Redis save failed: %s", _rse)
             flat: list[dict] = []
             for (pn, mk, side), v in ref.items():
                 flat.append({"player_name": pn, "market_key": mk, "side": side, **v})

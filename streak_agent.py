@@ -1766,6 +1766,19 @@ def run_streak_pick(
 
         notes = [_apply_line_comp(sp) for sp in start_picks]
 
+        # ── Belt-and-suspenders: enforce Underdog-only + player diversity ──
+        for _sp in start_picks:
+            _sp.platform = "Underdog"   # Streaks = Underdog ONLY
+        if len(start_picks) == 2:
+            _p1, _p2 = start_picks
+            if (_p1.player_name.lower() == _p2.player_name.lower() or
+                    (bool(_p1.team) and bool(_p2.team) and _p1.team.upper() == _p2.team.upper())):
+                logger.warning(
+                    "[Streak] Post-selection guard blocked same player/team: %s (%s) / %s (%s). Skipping.",
+                    _p1.player_name, _p1.team, _p2.player_name, _p2.team,
+                )
+                return None
+
         for i, sp in enumerate(start_picks, start=1):
             logger.info(
                 "[Streak] ✅ Start pick #%d: %s %s %.1f %s | conf=%.1f/10 | "
@@ -1855,6 +1868,7 @@ def run_streak_pick(
     )
 
     _line_comparison_note = _apply_line_comp(pick)
+    pick.platform = "Underdog"   # Streaks = Underdog ONLY (belt-and-suspenders, PR #477)
     if _LINE_COMP_AVAILABLE:
         try:
             _ud_props = fetch_underdog_props_with_teams()

@@ -53,19 +53,56 @@ def get_previous_month_range() -> tuple:
 
 
 def fetch_monthly_results(first_day: str, last_day: str) -> list:
-    """Pull all settled parlays from propiq_season_record for the month."""
+    """Pull all settled parlays from bet_ledger for the month (PR #477).
+
+    Switched from propiq_season_record (empty) to bet_ledger (canonical).
+    Groups legs by parlay_id so each slip counts once; old legs without a
+    parlay_id each count individually for backward compat.
+    """
     try:
         conn = _get_conn()
         cur = conn.cursor()
         cur.execute(
             """
+            WITH parlay_groups AS (
+                SELECT
+                    agent_name,
+                    CASE
+                        WHEN bool_and(outcome = 'WIN')  THEN 'W'
+                        WHEN bool_or (outcome = 'LOSS') THEN 'L'
+                        ELSE 'P'
+                    END AS status,
+                    5.0 AS stake,
+                    MAX(COALESCE(payout, 0)) AS payout,
+                    MIN(bet_date) AS bet_date
+                FROM bet_ledger
+                WHERE bet_date >= %s AND bet_date <= %s
+                  AND discord_sent = TRUE
+                  AND outcome IN ('WIN', 'LOSS', 'PUSH')
+                  AND parlay_id IS NOT NULL
+                GROUP BY parlay_id, agent_name
+                UNION ALL
+                SELECT
+                    agent_name,
+                    CASE outcome
+                        WHEN 'WIN'  THEN 'W'
+                        WHEN 'LOSS' THEN 'L'
+                        ELSE 'P'
+                    END AS status,
+                    5.0 AS stake,
+                    COALESCE(payout, 0) AS payout,
+                    bet_date
+                FROM bet_ledger
+                WHERE bet_date >= %s AND bet_date <= %s
+                  AND discord_sent = TRUE
+                  AND outcome IN ('WIN', 'LOSS', 'PUSH')
+                  AND parlay_id IS NULL
+            )
             SELECT agent_name, status, stake, payout, bet_date
-            FROM propiq_season_record
-            WHERE bet_date >= %s AND bet_date <= %s
-              AND status IN ('W', 'L', 'P')
-            ORDER BY bet_date ASC
+            FROM   parlay_groups
+            ORDER  BY bet_date ASC
             """,
-            (first_day, last_day),
+            (first_day, last_day, first_day, last_day),
         )
         rows = cur.fetchall()
         cur.close()
