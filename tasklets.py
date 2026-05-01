@@ -2179,6 +2179,7 @@ def _ensure_bet_ledger() -> None:
                     ev_pct        NUMERIC,
                     confidence    NUMERIC,
                     reject_reason TEXT,
+                    gate          TEXT,
                     reject_date   DATE DEFAULT CURRENT_DATE,
                     created_at    TIMESTAMPTZ DEFAULT NOW()
                 )
@@ -2210,6 +2211,8 @@ def _ensure_bet_ledger() -> None:
                 "ADD COLUMN IF NOT EXISTS reject_reason TEXT",
                 "ADD COLUMN IF NOT EXISTS reject_date DATE DEFAULT CURRENT_DATE",
                 "ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ DEFAULT NOW()",
+                # gate column — added in PR #467, tracks which eval gate rejected the prop
+                "ADD COLUMN IF NOT EXISTS gate TEXT",
             ]:
                 try:
                     _rc3.execute(f"ALTER TABLE rejection_log {_rldl}")
@@ -2227,18 +2230,20 @@ def _log_rejection(player_name: str, prop_type: str, side: str, line: float,
                    reject_reason: str) -> None:
     """Insert one row into rejection_log. Fire-and-forget — never raises."""
     try:
+        # Extract gate name from reject_reason prefix (e.g. "ev_gate:..." -> "ev_gate")
+        _gate = reject_reason.split(":")[0] if reject_reason and ":" in reject_reason else (reject_reason or "unknown")
         conn = _pg_conn()
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO rejection_log
                     (player_name, prop_type, side, line, model_prob, ev_pct,
-                     confidence, reject_reason)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                     confidence, reject_reason, gate)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (player_name, prop_type, side, float(line or 0),
                  float(model_prob or 0), float(ev_pct or 0),
-                 float(confidence or 0), reject_reason)
+                 float(confidence or 0), reject_reason, _gate)
             )
         conn.commit()
         conn.close()
@@ -2259,7 +2264,8 @@ def run_data_hub_tasklet() -> None:
     # ── Steamer 2026 prefetch (once per day, Postgres-cached) ────────────────
     try:
         from steamer_layer import prefetch as _steamer_prefetch  # noqa: PLC0415
-        _sc = _steamer_prefetch()
+        # Pass hub so Steamer can use DraftEdge as Tier 4 when FanGraphs/ScraperAPI fail
+        _sc = _steamer_prefetch(hub=_hub_data if "_hub_data" in dir() else None)
         if _sc:
             logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
         else:
