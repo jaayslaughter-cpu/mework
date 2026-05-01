@@ -904,6 +904,31 @@ def _fetch_mlb_lineups_today() -> list[dict]:
         return []
 
 
+def _warm_team_form_background() -> bool:
+    """Warm team form cache once per PT calendar day in a background thread.
+    Returns True if warm was triggered, False if already warmed today.
+    Non-blocking — hub continues building immediately.
+    """
+    try:
+        from team_form_layer import warm_team_form_cache, _CACHE_DATE  # noqa: PLC0415
+        today = _today_pt().isoformat()
+        if _CACHE_DATE == today:
+            return False  # already warmed today
+        import threading as _threading
+        _t = _threading.Thread(
+            target=warm_team_form_cache,
+            kwargs={"sleep_ms": 0.15},
+            daemon=True,
+            name="team_form_warm",
+        )
+        _t.start()
+        logger.info("[DataHub] Team form cache warming in background thread")
+        return True
+    except Exception as exc:
+        logger.debug("[DataHub] team_form warm skipped: %s", exc)
+        return False
+
+
 def _fetch_umpires_today() -> list[dict]:
     """Fetch today's home plate umpires from MLB Stats API with umpire_rates enrichment.
     Free, no auth required — same endpoint used by UmpireAgent per-prop fallback,
@@ -2454,6 +2479,7 @@ def run_data_hub_tasklet() -> None:
             context = {
                 "weather":            _fetch_weather_today(),    # Open-Meteo free
                 "umpires":            _fetch_umpires_today(),  # MLB Stats API /schedule?hydrate=officials
+                "team_form_warmed":   _warm_team_form_background(),  # L15 W/L + RPG flags
                 "injuries":           _fetch_injuries_today(),  # injury_layer
                 "lineups":            _fetch_mlb_lineups_today(),
                 "projected_starters": _fetch_mlb_probable_starters(),

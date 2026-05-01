@@ -1063,6 +1063,18 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _player_id = prop.get("player_id") or prop.get("mlbam_id")
                 _mlbapi = _get_mlbapi_pitcher(player, _player_id)
 
+                # Tier 2.5: Career-weighted stats (2023-2025 blend) — better than league avg
+                # Fills gap when current-season sample too small (< 5 IP in 2026)
+                if not _mlbapi.get("k_rate") and _player_id:
+                    try:
+                        from mlb_stats_layer import get_career_pitcher as _gcp  # noqa: PLC0415
+                        _career = _gcp(int(_player_id))
+                        if _career.get("k_rate"):
+                            _mlbapi = _career
+                            logger.debug("[Enrichment] Career stats for pitcher %s", player)
+                    except Exception:
+                        pass
+
                 _sc_whiff  = float(prop.get("sc_whiff_rate",    0.0) or 0.0)
                 _sc_hard   = float(prop.get("sc_hard_hit_rate", 0.0) or 0.0)
                 _sc_barrel = float(prop.get("sc_barrel_rate",   0.0) or 0.0)
@@ -1155,6 +1167,18 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 # FIX: FanGraphs 403 — use statsapi.mlb.com 2026 season stats (free, no key).
                 _player_id = prop.get("player_id") or prop.get("mlbam_id")
                 _mlbapi_b = _get_mlbapi_batter(player, _player_id)
+
+                # Tier 2.5: Career-weighted stats (2023-2025 blend) when season sample too small
+                if not _mlbapi_b and _player_id:
+                    try:
+                        from mlb_stats_layer import get_career_batter as _gcb  # noqa: PLC0415
+                        _career_b = _gcb(int(_player_id))
+                        if _career_b.get("k_pct") or _career_b.get("avg"):
+                            _mlbapi_b = _career_b
+                            logger.debug("[Enrichment] Career stats for batter %s", player)
+                    except Exception:
+                        pass
+
                 if _mlbapi_b:
                     prop.setdefault("wrc_plus", _mlbapi_b.get("wrc_plus", 100.0))
                     prop.setdefault("babip",    _mlbapi_b.get("babip",    0.288))

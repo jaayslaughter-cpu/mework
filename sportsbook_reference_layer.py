@@ -168,17 +168,42 @@ def _active_odds_key() -> str:
     return _ODDS_KEYS[_current_key_idx] if _ODDS_KEYS else ""
 
 def _rotate_odds_key() -> bool:
-    """Rotate to next available key when quota exhausted. Returns True if rotated."""
+    """Rotate to next available key when quota exhausted. Returns True if rotated.
+    Persists active key index to Redis so restarts don't lose rotation state.
+    """
     global _current_key_idx, _ODDS_KEY
     if _current_key_idx + 1 < len(_ODDS_KEYS):
         _current_key_idx += 1
         _ODDS_KEY = _ODDS_KEYS[_current_key_idx]
+        # Persist rotation state — survives Railway restart
+        _redis_setex("odds_api_active_key_idx", 86400, str(_current_key_idx))
         log.warning(
             "[SBRef] OddsAPI quota exhausted — rotated to key %d/%d",
             _current_key_idx + 1, len(_ODDS_KEYS),
         )
         return True
     return False
+
+
+def _restore_key_rotation_from_redis() -> None:
+    """On startup, restore the last active key index from Redis if available."""
+    global _current_key_idx, _ODDS_KEY
+    try:
+        saved = _redis_get("odds_api_active_key_idx")
+        if saved and _ODDS_KEYS:
+            idx = int(saved)
+            if 0 <= idx < len(_ODDS_KEYS):
+                _current_key_idx = idx
+                _ODDS_KEY = _ODDS_KEYS[idx]
+                if idx > 0:
+                    log.info("[SBRef] Restored OddsAPI key rotation: using key %d/%d",
+                             idx + 1, len(_ODDS_KEYS))
+    except Exception:
+        pass
+
+
+# Restore on module load
+_restore_key_rotation_from_redis()
 
 
 # ── Utility helpers ────────────────────────────────────────────────────────────
@@ -367,7 +392,7 @@ def _fetch_events() -> list[dict]:
             _redis_setex("odds_api_quota_remaining", 86400, remaining)
             try:
                 remaining_int = int(remaining)
-                if remaining_int < 50 and _rotate_odds_key():
+                if remaining_int < 20 and _rotate_odds_key():
                     log.warning("[SBRef] Quota low (%d) — pre-emptively rotated to next key", remaining_int)
             except (ValueError, TypeError):
                 pass
@@ -808,7 +833,14 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
     if _cached_json:
         try:
             raw = json.loads(_cached_json)
-            ref = {tuple(k): v for k, v in raw.items()}
+            # Normalize types: JSON round-trip turns tuple elements to uniform types.
+            # Key format: (player_name:str, prop_type:str, line:float)
+            def _restore_key(k):
+                lst = json.loads(k) if isinstance(k, str) else k
+                if len(lst) == 3:
+                    return (str(lst[0]), str(lst[1]), float(lst[2]))
+                return tuple(lst)
+            ref = {_restore_key(k): v for k, v in raw.items()}
             if ref:
                 _mem_ref = ref
                 _fetch_date = date_int
@@ -965,13 +997,34 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
                     "rbis":              "batter_rbis",
                     "runs":              "batter_runs_scored",
                 }
+                _DE_PROB_FIELDS: dict[str, str] = {
+                    "strikeouts":        "k_pct",
+                    "hits":              "hit_pct",
+                    "total_bases":       "hit_pct",       # best proxy available
+                    "earned_runs":       "er_pct",
+                    "hitter_strikeouts": "batter_k_pct",
+                    "rbis":              "rbi_pct",
+                    "runs":              "run_pct",
+                    "pitching_outs":     "outs_pct",
+                    "walks_allowed":     "bb_pct",
+                }
                 for prop in de_props:
                     pname = _normalize(str(prop.get("player_name", "")))
                     pt    = str(prop.get("prop_type", ""))
                     mk    = _PT_DE_MAP.get(pt, pt)
-                    prob  = float(prop.get("projected_prob", 0.524) or 0.524)
+                    # Map the correct probability field per prop type
+                    _prob_field = _DE_PROB_FIELDS.get(pt, "projected_prob")
+                    prob = float(
+                        prop.get(_prob_field)
+                        or prop.get("projected_prob")
+                        or prop.get("de_k_pct")
+                        or prop.get("de_hit_pct")
+                        or 0.524
+                    )
+                    # DraftEdge probs are 0-1; clamp to reasonable range
+                    prob = max(0.35, min(0.75, prob))
                     line  = float(prop.get("line", 0.5) or 0.5)
-                    if not pname or not mk:
+                    if not pname or not mk or prob == 0.524:
                         continue
                     for side, si in [("Over", prob), ("Under", round(1.0 - prob, 4))]:
                         de_ref[(pname, mk, side)] = {
