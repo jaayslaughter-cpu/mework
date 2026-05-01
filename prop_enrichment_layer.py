@@ -782,6 +782,39 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
             return round(p, 4)
         return None
 
+    # ── Batter hitter_strikeouts ──────────────────────────────────────────
+    if prop_type == "hitter_strikeouts":
+        import math as _math  # noqa: PLC0415
+        # Try FG projected K% first (most reliable for batter K props)
+        _batter_name = prop.get("player_name", "")
+        _batter_fg_k = None
+        if _batter_name:
+            try:
+                from statcast_static_layer import get_batter_fg_proj as _sc_fg  # noqa: PLC0415
+                _fg = _sc_fg(_batter_name)
+                if _fg and _fg.get("k_pct", 0) > 0:
+                    _batter_fg_k = _fg["k_pct"]  # already decimal, e.g. 0.227
+            except Exception:
+                pass
+
+        # Fallback: use prop-stamped batter_k_pct or league avg 0.222
+        _k_pa = _batter_fg_k or float(prop.get("_batter_k_pct", 0.0) or 0.0) or 0.222
+
+        # Typical 4 PA per game for a batter
+        _pa   = float(prop.get("_batter_pa_avg", 4.0) or 4.0)
+        _lam  = max(0.01, _k_pa * _pa)
+
+        _p_under = sum(
+            _math.exp(-_lam) * (_lam ** k) / _math.factorial(int(k))
+            for k in range(int(line))
+        )
+        _p_over = 1.0 - min(0.99, _p_under)
+        p = _p_over if is_over else (1.0 - _p_over)
+        # Only return if we have a real K rate (not just the 22.2% fallback)
+        if _batter_fg_k or float(prop.get("_batter_k_pct", 0.0) or 0.0) > 0:
+            return round(p, 4)
+        return None
+
     # ── Batter H+R+RBI composite ───────────────────────────────────────────
     # Now uses wRC+ and wOBA for a per-player Bayesian estimate.
     if prop_type == "hits_runs_rbis":

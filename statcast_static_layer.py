@@ -36,6 +36,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+import unicodedata as _ud
+
+def _norm_name(s: str) -> str:
+    """Normalize player name for fuzzy matching: lowercase, ASCII, strip punctuation."""
+    nfkd = _ud.normalize('NFKD', s)
+    ascii_s = ''.join(c for c in nfkd if not _ud.combining(c))
+    return ascii_s.lower().replace("'", "").replace(".", "").replace("-", " ").strip()
+
+
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "statcast")
 
 # ── Lazy-load state ───────────────────────────────────────────────────────────
@@ -54,6 +63,10 @@ _batter_xstats:     dict[int, dict] = {}
 _batter_discipline: dict[int, dict] = {}
 _batter_batted:     dict[int, dict] = {}
 _batter_percentiles:dict[int, dict] = {}
+
+_batter_fg_proj:    dict[str, dict] = {}  # keyed by normalized name
+_sprint_speed_data: dict[int, dict] = {}
+_baserunning_data:  dict[int, float] = {}
 
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
@@ -237,12 +250,65 @@ def _load() -> None:
                 "sprint_rank": _safe_float(r.get("sprint_speed")),
             }
 
+
+        # ── FanGraphs batter projections (name-based) ────────────────────────
+        for r in _read_csv("fg_batter_proj.csv"):
+            name = r.get("name", "").strip()
+            if not name:
+                continue
+            key = _norm_name(name)
+            k_pct  = _safe_float(r.get("k_pct"))
+            bb_pct = _safe_float(r.get("bb_pct"))
+            woba   = _safe_float(r.get("woba"))
+            wrc    = _safe_float(r.get("wrc_plus"))
+            iso    = _safe_float(r.get("iso"))
+            if k_pct:
+                _batter_fg_proj[key] = {
+                    "k_pct":  round(k_pct / 100.0, 4),   # % → decimal
+                    "bb_pct": round((bb_pct or 0.0) / 100.0, 4),
+                    "woba":   woba or 0.0,
+                    "wrc_plus": int(wrc) if wrc else 100,
+                    "iso":    iso or 0.0,
+                }
+
+        # ── Sprint speed ──────────────────────────────────────────────────────
+        for r in _read_csv("sprint_speed.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            spd = _safe_float(r.get("sprint_speed"))
+            if spd:
+                _sprint_speed_data[pid] = {
+                    "sprint_speed": spd,
+                    "bolts":   int(_safe_float(r.get("bolts")) or 0),
+                    "hp_to_1b": _safe_float(r.get("hp_to_1b")) or 0.0,
+                }
+
+        # ── Baserunning run value ─────────────────────────────────────────────
+        for r in _read_csv("baserunning_run_value.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            rv = _safe_float(r.get("runner_runs_tot"))
+            if rv is not None:
+                _baserunning_data[pid] = rv
+
         _loaded = True
         logger.info(
             "[StatcastStatic] Loaded: %d pitcher K rates, %d pitcher xERAs, "
-            "%d batter tracking, %d batter EV, %d batter xStats",
+            "%d batter tracking, %d batter EV, %d batter xStats, "
+            "%d FG proj, %d sprint, %d baserunning",
             len(_pitcher_k_rate), len(_pitcher_xera),
             len(_batter_tracking), len(_batter_ev), len(_batter_xstats),
+            len(_batter_fg_proj), len(_sprint_speed_data), len(_baserunning_data),
         )
 
 
@@ -346,3 +412,42 @@ def get_matchup_k_boost(pitcher_id: int, batter_id: int) -> float:
     # Weight pitcher more heavily (60/40) — pitcher is primary driver
     combined = pitcher_edge * 0.60 + batter_edge * 0.40
     return max(-0.30, min(0.30, combined))
+
+
+def get_batter_fg_proj(player_name: str) -> dict | None:
+    """Return FanGraphs 2026 projected stats keyed by player name.
+
+    Returns dict with k_pct (decimal), bb_pct, woba, wrc_plus, iso.
+    k_pct=0.189 means 18.9% projected strikeout rate.
+    """
+    _load()
+    key = _norm_name(player_name)
+    proj = _batter_fg_proj.get(key)
+    if proj:
+        return proj
+    # Fuzzy: try last name only match
+    last = key.split()[-1] if key.split() else key
+    for k, v in _batter_fg_proj.items():
+        if k.endswith(last) and len(last) > 4:
+            return v
+    return None
+
+
+def get_batter_sprint_speed(player_id: int) -> dict | None:
+    """Return sprint speed metrics for a batter.
+
+    Keys: sprint_speed (ft/s), bolts (runs ≥30 ft/s), hp_to_1b (seconds).
+    League avg sprint speed ~27 ft/s; elite ≥30.
+    """
+    _load()
+    return _sprint_speed_data.get(player_id)
+
+
+def get_batter_baserunning(player_id: int) -> float | None:
+    """Return FanGraphs baserunning run value for the season.
+
+    Positive = above-average baserunner. League avg ≈ 0.
+    Top baserunners: Corbin Carroll ~2.2, Jose Ramirez ~1.7.
+    """
+    _load()
+    return _baserunning_data.get(player_id)
