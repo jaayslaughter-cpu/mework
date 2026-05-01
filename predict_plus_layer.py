@@ -25,6 +25,35 @@ _MIN_CLASS_FREQ: float = 0.03  # pitch types below 3% of training set are droppe
 
 _SAVANT_CSV_URL: str = "https://baseballsavant.mlb.com/statcast_search/csv"
 
+import os as _os_pp
+import urllib.parse as _urlparse_pp
+
+_SCRAPERAPI_KEY_PP = _os_pp.getenv("SCRAPERAPI_KEY", "")
+
+def _scraperapi_get_pp(url: str, params: dict | None = None) -> "requests.Response | None":
+    """Route a Baseball Savant CSV request through ScraperAPI on 403/429."""
+    if not _SCRAPERAPI_KEY_PP:
+        logger.warning("[PredictPlus/ScraperAPI] SCRAPERAPI_KEY not set — cannot proxy")
+        return None
+    # Build full URL with params for ScraperAPI encoding
+    if params:
+        full_url = url + "?" + _urlparse_pp.urlencode(params)
+    else:
+        full_url = url
+    proxy = (
+        f"http://proxy-server.scraperapi.com/?api_key={_SCRAPERAPI_KEY_PP}"
+        f"&url={_urlparse_pp.quote(full_url, safe='')}"
+    )
+    try:
+        resp = requests.get(proxy, headers=_HEADERS, timeout=60)
+        logger.info("[PredictPlus/ScraperAPI] proxy status=%d for mlbam lookup", resp.status_code)
+        return resp
+    except Exception as _exc_pp:
+        logger.warning("[PredictPlus/ScraperAPI] Proxy failed: %s", _exc_pp)
+        return None
+
+
+
 _HEADERS: dict = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -98,7 +127,19 @@ def _fetch_pitcher_pitches(mlbam_id: int, season: int) -> list[dict]:
             headers=_HEADERS,
             timeout=30,
         )
-        if resp.status_code != 200:
+        if resp.status_code in (403, 429):
+            logger.warning(
+                "[PredictPlus] Savant HTTP %d for mlbam=%d — retrying via ScraperAPI",
+                resp.status_code, mlbam_id,
+            )
+            resp = _scraperapi_get_pp(_SAVANT_CSV_URL, params)
+            if resp is None or resp.status_code != 200:
+                logger.warning(
+                    "[PredictPlus] ScraperAPI also failed for mlbam=%d season=%d",
+                    mlbam_id, season,
+                )
+                return []
+        elif resp.status_code != 200:
             logger.warning(
                 "[PredictPlus] Savant HTTP %d for pitcher mlbam=%d season=%d",
                 resp.status_code, mlbam_id, season,

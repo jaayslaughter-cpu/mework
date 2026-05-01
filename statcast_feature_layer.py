@@ -68,6 +68,28 @@ _SAVANT_HEADERS = {
     "Referer": "https://baseballsavant.mlb.com/",
 }
 
+import os as _os_sc
+import urllib.parse as _urlparse_sc
+
+_SCRAPERAPI_KEY_SC = _os_sc.getenv("SCRAPERAPI_KEY", "")
+
+def _scraperapi_get_savant(url: str) -> "requests.Response | None":
+    """Route a Baseball Savant CSV request through ScraperAPI on 403/429."""
+    if not _SCRAPERAPI_KEY_SC:
+        logger.warning("[Savant/ScraperAPI] SCRAPERAPI_KEY not set — cannot proxy")
+        return None
+    proxy = (
+        f"http://proxy-server.scraperapi.com/?api_key={_SCRAPERAPI_KEY_SC}"
+        f"&url={_urlparse_sc.quote(url, safe='')}"
+    )
+    try:
+        resp = requests.get(proxy, headers=_SAVANT_HEADERS, timeout=45)
+        logger.info("[Savant/ScraperAPI] proxy status=%d for %s", resp.status_code, url[:80])
+        return resp
+    except Exception as _exc_sc:
+        logger.warning("[Savant/ScraperAPI] Proxy failed: %s", _exc_sc)
+        return None
+
 # Field names exposed to downstream agents (backward-compatible names preserved)
 BATTER_STATCAST_COLS = [
     "sc_xwoba",
@@ -144,7 +166,13 @@ class SavantFetcher:
             time.sleep(0.5)  # polite rate limit
             SavantFetcher._FETCH_ATTEMPTED[name] = _today_sc  # mark attempt
             resp = requests.get(url, headers=_SAVANT_HEADERS, timeout=20)
-            if resp.status_code != 200:
+            if resp.status_code in (403, 429):
+                logger.warning("[Savant] HTTP %d — retrying via ScraperAPI proxy", resp.status_code)
+                resp = _scraperapi_get_savant(url)
+                if resp is None or resp.status_code != 200:
+                    logger.warning("[Savant] ScraperAPI also failed for %s", name)
+                    return None
+            elif resp.status_code != 200:
                 logger.warning("[Savant] HTTP %d for %s", resp.status_code, name)
                 return None
 
