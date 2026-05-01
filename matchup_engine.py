@@ -219,8 +219,31 @@ def _fetch_savant_csv(url: str, cache_name: str):
         logger.info("[MatchupEngine] Fetching %s ...", cache_name)
         time.sleep(0.3)  # polite rate limit
 
-        import requests
+        import requests, urllib.parse as _ul_me
         resp = requests.get(url, headers=_SAVANT_HEADERS, timeout=20)
+        if resp.status_code in (403, 429):
+            # ScraperAPI retry — same pattern used in statcast_feature_layer + steamer_layer
+            _sa_key_me = os.getenv("SCRAPERAPI_KEY", "")
+            if _sa_key_me:
+                _proxy_me = (
+                    f"http://proxy-server.scraperapi.com/?api_key={_sa_key_me}"
+                    f"&url={_ul_me.quote(url, safe='')}"
+                )
+                try:
+                    resp = requests.get(_proxy_me, headers=_SAVANT_HEADERS, timeout=45)
+                    logger.info(
+                        "[MatchupEngine/ScraperAPI] proxy status=%d for %s",
+                        resp.status_code, cache_name,
+                    )
+                except Exception as _sp_exc:
+                    logger.warning("[MatchupEngine/ScraperAPI] Proxy failed: %s", _sp_exc)
+                    return None
+            else:
+                logger.warning(
+                    "[MatchupEngine] HTTP %d for %s (set SCRAPERAPI_KEY for retry)",
+                    resp.status_code, cache_name,
+                )
+                return None
         if resp.status_code != 200:
             logger.warning("[MatchupEngine] HTTP %d for %s", resp.status_code, cache_name)
             return None
