@@ -34,29 +34,31 @@ END;
 $$;
 
 -- Backfill all already-applied migrations as completed so they don't re-run
-INSERT INTO migration_history (version, description, applied_at) VALUES
-    ('V25', 'streak_tables',                              NOW()),
-    ('V26', 'tasklet_bet_ledger',                         NOW()),
-    ('V27', 'add_discord_sent',                           NOW()),
-    ('V28', 'fg_cache',                                   NOW()),
-    ('V29', 'agent_unit_sizing',                          NOW()),
-    ('V30', 'monitoring_fixes',                           NOW()),
-    ('V31', 'bet_ledger_dedup_index',                     NOW()),
-    ('V32', 'agent_unit_sizing_and_dedup_index',          NOW()),
-    ('V33', 'fix_dedup_and_missing_tables',               NOW()),
-    ('V34', 'backfill_result',                            NOW()),
-    ('V35', 'schema_hotfix_unit_dollars_and_missing',     NOW()),
-    ('V36', 'schema_fixes_monitoring_queries',            NOW()),
-    ('V37', 'add_game_type_alias',                        NOW()),
-    ('V38', 'backfill_entry_type_labels',                 NOW()),
-    ('V39', 'fix_migration_debt',                         NOW()),
-    ('V40', 'fix_backfill_features_json',                 NOW()),
-    ('V41', 'seed_neutral_features_for_historical_rows',  NOW()),
-    ('V42', 'backfill_clv_records',                       NOW()),
-    ('V43', 'fix_propiq_season_record_payout',            NOW()),
-    ('V44', 'fix_rejection_log_and_seed_progress',        NOW()),
-    ('V45', 'fix_migration_history_and_startup_errors',   NOW())
-ON CONFLICT (version) DO NOTHING;
+INSERT INTO migration_history (filename, applied_at) VALUES
+  ('V25__streak_tables.sql',                              NOW()),
+  ('V26__tasklet_bet_ledger.sql',                         NOW()),
+  ('V27__add_discord_sent.sql',                           NOW()),
+  ('V28__fg_cache.sql',                                   NOW()),
+  ('V29__agent_unit_sizing.sql',                          NOW()),
+  ('V30__monitoring_fixes.sql',                           NOW()),
+  ('V31__bet_ledger_dedup_index.sql',                     NOW()),
+  ('V32__agent_unit_sizing_and_dedup_index.sql',          NOW()),
+  ('V33__fix_dedup_and_missing_tables.sql',               NOW()),
+  ('V34__backfill_result.sql',                            NOW()),
+  ('V35__schema_hotfix_unit_dollars_and_missing.sql',     NOW()),
+  ('V36__schema_fixes_monitoring_queries.sql',            NOW()),
+  ('V37__add_game_type_alias.sql',                        NOW()),
+  ('V38__backfill_entry_type_labels.sql',                 NOW()),
+  ('V39__fix_migration_debt.sql',                         NOW()),
+  ('V40__fix_backfill_features_json.sql',                 NOW()),
+  ('V41__seed_neutral_features_for_historical_rows.sql',  NOW()),
+  ('V42__backfill_clv_records.sql',                       NOW()),
+  ('V43__fix_propiq_season_record_payout.sql',            NOW()),
+  ('V44__fix_rejection_log_and_seed_progress.sql',        NOW()),
+  ('V45__fix_migration_history_and_startup_errors.sql',   NOW()),
+  ('V46__fix_rejection_log_gate_column.sql',              NOW()),
+  ('V47__create_decision_log_table.sql',                  NOW())
+ON CONFLICT (filename) DO NOTHING;
 
 -- ── 2. Fix agent_performance view: add ::NUMERIC cast to ROUND() calls ────────
 -- V26 defined this view without the cast. V39 fixed it, but V26 re-ran every
