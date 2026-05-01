@@ -1063,6 +1063,26 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _player_id = prop.get("player_id") or prop.get("mlbam_id")
                 _mlbapi = _get_mlbapi_pitcher(player, _player_id)
 
+                # Tier 2.0: Statcast 2026 arsenal K% — real per-pitch data, Railway-safe
+                if not _mlbapi.get("k_rate") and _player_id:
+                    try:
+                        from statcast_static_layer import (  # noqa: PLC0415
+                            get_pitcher_k_rate as _sc_kr,
+                            get_pitcher_whiff_rate as _sc_wr,
+                            get_pitcher_xera as _sc_xera,
+                        )
+                        _sc_k = _sc_kr(int(_player_id))
+                        if _sc_k:
+                            _mlbapi["k_rate"]    = _sc_k
+                            _mlbapi["swstr_pct"] = _sc_wr(int(_player_id)) or 0.110
+                            _mlbapi["xfip"]      = _sc_xera(int(_player_id)) or 4.06
+                            logger.debug(
+                                "[Enrichment] Statcast arsenal k_rate=%.3f for %s",
+                                _sc_k, player,
+                            )
+                    except Exception:
+                        pass
+
                 # Tier 2.5: Career-weighted stats (2023-2025 blend) — better than league avg
                 # Fills gap when current-season sample too small (< 5 IP in 2026)
                 if not _mlbapi.get("k_rate") and _player_id:
@@ -1176,6 +1196,28 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                         if _career_b.get("k_pct") or _career_b.get("avg"):
                             _mlbapi_b = _career_b
                             logger.debug("[Enrichment] Career stats for batter %s", player)
+                    except Exception:
+                        pass
+
+                # Tier 2.0: Statcast batter metrics — whiff susceptibility + xStats
+                if _player_id:
+                    try:
+                        from statcast_static_layer import (  # noqa: PLC0415
+                            get_batter_k_susceptibility as _sc_bw,
+                            get_batter_xstats as _sc_bx,
+                            get_batter_ev_profile as _sc_ev,
+                        )
+                        _b_whiff = _sc_bw(int(_player_id))
+                        _b_xs    = _sc_bx(int(_player_id))
+                        _b_ev    = _sc_ev(int(_player_id))
+                        if _b_whiff:
+                            prop["_batter_whiff_rate"] = _b_whiff
+                        if _b_xs.get("xba"):
+                            prop.setdefault("xba",   _b_xs["xba"])
+                            prop.setdefault("xwoba", _b_xs.get("xwoba", 0.32))
+                        if _b_ev.get("ev50"):
+                            prop.setdefault("_batter_ev50",    _b_ev["ev50"])
+                            prop.setdefault("_batter_brl_pct", _b_ev.get("brl_percent", 0.0))
                     except Exception:
                         pass
 
