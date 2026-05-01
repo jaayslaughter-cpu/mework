@@ -933,15 +933,16 @@ def _fetch_umpires_today() -> list[dict]:
                         rates = {"k_rate": 8.8, "bb_rate": 3.1,
                                  "k_mod": 1.0, "bb_mod": 1.0, "known": False}
                     umpires.append({
-                        "name":      name,
-                        "home_team": game["teams"]["home"]["team"].get("name", ""),
-                        "away_team": game["teams"]["away"]["team"].get("name", ""),
-                        "k_rate":    rates.get("k_rate", 8.8),
-                        "bb_rate":   rates.get("bb_rate", 3.1),
-                        "k_mod":     rates.get("k_mod", 1.0),
-                        "bb_mod":    rates.get("bb_mod", 1.0),
-                        "known":     rates.get("known", False),
-                        "run_env":   1.0,
+                        "name":       name,
+                        "home_team":  game["teams"]["home"]["team"].get("name", ""),
+                        "away_team":  game["teams"]["away"]["team"].get("name", ""),
+                        "k_rate":     rates.get("k_rate", 8.8),
+                        "bb_rate":    rates.get("bb_rate", 3.1),
+                        "k_mod":      rates.get("k_mod", 1.0),
+                        "bb_mod":     rates.get("bb_mod", 1.0),
+                        "known":      rates.get("known", False),
+                        "run_impact": rates.get("run_impact", 0.0),  # + = hitter-friendly zone
+                        "run_env":    1.0,
                     })
         if umpires:
             logger.info("[DataHub] Umpires: %d home plate umpires loaded (%d known)",
@@ -3390,15 +3391,16 @@ class _UmpireAgent(_BaseAgent):
                                     _ump_rates = {"k_rate": 8.8, "bb_rate": 3.1,
                                                   "k_mod": 1.0, "bb_mod": 1.0, "known": False}
                                 umpires.append({
-                                    "name":      _ump_name,
-                                    "home_team": _g["teams"]["home"]["team"].get("name",""),
-                                    "away_team": _g["teams"]["away"]["team"].get("name",""),
-                                    "k_rate":    _ump_rates["k_rate"],
-                                    "bb_rate":   _ump_rates.get("bb_rate", 3.1),
-                                    "k_mod":     _ump_rates["k_mod"],
-                                    "bb_mod":    _ump_rates.get("bb_mod", 1.0),
-                                    "known":     _ump_rates.get("known", False),
-                                    "run_env":   1.0,
+                                    "name":       _ump_name,
+                                    "home_team":  _g["teams"]["home"]["team"].get("name",""),
+                                    "away_team":  _g["teams"]["away"]["team"].get("name",""),
+                                    "k_rate":     _ump_rates["k_rate"],
+                                    "bb_rate":    _ump_rates.get("bb_rate", 3.1),
+                                    "k_mod":      _ump_rates["k_mod"],
+                                    "bb_mod":     _ump_rates.get("bb_mod", 1.0),
+                                    "known":      _ump_rates.get("known", False),
+                                    "run_impact": _ump_rates.get("run_impact", 0.0),
+                                    "run_env":    1.0,
                                 })
             except Exception:
                 pass
@@ -3421,6 +3423,13 @@ class _UmpireAgent(_BaseAgent):
                 k_mod = 1.0 + (k_mod - 1.0) * 0.5
             # Apply historical K-rate modifier first
             model_prob = min(model_prob * k_mod, 95.0)
+            # run_impact: UmpScorecards run-impact signal (+hitter-friendly, -pitcher-friendly)
+            # Capped at ±2pp to avoid overshadowing the primary K-rate modifier
+            _run_impact = float(_ump.get("run_impact", 0.0) or 0.0)
+            if _run_impact > 0.5:    # hitter-friendly zone → suppress K probability
+                model_prob = max(5.0, model_prob - min(_run_impact * 0.8, 2.0))
+            elif _run_impact < -0.5: # pitcher-friendly zone → boost K probability
+                model_prob = min(95.0, model_prob + min(abs(_run_impact) * 0.8, 2.0))
             # Layer ABS overturn rate on top (2026-specific signal)
             try:
                 from abs_layer import get_umpire_abs_rate as _guar  # noqa: PLC0415

@@ -1,24 +1,43 @@
 """
 umpire_rates.py
 ===============
-Historical home plate umpire K-rate and BB-rate lookup table.
+Home plate umpire K-rate, BB-rate, and run-impact lookup.
 
-Data: 2023-2025 umpire scorecards (umpire-scorecards.com aggregated).
-Updated once per offseason. K-rate is per-9-innings (PA-adjusted),
-normalized to the MLB average of 8.8 K/9 for modifiers.
+Sources
+-------
+Static table  : 2023-2025 rolling averages from umpire-scorecards.com (fallback).
+Live API      : UmpScorecards API (umpscorecards.com/api/umpires) — fetched once per
+                calendar day and cached in-process.  Provides:
+                  run_impact  — avg runs added/removed per game by incorrect calls
+                                (positive = hitter-friendly, negative = pitcher-friendly)
+                  accuracy    — called-strike accuracy %
 
-Usage:
+Usage
+-----
     from umpire_rates import get_umpire_rates
     rates = get_umpire_rates("Angel Hernandez")
-    # → {"k_rate": 7.9, "bb_rate": 3.1, "k_mod": 0.898, "zone_size": -0.8}
+    # → {
+    #     "k_rate": 9.8, "bb_rate": 2.8,
+    #     "k_mod": 1.114, "bb_mod": 0.903,
+    #     "run_impact": -0.23,   # pitcher-friendly zone today
+    #     "accuracy": 95.1,
+    #     "known": True
+    #   }
 
 k_mod  = k_rate / 8.8   (1.0 = league avg, >1.0 = K-friendly, <1.0 = hitter-friendly)
 bb_mod = bb_rate / 3.1  (1.0 = league avg, >1.0 = walk-friendly)
+run_impact: + = hitter-friendly zone; − = pitcher-friendly zone; 0.0 = neutral / unknown.
 """
 from __future__ import annotations
 
+import logging
+import time
+from datetime import date
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# Umpire data table — 2023-2025 averages (K/9, BB/9)
+# Static table — 2023-2025 averages (K/9, BB/9)
 # Source: umpire-scorecards.com 3-year rolling averages
 # League avg: K/9 ≈ 8.8, BB/9 ≈ 3.1
 # ---------------------------------------------------------------------------
@@ -91,37 +110,122 @@ _UMPIRE_TABLE: dict[str, tuple[float, float]] = {
     "roberto ortiz":        (8.8, 3.1),
     "dan bellino":          (8.7, 3.1),
     "phil cuzzi":           (8.8, 3.2),
-    "mike DiMuro":          (8.7, 3.1),
     "mike dimuro":          (8.7, 3.1),
     # ── Hitter-friendly (low K, high BB) ─────────────────────────────────
     "bob davidson":         (7.8, 3.5),
     "bruce dreckman":       (8.0, 3.4),
     "vic carapazza":        (8.1, 3.3),
     "paul schrieber":       (8.0, 3.4),
-    "david rackley":        (8.1, 3.3),
     "gary cedarstrom":      (8.0, 3.4),
     "bill miller":          (8.1, 3.3),
-    "tom hallion":          (8.0, 3.3),
     "jerry meals":          (7.9, 3.4),
     "mark carlson":         (8.0, 3.3),
     "clint fagan":          (8.1, 3.3),
-    "manny gonzalez":       (8.0, 3.4),
     "larry vanover":        (7.9, 3.5),
     "marty foster":         (8.0, 3.4),
     "joe eddings":          (8.1, 3.3),
     "charlie reliford":     (7.9, 3.4),
     "ron kulpa":            (8.0, 3.4),
-    "eric cooper":          (8.1, 3.3),
     "brian o'nora":         (7.9, 3.4),
     "brian onora":          (7.9, 3.4),
 }
 
-# League averages
 _LEAGUE_K_RATE  = 8.8
 _LEAGUE_BB_RATE = 3.1
-
 _DEFAULT = (_LEAGUE_K_RATE, _LEAGUE_BB_RATE)
 
+# ---------------------------------------------------------------------------
+# Live UmpScorecards API — fetched once per calendar day
+# ---------------------------------------------------------------------------
+
+_LIVE_CACHE: dict[str, dict] = {}   # name_lower → {run_impact, accuracy, above_x, games}
+_LIVE_CACHE_DATE: str = ""          # YYYY-MM-DD of last successful fetch
+_LIVE_FETCH_ATTEMPTED: str = ""     # YYYY-MM-DD to prevent hammering on failure
+
+_UC_API     = "https://umpscorecards.com/api/umpires"
+_UC_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+
+def _fetch_live_ump_stats() -> dict[str, dict]:
+    """
+    Fetch current-season umpire stats from UmpScorecards API.
+    Called at most once per PT calendar day; results cached in _LIVE_CACHE.
+    Returns {name_lower: {run_impact, accuracy, above_x, games}}.
+    """
+    global _LIVE_CACHE, _LIVE_CACHE_DATE, _LIVE_FETCH_ATTEMPTED
+
+    today = date.today().isoformat()
+
+    # Already loaded today
+    if _LIVE_CACHE_DATE == today and _LIVE_CACHE:
+        return _LIVE_CACHE
+
+    # Already tried today and failed
+    if _LIVE_FETCH_ATTEMPTED == today:
+        return _LIVE_CACHE
+
+    _LIVE_FETCH_ATTEMPTED = today
+
+    try:
+        import requests
+        resp = requests.get(_UC_API, headers=_UC_HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("[UmpireRates] UmpScorecards live fetch failed: %s", exc)
+        return _LIVE_CACHE
+
+    umpires = data.get("rows") or (data if isinstance(data, list) else [])
+    new_cache: dict[str, dict] = {}
+
+    for u in umpires:
+        name = u.get("umpire") or u.get("name") or u.get("fullName") or ""
+        if not name:
+            continue
+
+        # Accuracy from raw called/correct counts
+        called  = u.get("called_pitches_sum") or 0
+        correct = u.get("called_correct_sum") or 0
+        accuracy = round(correct / called * 100, 1) if called > 0 else None
+
+        # run_impact: + = incorrect calls added runs (hitter-friendly)
+        #             − = incorrect calls removed runs (pitcher-friendly)
+        run_impact = u.get("total_run_impact_mean")
+        if run_impact is not None:
+            try:
+                run_impact = round(float(run_impact), 3)
+            except (TypeError, ValueError):
+                run_impact = None
+
+        above_x = u.get("correct_calls_above_x_sum")
+        if above_x is not None:
+            try:
+                above_x = round(float(above_x), 1)
+            except (TypeError, ValueError):
+                above_x = None
+
+        games = u.get("n")
+
+        new_cache[_norm(name)] = {
+            "run_impact": run_impact,   # + = hitter-friendly, − = pitcher-friendly
+            "accuracy":   accuracy,
+            "above_x":    above_x,
+            "games":      int(games) if games is not None else None,
+        }
+
+    if new_cache:
+        _LIVE_CACHE      = new_cache
+        _LIVE_CACHE_DATE = today
+        logger.info("[UmpireRates] UmpScorecards: %d umpires loaded (run_impact available)", len(new_cache))
+    else:
+        logger.warning("[UmpireRates] UmpScorecards returned 0 umpires")
+
+    return _LIVE_CACHE
+
+
+# ---------------------------------------------------------------------------
+# Name normalisation
+# ---------------------------------------------------------------------------
 
 def _norm(name: str) -> str:
     import unicodedata
@@ -129,24 +233,42 @@ def _norm(name: str) -> str:
     return " ".join("".join(c for c in n if unicodedata.category(c) != "Mn").split())
 
 
-def get_umpire_rates(name: str) -> dict[str, float]:
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_umpire_rates(name: str) -> dict:
     """
-    Return umpire K/BB rates and derived modifiers.
+    Return umpire K/BB rates, derived modifiers, and live run_impact.
 
-    Returns league-average defaults if umpire not found.
+    Falls back to league-average defaults if umpire not found in static table.
+    Merges live UmpScorecards run_impact on top (None if API unavailable).
 
-    Fields:
-        k_rate   — strikeouts per 9 innings (raw)
-        bb_rate  — walks per 9 innings (raw)
-        k_mod    — k_rate / 8.8  (1.0 = avg, >1 = K-friendly)
-        bb_mod   — bb_rate / 3.1 (1.0 = avg, >1 = BB-friendly)
-        known    — True if umpire found in table
+    Fields returned:
+        k_rate      — strikeouts per 9 innings (raw)
+        bb_rate     — walks per 9 innings (raw)
+        k_mod       — k_rate / 8.8  (1.0 = avg, >1 = K-friendly)
+        bb_mod      — bb_rate / 3.1 (1.0 = avg, >1 = BB-friendly)
+        run_impact  — avg runs per game from incorrect calls
+                      (+0.5 = hitter-friendly; -0.5 = pitcher-friendly; 0.0 = neutral)
+        accuracy    — called-strike accuracy % (None if unavailable)
+        known       — True if umpire found in static table
     """
     k, bb = _UMPIRE_TABLE.get(_norm(name), _DEFAULT)
+
+    # Try live API (cached after first call each day)
+    live = _fetch_live_ump_stats()
+    live_stats = live.get(_norm(name), {})
+
+    run_impact = live_stats.get("run_impact")   # None if umpire not in live data
+    accuracy   = live_stats.get("accuracy")
+
     return {
-        "k_rate":  k,
-        "bb_rate": bb,
-        "k_mod":   round(k  / _LEAGUE_K_RATE,  4),
-        "bb_mod":  round(bb / _LEAGUE_BB_RATE, 4),
-        "known":   _norm(name) in _UMPIRE_TABLE,
+        "k_rate":     k,
+        "bb_rate":    bb,
+        "k_mod":      round(k  / _LEAGUE_K_RATE,  4),
+        "bb_mod":     round(bb / _LEAGUE_BB_RATE, 4),
+        "run_impact": run_impact if run_impact is not None else 0.0,
+        "accuracy":   accuracy,
+        "known":      _norm(name) in _UMPIRE_TABLE,
     }
