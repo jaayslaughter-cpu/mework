@@ -287,15 +287,15 @@ def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
     """
     Single-leg Streaks confidence  (1.0 – 10.0).
 
-    Formula mirrors build_parlay() in live_dispatcher for consistency:
-      prob_score    = (prob – 0.50) / 0.30 × 7.0   → 0–7 over 50%–80%
-      ev_bonus      = min(ev_pct / 15.0 × 2.0, 2.0) → 0–2 for 0%–15% EV
-      signal_bonus  = min(signal_count × 0.1, 1.0)  → 0–1 for 0–10 agents
+    Formula (CURRENT):
+      prob_score    = min((prob - 0.50) / 0.35 × 5.0, 5.0)   → 0–5 over 50%–85%
+      ev_bonus      = min(ev_pct / 10.0 × 3.0, 3.0)           → 0–3 for 0%–10% EV
+      signal_bonus  = min(signal_count × 0.2, 2.0)             → 0–2 for 0–10 agents
+      max = 10.0,  gate = STREAK_CONF_MIN = 6.0
 
-    No legs_penalty (single-leg pick).  Gate for StreakAgent: 8.0/10.
-    Gate is achievable when:
-      prob ≥ 0.76 + ev_pct ≥ 7.5%  (e.g. hits_runs_rbis Over 0.5 = 82%)
-      prob ≥ 0.80 + any ev            (dominant Over lines)
+    Gate achievable at prob=0.62, ev=24%, signals≥0:
+      prob_score=1.71, ev_bonus=3.0, signal_bonus≥0 → conf≥4.71 (needs signals≥7 to reach 6.0)
+    Easiest qualifiers: hits_runs_rbis Over 0.5 (prob=0.78, 12 signals → conf=9.0)
     """
     # Prob contribution capped at 5 — prevents high base-rate props (82% hits_runs_rbis 0.5)
     # from dominating the score. Genuine edge (EV + agent signals) carries more weight.
@@ -323,13 +323,21 @@ def fetch_underdog_props_with_teams() -> list[dict]:
     try:
         resp = requests.get(_UD_LINES_URL, headers=_HEADERS, timeout=25)
         if resp.status_code != 200:
-            logger.warning("[Streak] Underdog HTTP %d — trying dispatcher fallback", resp.status_code)
-            if _DISPATCHER_AVAILABLE:
-                base = fetch_underdog_props()
-                for p in base:
-                    p.setdefault("team", "")
-                return base
-            return []
+            logger.warning("[Streak] Underdog HTTP %d — retrying once", resp.status_code)
+            # No external dispatcher dependency — streak fetches Underdog directly
+            try:
+                import time as _time
+                _time.sleep(2)
+                resp2 = requests.get(_UD_LINES_URL, headers=_HEADERS, timeout=25)
+                if resp2.status_code == 200:
+                    data = resp2.json()
+                    # fall through to normal parse below by reassigning resp
+                    resp = resp2
+                else:
+                    logger.warning("[Streak] Underdog retry also failed (HTTP %d)", resp2.status_code)
+                    return []
+            except Exception:
+                return []
 
         data = resp.json()
 
