@@ -107,6 +107,27 @@ def _load() -> None:
 
         # ── Pitcher arsenal: pitch-arsenal-stats (1).csv ─────────────────────
         arsenal_rows = _read_csv("pitch-arsenal-stats-pitchers.csv")
+        # Aggregate to per-pitcher overall K rate (weighted by pitch usage)
+        _pit_k_total: dict[int, float] = {}
+        _pit_k_usage: dict[int, float] = {}
+        _pit_whiff_total: dict[int, float] = {}
+        for _ar in arsenal_rows:
+            try:
+                _pid = int(_ar.get("player_id", 0) or 0)
+                _usage = float(_ar.get("pitch_usage", 0) or 0)
+                _kpct  = float(_ar.get("k_percent",   0) or 0) / 100.0
+                _whiff = float(_ar.get("whiff_percent", 0) or 0) / 100.0
+                if _pid and _usage > 0:
+                    _pit_k_total[_pid]     = _pit_k_total.get(_pid, 0) + _usage * _kpct
+                    _pit_k_usage[_pid]     = _pit_k_usage.get(_pid, 0) + _usage
+                    _pit_whiff_total[_pid] = _pit_whiff_total.get(_pid, 0) + _usage * _whiff
+            except (ValueError, TypeError):
+                pass
+        # Store weighted K rate and whiff rate per pitcher
+        for _pid in _pit_k_usage:
+            if _pit_k_usage[_pid] > 0:
+                _pitcher_k_rate[_pid] = round(_pit_k_total[_pid] / _pit_k_usage[_pid], 4)
+                _pitcher_whiff[_pid]  = round(_pit_whiff_total[_pid] / _pit_k_usage[_pid], 4)
         for r in arsenal_rows:
             pid_s = r.get("player_id", "").strip()
             if not pid_s:
@@ -431,73 +452,6 @@ def get_batter_fg_proj(player_name: str) -> dict | None:
         if k.endswith(last) and len(last) > 4:
             return v
     return None
-
-
-
-# ---------------------------------------------------------------------------
-# ABS Challenge Data — 2026 batter challenge tendencies (K-flip, walk-flip)
-# ---------------------------------------------------------------------------
-_ABS_BATTER: dict[str, dict] = {}
-
-def _load_abs_batter() -> None:
-    """Load ABS challenge batter data. K-flip counts → per-game K adjustment."""
-    import csv, unicodedata, re as _re
-    global _ABS_BATTER
-    path = _find_csv("abs-challenges-2026-batter.csv")
-    if not path:
-        logger.warning("[Statcast] ABS batter CSV not found")
-        return
-    try:
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                raw = row.get("entity_name", "") or ""
-                name = _re.sub(r"\s+", " ", (raw or "").strip().lower())
-                # ASCII normalize
-                nfkd = unicodedata.normalize("NFKD", name)
-                name = nfkd.encode("ascii", "ignore").decode("ascii").strip()
-                if not name:
-                    continue
-                try:
-                    _ABS_BATTER[name] = {
-                        "n_challenges":    int(float(row.get("n_challenges")    or 0)),
-                        "n_overturns":     int(float(row.get("n_overturns")     or 0)),
-                        "k_flip_for":      int(float(row.get("n_strikeouts_flip", 0) or 0)),
-                        "w_flip_for":      int(float(row.get("n_walks_flip", 0)      or 0)),
-                        "k_flip_against":  int(float(row.get("n_strikeouts_flip_against", 0) or 0)),
-                        "w_flip_against":  int(float(row.get("n_walks_flip_against",  0) or 0)),
-                        "rate_overturn":   float(row.get("rate_overturns", 0) or 0),
-                    }
-                except (ValueError, TypeError):
-                    continue
-        logger.info("[Statcast] ABS batter loaded: %d players", len(_ABS_BATTER))
-    except Exception as e:
-        logger.warning("[Statcast] ABS batter load failed: %s", e)
-
-_load_abs_batter()
-
-
-
-def get_batter_abs_k_edge(player_name: str) -> float:
-    """
-    Returns net K-avoidance edge from ABS challenges (2026).
-
-    Positive = batter flips Ks to balls (Under K edge)
-    Negative = pitcher challenges batter Ks → Under edge for pitcher
-
-    Scale: each K-flip ≈ 0.05 units of hitter_strikeouts edge
-    Returns 0.0 if no data.
-    """
-    name = _norm_name(player_name)
-    d = _ABS_BATTER.get(name)
-    if not d:
-        return 0.0
-    challenges = max(d["n_challenges"], 1)
-    # per-challenge K flip rates
-    k_for_rate  = d["k_flip_for"]  / challenges
-    k_against_rate = d["k_flip_against"] / max(1, d.get("n_challenges", 1))
-    # Net: positive = batter saves Ks (Under K edge)
-    edge = (k_for_rate - k_against_rate) * 0.5  # scale to ~±0.05 range
-    return round(edge, 4)
 
 
 def get_batter_sprint_speed(player_id: int) -> dict | None:
