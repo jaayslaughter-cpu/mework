@@ -38,8 +38,6 @@ BEGIN
   RAISE NOTICE '[V43] Recalculated payout for % WIN rows and % LOSS rows', v_wins, v_losses;
 END $$;
 
-INSERT INTO migration_history (version, description, applied_at)
-VALUES ('V43', 'Fix propiq_season_record payout: store net profit not stake+profit', NOW())
-ON CONFLICT (version) DO NOTHING;
+INSERT INTO migration_history (filename, applied_at) VALUES ('V43__fix_propiq_season_record_payout.sql', NOW()) ON CONFLICT (filename) DO NOTHING;
 
 COMMIT;
