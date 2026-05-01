@@ -289,7 +289,7 @@ def _fetch_steamer() -> dict[str, dict]:
     return projections
 
 
-def _get_cache() -> dict[str, dict]:
+def _get_cache(hub: dict | None = None) -> dict[str, dict]:
     """Return in-memory cache, loading from Postgres or API if stale.
 
     Fetch-attempt guard: if all three fetch paths fail today, we set
@@ -325,12 +325,28 @@ def _get_cache() -> dict[str, dict]:
         _CACHE_DATE = today
         _save_to_pg(data, today)
         logger.info("[Steamer] Projections cached: %d players", len(data))
-    else:
+    elif not data:
+        # Tier 4: DraftEdge projections already fetched by DataHub — no extra API call needed
         logger.warning(
-            "[Steamer] All fetch paths failed for %s -- model will use league-average "
-            "priors until tomorrow.",
+            "[Steamer] Tiers 1-3 (FanGraphs/ScraperAPI/pybaseball) all failed for %s. "
+            "Trying DraftEdge projections as Tier 4 fallback...",
             today,
         )
+        de_data = _fetch_steamer_draftedge(hub)
+        if de_data:
+            _CACHE = de_data
+            _CACHE_DATE = today
+            logger.info(
+                "[Steamer] Tier 4 DraftEdge active: %d players. "
+                "Probabilities are today-specific but less precise than FanGraphs. "
+                "Set SCRAPERAPI_KEY to restore full accuracy.",
+                len(de_data),
+            )
+        else:
+            logger.warning(
+                "[Steamer] All tiers failed (1=FanGraphs 2=ScraperAPI 3=pybaseball 4=DraftEdge). "
+                "Model using league-average priors. Set SCRAPERAPI_KEY to fix.",
+            )
 
     return _CACHE
 
@@ -480,7 +496,76 @@ def get_steamer_adj(player: str, prop_type: str, side: str, line: float) -> floa
         return 0.0
 
 
-def prefetch() -> int:
+def _fetch_steamer_draftedge(hub: dict | None = None) -> dict[str, dict]:
+    """
+    Tier 4 fallback: use DraftEdge projections already fetched in the DataHub.
+    DraftEdge provides hit_pct, hr_pct, run_pct, rbi_pct as per-game probabilities.
+    These are today-specific DFS projections — better than league-average priors.
+    Fires when FanGraphs is 403-blocked, ScraperAPI quota exhausted, and pybaseball fails.
+    """
+    try:
+        # Try to get DraftEdge data from the hub if passed, otherwise import from module
+        if hub is None:
+            try:
+                from draftedge_scraper import fetch_all_projections as _de_fetch
+                de_data = _de_fetch()
+            except Exception:
+                return {}
+        else:
+            de_data = hub.get("dfs", {}).get("prop_projections", [])
+
+        if not de_data:
+            return {}
+
+        projections: dict[str, dict] = {}
+        for row in de_data:
+            name = str(row.get("player_name") or row.get("player") or "")
+            if not name:
+                continue
+            key = _norm(name)
+            if not key:
+                continue
+
+            # DraftEdge uses probability fractions (0-1) for each outcome
+            hit_pct = float(row.get("hit_pct") or 0.0)
+            hr_pct  = float(row.get("hr_pct")  or 0.0)
+            run_pct = float(row.get("run_pct") or row.get("runs_pct") or 0.0)
+            rbi_pct = float(row.get("rbi_pct") or 0.0)
+
+            if hit_pct == 0.0 and hr_pct == 0.0:
+                continue  # pitcher row or missing data
+
+            # Convert per-game probabilities to per-game rates
+            # Assuming ~4 PA/game average: hits = hit_pct * 4 / (PA * hit_rate)
+            # Simpler: use the probability directly as projected hits/game (rough approximation)
+            projections[key] = {
+                "avg":    round(hit_pct,  4),
+                "obp":    round(min(hit_pct * 1.15, 0.500), 4),  # rough OBP proxy
+                "slg":    round(hit_pct + hr_pct * 3.0, 4),      # rough SLG proxy
+                "r":      round(run_pct * 162, 2),
+                "rbi":    round(rbi_pct * 162, 2),
+                "hr":     round(hr_pct  * 162, 2),
+                "sb":     round(float(row.get("sb_pct") or 0.0) * 162, 2),
+                "pa":     4.2,
+                "g":      1.0,
+                "r_pg":   round(run_pct, 4),
+                "rbi_pg": round(rbi_pct, 4),
+                "hr_pg":  round(hr_pct,  4),
+                "sb_pg":  round(float(row.get("sb_pct") or 0.0), 4),
+                "_source": "draftedge",
+            }
+
+        logger.info(
+            "[Steamer] Tier 4 DraftEdge fallback: %d batters with projections", len(projections)
+        )
+        return projections
+
+    except Exception as exc:
+        logger.warning("[Steamer] Tier 4 DraftEdge fallback failed: %s", exc)
+        return {}
+
+
+def prefetch(hub: dict | None = None) -> int:
     """Pre-warm the Steamer cache at DataHub startup. Returns player count."""
-    cache = _get_cache()
+    cache = _get_cache(hub=hub)
     return len(cache)

@@ -606,14 +606,14 @@ def main():
         if players_processed >= args.players:
             break
 
-        # ── Skip 2023 if DB is too full (≥700 MB) ──
+        # ── Skip 2023 if DB is too full (≥2500 MB) ──
         if season == 2023:
             with conn.cursor() as _cur:
                 _cur.execute("SELECT pg_database_size('railway')")
                 _db_bytes = _cur.fetchone()[0]
             _db_mb = _db_bytes / (1024 * 1024)
-            if _db_mb >= 2000:
-                log.warning("DB at %.0f MB — skipping 2023 seed to preserve headroom (limit 2500 MB)", _db_mb)
+            if _db_mb >= 2500:
+                log.warning("DB at %.0f MB — skipping 2023 seed to preserve headroom (2500 MB guard, 5 GB volume)", _db_mb)
                 continue
 
         # ── Pitchers ──
