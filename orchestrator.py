@@ -519,7 +519,7 @@ async def lifespan(_app: FastAPI):
 
     scheduler.add_job(
         job_calibrate_model,
-        CronTrigger(day_of_week="mon", hour=6, minute=0, timezone=PT),
+        CronTrigger(day_of_week="mon", hour=6, minute=0, timezone="America/Los_Angeles"),
         id="job_calibrate_model",
         name="Weekly calibration map rebuild",
         replace_existing=True,
