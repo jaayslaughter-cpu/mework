@@ -108,9 +108,19 @@ def _record_dispatch_ran_today() -> None:
     """Insert today's PT date into dispatch_date_log (no-op if already there).
     Cross-process guard: survives Railway restarts. If today is already present,
     job_agents() post-window check will skip re-dispatch.
+    Writes to BOTH Redis (instant) and Postgres (crash-safe persistence).
     """
     import psycopg2  # noqa: PLC0415
     pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    today_str = pt_today.isoformat()
+    # ── Redis write (fast, available immediately after restart) ──────────────
+    try:
+        from tasklets import _redis as _tredis  # noqa: PLC0415
+        _r = _tredis()
+        _r.set(f"dispatch_ran:{today_str}", "1", ex=28 * 3600)  # 28h TTL
+    except Exception:
+        pass
+    # ── Postgres write (crash-safe, survives Redis flush) ─────────────────────
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         return
@@ -137,14 +147,27 @@ def _record_dispatch_ran_today() -> None:
 def _dispatch_already_ran_today() -> bool:
     """Return True if dispatch already ran today (PT date in dispatch_date_log).
     Prevents a second dispatch cycle from firing even if the scheduler runs again.
+    Checks Redis first (instant, survives DB timeout on startup), then Postgres.
+    Fails CLOSED: if both checks error, assumes dispatch ran to prevent double-send.
     """
     import psycopg2  # noqa: PLC0415
     pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    today_str = pt_today.isoformat()
+    # ── Redis check first — instant, no timeout risk on startup ──────────────
+    try:
+        from tasklets import _redis as _tredis  # noqa: PLC0415
+        _r = _tredis()
+        if _r.exists(f"dispatch_ran:{today_str}"):
+            logger.debug("[orchestrator] Dispatch already ran today (Redis) — skipping.")
+            return True
+    except Exception:
+        pass
+    # ── Postgres check — authoritative, but may be slow on cold start ─────────
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         return False
     try:
-        conn = psycopg2.connect(db_url)
+        conn = psycopg2.connect(db_url, connect_timeout=5)
         cur = conn.cursor()
         cur.execute(
             "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s LIMIT 1",
@@ -155,8 +178,10 @@ def _dispatch_already_ran_today() -> bool:
         conn.close()
         return found
     except Exception as exc:
-        logger.warning("[orchestrator] _dispatch_already_ran_today check failed: %s", exc)
-        return False  # fail open — let the window gate decide
+        # Fail CLOSED: if we can't confirm, assume it already ran.
+        # A missed dispatch is safer than a double-dispatch.
+        logger.warning("[orchestrator] _dispatch_already_ran_today DB check failed: %s — failing CLOSED (assuming ran)", exc)
+        return True
 
 
 def _startup_ping_if_needed() -> None:
@@ -327,14 +352,13 @@ async def job_agents():
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
         start = time.time()
+        # Record BEFORE running — a mid-run crash can't cause a double-dispatch.
+        # The dispatch window check above already confirmed we're in window.
+        _record_dispatch_ran_today()
         result = await loop.run_in_executor(None, run_agent_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
-        # Only record dispatch when picks were actually sent (run_agent_tasklet returns True)
-        # Avoids "Dispatch date recorded" log spam every 30s during non-dispatch hours
-        if result is True:
-            _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
