@@ -71,6 +71,8 @@ _baserunning_data:  dict[int, float] = {}
 _pitcher_statcast:  dict[int, dict]  = {}  # statcast_pitchers_2026.csv
 _batter_statcast:   dict[int, dict]  = {}  # statcast_batters_2026.csv
 _spin_direction:    dict[tuple, dict] = {}  # spin_direction_pitches_2026.csv keyed (player_id, api_pitch_type)
+_PITCHER_ARSENAL_RHP: dict[str, dict] = {}   # player_id → opponent-batter stats vs RHP
+_PITCHER_ARSENAL_LHP: dict[str, dict] = {}   # player_id → opponent-batter stats vs LHP
 
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
@@ -422,6 +424,27 @@ def _load() -> None:
             len(_spin_direction),
         )
 
+        # ── Pitcher arsenal by handedness (RHP/LHP) ───────────────────────
+        for hand, fname, target in [
+            ("RHP", "pitcher_arsenal_rhp_2026.csv", _PITCHER_ARSENAL_RHP),
+            ("LHP", "pitcher_arsenal_lhp_2026.csv", _PITCHER_ARSENAL_LHP),
+        ]:
+            for r in _read_csv(fname):
+                pid = str(r.get("player_id", "")).strip()
+                if not pid:
+                    continue
+                target[pid] = {
+                    "k_pct": _sf(r.get("k_percent")),
+                    "woba_against": _sf(r.get("woba")),
+                    "hard_hit_against": _sf(r.get("hardhit_percent")),
+                    "barrel_pct_against": _sf(r.get("barrels_per_bbe_percent")),
+                    "whiff_pct": _sf(r.get("swing_miss_percent")),
+                    "arm_angle": _sf(r.get("arm_angle")),
+                    "pa": _sf(r.get("pa")),
+                    "name": r.get("player_name", ""),
+                }
+            logger.info("pitcher_arsenal_%s: %d pitchers loaded", hand, len(target))
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -665,3 +688,13 @@ def get_batter_vs_pitch(batter_id: int, pitch_type: str) -> dict:
     _load()
     return _batter_vs_pitch.get((int(batter_id), pitch_type.upper()), {})
 
+
+def get_pitcher_arsenal_vs_hand(pitcher_id: str | int, batter_hand: str) -> dict:
+    """Return pitcher stats vs given batter handedness (R/L).
+
+    Keys: k_pct, woba_against, hard_hit_against, barrel_pct_against, whiff_pct, arm_angle, pa
+    Returns empty dict if pitcher not found.
+    """
+    pid = str(pitcher_id)
+    target = _PITCHER_ARSENAL_RHP if batter_hand.upper() == "R" else _PITCHER_ARSENAL_LHP
+    return target.get(pid, {})
