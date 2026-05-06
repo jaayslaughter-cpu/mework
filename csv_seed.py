@@ -161,7 +161,7 @@ def load_pitcher_rows(csv_path: str) -> list[dict]:
                         "actual_outcome": outcome,
                         "actual_result": actual_val,
                         "platform":      "historical",
-                        "discord_sent":  False,
+                        "discord_sent":  True,   # historical labeled rows are XGBoost-eligible
                         "features_json": NEUTRAL_FEATURES,
                         "lookahead_safe": True,
                         "mlbam_id":      int(mlbam_id),
@@ -235,7 +235,7 @@ def load_batter_rows(csv_path: str) -> list[dict]:
                         "actual_outcome": outcome,
                         "actual_result": actual_val,
                         "platform":      "historical",
-                        "discord_sent":  False,
+                        "discord_sent":  True,   # historical labeled rows are XGBoost-eligible
                         "features_json": NEUTRAL_FEATURES,
                         "lookahead_safe": True,
                         "mlbam_id":      int(mlbam_id),
