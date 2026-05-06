@@ -913,6 +913,17 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     # so we defer to after the lookup maps are built.
     p2team, p2opp, p2mlbam, p2hand = _build_lookup_maps(hub)
 
+    # Build opposing pitcher ID map for batter pitch-type vulnerability
+    _team_to_pitcher_id: dict[str, int] = {}
+    for _sp in hub.get("context", {}).get("projected_starters", []):
+        _sp_team = _sp.get("team", "")
+        _sp_pid  = _sp.get("player_id")
+        if _sp_team and _sp_pid:
+            try:
+                _team_to_pitcher_id[_sp_team] = int(_sp_pid)
+            except (ValueError, TypeError):
+                pass
+
     # ── Pre-attach mlbam_ids so statcast can batch-fetch ──────────────────────
     for _p in props:
         _pn = _norm(_p.get("player", ""))
@@ -1365,6 +1376,36 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             prop = _enrich_rw(prop, season=season)
         except Exception as _rw_err:
             logger.debug("[Enrichment] Rolling window skipped: %s", _rw_err)
+
+        # ── Batter pitch-type vulnerability (hitter_strikeouts only) ─────────────
+        # Computes logit-space K adjustment based on how THIS batter performs vs
+        # each of the opposing pitcher's pitch types (whiff% weighted by pitch usage).
+        # Source: pybaseball.statcast_batter_pitch_arsenal — 12h Redis cache.
+        if prop_type == "hitter_strikeouts":
+            _b_id  = prop.get("player_id") or prop.get("mlbam_id")
+            _opp_t = prop.get("opposing_team", "")
+            _p_id  = _team_to_pitcher_id.get(_opp_t)
+            if _b_id and _p_id:
+                try:
+                    from batter_pitch_arsenal_layer import get_batter_pitch_vulnerability as _bpv  # noqa: PLC0415
+                    prop["_bpv_adj"] = round(_bpv(int(_b_id), int(_p_id)), 4)
+                    logger.debug(
+                        "[Enrichment] BPV %s vs pitcher %d → adj=%+.4f",
+                        player, _p_id, prop["_bpv_adj"],
+                    )
+                except Exception as _bpv_err:
+                    logger.debug("[Enrichment] BPV skipped for %s: %s", player, _bpv_err)
+
+        # ── Defense OAA stamp (batter props) ──────────────────────────────────────
+        # Stamps _defense_oaa: ±1.5pp based on opposing outfield Outs Above Average.
+        # Bad outfield (OAA −10) → +1.5pp for hitters. Good outfield (+10) → −1.5pp.
+        # Source: pybaseball.statcast_outs_above_average — 12h Redis cache.
+        if is_batter_prop:
+            try:
+                from defense_layer import stamp_defense_on_prop as _stamp_def  # noqa: PLC0415
+                prop = _stamp_def(prop)
+            except Exception as _def_err:
+                logger.debug("[Enrichment] Defense OAA skipped for %s: %s", player, _def_err)
 
         # ── FIX: Bridge enrichment keys → simulation engine underscore-prefixed keys ──
         # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
