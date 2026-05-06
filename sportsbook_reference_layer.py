@@ -938,6 +938,32 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
             ]
             _pg_save(date_int, flat)
 
+    # ── odds-api.net fallback — Tier 1.5b (bet365 + betr MLB player props) ─────
+    # Fires when OddsAPI quota exhausted AND PropOdds key not set.
+    # Free key at odds-api.net → set ODDS_API_NET_KEY in Railway.
+    # Coverage: pitcher_strikeouts, hits, hits_allowed, total_bases, hits_runs_rbis.
+    if not _mem_ref:
+        try:
+            _oan_key = os.getenv("ODDS_API_NET_KEY", "")
+            if _oan_key:
+                from odds_api_net_layer import fetch_mlb_props as _oan_fetch  # noqa: PLC0415
+                _oan_raw = _oan_fetch(date_int)
+                if _oan_raw:
+                    _oan_ref: dict = {}
+                    for (pn, pt, sd), v in _oan_raw.items():
+                        _oan_ref[(pn, pt, sd)] = {
+                            "sharp_prob": v["sharp_prob"],
+                            "no_vig_prob": v["sharp_prob"],  # already de-vigged per-side
+                            "line":       v.get("line", 0.5),
+                            "bookmaker":  v.get("bookmaker", "odds_api_net"),
+                            "source":     "odds_api_net",
+                        }
+                    _mem_ref = _oan_ref
+                    _file_save(date_int, _oan_ref)
+                    log.info("[SBRef] odds-api.net fallback: %d entries (bet365+betr)", len(_oan_ref))
+        except Exception as _oan_err:
+            log.debug("[SBRef] odds-api.net fallback failed: %s", _oan_err)
+
     # ── Covers.com fallback — Tier 3 (after Pinnacle direct, before DraftEdge) ─
     # Covers aggregates DK/FD/BetMGM/Caesars lines pre-game and also provides
     # THE BAT X projections. Covers only covers props during the pre-game window;
@@ -978,77 +1004,87 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
         except Exception as _covers_err:
             log.debug("[SBRef] Covers fallback failed: %s", _covers_err)
 
-    # ── DraftEdge fallback — DataFrames from draftedge_scraper ───────────────
-    # fetch_all_projections() returns {"batters": DataFrame, "pitchers": DataFrame}.
-    # PR #480 fix: old code iterated dict keys ("batters","pitchers") as if they
-    # were prop dicts — causing AttributeError and silent vig=0 failure every day.
+    # ── DraftEdge fallback — when Odds API has no props yet ──────────────────
+    # DraftEdge gives projected_prob per player/prop. Used when sharp book
+    # lines aren't available (props not yet posted for the day). Less precise
+    # than vig-stripped book odds but better than defaulting sb_implied_prob to 0.
     if not _mem_ref:
         try:
-            import math as _de_math  # noqa: PLC0415
             from draftedge_scraper import fetch_all_projections as _de_fetch  # noqa: PLC0415
-            de_all      = _de_fetch()
-            batters_df  = de_all.get("batters")
-            pitchers_df = de_all.get("pitchers")
-            de_ref: dict = {}
-
-            # Batters: hit_pct / run_pct / rbi_pct = P(≥1 today) ≈ P(Over 0.5)
-            if batters_df is not None and not batters_df.empty:
-                for _, _brow in batters_df.iterrows():
-                    _pname = _normalize(str(_brow.get("player_name") or ""))
-                    if not _pname:
+            _de_raw = _de_fetch()
+            # fetch_all_projections returns {'batters': DataFrame, 'pitchers': DataFrame}
+            # Flatten to a list of prop dicts for iteration
+            de_props: list = []
+            if isinstance(_de_raw, dict):
+                for _df_key in ("batters", "pitchers"):
+                    _df = _de_raw.get(_df_key)
+                    if _df is not None and hasattr(_df, "to_dict"):
+                        try:
+                            import pandas as _pd
+                            for _, _row in _df.iterrows():
+                                _d = _row.to_dict()
+                                # Tag which prop_type this is based on dataframe
+                                if _df_key == "pitchers" and "k_pct" in _d:
+                                    _d.setdefault("prop_type", "strikeouts")
+                                elif _df_key == "batters" and "hit_pct" in _d:
+                                    _d.setdefault("prop_type", "hits")
+                                de_props.append(_d)
+                        except Exception:
+                            pass
+            elif isinstance(_de_raw, list):
+                de_props = _de_raw  # already a list
+            if de_props:
+                de_ref: dict = {}
+                _PT_DE_MAP = {
+                    "strikeouts":        "pitcher_strikeouts",
+                    "hits":              "batter_hits",
+                    "total_bases":       "batter_total_bases",
+                    "earned_runs":       "pitcher_earned_runs",
+                    "hitter_strikeouts": "batter_strikeouts",
+                    "rbis":              "batter_rbis",
+                    "runs":              "batter_runs_scored",
+                }
+                _DE_PROB_FIELDS: dict[str, str] = {
+                    "strikeouts":        "k_pct",
+                    "hits":              "hit_pct",
+                    "total_bases":       "hit_pct",       # best proxy available
+                    "earned_runs":       "er_pct",
+                    "hitter_strikeouts": "batter_k_pct",
+                    "rbis":              "rbi_pct",
+                    "runs":              "run_pct",
+                    "pitching_outs":     "outs_pct",
+                    "walks_allowed":     "bb_pct",
+                }
+                for prop in de_props:
+                    pname = _normalize(str(prop.get("player_name", "")))
+                    pt    = str(prop.get("prop_type", ""))
+                    mk    = _PT_DE_MAP.get(pt, pt)
+                    # Map the correct probability field per prop type
+                    _prob_field = _DE_PROB_FIELDS.get(pt, "projected_prob")
+                    prob = float(
+                        prop.get(_prob_field)
+                        or prop.get("projected_prob")
+                        or prop.get("de_k_pct")
+                        or prop.get("de_hit_pct")
+                        or 0.524
+                    )
+                    # DraftEdge probs are 0-1; clamp to reasonable range
+                    prob = max(0.35, min(0.75, prob))
+                    line  = float(prop.get("line", 0.5) or 0.5)
+                    if not pname or not mk or prob == 0.524:
                         continue
-                    _BATTER_PROPS = {
-                        "batter_hits":        _brow.get("hit_pct"),
-                        "batter_runs_scored": _brow.get("run_pct"),
-                        "batter_rbis":        _brow.get("rbi_pct"),
-                        "batter_total_bases": _brow.get("hit_pct"),
-                        "batter_strikeouts":  _brow.get("batter_k_pct"),
-                    }
-                    for _mk, _raw_prob in _BATTER_PROPS.items():
-                        if _raw_prob is None:
-                            continue
-                        _p = max(0.35, min(0.75, float(_raw_prob)))
-                        _line = float(_brow.get("line", 0.5) or 0.5)
-                        for _side, _si in [("Over", _p), ("Under", round(1.0 - _p, 4))]:
-                            de_ref[(_pname, _mk, _side)] = {
-                                "sb_implied_prob": round(_si, 4),
-                                "line":            _line,
-                                "bookmaker":       "draftedge",
-                                "over_odds":       None,
-                                "under_odds":      None,
-                            }
-
-            # Pitchers: k_pct is P(strikeout event) — use as direct implied prob
-            if pitchers_df is not None and not pitchers_df.empty:
-                for _, _prow in pitchers_df.iterrows():
-                    _pname = _normalize(str(_prow.get("player_name") or ""))
-                    if not _pname:
-                        continue
-                    _PITCHER_PROPS = {
-                        "pitcher_strikeouts":    _prow.get("k_pct"),
-                        "pitcher_earned_runs":   _prow.get("er_pct"),
-                        "pitcher_walks_allowed": _prow.get("bb_pct"),
-                        "pitcher_outs":          _prow.get("outs_pct"),
-                        "pitcher_hits_allowed":  _prow.get("hit_pct"),
-                    }
-                    for _mk, _raw_prob in _PITCHER_PROPS.items():
-                        if _raw_prob is None:
-                            continue
-                        _p = max(0.35, min(0.75, float(_raw_prob)))
-                        _line = float(_prow.get("line", 0.5) or 0.5)
-                        for _side, _si in [("Over", _p), ("Under", round(1.0 - _p, 4))]:
-                            de_ref[(_pname, _mk, _side)] = {
-                                "sb_implied_prob": round(_si, 4),
-                                "line":            _line,
-                                "bookmaker":       "draftedge",
-                                "over_odds":       None,
-                                "under_odds":      None,
-                            }
-
-            if de_ref:
-                log.info("[SBRef] DraftEdge fallback: %d entries", len(de_ref))
-                _mem_ref    = de_ref
-                _fetch_date = date_int
+                    for side, si in [("Over", prob), ("Under", round(1.0 - prob, 4))]:
+                        de_ref[(pname, mk, side)] = {
+                            "sb_implied_prob": round(si, 4),
+                            "line":            line,
+                            "bookmaker":       "draftedge",
+                            "over_odds":       None,
+                            "under_odds":      None,
+                        }
+                if de_ref:
+                    log.info("[SBRef] DraftEdge fallback: %d entries (Odds API empty)", len(de_ref))
+                    _mem_ref    = de_ref
+                    _fetch_date = date_int
         except Exception as _de_err:
             log.debug("[SBRef] DraftEdge fallback failed: %s", _de_err)
 
