@@ -383,7 +383,11 @@ def _get_mlbapi_batter_splits(player_id: int | None, pitcher_hand: str) -> dict:
                 slg = round(float(s.get("slg", 0) or 0), 3)
                 babip = round(float(s.get("babip", 0) or avg), 3)
                 iso  = round(slg - avg, 3) if slg > avg else 0.156
-                woba = round(float(s.get("obp", 0) or 0) * 0.90 + slg * 0.10, 3)  # simplified wOBA proxy
+                # Linear weights approximation (2026 league: wOBA=0.308, OBP=0.317, SLG=0.407)
+                # wOBA ≈ lgwOBA + 1.2×(OBP − lgOBP) + 0.5×(SLG − lgSLG)
+                # Coefficients from wOBA linear weight structure — much more accurate than OBP*0.9+SLG*0.1
+                woba = round(0.308 + 1.2 * (obp - 0.317) + 0.5 * (slg - 0.407), 3)
+                woba = max(0.200, min(0.450, woba))  # sane range
                 k_pct  = round(so / pa, 4)
                 bb_pct = round(bb / pa, 4)
                 result = {

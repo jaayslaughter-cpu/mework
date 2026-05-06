@@ -161,7 +161,7 @@ def load_pitcher_rows(csv_path: str) -> list[dict]:
                         "actual_outcome": outcome,
                         "actual_result": actual_val,
                         "platform":      "historical",
-                        "discord_sent":  False,
+                        "discord_sent":  True,   # historical labeled rows are XGBoost-eligible
                         "features_json": NEUTRAL_FEATURES,
                         "lookahead_safe": True,
                         "mlbam_id":      int(mlbam_id),
@@ -235,7 +235,7 @@ def load_batter_rows(csv_path: str) -> list[dict]:
                         "actual_outcome": outcome,
                         "actual_result": actual_val,
                         "platform":      "historical",
-                        "discord_sent":  False,
+                        "discord_sent":  True,   # historical labeled rows are XGBoost-eligible
                         "features_json": NEUTRAL_FEATURES,
                         "lookahead_safe": True,
                         "mlbam_id":      int(mlbam_id),
@@ -290,14 +290,16 @@ def write_rows(rows: list[dict], dry_run: bool, clear_first: bool) -> None:
                 batch = rows[i:i+BATCH]
                 for row in batch:
                     try:
+                        cur.execute("SAVEPOINT seed_row")
                         cur.execute(INSERT_SQL, row)
                         if cur.rowcount:
                             inserted += 1
                         else:
                             skipped += 1
+                        cur.execute("RELEASE SAVEPOINT seed_row")
                     except Exception as e:
+                        cur.execute("ROLLBACK TO SAVEPOINT seed_row")
                         log.warning("Row insert failed: %s — %s", row.get('player_name'), e)
-                        conn.rollback()
                 conn.commit()
                 if (i // BATCH) % 10 == 0:
                     log.info("  Progress: %d / %d", min(i+BATCH, len(rows)), len(rows))
