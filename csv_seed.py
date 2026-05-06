@@ -290,14 +290,16 @@ def write_rows(rows: list[dict], dry_run: bool, clear_first: bool) -> None:
                 batch = rows[i:i+BATCH]
                 for row in batch:
                     try:
+                        cur.execute("SAVEPOINT seed_row")
                         cur.execute(INSERT_SQL, row)
                         if cur.rowcount:
                             inserted += 1
                         else:
                             skipped += 1
+                        cur.execute("RELEASE SAVEPOINT seed_row")
                     except Exception as e:
+                        cur.execute("ROLLBACK TO SAVEPOINT seed_row")
                         log.warning("Row insert failed: %s — %s", row.get('player_name'), e)
-                        conn.rollback()
                 conn.commit()
                 if (i // BATCH) % 10 == 0:
                     log.info("  Progress: %d / %d", min(i+BATCH, len(rows)), len(rows))
