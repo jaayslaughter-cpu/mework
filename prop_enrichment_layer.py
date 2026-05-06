@@ -239,9 +239,11 @@ def _get_mlbapi_pitcher(player_name: str, player_id: int | None) -> dict:
             gs = max(int(s.get("gamesStarted", 0) or 0), 1)
             if ip < 1:
                 continue
-            # Derive rates from season totals (IP unit = full innings)
-            k_rate  = round(min(so / (ip * 4.35), 0.40), 4)   # SO per BF proxy
-            bb_rate = round(min(bb / (ip * 4.35), 0.20), 4)
+            # PR #421 FIX: derive actual BF from counts, not fixed 4.35/IP constant
+            # BF ≈ outs (IP×3) + H + BB — accurately captures elite K% vs contact pitchers
+            _bf_est = max(1.0, ip * 3.0 + h + bb)
+            k_rate  = round(min(so / _bf_est, 0.40), 4)   # SO per real BF
+            bb_rate = round(min(bb / _bf_est, 0.20), 4)
             era_val = round(float(s.get("era",  0) or 0), 2) or round(er / ip * 9, 2)
             whip_val = round(float(s.get("whip", 0) or 0), 3) or round((h + bb) / ip, 3)
             result = {
@@ -803,12 +805,18 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
         if wrc < 1.0 and woba < 0.01:
             return None
         # League avg H+R+RBI Over 3.5 ≈ 55%.
+        # PR #421 FIX: raised coefficients (0.08→0.12 wRC+, 0.05→0.08 wOBA)
+        # and ceiling (0.78→0.82) so elite hitters (wRC+ 150, wOBA .380) reach ~70%
         base = 0.55
         if wrc > 80:
-            base += (wrc - 100.0) / 100.0 * 0.08   # ±8pp for ±100 wRC+
+            base += (wrc - 100.0) / 100.0 * 0.12   # ±12pp per 100 wRC+
         if woba > 0.01:
-            base += (woba - 0.308) / 0.060 * 0.05   # FG 2025: center 0.308
-        base = max(0.38, min(0.78, base))
+            base += (woba - 0.308) / 0.060 * 0.08   # FG 2025: center 0.308
+        # Lineup position bonus: top-4 hitters see more high-leverage PA
+        _slot = int(prop.get("_batting_order_slot", 0) or 0)
+        if 1 <= _slot <= 4:
+            base += 0.03
+        base = max(0.36, min(0.82, base))
         p = base if is_over else (1.0 - base)
         if wrc > 80 or woba > 0.01:
             return round(p, 4)
