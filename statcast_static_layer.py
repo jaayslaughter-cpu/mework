@@ -73,6 +73,7 @@ _batter_statcast:   dict[int, dict]  = {}  # statcast_batters_2026.csv
 _spin_direction:    dict[tuple, dict] = {}  # spin_direction_pitches_2026.csv keyed (player_id, api_pitch_type)
 _PITCHER_ARSENAL_RHP: dict[str, dict] = {}   # player_id → opponent-batter stats vs RHP
 _PITCHER_ARSENAL_LHP: dict[str, dict] = {}   # player_id → opponent-batter stats vs LHP
+_BATTER_VS_RHP: dict[str, dict] = {}         # batter_id → 2026 stats vs RHP pitchers
 
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
@@ -445,6 +446,22 @@ def _load() -> None:
                 }
             logger.info("pitcher_arsenal_%s: %d pitchers loaded", hand, len(target))
 
+        # ── Batter vs RHP splits (pitch-by-pitch aggregated) ─────────────
+        for r in _read_csv("batter_vs_rhp_2026.csv"):
+            bid = str(r.get("batter_id", "")).strip()
+            if not bid:
+                continue
+            _BATTER_VS_RHP[bid] = {
+                "k_pct": _sf(r.get("k_pct_vs_rhp")),
+                "bb_pct": _sf(r.get("bb_pct_vs_rhp")),
+                "woba": _sf(r.get("woba_vs_rhp")),
+                "whiff_pct": _sf(r.get("whiff_pct_vs_rhp")),
+                "pa": _sf(r.get("pa")),
+                "name": r.get("player_name", ""),
+                "stand": r.get("stand", ""),
+            }
+        logger.info("batter_vs_rhp: %d batters loaded", len(_BATTER_VS_RHP))
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -698,3 +715,12 @@ def get_pitcher_arsenal_vs_hand(pitcher_id: str | int, batter_hand: str) -> dict
     pid = str(pitcher_id)
     target = _PITCHER_ARSENAL_RHP if batter_hand.upper() == "R" else _PITCHER_ARSENAL_LHP
     return target.get(pid, {})
+
+
+def get_batter_vs_rhp(batter_id: str | int) -> dict:
+    """Return 2026 batter stats vs RHP (aggregated from pitch-by-pitch).
+
+    Keys: k_pct, bb_pct, woba, whiff_pct, pa, name, stand
+    Returns empty dict if batter not found or insufficient sample.
+    """
+    return _BATTER_VS_RHP.get(str(batter_id), {})
