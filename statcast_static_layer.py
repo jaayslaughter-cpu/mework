@@ -370,6 +370,28 @@ def _load() -> None:
                 "sweet_spot_against": _safe_float(r.get("sweet_spot_percent")),
             }
 
+        # ── Batter vs pitch type (batter_pitch_arsenal_2026.csv) ───
+        global _batter_vs_pitch
+        if not _batter_vs_pitch:
+            _bvp_path = _DATA / 'statcast' / 'batter_pitch_arsenal_2026.csv'
+            if _bvp_path.exists():
+                with open(_bvp_path, encoding='utf-8-sig', newline='') as f:
+                    for row in csv.DictReader(f):
+                        try:
+                            pid = int(row['player_id'])
+                            pt  = row['pitch_type'].strip().upper()
+                            _batter_vs_pitch[(pid, pt)] = {
+                                'woba':             float(row.get('woba') or 0),
+                                'xwoba':            float(row.get('est_woba') or 0),
+                                'whiff_pct':        float(row.get('whiff_percent') or 0),
+                                'k_pct':            float(row.get('k_percent') or 0),
+                                'hard_hit_pct':     float(row.get('hard_hit_percent') or 0),
+                                'put_away':         float(row.get('put_away') or 0),
+                                'run_value_per100': float(row.get('run_value_per_100') or 0),
+                            }
+                        except (ValueError, KeyError):
+                            continue
+
         # ── Spin direction / active spin (spin_direction_pitches_2026.csv) ───
         for r in _read_csv("spin_direction_pitches_2026.csv"):
             pid_s = r.get("player_id", "").strip()
@@ -608,3 +630,19 @@ def get_pitcher_statcast(player_id: int) -> dict:
     """
     _load()
     return _pitcher_statcast.get(int(player_id), {})
+
+def get_batter_vs_pitch(batter_id: int, pitch_type: str) -> dict:
+    """Return 2026 batter performance against a specific pitch type.
+
+    pitch_type: Savant abbreviation — FF, SL, CH, CU, ST, FC, SI, FS, SV, KN.
+    Returns dict with keys: woba, xwoba, whiff_pct, k_pct, hard_hit_pct,
+                            put_away, run_value_per100.
+    Returns {} if batter or pitch type not found.
+
+    Usage in batter_pitch_arsenal_layer:
+        vs = get_batter_vs_pitch(batter_id, "SL")
+        slider_whiff = vs.get("whiff_pct", league_avg_whiff)
+    """
+    _load()
+    return _batter_vs_pitch.get((int(batter_id), pitch_type.upper()), {})
+
