@@ -104,6 +104,37 @@ _last_leaderboard_run: str | None = None
 # Uses Postgres so a Railway redeploy (new process) still sees today's dispatch.
 
 
+def _dispatch_already_ran_today() -> bool:
+    """Return True if dispatch already fired today (PT date in dispatch_date_log).
+    Called at the top of job_agents() to prevent multiple dispatches per day.
+    """
+    import psycopg2  # noqa: PLC0415
+    pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return False
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS dispatch_date_log (
+                dispatch_date DATE PRIMARY KEY
+            )
+        """)
+        conn.commit()
+        cur.execute(
+            "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s",
+            (pt_today,)
+        )
+        ran = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return ran
+    except Exception as exc:
+        logger.warning("[orchestrator] _dispatch_already_ran_today failed: %s", exc)
+        return False  # fail open — let it try to dispatch
+
+
 def _record_dispatch_ran_today() -> None:
     """Insert today's PT date into dispatch_date_log (no-op if already there).
     Cross-process guard: survives Railway restarts. If today is already present,
@@ -245,6 +276,16 @@ async def job_agents():
     loop = asyncio.get_event_loop()
 
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
+
+    # ── One-dispatch-per-day guard ────────────────────────────────────────────
+    # Prevents a second dispatch cycle from firing later in the window and
+    # sending contradictory directions (e.g. OVER after UNDER on same prop).
+    if _dispatch_already_ran_today():
+        logger.debug(
+            "[orchestrator] Dispatch already ran today (%s PT) — skipping cycle.",
+            _pt_ck.strftime("%H:%M"),
+        )
+        return
 
     # ── Dynamic dispatch window ───────────────────────────────────────────────
     # Open : 9:00 AM PT (props are posted, no games live yet)

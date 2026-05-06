@@ -5827,16 +5827,17 @@ def run_agent_tasklet() -> bool:
         # ── Cross-agent prop dedup ────────────────────────────────────────────
         # Prevents the same player+prop+side from being sent by multiple agents
         # in different 30s cycles (e.g. EVHunter at 8:33 AM, F5Agent at 1:56 PM).
-        # Key: prop_sent:{player}:{prop_type}:{side}:{date} — expires after 25h.
+        # Key: prop_sent:{player}:{prop_type}:{date} — direction-agnostic, expires after 25h.
+        # Intentionally drops {side} so that once any direction for a player+prop
+        # is sent today, no contradictory direction can fire in a later cycle.
         _prop_already_sent = False
         try:
             for _dup_leg in _parlay_legs:
                 _prop_key = (
                     f"prop_sent:{_dup_leg.get('player','').lower()}:"
                     f"{_dup_leg.get('prop_type','')}:"
-                    f"{_dup_leg.get('side','').upper()}:"
                     f"{today_str}"
-                )
+                )  # direction-agnostic: blocks opposite direction re-sends
                 if r_dedup.exists(_prop_key):
                     logger.info(
                         "[AgentTasklet] %s — %s %s %s already sent today by another agent. Skipping.",
@@ -6021,9 +6022,8 @@ def run_agent_tasklet() -> bool:
                     _pk = (
                         f"prop_sent:{_pl.get('player','').lower()}:"
                         f"{_pl.get('prop_type','')}:"
-                        f"{_pl.get('side','').upper()}:"
                         f"{today_str}"
-                    )
+                    )  # direction-agnostic key — matches check key above
                     r_dedup.set(_pk, agent_name, ex=_DAY_TTL)
             except Exception:
                 pass
