@@ -71,6 +71,8 @@ _baserunning_data:  dict[int, float] = {}
 _pitcher_statcast:  dict[int, dict]  = {}  # statcast_pitchers_2026.csv
 _batter_statcast:   dict[int, dict]  = {}  # statcast_batters_2026.csv
 _spin_direction:    dict[tuple, dict] = {}  # spin_direction_pitches_2026.csv keyed (player_id, api_pitch_type)
+_PITCHER_ARSENAL_RHP: dict[str, dict] = {}   # player_id → opponent-batter stats vs RHP
+_PITCHER_ARSENAL_LHP: dict[str, dict] = {}   # player_id → opponent-batter stats vs LHP
 
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
@@ -370,6 +372,28 @@ def _load() -> None:
                 "sweet_spot_against": _safe_float(r.get("sweet_spot_percent")),
             }
 
+        # ── Batter vs pitch type (batter_pitch_arsenal_2026.csv) ───
+        global _batter_vs_pitch
+        if not _batter_vs_pitch:
+            _bvp_path = _DATA / 'statcast' / 'batter_pitch_arsenal_2026.csv'
+            if _bvp_path.exists():
+                with open(_bvp_path, encoding='utf-8-sig', newline='') as f:
+                    for row in csv.DictReader(f):
+                        try:
+                            pid = int(row['player_id'])
+                            pt  = row['pitch_type'].strip().upper()
+                            _batter_vs_pitch[(pid, pt)] = {
+                                'woba':             float(row.get('woba') or 0),
+                                'xwoba':            float(row.get('est_woba') or 0),
+                                'whiff_pct':        float(row.get('whiff_percent') or 0),
+                                'k_pct':            float(row.get('k_percent') or 0),
+                                'hard_hit_pct':     float(row.get('hard_hit_percent') or 0),
+                                'put_away':         float(row.get('put_away') or 0),
+                                'run_value_per100': float(row.get('run_value_per_100') or 0),
+                            }
+                        except (ValueError, KeyError):
+                            continue
+
         # ── Spin direction / active spin (spin_direction_pitches_2026.csv) ───
         for r in _read_csv("spin_direction_pitches_2026.csv"):
             pid_s = r.get("player_id", "").strip()
@@ -399,6 +423,27 @@ def _load() -> None:
             len(_batter_fg_proj), len(_sprint_speed_data), len(_baserunning_data),
             len(_spin_direction),
         )
+
+        # ── Pitcher arsenal by handedness (RHP/LHP) ───────────────────────
+        for hand, fname, target in [
+            ("RHP", "pitcher_arsenal_rhp_2026.csv", _PITCHER_ARSENAL_RHP),
+            ("LHP", "pitcher_arsenal_lhp_2026.csv", _PITCHER_ARSENAL_LHP),
+        ]:
+            for r in _read_csv(fname):
+                pid = str(r.get("player_id", "")).strip()
+                if not pid:
+                    continue
+                target[pid] = {
+                    "k_pct": _sf(r.get("k_percent")),
+                    "woba_against": _sf(r.get("woba")),
+                    "hard_hit_against": _sf(r.get("hardhit_percent")),
+                    "barrel_pct_against": _sf(r.get("barrels_per_bbe_percent")),
+                    "whiff_pct": _sf(r.get("swing_miss_percent")),
+                    "arm_angle": _sf(r.get("arm_angle")),
+                    "pa": _sf(r.get("pa")),
+                    "name": r.get("player_name", ""),
+                }
+            logger.info("pitcher_arsenal_%s: %d pitchers loaded", hand, len(target))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -608,3 +653,48 @@ def get_pitcher_statcast(player_id: int) -> dict:
     """
     _load()
     return _pitcher_statcast.get(int(player_id), {})
+
+
+def get_batter_lhp_splits(batter_id: int | str) -> dict:
+    """Return 2026 season-to-date splits for this batter vs LHP.
+
+    Returns dict with woba_vs_lhp, k_pct_vs_lhp, whiff_pct_vs_lhp, or {} if unknown.
+    """
+    _ensure_loaded()
+    return _BATTER_VS_LHP.get(str(batter_id), {})
+
+
+def get_batter_pitch_vs_lhp(batter_id: int | str, pitch_type: str) -> dict:
+    """Return 2026 stats for batter vs specific pitch type thrown by LHP.
+
+    Returns dict with woba_vs_pitch, whiff_pct_vs_pitch, or {} if unknown.
+    """
+    _ensure_loaded()
+    return _BATTER_PITCH_VS_LHP.get((str(batter_id), pitch_type.upper()), {})
+
+
+def get_batter_vs_pitch(batter_id: int, pitch_type: str) -> dict:
+    """Return 2026 batter performance against a specific pitch type.
+
+    pitch_type: Savant abbreviation — FF, SL, CH, CU, ST, FC, SI, FS, SV, KN.
+    Returns dict with keys: woba, xwoba, whiff_pct, k_pct, hard_hit_pct,
+                            put_away, run_value_per100.
+    Returns {} if batter or pitch type not found.
+
+    Usage in batter_pitch_arsenal_layer:
+        vs = get_batter_vs_pitch(batter_id, "SL")
+        slider_whiff = vs.get("whiff_pct", league_avg_whiff)
+    """
+    _load()
+    return _batter_vs_pitch.get((int(batter_id), pitch_type.upper()), {})
+
+
+def get_pitcher_arsenal_vs_hand(pitcher_id: str | int, batter_hand: str) -> dict:
+    """Return pitcher stats vs given batter handedness (R/L).
+
+    Keys: k_pct, woba_against, hard_hit_against, barrel_pct_against, whiff_pct, arm_angle, pa
+    Returns empty dict if pitcher not found.
+    """
+    pid = str(pitcher_id)
+    target = _PITCHER_ARSENAL_RHP if batter_hand.upper() == "R" else _PITCHER_ARSENAL_LHP
+    return target.get(pid, {})
