@@ -283,7 +283,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 6
+MIN_CONFIDENCE    = 5   # prob-first scoring — 5 = model_prob ≥ 55%
 # MIN_PROB cold-start schedule:
 #   Apr 16 launch:  0.52  (cold-start — XGBoost not yet trained)
 #   Apr 20 retrain: bump to 0.57 manually after first successful retrain
@@ -2341,6 +2341,14 @@ def run_data_hub_tasklet() -> None:
         # Pass hub so Steamer can use DraftEdge as Tier 4 when FanGraphs/ScraperAPI fail
         _sc = _steamer_prefetch(hub=_hub_data if "_hub_data" in dir() else None)
 
+        # Pre-warm player_id_resolver static map (1400+ players, instant from CSV)
+        try:
+            from player_id_resolver import warm_static_map as _wsm  # noqa: PLC0415
+            _n = _wsm()
+            logger.info("[DataHub] player_id_resolver: %d players pre-loaded", _n)
+        except Exception as _pie:
+            logger.debug("[DataHub] player_id_resolver warm skipped: %s", _pie)
+
         # Pre-warm career stats cache for today's players (avoids 8s per-prop latency)
         # Background thread — doesn't block hub build
         try:
@@ -3270,7 +3278,7 @@ class _BaseAgent:
             "implied_prob": implied_prob,
             "side":        side,
             "prop_type":   prop.get("prop_type", ""),
-            "confidence":  self._confidence(ev_pct),
+            "confidence":  self._confidence(ev_pct, model_prob=model_prob),
             "spring_training": _is_spring_training(),
         })
         kelly = _kelly_units(model_prob / 100, side_odds)
@@ -3293,7 +3301,7 @@ class _BaseAgent:
             "kelly_units":        round(kelly, 3),
             "recommended_platform": platforms[0] if platforms else "PrizePicks",
             "checklist":          self._checklist(prop),
-            "confidence":         self._confidence(ev_pct),
+            "confidence":         self._confidence(ev_pct, model_prob=model_prob),
             "spring_training":    _is_spring_training(),
             "ts":                 datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "_features_json":     json.dumps(_feat_vec),
@@ -3343,16 +3351,53 @@ class _BaseAgent:
         }
 
     @staticmethod
-    def _confidence(ev_pct: float) -> int:
-        # ev_pct is stored as percentage (3–20 range) in _build_bet
-        # Thresholds calibrated so MIN_CONFIDENCE=6 passes picks with ≥3% EV
-        # (previously required ≥5% which blocked most agents below -115 odds)
-        if ev_pct >= 15: return 9
-        if ev_pct >= 10: return 8
-        if ev_pct >= 7:  return 7
-        if ev_pct >= 3:  return 6
-        if ev_pct >= 1:  return 5
-        return 4
+    def _confidence(ev_pct: float, model_prob: float = 0.0) -> int:
+        """
+        Confidence score (1–10) based primarily on model win probability,
+        with EV as a secondary signal confirming the edge is real.
+
+        Primary driver — model_prob (P(outcome wins) from sim + Poisson model):
+          ≥ 72%  → 9   (very high confidence)
+          ≥ 67%  → 8
+          ≥ 63%  → 7
+          ≥ 59%  → 6
+          ≥ 55%  → 5
+          < 55%  → 4   (fails MIN_CONFIDENCE=5 gate)
+
+        EV modifier (confirms market mispricing):
+          EV ≥ 10%  → +1  (strong market edge on top of probability)
+          EV 0–10%  →  0  (neutral — probability alone sufficient)
+          EV < 0%   → −1  (market disagrees — reduce confidence)
+
+        Why probability-first is better than EV-first:
+          EV = (prob × profit) − (1 − prob) × stake
+          When all props have ~54% prob (league-avg fallback), EV≈0 for everyone.
+          Gating on EV hides whether the simulation has real signal.
+          Gating on prob directly exposes when the model has genuine conviction.
+        """
+        if model_prob <= 0.0:
+            # Legacy: fall back to EV-only scoring when model_prob not supplied
+            if ev_pct >= 15: return 9
+            if ev_pct >= 10: return 8
+            if ev_pct >= 7:  return 7
+            if ev_pct >= 3:  return 6
+            if ev_pct >= 1:  return 5
+            return 4
+
+        # Primary: probability-based score
+        if   model_prob >= 72: base = 9
+        elif model_prob >= 67: base = 8
+        elif model_prob >= 63: base = 7
+        elif model_prob >= 59: base = 6
+        elif model_prob >= 55: base = 5
+        else:                  base = 4
+
+        # Secondary: EV modifier (±1)
+        if   ev_pct >= 10: ev_mod =  1
+        elif ev_pct >= 0:  ev_mod =  0
+        else:              ev_mod = -1
+
+        return min(10, max(1, base + ev_mod))
 
 
 class _EVHunter(_BaseAgent):
@@ -4516,16 +4561,15 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
             "total_bases":       "batter_total_bases",
             "strikeouts":        "pitcher_strikeouts",
             "earned_runs":       "pitcher_earned_runs",
-            # these two were missing — caused sharp_prob to always be None
-            # for pitching outs and hitter strikeout props
             "pitching_outs":     "pitcher_outs",
             "hitter_strikeouts": "batter_strikeouts",
             "hits_allowed":      "pitcher_hits_allowed",
+            "hits_runs_rbis":    "batter_hits",  # no combined market exists; use hits as proxy
+            "walks_allowed":     "pitcher_walks",
         }
         market_key = _PT_TO_MARKET.get(prop_type, prop_type)
 
-        # Direct full-name lookup — try both "Over" (Odds API) and "over" (DraftEdge)
-        # Try internal prop_type first, then mapped market key
+        # Direct full-name lookup
         ref = (
             reference.get((player_norm, prop_type, "Over"))
             or reference.get((player_norm, prop_type, "over"))
@@ -4534,6 +4578,33 @@ def _get_sharp_consensus(hub: dict, player: str, prop_type: str) -> float | None
         )
         if ref:
             return round(ref["sb_implied_prob"] * 100.0, 2)
+
+        # hits_runs_rbis special case: no single-market coverage.
+        # Synthesize from component parts: P(H+R+RBI ≥ 1) ≈ 1 − P(0 hits) × P(0 runs) × P(0 rbis)
+        # which simplifies to using the hits proxy with a fixed bonus for runs/rbis correlation.
+        if prop_type == "hits_runs_rbis":
+            _hits_ref = (
+                reference.get((player_norm, "batter_hits",         "Over"))
+                or reference.get((player_norm, "batter_hits",      "over"))
+            )
+            _runs_ref = (
+                reference.get((player_norm, "batter_runs_scored",  "Over"))
+                or reference.get((player_norm, "batter_runs_scored","over"))
+            )
+            _rbis_ref = (
+                reference.get((player_norm, "batter_rbis",         "Over"))
+                or reference.get((player_norm, "batter_rbis",      "over"))
+            )
+            # If any component found, synthesize: P(H+R+RBI ≥ 1) is always > P(hits ≥ 1)
+            # Conservative boost: +8pp over hits probability
+            if _hits_ref:
+                _base_p = float(_hits_ref["sb_implied_prob"])
+                _boost  = 0.08  # runs and RBIs add ~8pp above hit probability
+                return round(min(_base_p + _boost, 0.95) * 100.0, 2)
+            # Fall back to highest available component
+            for _cr in (_runs_ref, _rbis_ref):
+                if _cr:
+                    return round(min(float(_cr["sb_implied_prob"]) + 0.12, 0.95) * 100.0, 2)
 
         # Last-name fallback: scan for any entry where last token matches
         parts = player_norm.split()
@@ -5828,8 +5899,8 @@ def run_agent_tasklet() -> bool:
         # Prevents the same player+prop+side from being sent by multiple agents
         # in different 30s cycles (e.g. EVHunter at 8:33 AM, F5Agent at 1:56 PM).
         # Key: prop_sent:{player}:{prop_type}:{date} — direction-agnostic, expires after 25h.
-        # Intentionally drops {side} so that once any direction for a player+prop
-        # is sent today, no contradictory direction can fire in a later cycle.
+        # Dropping {side} prevents the same prop being sent OVER by one agent and UNDER
+        # by another agent in the same day (opposite-direction conflict).
         _prop_already_sent = False
         try:
             for _dup_leg in _parlay_legs:
@@ -5837,7 +5908,7 @@ def run_agent_tasklet() -> bool:
                     f"prop_sent:{_dup_leg.get('player','').lower()}:"
                     f"{_dup_leg.get('prop_type','')}:"
                     f"{today_str}"
-                )  # direction-agnostic: blocks opposite direction re-sends
+                )
                 if r_dedup.exists(_prop_key):
                     logger.info(
                         "[AgentTasklet] %s — %s %s %s already sent today by another agent. Skipping.",
@@ -6023,7 +6094,7 @@ def run_agent_tasklet() -> bool:
                         f"prop_sent:{_pl.get('player','').lower()}:"
                         f"{_pl.get('prop_type','')}:"
                         f"{today_str}"
-                    )  # direction-agnostic key — matches check key above
+                    )  # direction-agnostic — matches check key above
                     r_dedup.set(_pk, agent_name, ex=_DAY_TTL)
             except Exception:
                 pass
