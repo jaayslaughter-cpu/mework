@@ -631,6 +631,25 @@ def get_pitcher_statcast(player_id: int) -> dict:
     _load()
     return _pitcher_statcast.get(int(player_id), {})
 
+
+def get_batter_lhp_splits(batter_id: int | str) -> dict:
+    """Return 2026 season-to-date splits for this batter vs LHP.
+
+    Returns dict with woba_vs_lhp, k_pct_vs_lhp, whiff_pct_vs_lhp, or {} if unknown.
+    """
+    _ensure_loaded()
+    return _BATTER_VS_LHP.get(str(batter_id), {})
+
+
+def get_batter_pitch_vs_lhp(batter_id: int | str, pitch_type: str) -> dict:
+    """Return 2026 stats for batter vs specific pitch type thrown by LHP.
+
+    Returns dict with woba_vs_pitch, whiff_pct_vs_pitch, or {} if unknown.
+    """
+    _ensure_loaded()
+    return _BATTER_PITCH_VS_LHP.get((str(batter_id), pitch_type.upper()), {})
+
+
 def get_batter_vs_pitch(batter_id: int, pitch_type: str) -> dict:
     """Return 2026 batter performance against a specific pitch type.
 
