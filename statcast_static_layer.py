@@ -68,6 +68,9 @@ _batter_fg_proj:    dict[str, dict] = {}  # keyed by normalized name
 _sprint_speed_data: dict[int, dict] = {}
 _baserunning_data:  dict[int, float] = {}
 
+_pitcher_statcast:  dict[int, dict]  = {}  # statcast_pitchers_2026.csv
+_batter_statcast:   dict[int, dict]  = {}  # statcast_batters_2026.csv
+
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
     try:
@@ -322,6 +325,50 @@ def _load() -> None:
             if rv is not None:
                 _baserunning_data[pid] = rv
 
+        # ── Batter combined Statcast (statcast_batters_2026.csv) ──────────────
+        for r in _read_csv("statcast_batters_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _batter_statcast[pid] = {
+                "k_pct":           _safe_float(r.get("k_percent")),
+                "bb_pct":          _safe_float(r.get("bb_percent")),
+                "woba":            _safe_float(r.get("woba")),
+                "xwoba":           _safe_float(r.get("xwoba")),
+                "sweet_spot_pct":  _safe_float(r.get("sweet_spot_percent")),
+                "barrel_pct":      _safe_float(r.get("barrel_batted_rate")),
+                "hard_hit_pct":    _safe_float(r.get("hard_hit_percent")),
+                "bat_speed_best":  _safe_float(r.get("avg_best_speed")),
+                "bat_speed_hyper": _safe_float(r.get("avg_hyper_speed")),
+                "whiff_pct":       _safe_float(r.get("whiff_percent")),
+                "swing_pct":       _safe_float(r.get("swing_percent")),
+            }
+
+        # ── Pitcher combined Statcast (statcast_pitchers_2026.csv) ────────────
+        for r in _read_csv("statcast_pitchers_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _pitcher_statcast[pid] = {
+                "k_pct":              _safe_float(r.get("k_percent")),
+                "bb_pct":             _safe_float(r.get("bb_percent")),
+                "woba_against":       _safe_float(r.get("woba")),
+                "xwoba_against":      _safe_float(r.get("xwoba")),
+                "barrel_against_pct": _safe_float(r.get("barrel_batted_rate")),
+                "hard_hit_against":   _safe_float(r.get("hard_hit_percent")),
+                "whiff_pct":          _safe_float(r.get("whiff_percent")),
+                "swing_pct":          _safe_float(r.get("swing_percent")),
+                "sweet_spot_against": _safe_float(r.get("sweet_spot_percent")),
+            }
+
         _loaded = True
         logger.info(
             "[StatcastStatic] Loaded: %d pitcher K rates, %d pitcher xERAs, "
@@ -336,9 +383,18 @@ def _load() -> None:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_pitcher_k_rate(player_id: int) -> float | None:
-    """Weighted K% across pitcher's 2026 arsenal. Returns decimal (e.g. 0.283)."""
+    """Pitcher K% for 2026.
+
+    Tier 1: statcast_pitchers_2026.csv actual K% (direct measurement).
+    Tier 2: arsenal-weighted K% from pitch-arsenal-stats-pitchers.csv.
+    Returns decimal (e.g. 0.283 = 28.3% K rate).
+    """
     _load()
-    return _pitcher_k_rate.get(int(player_id))
+    pid = int(player_id)
+    sc = _pitcher_statcast.get(pid, {})
+    if sc.get("k_pct") is not None:
+        return round(sc["k_pct"] / 100.0, 4)
+    return _pitcher_k_rate.get(pid)
 
 
 def get_pitcher_whiff_rate(player_id: int) -> float | None:
@@ -360,9 +416,18 @@ def get_pitcher_arsenal(player_id: int) -> dict:
 
 
 def get_batter_k_susceptibility(player_id: int) -> float | None:
-    """Batter's whiff_per_swing from bat tracking. Higher = more K-prone."""
+    """Batter K-susceptibility. Higher = more K-prone.
+
+    Tier 1: statcast_batters_2026.csv whiff% (overall swing whiff rate).
+    Tier 2: bat-tracking.csv whiff_per_swing.
+    Returns decimal (e.g. 0.26 = 26% whiff rate).
+    """
     _load()
-    bt = _batter_tracking.get(int(player_id), {})
+    pid = int(player_id)
+    sc = _batter_statcast.get(pid, {})
+    if sc.get("whiff_pct") is not None:
+        return round(sc["whiff_pct"] / 100.0, 4)
+    bt = _batter_tracking.get(pid, {})
     return bt.get("whiff_per_swing")
 
 
@@ -472,3 +537,24 @@ def get_batter_baserunning(player_id: int) -> float | None:
     """
     _load()
     return _baserunning_data.get(player_id)
+
+def get_batter_statcast(player_id: int) -> dict:
+    """Full 2026 Statcast combined stats for a batter.
+
+    Keys: k_pct, bb_pct, woba, xwoba, sweet_spot_pct, barrel_pct,
+          hard_hit_pct, bat_speed_best, bat_speed_hyper, whiff_pct, swing_pct.
+    Percentages are raw % (e.g. 21.4 means 21.4%). Returns {} if not found.
+    """
+    _load()
+    return _batter_statcast.get(int(player_id), {})
+
+
+def get_pitcher_statcast(player_id: int) -> dict:
+    """Full 2026 Statcast combined stats for a pitcher.
+
+    Keys: k_pct, bb_pct, woba_against, xwoba_against, barrel_against_pct,
+          hard_hit_against, whiff_pct, swing_pct, sweet_spot_against.
+    k_pct is raw % (e.g. 28.3 = 28.3% K rate). Returns {} if not found.
+    """
+    _load()
+    return _pitcher_statcast.get(int(player_id), {})
