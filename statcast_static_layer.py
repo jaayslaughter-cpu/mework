@@ -70,6 +70,7 @@ _baserunning_data:  dict[int, float] = {}
 
 _pitcher_statcast:  dict[int, dict]  = {}  # statcast_pitchers_2026.csv
 _batter_statcast:   dict[int, dict]  = {}  # statcast_batters_2026.csv
+_spin_direction:    dict[tuple, dict] = {}  # spin_direction_pitches_2026.csv keyed (player_id, api_pitch_type)
 
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
@@ -369,14 +370,34 @@ def _load() -> None:
                 "sweet_spot_against": _safe_float(r.get("sweet_spot_percent")),
             }
 
+        # ── Spin direction / active spin (spin_direction_pitches_2026.csv) ───
+        for r in _read_csv("spin_direction_pitches_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            pt    = r.get("api_pitch_type", "").strip()
+            if not pid_s or not pt:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _spin_direction[(pid, pt)] = {
+                "active_spin_pct":  _safe_float(r.get("alan_active_spin_pct")),
+                "clock_label":       r.get("hawkeye_measured_clock_label", "").strip(),
+                "movement_inches":  _safe_float(r.get("movement_inches")),
+                "spin_rate":        _safe_float(r.get("spin_rate")),
+                "release_speed":    _safe_float(r.get("release_speed")),
+                "n_pitches":        _safe_float(r.get("n_pitches")),
+            }
+
         _loaded = True
         logger.info(
             "[StatcastStatic] Loaded: %d pitcher K rates, %d pitcher xERAs, "
             "%d batter tracking, %d batter EV, %d batter xStats, "
-            "%d FG proj, %d sprint, %d baserunning",
+            "%d FG proj, %d sprint, %d baserunning, %d spin-dir entries",
             len(_pitcher_k_rate), len(_pitcher_xera),
             len(_batter_tracking), len(_batter_ev), len(_batter_xstats),
             len(_batter_fg_proj), len(_sprint_speed_data), len(_baserunning_data),
+            len(_spin_direction),
         )
 
 
@@ -413,6 +434,35 @@ def get_pitcher_arsenal(player_id: int) -> dict:
     """Full arsenal breakdown: {pitch_type: {usage, k_pct, whiff_pct, rv100, put_away, hard_hit_pct}}."""
     _load()
     return _pitcher_arsenal.get(int(player_id), {})
+
+
+def get_pitcher_active_spin(player_id: int, pitch_type: str) -> dict:
+    """Active spin / spin direction for a pitcher's specific pitch type.
+
+    Args:
+        player_id: MLBAM player ID
+        pitch_type: Savant pitch type code (e.g. 'FF', 'SL', 'CH')
+
+    Returns dict with:
+        active_spin_pct  – fraction of spin that is "active" (0.0–1.0)
+        clock_label      – spin axis as clock position (e.g. '12:00', '1:30')
+        movement_inches  – total movement in inches
+        spin_rate        – average spin rate (RPM)
+        release_speed    – average velocity (mph)
+    Returns {} if not found.
+    """
+    _load()
+    return _spin_direction.get((int(player_id), pitch_type.upper()), {})
+
+
+def get_pitcher_spin_profile(player_id: int) -> dict[str, dict]:
+    """All spin direction entries for a pitcher, keyed by pitch_type code.
+
+    Returns {} if not found.
+    """
+    _load()
+    pid = int(player_id)
+    return {pt: data for (p, pt), data in _spin_direction.items() if p == pid}
 
 
 def get_batter_k_susceptibility(player_id: int) -> float | None:
