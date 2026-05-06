@@ -462,6 +462,26 @@ async def job_predict_plus_prefetch():
     except Exception as exc:
         logger.warning("[PredictPlus] Prefetch failed (non-fatal): %s", exc)
 
+    # ── Batter pitch-type vulnerability cache warm ────────────────────────────
+    # Fetches how each batter performs vs each pitch type (whiff%, K%) from
+    # pybaseball.statcast_batter_pitch_arsenal(2026) — 12h Redis cache.
+    try:
+        from batter_pitch_arsenal_layer import prefetch as _bpv_prefetch  # noqa: PLC0415
+        _bpv_prefetch()
+        logger.info("[PredictPlus] Batter pitch-type vulnerability cache warmed.")
+    except Exception as exc:
+        logger.debug("[PredictPlus] BPV prefetch failed (non-fatal): %s", exc)
+
+    # ── Defense OAA cache warm ────────────────────────────────────────────────
+    # Fetches outfield Outs Above Average (LF+CF+RF) from
+    # pybaseball.statcast_outs_above_average(2026) — 12h Redis cache.
+    try:
+        from defense_layer import prefetch as _def_prefetch  # noqa: PLC0415
+        _def_prefetch()
+        logger.info("[PredictPlus] Defense OAA cache warmed.")
+    except Exception as exc:
+        logger.debug("[PredictPlus] Defense OAA prefetch failed (non-fatal): %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
