@@ -128,7 +128,7 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN    = 6.0    # PR #429: lowered from 7.0 — max achievable at prob=0.62 is ~6.71,
+STREAK_CONF_MIN    = 6.0   # prob-first: 6.0 = model_prob ≥ 59%    # PR #429: was 7.0; per directive must be 6.0
                             # so 7.0 was mathematically impossible (no picks could ever fire).
                             # Do NOT raise above 6.0 until 200+ real graded legs with features_json
                             # AND post-retrain Brier < 0.20 in xgb_model_store.
@@ -285,29 +285,34 @@ def _is_game_prop(prop_type: str, line: float) -> bool:
 
 def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
     """
-    Single-leg Streaks confidence  (1.0 – 10.0).
+    Single-leg Streaks confidence (1.0 – 10.0).
+    Primary driver: model win probability (P(outcome wins)).
+    Secondary: EV confirms edge, signal_count confirms agent consensus.
 
-    Formula (CURRENT):
-      prob_score    = min((prob - 0.50) / 0.35 × 5.0, 5.0)   → 0–5 over 50%–85%
-      ev_bonus      = min(ev_pct / 10.0 × 3.0, 3.0)           → 0–3 for 0%–10% EV
-      signal_bonus  = min(signal_count × 0.2, 2.0)             → 0–2 for 0–10 agents
-      max = 10.0,  gate = STREAK_CONF_MIN = 6.0
-
-    Gate achievable at prob=0.62, ev=24%, signals≥0:
-      prob_score=1.71, ev_bonus=3.0, signal_bonus≥0 → conf≥4.71 (needs signals≥7 to reach 6.0)
-    Easiest qualifiers: hits_runs_rbis Over 0.5 (prob=0.78, 12 signals → conf=9.0)
+    prob       — model_prob / 100 (0-1 scale)
+    ev_pct     — EV as percentage (e.g. 15.9 for 15.9%)
+    signal_count — number of agents agreeing on this pick
     """
-    # Prob contribution capped at 5 — prevents high base-rate props (82% hits_runs_rbis 0.5)
-    # from dominating the score. Genuine edge (EV + agent signals) carries more weight.
-    prob_score   = min((prob - 0.50) / 0.35 * 5.0, 5.0)   # was 0.30/7.0, uncapped
-    ev_bonus     = min(ev_pct / 10.0 * 3.0, 3.0)           # was /15 × 2; more EV weight
-    signal_bonus = min(signal_count * 0.2, 2.0)             # was × 0.1 cap 1.0; more signal weight
-    return round(min(10.0, max(1.0, prob_score + ev_bonus + signal_bonus)), 1)
+    prob_pct = prob * 100
 
+    # Base score from win probability
+    if   prob_pct >= 72: base = 9.0
+    elif prob_pct >= 67: base = 8.0
+    elif prob_pct >= 63: base = 7.0
+    elif prob_pct >= 59: base = 6.0
+    elif prob_pct >= 55: base = 5.0
+    else:                base = 3.0
 
-# ---------------------------------------------------------------------------
-# Underdog prop fetch with team enrichment
-# ---------------------------------------------------------------------------
+    # EV modifier: confirms model probability is real edge
+    if   ev_pct >= 10: ev_mod = 1.0
+    elif ev_pct >= 0:  ev_mod = 0.0
+    else:              ev_mod = -1.0
+
+    # Signal bonus: agent consensus adds up to +1
+    sig_bonus = min(signal_count * 0.1, 1.0)
+
+    return round(min(10.0, max(1.0, base + ev_mod + sig_bonus)), 1)
+
 
 def fetch_underdog_props_with_teams() -> list[dict]:
     """
