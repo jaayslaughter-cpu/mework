@@ -405,69 +405,6 @@ def _compute_predict_plus_ratio(feature_rows: list[dict]) -> float | None:
 # PredictPlusLayer class
 # ---------------------------------------------------------------------------
 
-
-# ---------------------------------------------------------------------------
-# PredictPlus GitHub CSV reader — reads pre-computed deception_plus scores
-# from comcgovern/PredictPlus repo (daily at 7AM UTC)
-# Format: output/{year}/{month_name}/{day_2digit}.csv
-# Columns: pitcher_id, pitcher_name, role, deception_plus, status, ...
-# ---------------------------------------------------------------------------
-
-_PP_GITHUB_BASE = "https://raw.githubusercontent.com/comcgovern/PredictPlus/main/output"
-
-def _load_pp_github_csv(date_offset_days: int = 1) -> dict[str, float]:
-    """
-    Load pre-computed Deception+ scores from PredictPlus GitHub repo.
-    date_offset_days=1 → yesterday (default, workflow runs at 7AM UTC)
-    date_offset_days=2 → two days ago (fallback)
-    Returns {str(mlbam_id): deception_plus_score} or empty dict.
-    """
-    try:
-        import datetime
-        import urllib.request
-        target = datetime.date.today() - datetime.timedelta(days=date_offset_days)
-        year   = target.year
-        month  = target.strftime("%B").lower()   # "april", "may", etc.
-        day    = target.strftime("%d")            # "04", "30"
-        url    = f"{_PP_GITHUB_BASE}/{year}/{month}/{day}.csv"
-        req = urllib.request.Request(url, headers={"User-Agent": "PropIQ/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            if r.status != 200:
-                return {}
-            content = r.read().decode("utf-8")
-        # Parse CSV
-        import csv, io
-        reader = csv.DictReader(io.StringIO(content))
-        scores: dict[str, float] = {}
-        for row in reader:
-            status = (row.get("status") or "").strip()
-            if status != "evaluated":
-                continue
-            pid   = str(row.get("pitcher_id", "")).strip()
-            score = row.get("deception_plus", "")
-            if pid and score not in ("", "NA", None):
-                try:
-                    scores[pid] = round(float(score), 1)
-                except (ValueError, TypeError):
-                    pass
-        logger.info(
-            "[PredictPlus] GitHub CSV %s/%s/%s → %d pitchers",
-            year, month, day, len(scores)
-        )
-        return scores
-    except Exception as exc:
-        logger.debug("[PredictPlus] GitHub CSV load failed (offset=%d): %s", date_offset_days, exc)
-        return {}
-
-
-def _load_pp_scores_from_github() -> dict[str, float]:
-    """Try today-1, then today-2, then return empty."""
-    scores = _load_pp_github_csv(1)
-    if not scores:
-        scores = _load_pp_github_csv(2)
-    return scores
-
-
 class PredictPlusLayer:
     """
     Compute and serve Predict+ scores for today's starting pitchers.
@@ -547,35 +484,13 @@ class PredictPlusLayer:
     def prefetch(self, pitcher_ids: list[tuple[int, str]]) -> None:
         """
         Pre-compute Predict+ scores for a list of (mlbam_id, player_name) tuples.
-        Primary: reads pre-computed Deception+ CSV from comcgovern/PredictPlus GitHub repo.
-        Fallback: fetches Statcast pitch data and computes locally (expensive).
         Uses weekly cache; only computes for uncached pitchers.
+
+        Uses the prior full season (season - 1) for training — current season
+        may have too few pitches early in the year.
         """
         if not self._loaded:
             self._load_cache()
-
-        # ── Primary: load pre-computed scores from PredictPlus GitHub repo ─────
-        # Covers 90+ pitchers daily, no Savant fetches needed for those pitchers.
-        if not self._cache:
-            gh_scores = _load_pp_scores_from_github()
-            if gh_scores:
-                self._cache.update(gh_scores)
-                self._loaded = True
-                self._save_cache()
-                logger.info(
-                    "[PredictPlus] Loaded %d scores from GitHub repo", len(gh_scores)
-                )
-        else:
-            # Also try to refresh from GitHub for any new pitchers
-            gh_scores = _load_pp_scores_from_github()
-            if gh_scores:
-                new_pids = [k for k in gh_scores if k not in self._cache]
-                if new_pids:
-                    self._cache.update(gh_scores)
-                    self._save_cache()
-                    logger.info(
-                        "[PredictPlus] GitHub refresh: +%d new pitchers", len(new_pids)
-                    )
 
         missing = [
             (mid, name) for mid, name in pitcher_ids
@@ -583,7 +498,7 @@ class PredictPlusLayer:
         ]
         if not missing:
             logger.info(
-                "[PredictPlus] All %d pitchers in cache (GitHub CSV).", len(pitcher_ids)
+                "[PredictPlus] All %d pitchers already in cache.", len(pitcher_ids)
             )
             return
 

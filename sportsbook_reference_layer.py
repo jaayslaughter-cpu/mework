@@ -938,32 +938,6 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
             ]
             _pg_save(date_int, flat)
 
-    # ── odds-api.net fallback — Tier 1.5b (bet365 + betr MLB player props) ─────
-    # Fires when OddsAPI quota exhausted AND PropOdds key not set.
-    # Free key at odds-api.net → set ODDS_API_NET_KEY in Railway.
-    # Coverage: pitcher_strikeouts, hits, hits_allowed, total_bases, hits_runs_rbis.
-    if not _mem_ref:
-        try:
-            _oan_key = os.getenv("ODDS_API_NET_KEY", "")
-            if _oan_key:
-                from odds_api_net_layer import fetch_mlb_props as _oan_fetch  # noqa: PLC0415
-                _oan_raw = _oan_fetch(date_int)
-                if _oan_raw:
-                    _oan_ref: dict = {}
-                    for (pn, pt, sd), v in _oan_raw.items():
-                        _oan_ref[(pn, pt, sd)] = {
-                            "sharp_prob": v["sharp_prob"],
-                            "no_vig_prob": v["sharp_prob"],  # already de-vigged per-side
-                            "line":       v.get("line", 0.5),
-                            "bookmaker":  v.get("bookmaker", "odds_api_net"),
-                            "source":     "odds_api_net",
-                        }
-                    _mem_ref = _oan_ref
-                    _file_save(date_int, _oan_ref)
-                    log.info("[SBRef] odds-api.net fallback: %d entries (bet365+betr)", len(_oan_ref))
-        except Exception as _oan_err:
-            log.debug("[SBRef] odds-api.net fallback failed: %s", _oan_err)
-
     # ── Covers.com fallback — Tier 3 (after Pinnacle direct, before DraftEdge) ─
     # Covers aggregates DK/FD/BetMGM/Caesars lines pre-game and also provides
     # THE BAT X projections. Covers only covers props during the pre-game window;

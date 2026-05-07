@@ -386,8 +386,6 @@ def _get_mlbapi_batter_splits(player_id: int | None, pitcher_hand: str) -> dict:
                 babip = round(float(s.get("babip", 0) or avg), 3)
                 iso  = round(slg - avg, 3) if slg > avg else 0.156
                 # Linear weights approximation (2026 league: wOBA=0.308, OBP=0.317, SLG=0.407)
-                # wOBA ≈ lgwOBA + 1.2×(OBP − lgOBP) + 0.5×(SLG − lgSLG)
-                # Coefficients from wOBA linear weight structure — much more accurate than OBP*0.9+SLG*0.1
                 woba = round(0.308 + 1.2 * (obp - 0.317) + 0.5 * (slg - 0.407), 3)
                 woba = max(0.200, min(0.450, woba))  # sane range
                 k_pct  = round(so / pa, 4)
@@ -805,8 +803,6 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
         if wrc < 1.0 and woba < 0.01:
             return None
         # League avg H+R+RBI Over 3.5 ≈ 55%.
-        # PR #421 FIX: raised coefficients (0.08→0.12 wRC+, 0.05→0.08 wOBA)
-        # and ceiling (0.78→0.82) so elite hitters (wRC+ 150, wOBA .380) reach ~70%
         base = 0.55
         if wrc > 80:
             base += (wrc - 100.0) / 100.0 * 0.12   # ±12pp per 100 wRC+
@@ -913,17 +909,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     # so we defer to after the lookup maps are built.
     p2team, p2opp, p2mlbam, p2hand = _build_lookup_maps(hub)
 
-    # Build opposing pitcher ID map for batter pitch-type vulnerability
-    _team_to_pitcher_id: dict[str, int] = {}
-    for _sp in hub.get("context", {}).get("projected_starters", []):
-        _sp_team = _sp.get("team", "")
-        _sp_pid  = _sp.get("player_id")
-        if _sp_team and _sp_pid:
-            try:
-                _team_to_pitcher_id[_sp_team] = int(_sp_pid)
-            except (ValueError, TypeError):
-                pass
-
     # ── Pre-attach mlbam_ids so statcast can batch-fetch ──────────────────────
     for _p in props:
         _pn = _norm(_p.get("player", ""))
@@ -960,6 +945,26 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         prop_type = prop.get("prop_type", "")
         line      = float(prop.get("line", 1.5) or 1.5)
         pn        = _norm(player)
+
+        # ── Resolve MLBAM player_id for ANY named player ──────────────────────
+        # p2mlbam only covers today's confirmed lineups (~64 players).
+        # player_id_resolver covers 1400+ active players via Statcast CSV map,
+        # with MLB Stats API fallback for anyone not in the static map.
+        # Without this: every player not in today's confirmed lineup gets
+        # player_id=None → every data tier returns {} → league average stats.
+        if not (prop.get("player_id") or prop.get("mlbam_id") or p2mlbam.get(pn)):
+            try:
+                from player_id_resolver import resolve_player_id as _rpid  # noqa: PLC0415
+                _resolved_id = _rpid(player, use_api=True)
+                if _resolved_id:
+                    prop["player_id"] = _resolved_id
+                    prop["mlbam_id"]  = _resolved_id
+            except Exception:
+                pass
+        # Merge p2mlbam into prop if not already set
+        if not prop.get("player_id") and p2mlbam.get(pn):
+            prop["player_id"] = p2mlbam[pn]
+            prop["mlbam_id"]  = p2mlbam[pn]
 
         # ── ABS (Automated Ball-Strike) adjustments — 2026 structural shift ────
         try:
@@ -1377,10 +1382,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         except Exception as _rw_err:
             logger.debug("[Enrichment] Rolling window skipped: %s", _rw_err)
 
-        # ── Batter pitch-type vulnerability (hitter_strikeouts only) ─────────────
-        # Computes logit-space K adjustment based on how THIS batter performs vs
-        # each of the opposing pitcher's pitch types (whiff% weighted by pitch usage).
-        # Source: pybaseball.statcast_batter_pitch_arsenal — 12h Redis cache.
+        # ── Batter pitch-type vulnerability (hitter_strikeouts) ──────────────────
         if prop_type == "hitter_strikeouts":
             _b_id  = prop.get("player_id") or prop.get("mlbam_id")
             _opp_t = prop.get("opposing_team", "")
@@ -1389,17 +1391,10 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 try:
                     from batter_pitch_arsenal_layer import get_batter_pitch_vulnerability as _bpv  # noqa: PLC0415
                     prop["_bpv_adj"] = round(_bpv(int(_b_id), int(_p_id)), 4)
-                    logger.debug(
-                        "[Enrichment] BPV %s vs pitcher %d → adj=%+.4f",
-                        player, _p_id, prop["_bpv_adj"],
-                    )
                 except Exception as _bpv_err:
                     logger.debug("[Enrichment] BPV skipped for %s: %s", player, _bpv_err)
 
-        # ── Defense OAA stamp (batter props) ──────────────────────────────────────
-        # Stamps _defense_oaa: ±1.5pp based on opposing outfield Outs Above Average.
-        # Bad outfield (OAA −10) → +1.5pp for hitters. Good outfield (+10) → −1.5pp.
-        # Source: pybaseball.statcast_outs_above_average — 12h Redis cache.
+        # ── Defense OAA (batter props) ─────────────────────────────────────────
         if is_batter_prop:
             try:
                 from defense_layer import stamp_defense_on_prop as _stamp_def  # noqa: PLC0415

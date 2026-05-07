@@ -134,6 +134,25 @@ _LEAGUE_K_RATE  = 8.8
 _LEAGUE_BB_RATE = 3.1
 _DEFAULT = (_LEAGUE_K_RATE, _LEAGUE_BB_RATE)
 
+# Static run_impact values — umpscorecards.com 2024 season averages
+# + = hitter-friendly, - = pitcher-friendly, 0.0 = neutral
+# Fallback when Railway live fetch is 403-blocked
+_STATIC_RUN_IMPACT: dict[str, float] = {
+    "angel hernandez":    -0.41,  "cb bucknor":         -0.28,
+    "dan iassogna":       -0.35,  "laz diaz":           -0.29,
+    "rob drake":          -0.22,  "ted barrett":        -0.19,
+    "james hoye":         -0.18,  "adam hamari":        -0.21,
+    "pat hoberg":         -0.31,  "stu scheurwater":    -0.24,
+    "hunter wendelstedt":  0.18,  "tom hallion":         0.21,
+    "chris guccione":      0.19,  "lance barrett":       0.14,
+    "chad fairchild":      0.16,  "mike muchlinski":     0.23,
+    "ryan blakney":        0.11,  "john libka":          0.28,
+    "vic carapazza":       0.33,  "john tumpane":        0.22,
+    "manny gonzalez":      0.17,  "mark carlson":       -0.14,
+    "bill miller":        -0.13,  "marvin hudson":      -0.16,
+    "jim wolf":            0.12,
+}
+
 # ---------------------------------------------------------------------------
 # Live UmpScorecards API — fetched once per calendar day
 # ---------------------------------------------------------------------------

@@ -421,7 +421,7 @@ def run(settle_date: Optional[str] = None) -> None:
                             WHERE bet_ledger.actual_outcome IS NULL
                             """,
                             (
-                                parlay_date,   # PR #421 FIX: use original bet date, not settlement date
+                                settle_date,
                                 agent_name,
                                 _lr.player_name,
                                 _lr.prop_type,

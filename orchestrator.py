@@ -27,9 +27,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from bug_checker import run_bug_checker
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 
 from tasklets import (
     run_data_hub_tasklet, read_hub,
@@ -59,6 +59,9 @@ except ImportError:
         raise NotImplementedError("monthly_leaderboard module not available")
 
 # ── Railway-compatible JSON log formatter ─────────────────────────────────────
+# Railway reads structured JSON from stdout and maps the "level" field to its
+# severity filter. Plain-text output causes Railway to tag every line as "error"
+# regardless of actual Python log level, breaking severity-based filtering.
 import json as _json_log
 class _RailwayFormatter(logging.Formatter):
     _LEVEL_MAP = {
@@ -86,9 +89,9 @@ logger = logging.getLogger("propiq.orchestrator")
 scheduler = AsyncIOScheduler(
     timezone="America/Los_Angeles",
     job_defaults={
-        "coalesce": True,
-        "misfire_grace_time": 30,
-        "max_instances": 1,
+        "coalesce": True,          # if a job is missed N times, fire it once not N times
+        "misfire_grace_time": 30,  # skip a job run if the scheduler is more than 30s late
+        "max_instances": 1,        # never run the same job concurrently
     },
 )
 
@@ -98,17 +101,16 @@ _last_leaderboard_run: str | None = None
 
 
 # ── Cross-process dispatch dedup ──────────────────────────────────────────────
+# Uses Postgres so a Railway redeploy (new process) still sees today's dispatch.
+
 
 def _record_dispatch_ran_today() -> None:
-    import psycopg2
+    """Insert today's PT date into dispatch_date_log (no-op if already there).
+    Cross-process guard: survives Railway restarts. If today is already present,
+    job_agents() post-window check will skip re-dispatch.
+    """
+    import psycopg2  # noqa: PLC0415
     pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
-    today_str = pt_today.isoformat()
-    try:
-        from tasklets import _redis as _tredis
-        _r = _tredis()
-        _r.set(f"dispatch_ran:{today_str}", "1", ex=28 * 3600)
-    except Exception:
-        pass
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
         return
@@ -132,42 +134,17 @@ def _record_dispatch_ran_today() -> None:
         logger.warning("[orchestrator] _record_dispatch_ran_today failed: %s", exc)
 
 
-def _dispatch_already_ran_today() -> bool:
-    import psycopg2
-    pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
-    today_str = pt_today.isoformat()
-    try:
-        from tasklets import _redis as _tredis
-        _r = _tredis()
-        if _r.exists(f"dispatch_ran:{today_str}"):
-            logger.debug("[orchestrator] Dispatch already ran today (Redis) — skipping.")
-            return True
-    except Exception:
-        pass
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        return False
-    try:
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM dispatch_date_log WHERE dispatch_date = %s LIMIT 1",
-            (pt_today,)
-        )
-        found = cur.fetchone() is not None
-        cur.close()
-        conn.close()
-        return found
-    except Exception as exc:
-        logger.warning("[orchestrator] _dispatch_already_ran_today DB check failed: %s — failing CLOSED (assuming ran)", exc)
-        return True
-
-
 def _startup_ping_if_needed() -> None:
-    import psycopg2
+    """Send the Discord startup ping at most once per PT calendar day.
+    Uses startup_ping_log table as a cross-process guard — survives Railway
+    redeploys so merging multiple PRs on the same day sends only one ping.
+    Falls back to always-send if Postgres is unavailable.
+    """
+    import psycopg2  # noqa: PLC0415
     db_url = os.environ.get("DATABASE_URL")
     pt_today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
     if not db_url:
+        # No DB — send unconditionally (edge case: DB env var not set)
         try:
             discord_alert.send_startup_ping()
         except Exception as _e:
@@ -211,6 +188,7 @@ def _startup_ping_if_needed() -> None:
 
 
 async def _safe_run(name: str, fn, *args, **kwargs):
+    """Run a synchronous tasklet in a thread so it never blocks the event loop."""
     loop = asyncio.get_event_loop()
     import functools
     try:
@@ -226,6 +204,7 @@ async def _safe_run(name: str, fn, *args, **kwargs):
 
 
 async def _run_subprocess(name: str, script_path: str) -> None:
+    """Run a Python script as a subprocess with full logging."""
     logger.info("[orchestrator] Launching %s (%s)...", name, script_path)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -246,6 +225,7 @@ async def _run_subprocess(name: str, script_path: str) -> None:
 
 
 async def job_data_hub():
+    """Run DataHub in a thread so it never blocks the event loop."""
     global _last_hub_run
     loop = asyncio.get_event_loop()
     try:
@@ -260,15 +240,17 @@ async def job_data_hub():
 
 
 async def job_agents():
+    """Run AgentTasklet in a thread so it runs independently of DataHub."""
     global _last_agent_run
     loop = asyncio.get_event_loop()
 
-    if _dispatch_already_ran_today():
-        logger.info("[orchestrator] Dispatch already ran today — skipping this cycle.")
-        return
-
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
 
+    # ── Dynamic dispatch window ───────────────────────────────────────────────
+    # Open : 9:00 AM PT (props are posted, no games live yet)
+    # Open : 8:30 AM PT
+    # Close: 30 min before the earliest scheduled first pitch of the day
+    # Fallback ceiling: 12:30 PM PT if game time data isn't in the hub yet
     _open_pt  = _pt_ck.replace(hour=8, minute=30, second=0, microsecond=0)
     if _pt_ck < _open_pt:
         logger.debug(
@@ -277,6 +259,7 @@ async def job_agents():
         )
         return
 
+    # Compute cutoff from hub game_times (game_time_pt = "HH:MM" PT string)
     _hub_snap  = read_hub()
     _game_times = (_hub_snap.get("context") or {}).get("game_times", {})
     _earliest_pt_str = None
@@ -312,16 +295,20 @@ async def job_agents():
     try:
         logger.info("[orchestrator] Running AgentTasklet...")
         start = time.time()
-        _record_dispatch_ran_today()
         result = await loop.run_in_executor(None, run_agent_tasklet)
         elapsed = time.time() - start
         logger.info("[orchestrator] AgentTasklet done in %.2fs", elapsed)
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
+        # Only record dispatch when picks were actually sent (run_agent_tasklet returns True)
+        # Avoids "Dispatch date recorded" log spam every 30s during non-dispatch hours
+        if result is True:
+            _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
 
 
 async def job_leaderboard():
+    """Run LeaderboardTasklet in a thread."""
     global _last_leaderboard_run
     loop = asyncio.get_event_loop()
     try:
@@ -344,6 +331,7 @@ async def job_xgboost():
 
 
 async def job_line_stream():
+    """Runs every 30 min 10 AM–10 PM PT — steam detection + CLV + in-game tracking."""
     if _LINE_STREAM_AVAILABLE:
         await _safe_run("LineStream", _run_line_stream)
     else:
@@ -351,6 +339,7 @@ async def job_line_stream():
 
 
 async def job_monthly_leaderboard():
+    """Fires 9 AM PT on the 1st of each month — Discord agent performance report."""
     if _LEADERBOARD_AVAILABLE:
         await _safe_run("MonthlyLeaderboard", _run_monthly_leaderboard)
     else:
@@ -358,24 +347,30 @@ async def job_monthly_leaderboard():
 
 
 async def job_settle():
+    """11:00 PM PT (2:00 AM ET) daily — settle bets and post recap to Discord."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nightly_recap.py")
     asyncio.create_task(_run_subprocess("NightlyRecap", script))
+
+
+# ── FastAPI App ───────────────────────────────────────────────────────────────
 
 
 async def job_bug_checker():
     await _safe_run("BugChecker", run_bug_checker)
 
 async def job_log_watcher():
+    """10:10 AM PT daily — hits Railway log API, emails/SMSs dispatch summary."""
     try:
-        from log_watcher import main as _log_watcher_main
+        from log_watcher import main as _log_watcher_main  # noqa: PLC0415
         await asyncio.get_event_loop().run_in_executor(None, _log_watcher_main)
         logger.info("[LogWatcher] Daily summary dispatched.")
     except Exception as exc:
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
+    """Streak pick — runs at 8:45 AM PT, within the 8:30 AM dispatch window."""
     try:
-        from streak_agent import run_streak_pick
+        from streak_agent import run_streak_pick  # noqa: PLC0415
         result = await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
         if result:
             logger.info("[StreakAgent] Pick posted — streak_id=%s picks=%d",
@@ -388,11 +383,23 @@ async def job_streak():
 
 
 async def job_predict_plus_prefetch():
+    """9:55 AM PT daily — pre-compute Predict+ scores for today's starting pitchers.
+
+    PredictPlusLayer.prefetch() fetches prior-season Savant pitch data per pitcher,
+    fits a LogisticRegression full/baseline model pair, and normalises the resulting
+    surprise ratio into a Predict+ score (mean=100, SD=10).  The weekly on-disk cache
+    means Railway restarts within the same ISO week are free (< 1 ms).
+
+    Runs 25 minutes before the dispatch window opens so _get_predict_plus_adj() in
+    prop enrichment always finds a warm cache.  Falls back gracefully if scikit-learn
+    is unavailable or the hub has no pitcher props yet.
+    """
     try:
-        from predict_plus_layer import PredictPlusLayer
+        from predict_plus_layer import PredictPlusLayer  # noqa: PLC0415
         hub_snap  = read_hub()
         props     = hub_snap.get("player_props", [])
 
+        # Collect unique starting pitchers that have mlbam_id stamped by enrichment.
         _PITCHER_PROP_TYPES = frozenset({
             "strikeouts", "pitching_outs", "hits_allowed",
             "earned_runs", "walks_allowed",
@@ -423,33 +430,25 @@ async def job_predict_plus_prefetch():
     except Exception as exc:
         logger.warning("[PredictPlus] Prefetch failed (non-fatal): %s", exc)
 
-    try:
-        from batter_pitch_arsenal_layer import prefetch as _bpv_prefetch
-        _bpv_prefetch()
-        logger.info("[PredictPlus] Batter pitch-type vulnerability cache warmed.")
-    except Exception as exc:
-        logger.debug("[PredictPlus] BPV prefetch failed (non-fatal): %s", exc)
-
-    try:
-        from defense_layer import prefetch as _def_prefetch
-        _def_prefetch()
-        logger.info("[PredictPlus] Defense OAA cache warmed.")
-    except Exception as exc:
-        logger.debug("[PredictPlus] Defense OAA prefetch failed (non-fatal): %s", exc)
-
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
 
+    # ── Run pending SQL migrations ────────────────────────────────────────────
+    # No Flyway process is attached to this Railway deployment — migrations in
+    # the migrations/ folder were never being applied. This runner applies any
+    # .sql file that hasn't been recorded in migration_history yet.
+    # Safe to run on every startup: all SQL uses IF NOT EXISTS / CREATE OR REPLACE.
     try:
-        import glob as _glob
-        import psycopg2 as _pg
+        import glob as _glob  # noqa: PLC0415
+        import psycopg2 as _pg  # noqa: PLC0415
 
         _db_url = os.getenv("DATABASE_URL", "")
         if _db_url:
             with _pg.connect(_db_url) as _mc:
                 with _mc.cursor() as _cur:
+                    # Create migration history table if it doesn't exist
                     _cur.execute("""
                         CREATE TABLE IF NOT EXISTS migration_history (
                             filename   TEXT PRIMARY KEY,
@@ -458,6 +457,7 @@ async def lifespan(_app: FastAPI):
                     """)
                     _mc.commit()
 
+                    # Find all migration files in order
                     _mig_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
                     _sql_files = sorted(_glob.glob(os.path.join(_mig_dir, "V*.sql")))
 
@@ -466,7 +466,7 @@ async def lifespan(_app: FastAPI):
                         _fname = os.path.basename(_sql_path)
                         _cur.execute("SELECT 1 FROM migration_history WHERE filename = %s", (_fname,))
                         if _cur.fetchone():
-                            continue
+                            continue  # already applied
                         try:
                             with open(_sql_path) as _f:
                                 _sql = _f.read()
@@ -488,24 +488,29 @@ async def lifespan(_app: FastAPI):
                         logger.info("[Migrations] %d migration(s) applied on startup.", _applied)
     except Exception as _mig_outer:
         logger.error("[Migrations] Migration runner failed: %s", _mig_outer)
+        # Never block startup on a migration failure
 
+    # ── Tasklet interval jobs ─────────────────────────────────────────────────
     scheduler.add_job(job_data_hub,   IntervalTrigger(seconds=15), id="data_hub")
     scheduler.add_job(job_agents,     IntervalTrigger(seconds=30), id="agents")
     scheduler.add_job(job_leaderboard, IntervalTrigger(seconds=60), id="leaderboard")
 
+    # ── Nightly maintenance jobs ──────────────────────────────────────────────
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
     scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
-    scheduler.add_job(job_xgboost,  CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")
+    scheduler.add_job(job_xgboost,  CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")  # daily retrain now that seed data available
 
+    # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(
         job_line_stream,
         CronTrigger(hour="10-22", minute="0,30", timezone="America/Los_Angeles"),
         id="line_stream",
     )
 
+    # ── Weekly calibration map rebuild (every Monday 6:00 AM PT) ─────────────
     def job_calibrate_model():
         try:
-            from calibrate_model import generate_calibration_map_from_db
+            from calibrate_model import generate_calibration_map_from_db  # noqa: PLC0415
             result = generate_calibration_map_from_db()
             logger.info("[Scheduler] Calibration map: %s",
                         f"{len(result)} buckets updated" if result else "insufficient data (<100 graded rows)")
@@ -514,42 +519,50 @@ async def lifespan(_app: FastAPI):
 
     scheduler.add_job(
         job_calibrate_model,
-        CronTrigger(day_of_week="mon", hour=6, minute=0, timezone="America/Los_Angeles"),
+        CronTrigger(day_of_week="mon", hour=6, minute=0, timezone=PT),
         id="job_calibrate_model",
         name="Weekly calibration map rebuild",
         replace_existing=True,
     )
 
+    # ── Monthly leaderboard — 1st of month 9 AM PT ───────────────────────────
     scheduler.add_job(
         job_monthly_leaderboard,
         CronTrigger(day=1, hour=9, timezone="America/Los_Angeles"),
         id="monthly_leaderboard",
     )
 
+    # ── Daily health check — 10:00 AM PT ─────────────────────────────────────
     scheduler.add_job(
         job_bug_checker,
         CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
         id="bug_checker",
     )
 
+    # ── Predict+ prefetch — 8:15 AM PT (15 min before dispatch window opens at 8:30) ──
+    # Pre-computes pitcher unpredictability scores so _get_predict_plus_adj()
+    # in prop enrichment always finds a warm weekly cache.
     scheduler.add_job(
         job_predict_plus_prefetch,
         CronTrigger(hour=8, minute=15, timezone="America/Los_Angeles"),
         id="predict_plus_prefetch",
     )
 
+    # ── Streak pick — 8:45 AM PT (within dispatch window, well before first pitch) ──
     scheduler.add_job(
         job_streak,
         CronTrigger(hour=8, minute=45, timezone="America/Los_Angeles"),
         id="streak",
     )
 
+    # ── Log watcher summary — 9:15 AM PT (after streak, within dispatch window) ──
     scheduler.add_job(
         job_log_watcher,
         CronTrigger(hour=9, minute=15, timezone="America/Los_Angeles"),
         id="log_watcher",
     )
 
+    # ── Nightly settlement — 11:00 PM PT ─────────────────────────────────────
     scheduler.add_job(
         job_settle,
         CronTrigger(hour=23, minute=0, timezone="America/Los_Angeles"),
@@ -558,8 +571,10 @@ async def lifespan(_app: FastAPI):
 
     scheduler.start()
 
+    # Discord startup ping — guarded: at most once per PT calendar day
     _startup_ping_if_needed()
 
+    # Kick off initial data pull
     asyncio.create_task(job_data_hub())
 
     logger.info(
@@ -581,6 +596,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# SECURITY: Restrict CORS to known origins. Add your Railway/Vercel frontend URL
+# as the FRONTEND_URL environment variable (e.g. https://mework.up.railway.app).
+# Multiple origins can be comma-separated: "https://a.com,https://b.com"
 _cors_env = os.getenv("FRONTEND_URL", "")
 _allowed_origins: list[str] = (
     [o.strip() for o in _cors_env.split(",") if o.strip()]
@@ -614,6 +632,7 @@ async def root():
 
 @app.get("/props")
 async def get_props():
+    """Live player props."""
     hub = read_hub()
     props = hub.get("player_props", [])
     formatted = []
@@ -633,6 +652,7 @@ async def get_props():
 
 @app.get("/insights")
 async def get_insights():
+    """Agent rankings + active bet queue."""
     lb = read_leaderboard()
     hub = read_hub()
     agents = get_agents()
@@ -697,32 +717,38 @@ async def health():
     })
 
 
-# ── PropIQ HTTP endpoints ─────────────────────────────────────────────────────
+# ── PropIQ HTTP endpoints ──────────────────────────────────────────────────────
 
 @app.post("/propiq/dispatch")
 async def trigger_dispatch():
+    """live_dispatcher.py removed — AgentTasklet is the canonical dispatch system.
+    Parlays are sent continuously by AgentTasklet (every 30s) with full dedup."""
     return JSONResponse({"status": "disabled", "message": "job_dispatch removed. AgentTasklet (every 30s) is the canonical parlay sender."})
 
 
 @app.post("/propiq/settle")
 async def trigger_settle():
+    """Manual or Tasklet-triggered nightly settlement."""
     await job_settle()
     return JSONResponse({"status": "started", "message": "Settlement engine triggered in background"})
 
 
 @app.post("/trigger/dispatch")
 async def trigger_dispatch_alt():
+    """Alias for /propiq/dispatch — both removed. AgentTasklet is canonical."""
     return JSONResponse({"status": "disabled", "message": "job_dispatch removed. AgentTasklet (every 30s) is the canonical parlay sender."})
 
 
 @app.post("/trigger/settle")
 async def trigger_settle_alt():
+    """Alias for /propiq/settle — matches Tasklet schedule trigger path."""
     await job_settle()
     return JSONResponse({"status": "started", "message": "Settlement engine triggered"})
 
 
 @app.post("/trigger/leaderboard")
 async def trigger_leaderboard():
+    """Trigger monthly leaderboard — called by Tasklet schedule on 1st of month."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monthly_leaderboard.py")
     asyncio.create_task(_run_subprocess("MonthlyLeaderboard", script))
     return JSONResponse({"status": "started", "message": "Monthly leaderboard triggered in background"})
@@ -730,6 +756,7 @@ async def trigger_leaderboard():
 
 @app.get("/propiq/status")
 async def get_propiq_status():
+    """Full system status."""
     hub = read_hub()
     lb = read_leaderboard()
     return JSONResponse({
@@ -748,7 +775,8 @@ async def get_propiq_status():
 
 @app.get("/propiq/record")
 async def get_season_record():
-    import psycopg2
+    """Season W/L record from Postgres."""
+    import psycopg2  # noqa: PLC0415
 
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -786,45 +814,9 @@ async def get_season_record():
             "total_payout": float(total_payout),
             "roi_pct": round(roi, 2),
         })
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.error("[record] Postgres query failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-# ── Admin: one-shot seed trigger ──────────────────────────────────────────────
-# Opens a browser-accessible endpoint so csv_seed.py can be run without
-# needing Railway shell access. Protected by a static token.
-# Usage: GET https://mework-production-864d.up.railway.app/admin/run-seed?token=propiq-seed-2026
-
-_SEED_TOKEN = "propiq-seed-2026"
-
-@app.get("/admin/run-seed", response_class=PlainTextResponse)
-async def admin_run_seed(token: str = Query(default="")):
-    """Trigger csv_seed.py --write --clear and stream output as plain text."""
-    if token != _SEED_TOKEN:
-        return PlainTextResponse("Unauthorized — pass ?token=propiq-seed-2026", status_code=401)
-
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_seed.py")
-    if not os.path.exists(script):
-        return PlainTextResponse("ERROR: csv_seed.py not found", status_code=500)
-
-    logger.info("[admin] /admin/run-seed triggered — running csv_seed.py --write --clear")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, script, "--write", "--clear",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
-        output = stdout.decode(errors="replace")
-        status = "SUCCESS" if proc.returncode == 0 else f"FAILED (exit {proc.returncode})"
-        logger.info("[admin] csv_seed.py finished: %s", status)
-        return PlainTextResponse(f"=== csv_seed.py {status} ===\n\n{output}")
-    except asyncio.TimeoutError:
-        return PlainTextResponse("ERROR: Seed timed out after 10 minutes", status_code=500)
-    except Exception as exc:
-        logger.error("[admin] run-seed failed: %s", exc)
-        return PlainTextResponse(f"ERROR: {exc}", status_code=500)
 
 
 if __name__ == "__main__":

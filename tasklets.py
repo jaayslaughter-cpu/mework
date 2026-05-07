@@ -5848,37 +5848,25 @@ def run_agent_tasklet() -> bool:
 
     # ── DB-backed dedup preload — survives crash + Redis cold restart ──────────
     # a fresh restart never re-sends picks that were already Discord-sent today.
-    # Also re-stamps prop_sent Redis keys so cross-agent direction dedup survives restart.
     try:
         _pg = _pg_conn()
         with _pg.cursor() as _c:
             _c.execute(
-                "SELECT DISTINCT agent_name, player_name, prop_type FROM bet_ledger "
+                "SELECT DISTINCT agent_name FROM bet_ledger "
                 "WHERE bet_date = %s AND discord_sent = TRUE "
                 "AND created_at >= NOW() - INTERVAL '18 hours'",
                 (today_str,)
             )
             _preloaded: list = []
-            _restamped = 0
-            for (_ag, _pname, _ptype) in _c.fetchall():
+            for (_ag,) in _c.fetchall():
                 _AGENT_SENT_TODAY.setdefault(_ag, today_str)
-                if _ag not in _preloaded:
-                    _preloaded.append(_ag)
-                # Re-stamp prop_sent Redis key so cross-agent dedup survives Redis flush/restart
-                if _pname and _ptype:
-                    try:
-                        _ps_key = f"prop_sent:{_pname.lower()}:{_ptype}:{today_str}"
-                        r_dedup.set(_ps_key, _ag, ex=_DAY_TTL)
-                        _restamped += 1
-                    except Exception:
-                        pass
+                _preloaded.append(_ag)
         _pg.commit()
         _pg.close()   # CRIT-1: close dedup preload connection to prevent pool exhaustion
         if _preloaded:
             logger.info(
-                "[AgentTasklet] Dedup preload — %d agent(s) already sent today, "
-                "%d prop_sent Redis keys re-stamped: %s",
-                len(_preloaded), _restamped, list(dict.fromkeys(_preloaded))
+                "[AgentTasklet] Dedup preload — these agents already sent today"
+                " and will be blocked this cycle: %s", _preloaded
             )
     except Exception as _dbe:
         logger.debug("[AgentTasklet] dedup preload skipped: %s", _dbe)
@@ -6105,8 +6093,8 @@ def run_agent_tasklet() -> bool:
                     _pk = (
                         f"prop_sent:{_pl.get('player','').lower()}:"
                         f"{_pl.get('prop_type','')}:"
-                        f"{today_str}"
-                    )  # direction-agnostic — matches check key above
+                            f"{today_str}"
+                    )
                     r_dedup.set(_pk, agent_name, ex=_DAY_TTL)
             except Exception:
                 pass
@@ -6316,10 +6304,6 @@ def run_agent_tasklet() -> bool:
         _dl_flush()
     except Exception:
         pass
-
-    if not all_parlays:
-        logger.info("[AgentTasklet] No qualifying parlays this cycle — window open but nothing cleared gates.")
-        return True  # dispatch window was processed; don't re-run same day
 
     active_agents = len({p["agent"] for p in all_parlays})
     best = max(all_parlays, key=lambda p: p["combined_ev_pct"])

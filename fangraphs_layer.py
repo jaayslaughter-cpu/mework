@@ -739,6 +739,17 @@ def park_factor_adjustment(
 
 # ─── Public getters ───────────────────────────────────────────────────────────
 
+def get_batter_static_2025(name: str) -> dict:
+    """2025 FanGraphs batter stats from static cache — no API call, Railway-safe.
+    446 qualified batters. Used as Tier 1.5 when live FG API is 403-blocked.
+    """
+    try:
+        from fg_batter_cache_2025 import get_fg_batter_static  # noqa: PLC0415
+        return get_fg_batter_static(name) or {}
+    except Exception:
+        return {}
+
+
 def get_batter(name: str) -> dict[str, float]:
     """Return FanGraphs batting stats for name. Empty dict if not found."""
     try:

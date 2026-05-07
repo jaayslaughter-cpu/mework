@@ -58,7 +58,7 @@ import requests
 logger = logging.getLogger("propiq.steamer_layer")
 
 _TZ     = ZoneInfo("America/Los_Angeles")
-_FG_BASE = "https://www.fangraphs.com/api/projections"
+_FG_BASE = "https://www.fangraphs.com/api/leaders/major-league/data"
 # Import rotating headers from fangraphs_layer to avoid FanGraphs 403 blocks
 try:
     from fangraphs_layer import _fg_headers  # noqa: PLC0415
@@ -77,17 +77,25 @@ except ImportError:
 
 # FanGraphs Steamer projection API params
 _STEAMER_PARAMS = {
-    "type":      "steamerr",    # ← rest-of-season Steamer (better for in-season)
-    "stats":     "bat",
+    "age":       "0",
     "pos":       "all",
-    "team":      "0",
-    "players":   "0",
+    "stats":     "bat",
     "lg":        "all",
-    "qual":      "1",
-    "statgroup": "fantasy",     # single call returns all metrics
-    "pageitems": "4500",
+    "qual":      "1",           # min 1 PA — include bench players
+    "startdate": "",
+    "enddate":   "",
+    "month":     "0",
+    "hand":      "",
+    "team":      "0",
+    "pageitems": "600",
     "pagenum":   "1",
     "ind":       "0",
+    "rost":      "0",
+    "players":   "0",
+    "type":      "steamer",     # ← Steamer projections, not dashboard stats
+    "postseason": "",
+    "sortdir":   "default",
+    "sortstat":  "PA",
 }
 
 # ── League-average baselines (FG 2025 actuals — used for deviation calc) ──────
@@ -105,7 +113,6 @@ _LG = {
 _CACHE: dict[str, dict] = {}      # {name_key: projection_dict}
 _CACHE_DATE: str = ""
 _FETCH_ATTEMPTED_DATE: str = ""   # tracks date of last fetch attempt (success OR fail)
-_MLBAM_CACHE: dict[int, dict] = {}   # {xMLBAMID: projection_dict} — direct ID lookup
 
 
 def _norm(name: str) -> str:
@@ -242,7 +249,6 @@ def _fetch_steamer() -> dict[str, dict]:
         return _fetch_steamer_pybaseball()
 
     projections: dict[str, dict] = {}
-    mlbam_index: dict[int, dict] = {}
     for row in rows:
         name = str(row.get("PlayerName") or row.get("Name") or "")
         key = _norm(name)
@@ -251,8 +257,7 @@ def _fetch_steamer() -> dict[str, dict]:
 
         def _f(field: str, default: float = 0.0) -> float:
             try:
-                v = row.get(field)
-                return float(v) if v is not None else default
+                return float(row.get(field) or default)
             except (TypeError, ValueError):
                 return default
 
@@ -262,57 +267,25 @@ def _fetch_steamer() -> dict[str, dict]:
         rbi = _f("RBI")
         sb  = _f("SB")
         hr  = _f("HR")
-        so  = _f("SO")
-        bb  = _f("BB")
 
-        proj = {
-            "avg":      _f("AVG",   _LG["avg"]),
-            "obp":      _f("OBP",   _LG["obp"]),
-            "slg":      _f("SLG",   _LG["slg"]),
-            "woba":     _f("wOBA",  0.320),
-            "wrc_plus": _f("wRC+",  100.0),
-            "iso":      _f("ISO",   0.162),
-            "babip":    _f("BABIP", 0.300),
-            "k_pct":    _f("K%",    0.225),   # hitter K rate — feeds hitter_strikeouts
-            "bb_pct":   _f("BB%",   0.085),
-            "spd":      _f("Spd",   4.0),     # speed score — feeds stolen_bases
-            "r":        r,
-            "rbi":      rbi,
-            "sb":       sb,
-            "hr":       hr,
-            "so":       so,
-            "bb":       bb,
-            "pa":       pa,
-            "g":        g,
+        projections[key] = {
+            "avg":    _f("AVG",  _LG["avg"]),
+            "obp":    _f("OBP",  _LG["obp"]),
+            "slg":    _f("SLG",  _LG["slg"]),
+            "r":      r,
+            "rbi":    rbi,
+            "sb":     sb,
+            "hr":     hr,
+            "pa":     pa,
+            "g":      g,
             # Per-game rates (key comparison metric)
-            "r_pg":     r   / g if g > 0 else _LG["r_pg"],
-            "rbi_pg":   rbi / g if g > 0 else _LG["rbi_pg"],
-            "sb_pg":    sb  / g if g > 0 else _LG["sb_pg"],
-            "hr_pg":    hr  / g if g > 0 else _LG["hr_pg"],
-            "so_pg":    so  / g if g > 0 else 0.85,
-            "h_pg":     _f("H", 0) / g if g > 0 else 0.90,
-            "_source":  "fg_steamerr",
+            "r_pg":   r   / g if g > 0 else _LG["r_pg"],
+            "rbi_pg": rbi / g if g > 0 else _LG["rbi_pg"],
+            "sb_pg":  sb  / g if g > 0 else _LG["sb_pg"],
+            "hr_pg":  hr  / g if g > 0 else _LG["hr_pg"],
         }
-        projections[key] = proj
 
-        # Build MLBAM ID index from xMLBAMID field
-        mlbam_raw = row.get("xMLBAMID")
-        if mlbam_raw:
-            try:
-                mlbam_int = int(float(mlbam_raw))
-                if mlbam_int > 0:
-                    mlbam_index[mlbam_int] = proj
-            except (TypeError, ValueError):
-                pass
-
-    # Update global MLBAM cache (module-level)
-    global _MLBAM_CACHE
-    _MLBAM_CACHE = mlbam_index
-
-    logger.info(
-        "[Steamer] Loaded %d batter projections (%d with MLBAM ID) from FanGraphs steamerr",
-        len(projections), len(mlbam_index),
-    )
+    logger.info("[Steamer] Loaded %d batter projections from FanGraphs", len(projections))
     return projections
 
 
@@ -378,7 +351,7 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
     return _CACHE
 
 
-def get_steamer(player_name: str, mlbam_id: int | None = None) -> dict | None:
+def get_steamer(player_name: str) -> dict | None:
     """
     Return Steamer projection dict for a player, or None if not found.
 
@@ -391,14 +364,6 @@ def get_steamer(player_name: str, mlbam_id: int | None = None) -> dict | None:
       2. FanGraphs Steamer cache — used if mlb_stats_layer returns no data yet
          (e.g. very early season before enough PA accumulate).
     """
-    # ── Tier 0: MLBAM ID direct lookup (xMLBAMID from FanGraphs) ───────────
-    if mlbam_id and mlbam_id > 0:
-        # Ensure cache is warm
-        _get_cache()
-        hit = _MLBAM_CACHE.get(mlbam_id)
-        if hit:
-            return hit
-
     # ── Primary: MLB Stats API via mlb_stats_layer ───────────────────────
     try:
         from mlb_stats_layer import get_batter as _mlb_get_batter  # noqa: PLC0415
