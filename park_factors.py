@@ -354,6 +354,152 @@ _TEAM_TO_VENUE: dict[str, str] = {
 _NEUTRAL = 1.0
 
 
+
+
+# ── Venue aliases: renames, spelling variants, neutral sites ──────────────────
+_VENUE_ALIASES: dict[str, str] = {
+    # Marlins old/new names
+    "marlins park":              "loandepot park",
+    "loanDepot park":            "loandepot park",
+    # Athletics
+    "athletics ballpark":        "oakland coliseum",
+    "sutter health park":        "oakland coliseum",
+    "oakland-alameda county coliseum": "oakland coliseum",
+    "ringcentral coliseum":      "oakland coliseum",
+    # Seattle old name
+    "safeco field":              "t-mobile park",
+    # Atlanta old name
+    "suntrust park":             "truist park",
+    "turner field":              "truist park",
+    # Tampa Bay
+    "tropicana field":           "tropicana field",
+    # White Sox
+    "comiskey park":             "guaranteed rate field",
+    "us cellular field":         "guaranteed rate field",
+    # Milwaukee
+    "miller park":               "american family field",
+    # San Diego
+    "qualcomm stadium":          "petco park",
+    # Houston
+    "enron field":               "minute maid park",
+    "minute maid park":          "minute maid park",
+    # Cleveland
+    "jacobs field":              "progressive field",
+    "progressive field":         "progressive field",
+    # Cincinnati
+    "great american ball park":  "great american ball park",
+    "great american ballpark":   "great american ball park",
+    # Minnesota
+    "metrodome":                 "target field",
+    # Texas
+    "globe life park in arlington": "globe life field",
+    "globe life park":           "globe life field",
+    # Neutral / international sites
+    "estadio alfredo harp helu": "neutral",
+    "estadio de beisbol monterrey": "neutral",
+    "london stadium":            "neutral",
+    "rickwood field":            "neutral",
+    "first data field":          "neutral",
+}
+
+# ── MLB Stats API team → home/away run-split park factor (Retrosheet method) ─
+_DYNAMIC_PF_CACHE: dict[str, float] = {}   # team_abbr → computed batting factor
+_DYNAMIC_PF_DATE: str = ""                  # date string of last fetch
+
+
+def _retrosheet_park_factor(team_abbr: str) -> float:
+    """Compute a basic park factor from MLB Stats API home/away run splits.
+
+    Formula (Retrosheet method):
+        pf = (home_R + home_RA) / home_G / ((away_R + away_RA) / away_G)
+
+    Uses /api/v1/teams/{teamId}/stats?stats=statSplits&season=YEAR&group=hitting.
+    Falls back to 1.0 on any error.  Results cached for the process lifetime.
+    """
+    global _DYNAMIC_PF_CACHE, _DYNAMIC_PF_DATE
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+
+    if _DYNAMIC_PF_DATE != today:
+        _DYNAMIC_PF_CACHE.clear()
+        _DYNAMIC_PF_DATE = today
+
+    abbr_key = team_abbr.upper()
+    if abbr_key in _DYNAMIC_PF_CACHE:
+        return _DYNAMIC_PF_CACHE[abbr_key]
+
+    try:
+        import requests
+        season = datetime.now(ZoneInfo("America/Los_Angeles")).year
+
+        # Resolve team ID
+        teams_resp = requests.get(
+            "https://statsapi.mlb.com/api/v1/teams",
+            params={"sportId": 1, "season": season},
+            timeout=10,
+        )
+        if teams_resp.status_code != 200:
+            _DYNAMIC_PF_CACHE[abbr_key] = _NEUTRAL
+            return _NEUTRAL
+
+        team_id = None
+        for team in teams_resp.json().get("teams", []):
+            if team.get("abbreviation", "").upper() == abbr_key:
+                team_id = team["id"]
+                break
+
+        if not team_id:
+            _DYNAMIC_PF_CACHE[abbr_key] = _NEUTRAL
+            return _NEUTRAL
+
+        # Fetch home/away stat splits
+        stats_resp = requests.get(
+            f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats",
+            params={
+                "stats":       "statSplits",
+                "season":      season,
+                "group":       "hitting",
+                "sportId":     1,
+            },
+            timeout=10,
+        )
+        if stats_resp.status_code != 200:
+            _DYNAMIC_PF_CACHE[abbr_key] = _NEUTRAL
+            return _NEUTRAL
+
+        home_r = home_ra = home_g = 0.0
+        away_r = away_ra = away_g = 0.0
+
+        for split_grp in stats_resp.json().get("stats", []):
+            for split in split_grp.get("splits", []):
+                loc = split.get("split", {}).get("code", "")
+                st  = split.get("stat", {})
+                g   = float(st.get("gamesPlayed", 0) or 0)
+                r   = float(st.get("runs", 0) or 0)
+                ra  = float(st.get("runsAllowed", st.get("earnedRuns", 0)) or 0)
+                if loc == "H":
+                    home_r, home_ra, home_g = r, ra, g
+                elif loc == "A":
+                    away_r, away_ra, away_g = r, ra, g
+
+        if home_g > 0 and away_g > 0:
+            home_rate = (home_r + home_ra) / home_g
+            away_rate = (away_r + away_ra) / away_g
+            if away_rate > 0:
+                pf = round(home_rate / away_rate, 3)
+                pf = max(0.70, min(1.40, pf))   # sanity clamp
+                _DYNAMIC_PF_CACHE[abbr_key] = pf
+                return pf
+
+    except Exception:
+        pass
+
+    _DYNAMIC_PF_CACHE[abbr_key] = _NEUTRAL
+    return _NEUTRAL
+
+
 def _norm_venue(v: str) -> str:
     return v.lower().strip()
 
@@ -367,6 +513,10 @@ def get_park_factor(venue: str, prop_type: str, team: str = "") -> float:
     Falls back to team name if venue not found, then to 1.0 (neutral).
     """
     v = _norm_venue(venue)
+    # Resolve aliases first (renames, misspellings, old stadium names)
+    v = _VENUE_ALIASES.get(v, v)
+    if v == "neutral":
+        return _NEUTRAL
     park = _PARK_FACTORS.get(v)
 
     if park is None and team:
@@ -378,6 +528,17 @@ def get_park_factor(venue: str, prop_type: str, team: str = "") -> float:
                 break
 
     if park is None:
+        # Dynamic fallback: compute from MLB Stats API home/away run splits
+        # (Retrosheet method: home (R+RA)/G / away (R+RA)/G)
+        if team:
+            # Try to extract team abbreviation from team string (e.g. "Colorado Rockies" → "COL")
+            _t = team.upper().strip()
+            # Prefer 2–3 char tokens that could be abbreviations
+            _toks = [x for x in _t.split() if 2 <= len(x) <= 3]
+            dyn_abbr = _toks[0] if _toks else _t[:3]
+            dyn_pf   = _retrosheet_park_factor(dyn_abbr)
+            if dyn_pf != _NEUTRAL:
+                return dyn_pf
         return _NEUTRAL
 
     pt = prop_type.lower().replace(" ", "_").replace("+", "_")
@@ -400,6 +561,10 @@ def get_park_info(venue: str, team: str = "") -> dict[str, float]:
     Useful for logging / debugging.
     """
     v = _norm_venue(venue)
+    # Resolve aliases first (renames, misspellings, old stadium names)
+    v = _VENUE_ALIASES.get(v, v)
+    if v == "neutral":
+        return _NEUTRAL
     park = _PARK_FACTORS.get(v)
     if park is None and team:
         t = team.lower().strip()

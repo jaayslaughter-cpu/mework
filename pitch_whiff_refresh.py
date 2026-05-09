@@ -156,13 +156,10 @@ def _parse_feed(game_json: dict) -> tuple[
 
             cur_batter_id = matchup.get("batter", {}).get("id")
 
-            # Scan for mid-AB pitcher substitutions
-            for evt in ab.get("playEvents", []):
-                evt_type = evt.get("details", {}).get("eventType", "")
-                if evt_type == "pitching_substitution" and "player" in evt:
-                    new_id = evt["player"]["id"]
-                    cur_pitcher_id = new_id
-                    break
+            # NOTE: mid-AB pitcher substitutions are handled INLINE in the
+            # per-pitch event loop below (tnestico fix d734433).  The pre-scan
+            # that applied the new pitcher to the *entire* AB (including pitches
+            # thrown before the substitution) has been removed.
 
             result     = ab.get("result", {})
             is_k       = result.get("eventType") == "strikeout"

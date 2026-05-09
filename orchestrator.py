@@ -517,6 +517,14 @@ async def lifespan(_app: FastAPI):
         except Exception as exc:
             logger.warning("[Scheduler] Calibration map rebuild failed: %s", exc)
 
+        # ── Risk-adjusted diagnostics (Sharpe, max drawdown, Calmar) ─────────
+        # Runs immediately after calibration on Monday morning.
+        try:
+            from model_diagnostics import run_weekly_diagnostics  # noqa: PLC0415
+            run_weekly_diagnostics(lookback_days=90)
+        except Exception as _diag_exc:
+            logger.warning("[Scheduler] Weekly diagnostics failed (non-fatal): %s", _diag_exc)
+
     scheduler.add_job(
         job_calibrate_model,
         CronTrigger(day_of_week="mon", hour=6, minute=0, timezone="America/Los_Angeles"),

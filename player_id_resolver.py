@@ -98,6 +98,122 @@ def _load_static_map() -> None:
     logger.info("[PlayerIDResolver] Static map: %d players loaded from Statcast CSVs", total)
 
 
+
+# ── Tier 1.5: Chadwick Bureau registry ───────────────────────────────────────
+# ~150k player rows; key_mlbam maps to MLBAM IDs.
+# Downloaded once at startup and cached in Redis (48h TTL) as a compact dict.
+# URL: https://raw.githubusercontent.com/chadwickbureau/register/master/data/people.csv
+_CHADWICK_LOADED = False
+_CHADWICK_CACHE: dict[str, int] = {}   # norm_name → mlbam_id
+_CHADWICK_REDIS_KEY = "chadwick_name_map_v1"
+_CHADWICK_TTL = 172800   # 48h
+
+
+def _get_redis_for_chadwick():
+    try:
+        import redis as _r
+        url = __import__("os").environ.get("REDIS_URL") or __import__("os").environ.get("REDIS_PUBLIC_URL")
+        if not url:
+            return None
+        return _r.from_url(url, decode_responses=True, socket_connect_timeout=3)
+    except Exception:
+        return None
+
+
+def _load_chadwick() -> None:
+    """Download Chadwick register CSV and build name→MLBAM map.
+    
+    Checks Redis first (48h TTL), then fetches the CSV from GitHub raw.
+    Silently skips on any network/parse error — system degrades to MLB API.
+    """
+    global _CHADWICK_LOADED, _CHADWICK_CACHE
+    if _CHADWICK_LOADED:
+        return
+
+    # Try Redis first
+    r = _get_redis_for_chadwick()
+    if r:
+        try:
+            cached = r.get(_CHADWICK_REDIS_KEY)
+            if cached:
+                import json as _j
+                _CHADWICK_CACHE = _j.loads(cached)
+                _CHADWICK_LOADED = True
+                logger.info(
+                    "[PlayerIDResolver] Chadwick: %d players loaded from Redis cache",
+                    len(_CHADWICK_CACHE),
+                )
+                return
+        except Exception:
+            pass
+
+    # Download from GitHub raw (Chadwick Bureau register)
+    try:
+        import csv as _csv
+        import io
+        import requests as _req
+
+        resp = _req.get(
+            "https://raw.githubusercontent.com/chadwickbureau/register/master/data/people.csv",
+            timeout=30,
+            headers={"Accept": "text/csv"},
+        )
+        if resp.status_code != 200:
+            logger.debug("[PlayerIDResolver] Chadwick download failed: HTTP %d", resp.status_code)
+            _CHADWICK_LOADED = True   # Mark as attempted to avoid repeated failures
+            return
+
+        reader = _csv.DictReader(io.StringIO(resp.text))
+        count = 0
+        for row in reader:
+            mlbam_raw = row.get("key_mlbam", "").strip()
+            first     = row.get("name_first", "").strip()
+            last      = row.get("name_last",  "").strip()
+            if not mlbam_raw or not mlbam_raw.isdigit():
+                continue
+            if not first and not last:
+                continue
+            full = f"{first} {last}".strip()
+            key  = _norm(full)
+            pid  = int(mlbam_raw)
+            if key and pid and key not in _CHADWICK_CACHE:
+                _CHADWICK_CACHE[key] = pid
+                count += 1
+
+        # Store in Redis for next startup
+        if r and _CHADWICK_CACHE:
+            try:
+                import json as _j
+                r.setex(_CHADWICK_REDIS_KEY, _CHADWICK_TTL, _j.dumps(_CHADWICK_CACHE))
+            except Exception:
+                pass
+
+        _CHADWICK_LOADED = True
+        logger.info("[PlayerIDResolver] Chadwick: %d players loaded from CSV", count)
+
+    except Exception as exc:
+        logger.debug("[PlayerIDResolver] Chadwick load failed: %s", exc)
+        _CHADWICK_LOADED = True   # Don't retry on this startup
+
+
+def _chadwick_lookup(player_name: str) -> "Optional[int]":
+    """Look up MLBAM ID from Chadwick registry.  Returns None on miss."""
+    _load_chadwick()
+    if not _CHADWICK_CACHE:
+        return None
+    key = _norm(player_name)
+    pid = _CHADWICK_CACHE.get(key)
+    if pid:
+        return pid
+    # Last-name fallback: try "<first> <last>" rearrangements
+    parts = key.split()
+    if len(parts) == 2:
+        swapped = f"{parts[1]} {parts[0]}"
+        pid = _CHADWICK_CACHE.get(swapped)
+    return pid
+
+
+
 def _api_lookup(player_name: str) -> Optional[int]:
     """Look up MLBAM ID via MLB Stats API people/search — free, no key."""
     key = _norm(player_name)
@@ -169,6 +285,13 @@ def resolve_player_id(
     if pid:
         return pid
 
+    # Tier 1.5: Chadwick Bureau registry (~150k players, Redis-cached 48h)
+    # Covers fringe call-ups not in Statcast leaderboards
+    chadwick_pid = _chadwick_lookup(player_name)
+    if chadwick_pid:
+        _NAME_TO_ID[key] = chadwick_pid   # backfill static map
+        return chadwick_pid
+
     # Tier 1: MLB Stats API (live, ~200ms, Railway-safe)
     if use_api:
         return _api_lookup(player_name)
@@ -180,3 +303,14 @@ def warm_static_map() -> int:
     """Pre-load the static map at startup. Returns player count."""
     _load_static_map()
     return len(_NAME_TO_ID)
+
+
+def warm_chadwick() -> int:
+    """Pre-load the Chadwick registry in a background thread at startup.
+    
+    Called from orchestrator startup so the 8:30 AM dispatch window
+    never blocks on a cold Chadwick download.
+    Returns number of players loaded.
+    """
+    _load_chadwick()
+    return len(_CHADWICK_CACHE)
