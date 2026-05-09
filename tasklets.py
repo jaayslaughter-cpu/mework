@@ -2373,10 +2373,12 @@ def run_data_hub_tasklet() -> None:
             logger.debug("[DataHub] Career stats pre-warm thread started")
         except Exception as _cse:
             logger.debug("[DataHub] Career stats pre-warm skipped: %s", _cse)
-        if _sc:
+        if _sc and _sc > 0:
             logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
-        else:
+        elif _sc == 0:
+            # Fresh failure today — warn once
             logger.warning("[DataHub] Steamer projections unavailable -- using league-average priors")
+        # _sc == -1: already warned today — stay silent
     except Exception as _spe:
         logger.warning("[DataHub] Steamer prefetch failed: %s", _spe)
     r = _redis()

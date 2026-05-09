@@ -566,6 +566,16 @@ def _fetch_steamer_draftedge(hub: dict | None = None) -> dict[str, dict]:
 
 
 def prefetch(hub: dict | None = None) -> int:
-    """Pre-warm the Steamer cache at DataHub startup. Returns player count."""
+    """Pre-warm the Steamer cache at DataHub startup.
+
+    Returns:
+        >0   — projections loaded (player count)
+         0   — fresh failure today (caller should warn once)
+        -1   — already attempted and failed today (caller should stay silent)
+    """
+    today = _today()
+    # Already tried and failed today — return sentinel so caller doesn't re-warn
+    if _FETCH_ATTEMPTED_DATE == today and not _CACHE:
+        return -1
     cache = _get_cache(hub=hub)
     return len(cache)
