@@ -569,6 +569,33 @@ async def lifespan(_app: FastAPI):
         id="nightly_recap",
     )
 
+    # ── Nightly Savant CSV refresh — 4:00 AM PT ───────────────────────────────
+    # Fetches live season-to-date data from baseballsavant.mlb.com for all 10
+    # statcast CSVs (pitcher arsenal, xERA, batter EV, expected stats, sprint speed,
+    # percentiles, bat tracking, swing-take, batted ball, baserunning).
+    # Overwrites data/statcast/ CSVs then resets statcast_static_layer in-process.
+    # Runs AFTER grading (2 AM) and XGBoost retrain (2:30 AM), BEFORE dispatch (8:30 AM).
+    def job_savant_refresh():
+        try:
+            from savant_refresh import refresh as _sv_refresh  # noqa: PLC0415
+            result = _sv_refresh()
+            logger.info(
+                "[Scheduler] SavantRefresh: %d updated, %d skipped%s",
+                result.get("updated", 0),
+                result.get("skipped", 0),
+                f" errors={result['errors']}" if result.get("errors") else "",
+            )
+        except Exception as exc:
+            logger.warning("[Scheduler] SavantRefresh failed: %s", exc)
+
+    scheduler.add_job(
+        job_savant_refresh,
+        CronTrigger(hour=4, minute=0, timezone="America/Los_Angeles"),
+        id="savant_refresh",
+        name="Nightly Savant CSV refresh",
+        replace_existing=True,
+    )
+
     # ── Nightly pitch whiff refresh — 3:30 AM PT ──────────────────────────────
     # Fetches yesterday's live game feeds from MLB Stats API, parses all pitches,
     # aggregates to season-to-date whiff%/K% by pitcher+pitch_type and batter+pitch_type.
@@ -874,31 +901,33 @@ async def get_season_record():
 
 @app.get("/admin/run-seed")
 async def admin_run_seed(token: str = ""):
-    """One-shot endpoint to trigger csv_seed.py — fixes the 72.4% model lock."""
-    expected = os.environ.get("SEED_TOKEN", "propiq-seed-2026")
-    if token != expected:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    import subprocess  # noqa: PLC0415
+    """Streaming endpoint to run csv_seed.py and break the model lock."""
     from fastapi.responses import StreamingResponse  # noqa: PLC0415
-    import asyncio  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
 
-    async def _stream():
+    SEED_TOKEN = os.environ.get("SEED_TOKEN", "propiq-seed-2026")
+    if token != SEED_TOKEN:
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    def _stream():
         yield "=== csv_seed.py starting ===\n"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "python3", "csv_seed.py", "--write", "--clear",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+            proc = subprocess.Popen(
+                ["python3", "csv_seed.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
             )
-            async for line in proc.stdout:
-                yield line.decode(errors="replace")
-            await proc.wait()
+            for line in iter(proc.stdout.readline, ""):
+                yield line
+            proc.wait()
             if proc.returncode == 0:
                 yield "\n=== csv_seed.py SUCCESS ===\n"
             else:
                 yield f"\n=== csv_seed.py FAILED (exit {proc.returncode}) ===\n"
         except Exception as exc:  # noqa: BLE001
-            yield f"\n=== csv_seed.py ERROR: {exc} ===\n"
+            yield f"\n=== ERROR: {exc} ===\n"
 
     return StreamingResponse(_stream(), media_type="text/plain")
 
