@@ -42,8 +42,8 @@ CREATE INDEX IF NOT EXISTS idx_pitch_whiff_pitcher ON pitch_whiff_live (pitcher_
 CREATE INDEX IF NOT EXISTS idx_batter_pitch_whiff_batter ON batter_pitch_whiff_live (batter_id, season);
 
 -- Record this migration
-INSERT INTO migration_history (version, description, applied_at)
-VALUES ('V48', 'pitch_whiff_live_tables', NOW())
+INSERT INTO migration_history (filename, version, description, applied_at)
+VALUES ('V48__pitch_whiff_live_tables.sql', 'V48', 'pitch_whiff_live_tables', NOW())
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
