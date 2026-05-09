@@ -4119,6 +4119,20 @@ class _BullpenAgent(_BaseAgent):
         # ── 2. BVI structural adjustment ─────────────────────────────────────
         bvi_entry  = bvi_map.get(opp_abbrev, {})
         bvi_score  = float(bvi_entry.get("bvi", 50.0)) if bvi_entry else 50.0
+        # ── PR #512: WPA drama adjustment ─────────────────────────────────────
+        # Yesterday's late-inning WPA swing shifts bvi_score before directional
+        # gates fire: walkoff/comeback boosts volatility; blowout damps it.
+        # wpa_drama_layer.prefetch_yesterday_drama() is called at 8:15 AM PT
+        # (alongside Predict+ prefetch) so the cache is warm at dispatch time.
+        try:
+            from wpa_drama_layer import get_team_bvi_adjustment as _wpa_bvi_adj  # noqa: PLC0415
+            _wpa_delta = _wpa_bvi_adj(opp_team)
+            if _wpa_delta:
+                bvi_score = max(0.0, min(100.0, bvi_score + _wpa_delta))
+                logger.debug("[BullpenAgent] WPA drama adj %+.1f → bvi_score=%.1f (%s)",
+                             _wpa_delta, bvi_score, opp_team)
+        except Exception:
+            pass
         # Directional BVI boost: volatile bullpen → OVER; stable → UNDER
         if bvi_score > 60.0:
             bvi_over_adj  = round((bvi_score - 60.0) / 40.0 * 3.0, 2)   # max +3pp at BVI=100
