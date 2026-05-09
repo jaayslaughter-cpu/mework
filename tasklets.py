@@ -5448,10 +5448,11 @@ def _build_pitcher_enrich_map(hub: dict) -> dict[str, dict]:
 
 def _get_props(hub: dict) -> list[dict]:
     """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
-    # 1. Try PrizePicks from hub (6,500+ real MLB props)
+    # 1. Build PP props (always) — tagged platform="prizepicks"
     pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+    pp_props: list[dict] = []
     if pp_picks and isinstance(pp_picks, list):
-        props = []
+        _pp_enrich = _build_pitcher_enrich_map(hub)
         for pick in pp_picks:
             if not isinstance(pick, dict):
                 continue
@@ -5460,7 +5461,6 @@ def _get_props(hub: dict) -> list[dict]:
             line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue
-            _pp_enrich = _build_pitcher_enrich_map(hub)
             _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
             _fg_pitcher = {}
             try:
@@ -5468,8 +5468,9 @@ def _get_props(hub: dict) -> list[dict]:
                 _fg_pitcher = _fg_get_pitcher(player) or {}
             except Exception:
                 pass
-            props.append({
+            pp_props.append({
                 "player":           player,
+                "player_name":      player,
                 "prop_type":        str(prop_type).lower(),
                 "line":             float(line or 1.5),
                 "over_american":    int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
@@ -5486,47 +5487,24 @@ def _get_props(hub: dict) -> list[dict]:
                 "era":              _fg_pitcher.get("era",    4.06),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
-        if props:
-            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
-            return props
 
-    # 2. Underdog from hub — returned as separate tagged props alongside PP props.
-    # PLATFORM PURITY: both PP and UD props are returned together in the full list,
-    # each tagged with their platform. _make_parlay enforces that every leg in a slip
-    # must share the same platform — no cross-platform mixing allowed.
+    # 2. Build UD props (always) — tagged platform="underdog"
+    # PLATFORM PURITY: both PP and UD props are always returned together.
+    # _make_parlay enforces that every leg in a slip must share one platform.
+    # Previously this was only done when PP was absent — fixed: always include UD.
     ud_props = _extract_underdog_props(hub)
-    if ud_props:
-        props = []
-        props.extend(ud_props)  # already tagged platform="underdog"
-        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
 
-        # Append PP props separately — keep platform tag "prizepicks" intact.
-        # Agents evaluate all props; _make_parlay splits them by platform at slip-build time.
-        pp_picks = hub.get("dfs", {}).get("prizepicks", [])
-        if pp_picks and isinstance(pp_picks, list):
-            pp_added = 0
-            for pick in pp_picks:
-                if not isinstance(pick, dict):
-                    continue
-                player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
-                prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", ""))))
-                line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
-                if not player or not prop_type:
-                    continue
-                props.append({
-                    "player":         player,
-                    "player_name":    player,
-                    "prop_type":      prop_type,
-                    "line":           float(line or 1.5),
-                    "over_american":  int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
-                    "under_american": int(pick.get("under_american", pick.get("under_odds", -115)) or -115),
-                    "team":           pick.get("player_team", pick.get("team", "")),
-                    "venue":          "",
-                    "platform":       "prizepicks",  # keep tagged — purity enforced downstream
-                })
-                pp_added += 1
-            if pp_added:
-                logger.info("[AgentTasklet] PrizePicks: %d props added (kept separate from UD)", pp_added)
+    props: list[dict] = []
+    if ud_props:
+        props.extend(ud_props)
+    if pp_props:
+        props.extend(pp_props)
+
+    if props:
+        logger.info(
+            "[AgentTasklet] Props available: %d UD + %d PP = %d total",
+            len(ud_props), len(pp_props), len(props),
+        )
         return props
 
     # No real props available — skip cycle entirely (no synthetic)
@@ -5724,16 +5702,30 @@ def run_agent_tasklet() -> bool:
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is None:
-                    # No sharp book data for this specific player/prop.
-                    # The reference chain (OddsAPI → PropOdds → Pinnacle → Covers →
-                    # DraftEdge → ActionNetwork → TheRundown) already ran — if it's
-                    # still None this prop genuinely has no coverage today.
-                    logger.debug(
-                        "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
-                        agent.name, player, prop_type,
-                    )
-                    _rj_no_sharp += 1
-                    continue
+                    # No sportsbook market for this prop type (common for pitching_outs,
+                    # walks_allowed, hits_allowed — these markets rarely exist on DK/FD).
+                    # Fallback: use the agent's internal model_prob if it is high-confidence
+                    # (≥62%). This lets F5Agent / UmpireAgent fire on specialty pitcher props
+                    # that have no sportsbook analog without sacrificing edge discipline.
+                    _fallback_prob = float(bet.get("model_prob", 0) or 0)
+                    _PITCHER_NO_SB_MARKETS = {
+                        "pitching_outs", "walks_allowed", "hits_allowed",
+                        "hitter_strikeouts",  # batter_strikeouts — sparse coverage
+                    }
+                    if _fallback_prob >= 62.0 and prop_type in _PITCHER_NO_SB_MARKETS:
+                        sharp_prob = _fallback_prob
+                        bet["_no_sb_coverage"] = True  # flag for logging/Discord
+                        logger.debug(
+                            "[AgentTasklet] %s %s %s — no SB market; using model fallback %.1f%%",
+                            agent.name, player, prop_type, sharp_prob,
+                        )
+                    else:
+                        logger.debug(
+                            "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
+                            agent.name, player, prop_type,
+                        )
+                        _rj_no_sharp += 1
+                        continue
 
                 side    = bet["side"]
                 ud_odds = (prop.get("over_american", -120)
@@ -5755,6 +5747,18 @@ def run_agent_tasklet() -> bool:
                 bet["ev_pct"]          = round(edge, 2)
                 bet["model_prob"]      = round(sharp_prob, 1)
                 bet["sharp_consensus"] = True
+                # Recompute confidence from sharp_prob (consistent with model_prob overwrite).
+                # Confidence thresholds from Phase 121 directive:
+                # ≥72→9, ≥67→8, ≥63→7, ≥59→6, ≥55→5, <55→4 (+1 if EV≥10%, -1 if EV<0)
+                _sp = round(sharp_prob, 1)
+                _ev_adj = (1 if edge >= 10.0 else (-1 if edge < 0 else 0))
+                if _sp >= 72:   _reconf = 9
+                elif _sp >= 67: _reconf = 8
+                elif _sp >= 63: _reconf = 7
+                elif _sp >= 59: _reconf = 6
+                elif _sp >= 55: _reconf = 5
+                else:           _reconf = 4
+                bet["confidence"] = max(1, min(10, _reconf + _ev_adj))
                 bet["underdog_line"]   = prop.get("underdog_line",
                                                     prop.get("over_american", -120))
                 agent_hits.append(bet)
