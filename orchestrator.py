@@ -569,6 +569,59 @@ async def lifespan(_app: FastAPI):
         id="nightly_recap",
     )
 
+    # ── Nightly pitch whiff refresh — 3:30 AM PT ──────────────────────────────
+    # Fetches yesterday's live game feeds from MLB Stats API, parses all pitches,
+    # aggregates to season-to-date whiff%/K% by pitcher+pitch_type and batter+pitch_type.
+    # Upserts into pitch_whiff_live and batter_pitch_whiff_live tables.
+    # Invalidates batter_pitch_arsenal Redis cache so next cycle reads live data.
+    def job_pitch_whiff():
+        try:
+            from pitch_whiff_refresh import refresh as _pw_refresh  # noqa: PLC0415
+            result = _pw_refresh()
+            logger.info(
+                "[Scheduler] PitchWhiffRefresh: %d games, %d pitches, "
+                "%d pitcher rows, %d batter rows",
+                result.get("games_fetched", 0),
+                result.get("pitches_parsed", 0),
+                result.get("pitcher_rows", 0),
+                result.get("batter_rows", 0),
+            )
+        except Exception as exc:
+            logger.warning("[Scheduler] PitchWhiffRefresh failed: %s", exc)
+
+    scheduler.add_job(
+        job_pitch_whiff,
+        CronTrigger(hour=3, minute=30, timezone="America/Los_Angeles"),
+        id="pitch_whiff_refresh",
+        name="Nightly pitch whiff refresh",
+        replace_existing=True,
+    )
+
+    # ── Weekly umpire table refresh — Monday 3:00 AM PT ───────────────────────
+    # Scrapes swishanalytics.com/mlb/mlb-umpire-factors for live K%, BB%, RPG, boosts.
+    # Updates umpire_rates._UMPIRE_TABLE and _STATIC_RUN_IMPACT in-process.
+    # Falls back to Redis-cached prior scrape if site returns 403.
+    def job_ump_refresh():
+        try:
+            from ump_refresh import refresh as _ur_refresh  # noqa: PLC0415
+            result = _ur_refresh()
+            logger.info(
+                "[Scheduler] UmpRefresh: %d scraped, %d updated (source=%s)",
+                result.get("scraped", 0),
+                result.get("updated", 0),
+                result.get("source", "?"),
+            )
+        except Exception as exc:
+            logger.warning("[Scheduler] UmpRefresh failed: %s", exc)
+
+    scheduler.add_job(
+        job_ump_refresh,
+        CronTrigger(day_of_week="mon", hour=3, minute=0, timezone="America/Los_Angeles"),
+        id="ump_refresh",
+        name="Weekly umpire table refresh",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
     # Discord startup ping — guarded: at most once per PT calendar day
@@ -817,6 +870,37 @@ async def get_season_record():
     except Exception as exc:  # noqa: BLE001
         logger.error("[record] Postgres query failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/admin/run-seed")
+async def admin_run_seed(token: str = ""):
+    """One-shot endpoint to trigger csv_seed.py — fixes the 72.4% model lock."""
+    expected = os.environ.get("SEED_TOKEN", "propiq-seed-2026")
+    if token != expected:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    import subprocess  # noqa: PLC0415
+    from fastapi.responses import StreamingResponse  # noqa: PLC0415
+    import asyncio  # noqa: PLC0415
+
+    async def _stream():
+        yield "=== csv_seed.py starting ===\n"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "python3", "csv_seed.py", "--write", "--clear",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            async for line in proc.stdout:
+                yield line.decode(errors="replace")
+            await proc.wait()
+            if proc.returncode == 0:
+                yield "\n=== csv_seed.py SUCCESS ===\n"
+            else:
+                yield f"\n=== csv_seed.py FAILED (exit {proc.returncode}) ===\n"
+        except Exception as exc:  # noqa: BLE001
+            yield f"\n=== csv_seed.py ERROR: {exc} ===\n"
+
+    return StreamingResponse(_stream(), media_type="text/plain")
 
 
 if __name__ == "__main__":

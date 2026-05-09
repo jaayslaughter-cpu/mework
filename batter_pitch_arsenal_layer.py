@@ -62,6 +62,48 @@ def _get_redis():
 
 # ── pybaseball fetch ─────────────────────────────────────────────────────────
 
+def _fetch_from_live_db() -> dict[int, dict[str, dict]]:
+    """
+    Read batter_pitch_whiff_live table (written by pitch_whiff_refresh.py nightly).
+    Returns same shape as _fetch_from_pybaseball: {player_id: {pitch_type: {whiff_pct, k_pct, woba, pa}}}.
+    Returns {} if table doesn't exist or has no rows for current season.
+    """
+    try:
+        import os, psycopg2  # noqa: PLC0415, E401
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            return {}
+        conn = psycopg2.connect(url)
+        season = __import__("datetime").date.today().year
+        result: dict[int, dict[str, dict]] = {}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT batter_id, pitch_type, pa, whiff_pct, k_pct
+                FROM batter_pitch_whiff_live
+                WHERE season = %s AND swings >= 15
+                """,
+                (season,),
+            )
+            for row in cur.fetchall():
+                bid, pt, pa, whiff, k_pct = row
+                if bid not in result:
+                    result[int(bid)] = {}
+                result[int(bid)][str(pt).strip()] = {
+                    "whiff_pct": float(whiff),
+                    "k_pct":     float(k_pct),
+                    "woba":      0.0,   # not stored in live table yet
+                    "pa":        int(pa),
+                }
+        conn.close()
+        if result:
+            logger.info("[BatterPitchArsenal] Live DB: %d batters loaded (season=%d)", len(result), season)
+        return result
+    except Exception as exc:
+        logger.debug("[BatterPitchArsenal] Live DB read failed: %s", exc)
+        return {}
+
+
 def _fetch_from_pybaseball() -> dict[int, dict[str, dict]]:
     """Call pybaseball.statcast_batter_pitch_arsenal(2026, minPA=50).
     Returns {player_id: {pitch_type: {whiff_pct, k_pct, woba, pa}}}.
@@ -124,9 +166,12 @@ def _load() -> None:
             except Exception as exc:
                 logger.debug("[BatterPitchArsenal] Redis read failed: %s", exc)
 
-        # Fetch fresh from pybaseball
-        logger.info("[BatterPitchArsenal] Fetching from pybaseball (cold start)…")
-        fetched = _fetch_from_pybaseball()
+        # Fetch fresh: live DB first, then pybaseball fallback
+        logger.info("[BatterPitchArsenal] Cache miss — checking live DB then pybaseball…")
+        fetched = _fetch_from_live_db()
+        if not fetched:
+            logger.info("[BatterPitchArsenal] Live DB empty — falling back to pybaseball…")
+            fetched = _fetch_from_pybaseball()
         if fetched:
             _data = fetched
             if r:
