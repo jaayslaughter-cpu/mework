@@ -913,7 +913,7 @@ async def admin_run_seed(token: str = ""):
         yield "=== csv_seed.py starting ===\n"
         try:
             proc = subprocess.Popen(
-                ["python3", "csv_seed.py"],
+                ["python3", "csv_seed.py", "--write"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
