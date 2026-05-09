@@ -1,7 +1,8 @@
 """statcast_static_layer.py — 2026 Statcast CSV lookup layer.
 
-Loads pitcher arsenal stats, batter bat-tracking, EV, xStats, and discipline
-from CSV files in data/statcast/ relative to this module.
+Loads pitcher arsenal stats, batter bat-tracking, EV, xStats, discipline,
+spin direction, handedness splits, and historical trend data from CSV files
+in data/statcast/ relative to this module.
 
 All lookups keyed by MLBAM player_id (int). Returns None / empty dict when
 a player is not in the dataset — callers should always provide a fallback.
@@ -9,20 +10,36 @@ a player is not in the dataset — callers should always provide a fallback.
 Public API
 ----------
 # Pitcher
-get_pitcher_k_rate(player_id)    -> float | None   (e.g. 0.283 = 28.3% K rate)
-get_pitcher_whiff_rate(player_id)-> float | None   (e.g. 0.271 = 27.1% whiff)
-get_pitcher_xera(player_id)      -> float | None   (e.g. 3.41)
-get_pitcher_arsenal(player_id)   -> dict           pitch_type → metrics
+get_pitcher_k_rate(player_id)          -> float | None   (0.283 = 28.3%)
+get_pitcher_whiff_rate(player_id)      -> float | None
+get_pitcher_xera(player_id)            -> float | None   (e.g. 3.41)
+get_pitcher_arsenal(player_id)         -> dict           pitch_type → metrics
+get_pitcher_statcast(player_id)        -> dict           2026 combined stats
+get_pitcher_active_spin(pid, pt)       -> dict           spin direction
+get_pitcher_spin_profile(player_id)    -> dict[str, dict]
+get_pitcher_percentiles(player_id)     -> dict           0–100 percentile ranks
+get_pitcher_expected_stats(player_id)  -> dict           era, est_woba, xera_diff
+get_pitcher_arsenal_vs_hand(pid, hand) -> dict           vs R or L batters
 
 # Batter
 get_batter_k_susceptibility(player_id) -> float | None  (whiff_per_swing)
+get_batter_bat_tracking(player_id)     -> dict
 get_batter_ev_profile(player_id)       -> dict          (ev50, brl_percent, avg_hit_speed)
 get_batter_xstats(player_id)           -> dict          (xba, xwoba, xslg)
 get_batter_discipline(player_id)       -> dict          (runs_chase, runs_heart, runs_waste)
 get_batter_batted_ball(player_id)      -> dict          (gb_rate, fb_rate, ld_rate, pull_rate)
+get_batter_percentiles(player_id)      -> dict          batter Statcast percentiles
+get_batter_statcast(player_id)         -> dict          2026 combined stats
+get_batter_fg_proj(player_name)        -> dict | None   FanGraphs projected stats
+get_batter_sprint_speed(player_id)     -> dict | None
+get_batter_baserunning(player_id)      -> float | None
+get_batter_vs_pitch(batter_id, pt)     -> dict          batter perf vs pitch type
+get_batter_lhp_splits(batter_id)       -> dict          vs LHP aggregated
+get_batter_pitch_vs_lhp(bid, pt)       -> dict          vs specific pitch from LHP
+get_batter_k_trend(player_id)          -> dict          multi-year K% trend
 
 # Matchup
-get_matchup_k_boost(pitcher_id, batter_id) -> float    (logit adjustment, typically -0.1 to +0.2)
+get_matchup_k_boost(pitcher_id, batter_id) -> float    (logit delta, -0.30 to +0.30)
 """
 
 from __future__ import annotations
@@ -31,12 +48,12 @@ import csv
 import logging
 import os
 import threading
-from functools import lru_cache
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 import unicodedata as _ud
+
 
 def _norm_name(s: str) -> str:
     """Normalize player name for fuzzy matching: lowercase, ASCII, strip punctuation."""
@@ -48,7 +65,7 @@ def _norm_name(s: str) -> str:
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "statcast")
 
 # ── Lazy-load state ───────────────────────────────────────────────────────────
-_loaded   = False
+_loaded    = False
 _load_lock = threading.Lock()
 
 # Internal stores (keyed by MLBAM int)
@@ -56,18 +73,35 @@ _pitcher_k_rate:    dict[int, float] = {}
 _pitcher_whiff:     dict[int, float] = {}
 _pitcher_xera:      dict[int, float] = {}
 _pitcher_arsenal:   dict[int, dict]  = {}
+_pitcher_statcast:  dict[int, dict]  = {}
+_pitcher_percentiles: dict[int, dict] = {}  # percentile_rankings-pitchers.csv
+_pitcher_expected:  dict[int, dict]  = {}   # expected-stats-pitchers.csv (era, est_woba, diff)
 
 _batter_tracking:   dict[int, dict] = {}
 _batter_ev:         dict[int, dict] = {}
 _batter_xstats:     dict[int, dict] = {}
 _batter_discipline: dict[int, dict] = {}
 _batter_batted:     dict[int, dict] = {}
-_batter_percentiles:dict[int, dict] = {}
+_batter_percentiles: dict[int, dict] = {}
+_batter_statcast:   dict[int, dict] = {}
+_batter_k_history:  dict[int, list] = {}   # statcast_batters_historical.csv — list of {year, k_pct, ...}
 
-_batter_fg_proj:    dict[str, dict] = {}  # keyed by normalized name
+_batter_fg_proj:    dict[str, dict] = {}   # keyed by normalized name
 _sprint_speed_data: dict[int, dict] = {}
 _baserunning_data:  dict[int, float] = {}
 
+# Matchup / handedness splits
+_batter_vs_pitch:      dict[tuple, dict] = {}   # (batter_id, pitch_type) → stats
+_BATTER_VS_LHP:        dict[str, dict]   = {}   # str(player_id) → {woba_vs_lhp, k_pct_vs_lhp, whiff_pct_vs_lhp}
+_BATTER_PITCH_VS_LHP:  dict[tuple, dict] = {}   # (str(player_id), pitch_type) → {woba_vs_pitch, whiff_pct_vs_pitch}
+_PITCHER_ARSENAL_RHP:  dict[str, dict]   = {}   # str(player_id) → opponent-batter stats vs RHP
+_PITCHER_ARSENAL_LHP:  dict[str, dict]   = {}   # str(player_id) → opponent-batter stats vs LHP
+
+# Spin direction (2026)
+_spin_direction: dict[tuple, dict] = {}    # (player_id_int, api_pitch_type) → spin stats
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _safe_float(v: Any, default: float | None = None) -> float | None:
     try:
@@ -93,6 +127,8 @@ def _read_csv(filename: str) -> list[dict]:
         return []
 
 
+# ── Loader ────────────────────────────────────────────────────────────────────
+
 def _load() -> None:
     global _loaded
 
@@ -105,15 +141,14 @@ def _load() -> None:
 
         logger.info("[StatcastStatic] Loading 2026 Statcast CSV data from %s", _DATA_DIR)
 
-        # ── Pitcher arsenal: pitch-arsenal-stats (1).csv ─────────────────────
+        # ── Pitcher arsenal: pitch-arsenal-stats-pitchers.csv ─────────────────
         arsenal_rows = _read_csv("pitch-arsenal-stats-pitchers.csv")
-        # Aggregate to per-pitcher overall K rate (weighted by pitch usage)
         _pit_k_total: dict[int, float] = {}
         _pit_k_usage: dict[int, float] = {}
         _pit_whiff_total: dict[int, float] = {}
         for _ar in arsenal_rows:
             try:
-                _pid = int(_ar.get("player_id", 0) or 0)
+                _pid   = int(_ar.get("player_id", 0) or 0)
                 _usage = float(_ar.get("pitch_usage", 0) or 0)
                 _kpct  = float(_ar.get("k_percent",   0) or 0) / 100.0
                 _whiff = float(_ar.get("whiff_percent", 0) or 0) / 100.0
@@ -123,11 +158,11 @@ def _load() -> None:
                     _pit_whiff_total[_pid] = _pit_whiff_total.get(_pid, 0) + _usage * _whiff
             except (ValueError, TypeError):
                 pass
-        # Store weighted K rate and whiff rate per pitcher
         for _pid in _pit_k_usage:
             if _pit_k_usage[_pid] > 0:
                 _pitcher_k_rate[_pid] = round(_pit_k_total[_pid] / _pit_k_usage[_pid], 4)
                 _pitcher_whiff[_pid]  = round(_pit_whiff_total[_pid] / _pit_k_usage[_pid], 4)
+
         for r in arsenal_rows:
             pid_s = r.get("player_id", "").strip()
             if not pid_s:
@@ -136,15 +171,13 @@ def _load() -> None:
                 pid = int(pid_s)
             except ValueError:
                 continue
-
             usage = _safe_float(r.get("pitch_usage"), 0.0) or 0.0
             kpct  = _safe_float(r.get("k_percent"),   0.0) or 0.0
-            whiff = _safe_float(r.get("whiff_percent"),0.0) or 0.0
+            whiff = _safe_float(r.get("whiff_percent"), 0.0) or 0.0
             rv100 = _safe_float(r.get("run_value_per_100"), 0.0) or 0.0
             put_a = _safe_float(r.get("put_away"),    0.0) or 0.0
             hh    = _safe_float(r.get("hard_hit_percent"), 0.0) or 0.0
             pt    = r.get("pitch_type", "").strip()
-
             if pid not in _pitcher_arsenal:
                 _pitcher_arsenal[pid] = {}
             _pitcher_arsenal[pid][pt] = {
@@ -152,26 +185,86 @@ def _load() -> None:
                 "rv100": rv100, "put_away": put_a, "hard_hit_pct": hh,
             }
 
+        # Re-derive weighted K rate from full arsenal dict
         for pid, pitches in _pitcher_arsenal.items():
             total = sum(p["usage"] for p in pitches.values())
             if total <= 0:
                 continue
             wk = sum(p["k_pct"]    * p["usage"] for p in pitches.values()) / total
-            ww = sum(p["whiff_pct"]* p["usage"] for p in pitches.values()) / total
+            ww = sum(p["whiff_pct"] * p["usage"] for p in pitches.values()) / total
             if wk > 0:
                 _pitcher_k_rate[pid] = round(wk / 100.0, 4)  # % → decimal
             if ww > 0:
                 _pitcher_whiff[pid]  = round(ww / 100.0, 4)
 
-        # ── Pitcher xERA: expected_stats (1).csv ──────────────────────────────
+        # ── Pitcher xERA + extended expected stats (expected-stats-pitchers.csv) ─
         for r in _read_csv("expected-stats-pitchers.csv"):
             pid_s = r.get("player_id", "").strip()
-            xera  = _safe_float(r.get("xera"))
-            if pid_s and xera:
-                try:
-                    _pitcher_xera[int(pid_s)] = round(xera, 3)
-                except ValueError:
-                    pass
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            xera = _safe_float(r.get("xera"))
+            if xera:
+                _pitcher_xera[pid] = round(xera, 3)
+            era_val   = _safe_float(r.get("era"))
+            est_woba  = _safe_float(r.get("est_woba"))
+            woba_allowed = _safe_float(r.get("woba"))
+            xera_diff = _safe_float(r.get("era_minus_xera_diff"))
+            _pitcher_expected[pid] = {
+                "era":              era_val,
+                "xera":             xera if xera else None,
+                "est_woba_allowed": est_woba,
+                "woba_allowed":     woba_allowed,
+                "era_minus_xera":   xera_diff,   # negative = pitching better than ERA shows
+                "est_ba_allowed":   _safe_float(r.get("est_ba")),
+            }
+
+        # ── Pitcher percentile ranks (percentile_rankings-pitchers.csv) ────────
+        for r in _read_csv("percentile_rankings-pitchers.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _pitcher_percentiles[pid] = {
+                "xwoba_pct":      _safe_float(r.get("xwoba")),
+                "brl_pct_rank":   _safe_float(r.get("brl_percent")),
+                "ev_rank":        _safe_float(r.get("exit_velocity")),
+                "hard_hit_rank":  _safe_float(r.get("hard_hit_percent")),
+                "k_pct_rank":     _safe_float(r.get("k_percent")),
+                "bb_pct_rank":    _safe_float(r.get("bb_percent")),
+                "whiff_rank":     _safe_float(r.get("whiff_percent")),
+                "chase_rank":     _safe_float(r.get("chase_percent")),
+                "xera_pct":       _safe_float(r.get("xera")),
+                "fb_velo_rank":   _safe_float(r.get("fb_velocity")),
+                "fb_spin_rank":   _safe_float(r.get("fb_spin")),
+            }
+
+        # ── Pitcher combined Statcast (statcast_pitchers_2026.csv) ────────────
+        for r in _read_csv("statcast_pitchers_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _pitcher_statcast[pid] = {
+                "k_pct":              _safe_float(r.get("k_percent")),
+                "bb_pct":             _safe_float(r.get("bb_percent")),
+                "woba_against":       _safe_float(r.get("woba")),
+                "xwoba_against":      _safe_float(r.get("xwoba")),
+                "barrel_against_pct": _safe_float(r.get("barrel_batted_rate")),
+                "hard_hit_against":   _safe_float(r.get("hard_hit_percent")),
+                "whiff_pct":          _safe_float(r.get("whiff_percent")),
+                "swing_pct":          _safe_float(r.get("swing_percent")),
+                "sweet_spot_against": _safe_float(r.get("sweet_spot_percent")),
+            }
 
         # ── Batter bat tracking ───────────────────────────────────────────────
         for r in _read_csv("bat-tracking.csv"):
@@ -206,7 +299,7 @@ def _load() -> None:
                 "max_hit_speed": _safe_float(r.get("max_hit_speed")),
             }
 
-        # ── Batter expected stats ─────────────────────────────────────────────
+        # ── Batter expected stats (batter xwOBA, xBA, xSLG) ──────────────────
         for r in _read_csv("expected_stats.csv"):
             pid_s = r.get("player_id", "").strip()
             if not pid_s:
@@ -253,7 +346,7 @@ def _load() -> None:
                 "pull_rate": _safe_float(r.get("pull_rate")),
             }
 
-        # ── Batter percentile ranks ───────────────────────────────────────────
+        # ── Batter percentile ranks (batter leaderboard) ─────────────────────
         for r in _read_csv("percentile_rankings.csv"):
             pid_s = r.get("player_id", "").strip()
             if not pid_s:
@@ -271,25 +364,24 @@ def _load() -> None:
                 "sprint_rank": _safe_float(r.get("sprint_speed")),
             }
 
-
         # ── FanGraphs batter projections (name-based) ────────────────────────
         for r in _read_csv("fg_batter_proj.csv"):
             name = r.get("name", "").strip()
             if not name:
                 continue
-            key = _norm_name(name)
-            k_pct  = _safe_float(r.get("k_pct"))
+            key   = _norm_name(name)
+            k_pct = _safe_float(r.get("k_pct"))
             bb_pct = _safe_float(r.get("bb_pct"))
-            woba   = _safe_float(r.get("woba"))
-            wrc    = _safe_float(r.get("wrc_plus"))
-            iso    = _safe_float(r.get("iso"))
+            woba  = _safe_float(r.get("woba"))
+            wrc   = _safe_float(r.get("wrc_plus"))
+            iso   = _safe_float(r.get("iso"))
             if k_pct:
                 _batter_fg_proj[key] = {
-                    "k_pct":  round(k_pct / 100.0, 4),   # % → decimal
-                    "bb_pct": round((bb_pct or 0.0) / 100.0, 4),
-                    "woba":   woba or 0.0,
+                    "k_pct":    round(k_pct / 100.0, 4),
+                    "bb_pct":   round((bb_pct or 0.0) / 100.0, 4),
+                    "woba":     woba or 0.0,
                     "wrc_plus": int(wrc) if wrc else 100,
-                    "iso":    iso or 0.0,
+                    "iso":      iso or 0.0,
                 }
 
         # ── Sprint speed ──────────────────────────────────────────────────────
@@ -305,8 +397,8 @@ def _load() -> None:
             if spd:
                 _sprint_speed_data[pid] = {
                     "sprint_speed": spd,
-                    "bolts":   int(_safe_float(r.get("bolts")) or 0),
-                    "hp_to_1b": _safe_float(r.get("hp_to_1b")) or 0.0,
+                    "bolts":        int(_safe_float(r.get("bolts")) or 0),
+                    "hp_to_1b":     _safe_float(r.get("hp_to_1b")) or 0.0,
                 }
 
         # ── Baserunning run value ─────────────────────────────────────────────
@@ -322,23 +414,196 @@ def _load() -> None:
             if rv is not None:
                 _baserunning_data[pid] = rv
 
+        # ── Batter combined Statcast (statcast_batters_2026.csv) ──────────────
+        for r in _read_csv("statcast_batters_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _batter_statcast[pid] = {
+                "k_pct":           _safe_float(r.get("k_percent")),
+                "bb_pct":          _safe_float(r.get("bb_percent")),
+                "woba":            _safe_float(r.get("woba")),
+                "xwoba":           _safe_float(r.get("xwoba")),
+                "sweet_spot_pct":  _safe_float(r.get("sweet_spot_percent")),
+                "barrel_pct":      _safe_float(r.get("barrel_batted_rate")),
+                "hard_hit_pct":    _safe_float(r.get("hard_hit_percent")),
+                "bat_speed_best":  _safe_float(r.get("avg_best_speed")),
+                "bat_speed_hyper": _safe_float(r.get("avg_hyper_speed")),
+                "whiff_pct":       _safe_float(r.get("whiff_percent")),
+                "swing_pct":       _safe_float(r.get("swing_percent")),
+            }
+
+        # ── Batter vs pitch type (primary: batter_pitch_arsenal_2026.csv) ─────
+        for r in _read_csv("batter_pitch_arsenal_2026.csv"):
+            try:
+                pid = int(r["player_id"])
+                pt  = r["pitch_type"].strip().upper()
+                _batter_vs_pitch[(pid, pt)] = {
+                    "woba":             float(r.get("woba") or 0),
+                    "xwoba":            float(r.get("est_woba") or 0),
+                    "whiff_pct":        float(r.get("whiff_percent") or 0),
+                    "k_pct":            float(r.get("k_percent") or 0),
+                    "hard_hit_pct":     float(r.get("hard_hit_percent") or 0),
+                    "put_away":         float(r.get("put_away") or 0),
+                    "run_value_per100": float(r.get("run_value_per_100") or 0),
+                }
+            except (ValueError, KeyError):
+                continue
+
+        # ── Batter vs pitch type (supplement: pitch-arsenal-stats-batters.csv) ─
+        # Same structure — only fills gaps not covered by the larger CSV above.
+        for r in _read_csv("pitch-arsenal-stats-batters.csv"):
+            try:
+                pid = int(r["player_id"])
+                pt  = r["pitch_type"].strip().upper()
+                key = (pid, pt)
+                if key in _batter_vs_pitch:
+                    continue  # don't overwrite larger dataset
+                _batter_vs_pitch[key] = {
+                    "woba":             float(r.get("woba") or 0),
+                    "xwoba":            float(r.get("est_woba") or 0),
+                    "whiff_pct":        float(r.get("whiff_percent") or 0),
+                    "k_pct":            float(r.get("k_percent") or 0),
+                    "hard_hit_pct":     float(r.get("hard_hit_percent") or 0),
+                    "put_away":         float(r.get("put_away") or 0),
+                    "run_value_per100": float(r.get("run_value_per_100") or 0),
+                }
+            except (ValueError, KeyError):
+                continue
+
+        # ── Batter vs LHP (batter_vs_lhp_2026.csv) ───────────────────────────
+        for r in _read_csv("batter_vs_lhp_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            if not pid_s:
+                continue
+            _BATTER_VS_LHP[pid_s] = {
+                "woba_vs_lhp":   _safe_float(r.get("woba_vs_lhp")),
+                "k_pct_vs_lhp":  _safe_float(r.get("k_pct_vs_lhp")),
+                "whiff_pct_vs_lhp": _safe_float(r.get("whiff_pct_vs_lhp")),
+                "pa":            _safe_float(r.get("pa")),
+            }
+
+        # ── Batter vs pitch type from LHP (batter_pitch_vs_lhp_2026.csv) ─────
+        for r in _read_csv("batter_pitch_vs_lhp_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            pt    = r.get("pitch_type", "").strip().upper()
+            if not pid_s or not pt:
+                continue
+            _BATTER_PITCH_VS_LHP[(pid_s, pt)] = {
+                "woba_vs_pitch":    _safe_float(r.get("woba_vs_pitch")),
+                "whiff_pct_vs_pitch": _safe_float(r.get("whiff_pct_vs_pitch")),
+                "pa_vs_pitch":      _safe_float(r.get("pa_vs_pitch")),
+            }
+
+        # ── Spin direction / active spin (spin_direction_pitches_2026.csv) ────
+        for r in _read_csv("spin_direction_pitches_2026.csv"):
+            pid_s = r.get("player_id", "").strip()
+            pt    = r.get("api_pitch_type", "").strip()
+            if not pid_s or not pt:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _spin_direction[(pid, pt)] = {
+                "active_spin_pct": _safe_float(r.get("alan_active_spin_pct")),
+                "clock_label":     r.get("hawkeye_measured_clock_label", "").strip(),
+                "movement_inches": _safe_float(r.get("movement_inches")),
+                "spin_rate":       _safe_float(r.get("spin_rate")),
+                "release_speed":   _safe_float(r.get("release_speed")),
+                "n_pitches":       _safe_float(r.get("n_pitches")),
+            }
+
+        # ── Historical batter K% trend (statcast_batters_historical.csv) ──────
+        # Store per-player list of {year, k_pct, woba, xwoba, whiff_pct, barrel_pct, hard_hit_pct}
+        # Keep 2023 onward (earlier years less predictive)
+        for r in _read_csv("statcast_batters_historical.csv"):
+            pid_s = r.get("player_id", "").strip()
+            yr_s  = r.get("year", "").strip()
+            if not pid_s or not yr_s:
+                continue
+            try:
+                pid = int(pid_s)
+                yr  = int(yr_s)
+            except ValueError:
+                continue
+            if yr < 2023:
+                continue
+            entry = {
+                "year":        yr,
+                "k_pct":       _safe_float(r.get("k_percent")),
+                "bb_pct":      _safe_float(r.get("bb_percent")),
+                "woba":        _safe_float(r.get("woba")),
+                "xwoba":       _safe_float(r.get("xwoba")),
+                "whiff_pct":   _safe_float(r.get("whiff_percent")),
+                "barrel_pct":  _safe_float(r.get("barrel_batted_rate")),
+                "hard_hit_pct": _safe_float(r.get("hard_hit_percent")),
+                "pa":          _safe_float(r.get("pa")),
+            }
+            if pid not in _batter_k_history:
+                _batter_k_history[pid] = []
+            _batter_k_history[pid].append(entry)
+
+        # Sort each player's history by year ascending
+        for pid in _batter_k_history:
+            _batter_k_history[pid].sort(key=lambda x: x["year"])
+
+        # ── Pitcher arsenal by handedness (RHP/LHP) ───────────────────────────
+        for hand, fname, target in [
+            ("RHP", "pitcher_arsenal_rhp_2026.csv", _PITCHER_ARSENAL_RHP),
+            ("LHP", "pitcher_arsenal_lhp_2026.csv", _PITCHER_ARSENAL_LHP),
+        ]:
+            for r in _read_csv(fname):
+                pid = str(r.get("player_id", "")).strip()
+                if not pid:
+                    continue
+                target[pid] = {
+                    "k_pct":              _safe_float(r.get("k_percent")),
+                    "woba_against":       _safe_float(r.get("woba")),
+                    "hard_hit_against":   _safe_float(r.get("hardhit_percent")),
+                    "barrel_pct_against": _safe_float(r.get("barrels_per_bbe_percent")),
+                    "whiff_pct":          _safe_float(r.get("swing_miss_percent")),
+                    "arm_angle":          _safe_float(r.get("arm_angle")),
+                    "pa":                 _safe_float(r.get("pa")),
+                    "name":               r.get("player_name", ""),
+                }
+            logger.info("pitcher_arsenal_%s: %d pitchers loaded", hand, len(target))
+
         _loaded = True
         logger.info(
-            "[StatcastStatic] Loaded: %d pitcher K rates, %d pitcher xERAs, "
+            "[StatcastStatic] Loaded: %d pitcher K rates, %d pitcher xERAs, %d pitcher percentiles, "
             "%d batter tracking, %d batter EV, %d batter xStats, "
-            "%d FG proj, %d sprint, %d baserunning",
-            len(_pitcher_k_rate), len(_pitcher_xera),
+            "%d FG proj, %d sprint, %d baserunning, %d spin-dir entries, "
+            "%d batter-vs-pitch, %d vs-LHP, %d batter-k-history",
+            len(_pitcher_k_rate), len(_pitcher_xera), len(_pitcher_percentiles),
             len(_batter_tracking), len(_batter_ev), len(_batter_xstats),
             len(_batter_fg_proj), len(_sprint_speed_data), len(_baserunning_data),
+            len(_spin_direction), len(_batter_vs_pitch),
+            len(_BATTER_VS_LHP), len(_batter_k_history),
         )
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+# -- Pitcher --
+
 def get_pitcher_k_rate(player_id: int) -> float | None:
-    """Weighted K% across pitcher's 2026 arsenal. Returns decimal (e.g. 0.283)."""
+    """Pitcher K% for 2026.
+
+    Tier 1: statcast_pitchers_2026.csv actual K% (direct measurement).
+    Tier 2: arsenal-weighted K% from pitch-arsenal-stats-pitchers.csv.
+    Returns decimal (e.g. 0.283 = 28.3% K rate).
+    """
     _load()
-    return _pitcher_k_rate.get(int(player_id))
+    pid = int(player_id)
+    sc  = _pitcher_statcast.get(pid, {})
+    if sc.get("k_pct") is not None:
+        return round(sc["k_pct"] / 100.0, 4)
+    return _pitcher_k_rate.get(pid)
 
 
 def get_pitcher_whiff_rate(player_id: int) -> float | None:
@@ -359,10 +624,98 @@ def get_pitcher_arsenal(player_id: int) -> dict:
     return _pitcher_arsenal.get(int(player_id), {})
 
 
-def get_batter_k_susceptibility(player_id: int) -> float | None:
-    """Batter's whiff_per_swing from bat tracking. Higher = more K-prone."""
+def get_pitcher_statcast(player_id: int) -> dict:
+    """Full 2026 Statcast combined stats for a pitcher.
+
+    Keys: k_pct, bb_pct, woba_against, xwoba_against, barrel_against_pct,
+          hard_hit_against, whiff_pct, swing_pct, sweet_spot_against.
+    k_pct is raw % (e.g. 28.3 = 28.3% K rate). Returns {} if not found.
+    """
     _load()
-    bt = _batter_tracking.get(int(player_id), {})
+    return _pitcher_statcast.get(int(player_id), {})
+
+
+def get_pitcher_percentiles(player_id: int) -> dict:
+    """Pitcher 2026 Statcast percentile ranks (0–100 scale).
+
+    Keys: xwoba_pct, brl_pct_rank, ev_rank, hard_hit_rank,
+          k_pct_rank, bb_pct_rank, whiff_rank, chase_rank,
+          xera_pct, fb_velo_rank, fb_spin_rank.
+    High k_pct_rank (e.g. 90) = elite strikeout pitcher.
+    Returns {} if not found.
+    """
+    _load()
+    return _pitcher_percentiles.get(int(player_id), {})
+
+
+def get_pitcher_expected_stats(player_id: int) -> dict:
+    """Pitcher 2026 expected vs actual stats.
+
+    Keys: era, xera, est_woba_allowed, woba_allowed, era_minus_xera, est_ba_allowed.
+    era_minus_xera < 0 means pitcher is outperforming (ERA < xERA → lucky).
+    era_minus_xera > 0 means pitcher due for regression (ERA > xERA → unlucky).
+    Returns {} if not found.
+    """
+    _load()
+    return _pitcher_expected.get(int(player_id), {})
+
+
+def get_pitcher_active_spin(player_id: int, pitch_type: str) -> dict:
+    """Active spin / spin direction for a pitcher's specific pitch type.
+
+    Args:
+        player_id: MLBAM player ID
+        pitch_type: Savant pitch type code (e.g. 'FF', 'SL', 'CH')
+
+    Returns dict with:
+        active_spin_pct  – fraction of spin that is 'active' (0.0–1.0)
+        clock_label      – spin axis as clock position (e.g. '12:00', '1:30')
+        movement_inches  – total movement in inches
+        spin_rate        – average spin rate (RPM)
+        release_speed    – average velocity (mph)
+    Returns {} if not found.
+    """
+    _load()
+    return _spin_direction.get((int(player_id), pitch_type.upper()), {})
+
+
+def get_pitcher_spin_profile(player_id: int) -> dict[str, dict]:
+    """All spin direction entries for a pitcher, keyed by pitch_type code.
+
+    Returns {} if not found.
+    """
+    _load()
+    pid = int(player_id)
+    return {pt: data for (p, pt), data in _spin_direction.items() if p == pid}
+
+
+def get_pitcher_arsenal_vs_hand(pitcher_id: int | str, batter_hand: str) -> dict:
+    """Return pitcher stats vs given batter handedness (R/L).
+
+    Keys: k_pct, woba_against, hard_hit_against, barrel_pct_against, whiff_pct, arm_angle, pa
+    Returns empty dict if pitcher not found.
+    """
+    _load()
+    pid    = str(pitcher_id)
+    target = _PITCHER_ARSENAL_RHP if batter_hand.upper() == "R" else _PITCHER_ARSENAL_LHP
+    return target.get(pid, {})
+
+
+# -- Batter --
+
+def get_batter_k_susceptibility(player_id: int) -> float | None:
+    """Batter K-susceptibility. Higher = more K-prone.
+
+    Tier 1: statcast_batters_2026.csv whiff% (overall swing whiff rate).
+    Tier 2: bat-tracking.csv whiff_per_swing.
+    Returns decimal (e.g. 0.26 = 26% whiff rate).
+    """
+    _load()
+    pid = int(player_id)
+    sc  = _batter_statcast.get(pid, {})
+    if sc.get("whiff_pct") is not None:
+        return round(sc["whiff_pct"] / 100.0, 4)
+    bt = _batter_tracking.get(pid, {})
     return bt.get("whiff_per_swing")
 
 
@@ -402,6 +755,131 @@ def get_batter_percentiles(player_id: int) -> dict:
     return _batter_percentiles.get(int(player_id), {})
 
 
+def get_batter_statcast(player_id: int) -> dict:
+    """Full 2026 Statcast combined stats for a batter.
+
+    Keys: k_pct, bb_pct, woba, xwoba, sweet_spot_pct, barrel_pct,
+          hard_hit_pct, bat_speed_best, bat_speed_hyper, whiff_pct, swing_pct.
+    Percentages are raw % (e.g. 21.4 means 21.4%). Returns {} if not found.
+    """
+    _load()
+    return _batter_statcast.get(int(player_id), {})
+
+
+def get_batter_fg_proj(player_name: str) -> dict | None:
+    """Return FanGraphs 2026 projected stats keyed by player name.
+
+    Returns dict with k_pct (decimal), bb_pct, woba, wrc_plus, iso.
+    k_pct=0.189 means 18.9% projected strikeout rate.
+    """
+    _load()
+    key  = _norm_name(player_name)
+    proj = _batter_fg_proj.get(key)
+    if proj:
+        return proj
+    # Fuzzy: try last name only match
+    last = key.split()[-1] if key.split() else key
+    for k, v in _batter_fg_proj.items():
+        if k.endswith(last) and len(last) > 4:
+            return v
+    return None
+
+
+def get_batter_sprint_speed(player_id: int) -> dict | None:
+    """Return sprint speed metrics for a batter.
+
+    Keys: sprint_speed (ft/s), bolts (runs ≥30 ft/s), hp_to_1b (seconds).
+    League avg sprint speed ~27 ft/s; elite ≥30.
+    """
+    _load()
+    return _sprint_speed_data.get(int(player_id))
+
+
+def get_batter_baserunning(player_id: int) -> float | None:
+    """Return FanGraphs baserunning run value for the season.
+
+    Positive = above-average baserunner. League avg ≈ 0.
+    """
+    _load()
+    return _baserunning_data.get(int(player_id))
+
+
+def get_batter_vs_pitch(batter_id: int, pitch_type: str) -> dict:
+    """Return 2026 batter performance against a specific pitch type.
+
+    pitch_type: Savant abbreviation — FF, SL, CH, CU, ST, FC, SI, FS, SV, KN.
+    Returns dict with keys: woba, xwoba, whiff_pct, k_pct, hard_hit_pct,
+                            put_away, run_value_per100.
+    Returns {} if batter or pitch type not found.
+    """
+    _load()
+    return _batter_vs_pitch.get((int(batter_id), pitch_type.upper()), {})
+
+
+def get_batter_lhp_splits(batter_id: int | str) -> dict:
+    """Return 2026 season-to-date splits for this batter vs LHP.
+
+    Returns dict with woba_vs_lhp, k_pct_vs_lhp, whiff_pct_vs_lhp, pa
+    or {} if unknown.
+    """
+    _load()
+    return _BATTER_VS_LHP.get(str(batter_id), {})
+
+
+def get_batter_pitch_vs_lhp(batter_id: int | str, pitch_type: str) -> dict:
+    """Return 2026 stats for batter vs specific pitch type thrown by LHP.
+
+    Returns dict with woba_vs_pitch, whiff_pct_vs_pitch, pa_vs_pitch or {} if unknown.
+    """
+    _load()
+    return _BATTER_PITCH_VS_LHP.get((str(batter_id), pitch_type.upper()), {})
+
+
+def get_batter_k_trend(player_id: int) -> dict:
+    """Multi-year K% trend for a batter (2023 onward).
+
+    Returns dict with:
+        k_pct_2023, k_pct_2024, k_pct_2025   — historical K% (raw %)
+        trend_delta                            — 2025 K% minus 2023 K%
+                                                  (positive = K% rising = regression warning)
+        most_recent_year, most_recent_k_pct
+        records                               — full list sorted by year
+
+    Returns {} if player not found in historical data.
+
+    Usage:
+        trend = get_batter_k_trend(player_id)
+        if trend.get('trend_delta', 0) > 3:
+            # K% rising 3pp → flag as regression candidate
+    """
+    _load()
+    records = _batter_k_history.get(int(player_id))
+    if not records:
+        return {}
+
+    result: dict = {"records": records}
+    for entry in records:
+        yr = entry.get("year")
+        if yr:
+            result[f"k_pct_{yr}"] = entry.get("k_pct")
+            result[f"woba_{yr}"]  = entry.get("woba")
+
+    # Most recent year
+    last = records[-1]
+    result["most_recent_year"]  = last.get("year")
+    result["most_recent_k_pct"] = last.get("k_pct")
+
+    # Trend: latest minus earliest (within 2023+)
+    if len(records) >= 2:
+        earliest_k = records[0].get("k_pct")
+        latest_k   = records[-1].get("k_pct")
+        if earliest_k is not None and latest_k is not None:
+            result["trend_delta"] = round(latest_k - earliest_k, 2)
+    return result
+
+
+# -- Matchup --
+
 def get_matchup_k_boost(pitcher_id: int, batter_id: int) -> float:
     """Logit-space K probability adjustment for pitcher vs batter.
 
@@ -425,50 +903,9 @@ def get_matchup_k_boost(pitcher_id: int, batter_id: int) -> float:
         p = max(0.01, min(0.99, p))
         return math.log(p / (1 - p))
 
-    # Pitcher edge: how much better/worse than league avg
     pitcher_edge = logit(pitcher_k) - logit(_LG_PITCHER_K)
-    # Batter susceptibility edge
     batter_edge  = logit(batter_w)  - logit(_LG_BATTER_W)
 
     # Weight pitcher more heavily (60/40) — pitcher is primary driver
     combined = pitcher_edge * 0.60 + batter_edge * 0.40
     return max(-0.30, min(0.30, combined))
-
-
-def get_batter_fg_proj(player_name: str) -> dict | None:
-    """Return FanGraphs 2026 projected stats keyed by player name.
-
-    Returns dict with k_pct (decimal), bb_pct, woba, wrc_plus, iso.
-    k_pct=0.189 means 18.9% projected strikeout rate.
-    """
-    _load()
-    key = _norm_name(player_name)
-    proj = _batter_fg_proj.get(key)
-    if proj:
-        return proj
-    # Fuzzy: try last name only match
-    last = key.split()[-1] if key.split() else key
-    for k, v in _batter_fg_proj.items():
-        if k.endswith(last) and len(last) > 4:
-            return v
-    return None
-
-
-def get_batter_sprint_speed(player_id: int) -> dict | None:
-    """Return sprint speed metrics for a batter.
-
-    Keys: sprint_speed (ft/s), bolts (runs ≥30 ft/s), hp_to_1b (seconds).
-    League avg sprint speed ~27 ft/s; elite ≥30.
-    """
-    _load()
-    return _sprint_speed_data.get(player_id)
-
-
-def get_batter_baserunning(player_id: int) -> float | None:
-    """Return FanGraphs baserunning run value for the season.
-
-    Positive = above-average baserunner. League avg ≈ 0.
-    Top baserunners: Corbin Carroll ~2.2, Jose Ramirez ~1.7.
-    """
-    _load()
-    return _baserunning_data.get(player_id)
