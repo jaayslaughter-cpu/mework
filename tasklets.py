@@ -6664,6 +6664,8 @@ def run_grading_tasklet() -> None:
             "QualityStart":      espn.get("quality_start",   0.0),
             # PitchingOuts = direct outs count from MLB API (authoritative)
             "PitchingOuts":      espn.get("pitching_outs",   0.0),
+            # PR#502: Pre-computed composite for belt-and-suspenders grading
+            "hits_runs_rbis":    espn.get("hits_runs_rbis",  None),  # computed by _parse_athlete_stats
         }
         stat_lookup[display_name] = mapped
         stat_lookup[name_lower]   = mapped   # lowercase index
@@ -7419,10 +7421,17 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
     # ── H+R+RBI composite ─────────────────────────────────────────────────────
     if field == "__composite__":
+        # PR#502: try pre-computed ESPN field first (set by _parse_athlete_stats)
+        _direct = stats.get("hits_runs_rbis")
+        if _direct is not None:
+            return float(_direct)
         h   = float(stats.get("Hits",         stats.get("H",   0)) or 0)
         r   = float(stats.get("Runs",         stats.get("R",   0)) or 0)
-        rbi = float(stats.get("RunsBattedIn", stats.get("RBI", 0)) or 0)
-        return h + r + rbi
+        rbi = float(stats.get("RunsBattedIn", stats.get("RBI", stats.get("rbis", stats.get("rbi", 0)))) or 0)
+        result = h + r + rbi
+        # If ALL components are zero and stats dict is not empty, player had 0 H+R+RBI — valid 0
+        # Don't return None — return 0 so OVER bets can be graded as LOSS, UNDER as WIN
+        return result
 
     # ── Fantasy score ─────────────────────────────────────────────────────────
     if field == "__fantasy_score__":
