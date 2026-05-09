@@ -908,8 +908,10 @@ async def get_season_record():
 
 
 @app.get("/admin/run-seed")
-async def admin_run_seed(token: str = ""):
-    """Streaming endpoint to run csv_seed.py and break the model lock."""
+async def admin_run_seed(token: str = "", clear: bool = False):
+    """Streaming endpoint to run csv_seed.py and break the model lock.
+    Pass ?clear=true to wipe and re-insert seed rows (needed after discord_sent fix).
+    """
     from fastapi.responses import StreamingResponse  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
 
@@ -917,11 +919,15 @@ async def admin_run_seed(token: str = ""):
     if token != SEED_TOKEN:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
 
+    cmd = ["python3", "csv_seed.py", "--write"]
+    if clear:
+        cmd.append("--clear")
+
     def _stream():
         yield "=== csv_seed.py starting ===\n"
         try:
             proc = subprocess.Popen(
-                ["python3", "csv_seed.py", "--write"],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
