@@ -658,6 +658,14 @@ async def lifespan(_app: FastAPI):
         except Exception as exc:
             logger.warning("[Scheduler] PitchWhiffRefresh failed: %s", exc)
 
+        # ── WPA drama scores (feeds BVI layer + CorrelatedParlayAgent) ────────
+        try:
+            from wpa_drama_layer import prefetch_yesterday_drama as _wpa_fetch  # noqa: PLC0415
+            drama = _wpa_fetch()
+            logger.info("[Scheduler] WPADrama: %d teams loaded", len(drama))
+        except Exception as exc:
+            logger.warning("[Scheduler] WPADrama prefetch failed: %s", exc)
+
     scheduler.add_job(
         job_pitch_whiff,
         CronTrigger(hour=3, minute=30, timezone="America/Los_Angeles"),
@@ -945,6 +953,9 @@ async def get_season_record():
 async def admin_run_seed(token: str = "", clear: bool = False):
     """Streaming endpoint to run csv_seed.py and break the model lock.
     Pass ?clear=true to wipe and re-insert seed rows (needed after discord_sent fix).
+
+    Uses pg_try_advisory_lock(12345) so concurrent calls don't deadlock
+    on the DELETE FROM bet_ledger step.
     """
     from fastapi.responses import StreamingResponse  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
@@ -952,6 +963,27 @@ async def admin_run_seed(token: str = "", clear: bool = False):
     SEED_TOKEN = os.environ.get("SEED_TOKEN", "propiq-seed-2026")
     if token != SEED_TOKEN:
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
+
+    # Advisory lock — prevent two concurrent seed runs from deadlocking
+    # on DELETE FROM bet_ledger WHERE agent_name='HistoricalCSVSeed'
+    _SEED_LOCK_ID = 20260001
+    try:
+        import psycopg2 as _pg2
+        _lock_conn = _pg2.connect(os.environ["DATABASE_URL"])
+        _lock_conn.autocommit = True
+        with _lock_conn.cursor() as _lc:
+            _lc.execute("SELECT pg_try_advisory_lock(%s)", (_SEED_LOCK_ID,))
+            _got_lock = _lc.fetchone()[0]
+        if not _got_lock:
+            _lock_conn.close()
+            return JSONResponse(
+                {"error": "Seed already running — try again in a few minutes"},
+                status_code=409,
+            )
+    except Exception as _lock_exc:
+        logger.warning("[admin/run-seed] Advisory lock check failed: %s", _lock_exc)
+        _lock_conn = None
+        _got_lock = True  # proceed anyway — better than blocking forever
 
     cmd = ["python3", "csv_seed.py", "--write"]
     if clear:
@@ -976,6 +1008,15 @@ async def admin_run_seed(token: str = "", clear: bool = False):
                 yield f"\n=== csv_seed.py FAILED (exit {proc.returncode}) ===\n"
         except Exception as exc:  # noqa: BLE001
             yield f"\n=== ERROR: {exc} ===\n"
+        finally:
+            # Release advisory lock so the next /admin/run-seed call can proceed
+            if _lock_conn and _got_lock:
+                try:
+                    with _lock_conn.cursor() as _rlc:
+                        _rlc.execute("SELECT pg_advisory_unlock(%s)", (_SEED_LOCK_ID,))
+                    _lock_conn.close()
+                except Exception:
+                    pass
 
     return StreamingResponse(_stream(), media_type="text/plain")
 

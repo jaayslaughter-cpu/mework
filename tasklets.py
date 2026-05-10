@@ -47,7 +47,6 @@ except ImportError:
     def _should_skip_prop(prop, game_times): return (False, "gate_unavailable")   # noqa: E704
     def _stamp_prop(prop, game_times): return prop                                 # noqa: E704
     def _fetch_game_times_today(): return {}                                       # noqa: E704
-    def _fetch_sbr_game_lines(): return []                                            # noqa: E704
     def _data_is_contaminated(prop, ts, game_times): return False                 # noqa: E704
 try:
     from clv_feedback_engine import (
@@ -1903,34 +1902,6 @@ def _fetch_weather_today() -> list[dict]:
     logger.info("[DataHub] Weather fetched for %d stadiums", len(results))
     return results
 
-def _fetch_sbr_game_lines() -> list:
-    """Fetch sharp game totals + moneylines from SportsBookReview (PR #520).
-    Returns list of game dicts compatible with inject_team_total():
-    {home_team, away_team, over_under, home_moneyline, away_moneyline, ...}
-    """
-    try:
-        from sportsbookreview_layer import get_all_games as _sbr_games  # noqa: PLC0415
-        result = []
-        for gl in _sbr_games():
-            result.append({
-                "home_team":      gl.home_abbr,
-                "away_team":      gl.away_abbr,
-                "over_under":     gl.current_total or gl.sharp_total,
-                "home_moneyline": gl.consensus_home_ml,
-                "away_moneyline": gl.consensus_away_ml,
-                "sharp_total":    gl.sharp_total,
-                "total_movement": gl.total_movement,
-                "home_implied":   gl.home_implied,
-                "away_implied":   gl.away_implied,
-                "start_time_utc": gl.start_time_utc,
-            })
-        logger.info("[DataHub] SBR game lines: %d games", len(result))
-        return result
-    except Exception as exc:
-        logger.debug("[DataHub] SBR game lines unavailable: %s", exc)
-        return []
-
-
 def _refresh_sample_counts() -> None:
     """Seed xgb_sample_counts in Redis from bet_ledger settled rows.
 
@@ -2402,12 +2373,10 @@ def run_data_hub_tasklet() -> None:
             logger.debug("[DataHub] Career stats pre-warm thread started")
         except Exception as _cse:
             logger.debug("[DataHub] Career stats pre-warm skipped: %s", _cse)
-        if _sc and _sc > 0:
+        if _sc:
             logger.info("[DataHub] Steamer 2026 projections loaded: %d players", _sc)
-        elif _sc == 0:
-            # Fresh failure today — warn once
+        else:
             logger.warning("[DataHub] Steamer projections unavailable -- using league-average priors")
-        # _sc == -1: already warned today — stay silent
     except Exception as _spe:
         logger.warning("[DataHub] Steamer prefetch failed: %s", _spe)
     r = _redis()
@@ -2549,7 +2518,6 @@ def run_data_hub_tasklet() -> None:
                 "projected_starters": _fetch_mlb_probable_starters(),
                 "standings":          _fetch_mlb_standings(),
                 "game_times":         _fetch_game_times_today(),  # Step 3: first-pitch UTC + status
-                "games":              _fetch_sbr_game_lines(),   # PR #520: sharp game totals+ML
             }
             _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
         except Exception as _ctx_err:
@@ -4151,20 +4119,6 @@ class _BullpenAgent(_BaseAgent):
         # ── 2. BVI structural adjustment ─────────────────────────────────────
         bvi_entry  = bvi_map.get(opp_abbrev, {})
         bvi_score  = float(bvi_entry.get("bvi", 50.0)) if bvi_entry else 50.0
-        # ── PR #512: WPA drama adjustment ─────────────────────────────────────
-        # Yesterday's late-inning WPA swing shifts bvi_score before directional
-        # gates fire: walkoff/comeback boosts volatility; blowout damps it.
-        # wpa_drama_layer.prefetch_yesterday_drama() is called at 8:15 AM PT
-        # (alongside Predict+ prefetch) so the cache is warm at dispatch time.
-        try:
-            from wpa_drama_layer import get_team_bvi_adjustment as _wpa_bvi_adj  # noqa: PLC0415
-            _wpa_delta = _wpa_bvi_adj(opp_team)
-            if _wpa_delta:
-                bvi_score = max(0.0, min(100.0, bvi_score + _wpa_delta))
-                logger.debug("[BullpenAgent] WPA drama adj %+.1f → bvi_score=%.1f (%s)",
-                             _wpa_delta, bvi_score, opp_team)
-        except Exception:
-            pass
         # Directional BVI boost: volatile bullpen → OVER; stable → UNDER
         if bvi_score > 60.0:
             bvi_over_adj  = round((bvi_score - 60.0) / 40.0 * 3.0, 2)   # max +3pp at BVI=100
@@ -5494,11 +5448,10 @@ def _build_pitcher_enrich_map(hub: dict) -> dict[str, dict]:
 
 def _get_props(hub: dict) -> list[dict]:
     """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
-    # 1. Build PP props (always) — tagged platform="prizepicks"
+    # 1. Try PrizePicks from hub (6,500+ real MLB props)
     pp_picks = hub.get("dfs", {}).get("prizepicks", [])
-    pp_props: list[dict] = []
     if pp_picks and isinstance(pp_picks, list):
-        _pp_enrich = _build_pitcher_enrich_map(hub)
+        props = []
         for pick in pp_picks:
             if not isinstance(pick, dict):
                 continue
@@ -5507,6 +5460,7 @@ def _get_props(hub: dict) -> list[dict]:
             line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue
+            _pp_enrich = _build_pitcher_enrich_map(hub)
             _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
             _fg_pitcher = {}
             try:
@@ -5514,9 +5468,8 @@ def _get_props(hub: dict) -> list[dict]:
                 _fg_pitcher = _fg_get_pitcher(player) or {}
             except Exception:
                 pass
-            pp_props.append({
+            props.append({
                 "player":           player,
-                "player_name":      player,
                 "prop_type":        str(prop_type).lower(),
                 "line":             float(line or 1.5),
                 "over_american":    int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
@@ -5533,24 +5486,47 @@ def _get_props(hub: dict) -> list[dict]:
                 "era":              _fg_pitcher.get("era",    4.06),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
+        if props:
+            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
+            return props
 
-    # 2. Build UD props (always) — tagged platform="underdog"
-    # PLATFORM PURITY: both PP and UD props are always returned together.
-    # _make_parlay enforces that every leg in a slip must share one platform.
-    # Previously this was only done when PP was absent — fixed: always include UD.
+    # 2. Underdog from hub — returned as separate tagged props alongside PP props.
+    # PLATFORM PURITY: both PP and UD props are returned together in the full list,
+    # each tagged with their platform. _make_parlay enforces that every leg in a slip
+    # must share the same platform — no cross-platform mixing allowed.
     ud_props = _extract_underdog_props(hub)
-
-    props: list[dict] = []
     if ud_props:
-        props.extend(ud_props)
-    if pp_props:
-        props.extend(pp_props)
+        props = []
+        props.extend(ud_props)  # already tagged platform="underdog"
+        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
 
-    if props:
-        logger.info(
-            "[AgentTasklet] Props available: %d UD + %d PP = %d total",
-            len(ud_props), len(pp_props), len(props),
-        )
+        # Append PP props separately — keep platform tag "prizepicks" intact.
+        # Agents evaluate all props; _make_parlay splits them by platform at slip-build time.
+        pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+        if pp_picks and isinstance(pp_picks, list):
+            pp_added = 0
+            for pick in pp_picks:
+                if not isinstance(pick, dict):
+                    continue
+                player    = pick.get("player_name", pick.get("player", pick.get("name", "")))
+                prop_type = _norm_stat(pick.get("stat", pick.get("stat_type", pick.get("prop_type", ""))))
+                line      = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
+                if not player or not prop_type:
+                    continue
+                props.append({
+                    "player":         player,
+                    "player_name":    player,
+                    "prop_type":      prop_type,
+                    "line":           float(line or 1.5),
+                    "over_american":  int(pick.get("over_american", pick.get("over_odds", -115)) or -115),
+                    "under_american": int(pick.get("under_american", pick.get("under_odds", -115)) or -115),
+                    "team":           pick.get("player_team", pick.get("team", "")),
+                    "venue":          "",
+                    "platform":       "prizepicks",  # keep tagged — purity enforced downstream
+                })
+                pp_added += 1
+            if pp_added:
+                logger.info("[AgentTasklet] PrizePicks: %d props added (kept separate from UD)", pp_added)
         return props
 
     # No real props available — skip cycle entirely (no synthetic)
@@ -5748,30 +5724,16 @@ def run_agent_tasklet() -> bool:
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is None:
-                    # No sportsbook market for this prop type (common for pitching_outs,
-                    # walks_allowed, hits_allowed — these markets rarely exist on DK/FD).
-                    # Fallback: use the agent's internal model_prob if it is high-confidence
-                    # (≥62%). This lets F5Agent / UmpireAgent fire on specialty pitcher props
-                    # that have no sportsbook analog without sacrificing edge discipline.
-                    _fallback_prob = float(bet.get("model_prob", 0) or 0)
-                    _PITCHER_NO_SB_MARKETS = {
-                        "pitching_outs", "walks_allowed", "hits_allowed",
-                        "hitter_strikeouts",  # batter_strikeouts — sparse coverage
-                    }
-                    if _fallback_prob >= 62.0 and prop_type in _PITCHER_NO_SB_MARKETS:
-                        sharp_prob = _fallback_prob
-                        bet["_no_sb_coverage"] = True  # flag for logging/Discord
-                        logger.debug(
-                            "[AgentTasklet] %s %s %s — no SB market; using model fallback %.1f%%",
-                            agent.name, player, prop_type, sharp_prob,
-                        )
-                    else:
-                        logger.debug(
-                            "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
-                            agent.name, player, prop_type,
-                        )
-                        _rj_no_sharp += 1
-                        continue
+                    # No sharp book data for this specific player/prop.
+                    # The reference chain (OddsAPI → PropOdds → Pinnacle → Covers →
+                    # DraftEdge → ActionNetwork → TheRundown) already ran — if it's
+                    # still None this prop genuinely has no coverage today.
+                    logger.debug(
+                        "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
+                        agent.name, player, prop_type,
+                    )
+                    _rj_no_sharp += 1
+                    continue
 
                 side    = bet["side"]
                 ud_odds = (prop.get("over_american", -120)
@@ -5793,18 +5755,6 @@ def run_agent_tasklet() -> bool:
                 bet["ev_pct"]          = round(edge, 2)
                 bet["model_prob"]      = round(sharp_prob, 1)
                 bet["sharp_consensus"] = True
-                # Recompute confidence from sharp_prob (consistent with model_prob overwrite).
-                # Confidence thresholds from Phase 121 directive:
-                # ≥72→9, ≥67→8, ≥63→7, ≥59→6, ≥55→5, <55→4 (+1 if EV≥10%, -1 if EV<0)
-                _sp = round(sharp_prob, 1)
-                _ev_adj = (1 if edge >= 10.0 else (-1 if edge < 0 else 0))
-                if _sp >= 72:   _reconf = 9
-                elif _sp >= 67: _reconf = 8
-                elif _sp >= 63: _reconf = 7
-                elif _sp >= 59: _reconf = 6
-                elif _sp >= 55: _reconf = 5
-                else:           _reconf = 4
-                bet["confidence"] = max(1, min(10, _reconf + _ev_adj))
                 bet["underdog_line"]   = prop.get("underdog_line",
                                                     prop.get("over_american", -120))
                 agent_hits.append(bet)
@@ -6714,8 +6664,6 @@ def run_grading_tasklet() -> None:
             "QualityStart":      espn.get("quality_start",   0.0),
             # PitchingOuts = direct outs count from MLB API (authoritative)
             "PitchingOuts":      espn.get("pitching_outs",   0.0),
-            # PR#502: Pre-computed composite for belt-and-suspenders grading
-            "hits_runs_rbis":    espn.get("hits_runs_rbis",  None),  # computed by _parse_athlete_stats
         }
         stat_lookup[display_name] = mapped
         stat_lookup[name_lower]   = mapped   # lowercase index
@@ -7471,17 +7419,10 @@ def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> floa
 
     # ── H+R+RBI composite ─────────────────────────────────────────────────────
     if field == "__composite__":
-        # PR#502: try pre-computed ESPN field first (set by _parse_athlete_stats)
-        _direct = stats.get("hits_runs_rbis")
-        if _direct is not None:
-            return float(_direct)
         h   = float(stats.get("Hits",         stats.get("H",   0)) or 0)
         r   = float(stats.get("Runs",         stats.get("R",   0)) or 0)
-        rbi = float(stats.get("RunsBattedIn", stats.get("RBI", stats.get("rbis", stats.get("rbi", 0)))) or 0)
-        result = h + r + rbi
-        # If ALL components are zero and stats dict is not empty, player had 0 H+R+RBI — valid 0
-        # Don't return None — return 0 so OVER bets can be graded as LOSS, UNDER as WIN
-        return result
+        rbi = float(stats.get("RunsBattedIn", stats.get("RBI", 0)) or 0)
+        return h + r + rbi
 
     # ── Fantasy score ─────────────────────────────────────────────────────────
     if field == "__fantasy_score__":

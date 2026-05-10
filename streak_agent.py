@@ -128,9 +128,10 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN    = 6.0   # Phase 121 / PR #417: confirmed 6.0. DO NOT lower.
-                            # At prob=0.62 + EV=24% + 10 signals: conf = 6+1+1 = 8.0 (passes gate).
-                            # PR#501: reverted from 5.0 back to directive-mandated 6.0.
+STREAK_CONF_MIN    = 6.0   # prob-first: 5.0 = model_prob ≥ 55%    # PR #429: lowered from 7.0 — max achievable at prob=0.62 is ~6.71,
+                            # so 7.0 was mathematically impossible (no picks could ever fire).
+                            # Do NOT raise above 6.0 until 200+ real graded legs with features_json
+                            # AND post-retrain Brier < 0.20 in xgb_model_store.
 STREAK_PROB_MIN    = 0.62   # Minimum per-leg win probability for streak picks.
 STREAK_EV_MIN      = 8.0    # Minimum edge vs 50% break-even for streak picks.
 STREAK_MIN_LINE    = 0.5    # Allow 0.5 lines — high-prob props (earned_runs Over 0.5 = 88%) are valid.
@@ -238,13 +239,10 @@ _STAT_TYPE_MAP: dict[str, str] = {
     "runs": "runs",
     "total bases": "total_bases", "total_bases": "total_bases",
     "hits+runs+rbis": "hits_runs_rbis", "hits + runs + rbis": "hits_runs_rbis",
-    "hits_runs_rbis": "hits_runs_rbis",   # FIX PR#501: UD API returns underscored form
     "hitter fantasy score": "fantasy_hitter", "fantasy_points_hitter": "fantasy_hitter",
     "pitcher fantasy score": "fantasy_pitcher", "fantasy_points_pitcher": "fantasy_pitcher",
     "earned runs": "earned_runs", "earned runs allowed": "earned_runs", "earned_runs": "earned_runs",
-    "hits allowed": "hits_allowed", "hits_allowed": "hits_allowed",  # FIX PR#501: UD underscored
-    "pitching outs": "pitching_outs", "pitch_outs": "pitching_outs",  # FIX PR#501: UD returns pitch_outs
-    "walks_allowed": "walks_allowed",  # FIX PR#501: UD underscored form
+    "hits allowed": "hits_allowed", "pitching outs": "pitching_outs",
 }
 
 
@@ -395,13 +393,10 @@ def fetch_underdog_props_with_teams() -> list[dict]:
                 continue
 
             # Resolve team: try appearance.team_id then appearance.team_abbr
-            # FIX PR#501: UD API has no 'teams' array — team_abbr is always None.
-            # Fall back to team_id UUID which IS present, unique per team (30 unique IDs confirmed).
-            team_id  = appearance.get("team_id", "") or player.get("team_id", "")
+            team_id  = appearance.get("team_id", "")
             team_abbr = (teams_map.get(team_id, "")
                          or appearance.get("team_abbr", "")
                          or player.get("team_abbr", "")
-                         or team_id   # UUID fallback — uniquely identifies team for diversity check
                          or "")
 
             line_val   = float(line.get("stat_value") or 0)

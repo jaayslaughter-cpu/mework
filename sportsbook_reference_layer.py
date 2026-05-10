@@ -753,164 +753,6 @@ def _fetch_pinnacle_direct() -> dict:
     return ref
 
 
-
-# ── odds-api.net player props fetch — Tier 1.5b ────────────────────────────
-# auth: X-API-Key header; covers bet365 + betr MLB player props.
-# Key = ODDS_API_NET_KEY in Railway (20M credits/month; Tier 1.5b per directives).
-_OAN_BASE = "https://api.odds-api.net/v1"
-
-# odds-api.net market_key → our internal market_key
-_OAN_MARKET_MAP: dict[str, str] = {
-    "pitcher_strikeouts":        "pitcher_strikeouts",
-    "player_strikeouts":         "pitcher_strikeouts",
-    "batter_strikeouts":         "batter_strikeouts",
-    "batter_ks":                 "batter_strikeouts",
-    "player_hits":               "batter_hits",
-    "batter_hits":               "batter_hits",
-    "player_total_bases":        "batter_total_bases",
-    "batter_total_bases":        "batter_total_bases",
-    "pitcher_earned_runs":       "pitcher_earned_runs",
-    "player_earned_runs":        "pitcher_earned_runs",
-    "pitcher_outs":              "pitcher_outs",
-    "player_pitcher_outs":       "pitcher_outs",
-    "player_outs":               "pitcher_outs",
-    "player_rbi":                "batter_rbis",
-    "batter_rbis":               "batter_rbis",
-    "player_runs":               "batter_runs",
-    "batter_runs":               "batter_runs",
-    "pitcher_hits_allowed":      "pitcher_hits_allowed",
-    "player_hits_allowed":       "pitcher_hits_allowed",
-    "pitcher_walks":             "pitcher_walks",
-    "player_walks_allowed":      "pitcher_walks",
-    "walks_allowed":             "pitcher_walks",
-    "player_walks":              "pitcher_walks",
-    "hits_runs_rbis":            "batter_hits",      # composite proxy
-    "player_hits_runs_rbis":     "batter_hits",
-}
-
-
-def _decimal_to_american(dec: float) -> int:
-    """Convert decimal odds to American odds integer."""
-    if dec >= 2.0:
-        return int((dec - 1) * 100)
-    elif dec > 1.0:
-        return int(-100 / (dec - 1))
-    return -110
-
-
-def _fetch_odds_api_net() -> dict:
-    """Tier 1.5b: odds-api.net bet365/betr player props — X-API-Key auth.
-    Returns same ref dict format as _fetch_live().
-    """
-    _key = os.getenv("ODDS_API_NET_KEY", "")
-    if not _key:
-        log.debug("[OddsAPINet] ODDS_API_NET_KEY not set — skipping Tier 1.5b")
-        return {}
-
-    hdr = {"X-API-Key": _key}
-
-    # Step 1: get today's MLB events (PT window)
-    try:
-        now_pt     = datetime.now(_PT)
-        start_from = int(now_pt.replace(hour=0,  minute=0,  second=0,  microsecond=0).timestamp())
-        start_to   = int(now_pt.replace(hour=23, minute=59, second=59, microsecond=0).timestamp())
-
-        ev_resp = requests.get(
-            f"{_OAN_BASE}/events",
-            headers=hdr,
-            params={"sport": "baseball", "league": "MLB",
-                    "start_from": start_from, "start_to": start_to, "limit": 50},
-            timeout=20,
-        )
-        if ev_resp.status_code == 429:
-            log.warning("[OddsAPINet] Rate limited on /events — skipping Tier 1.5b")
-            return {}
-        ev_resp.raise_for_status()
-        events = ev_resp.json().get("items", [])
-        log.info("[OddsAPINet] %d MLB events found for Tier 1.5b", len(events))
-    except Exception as exc:
-        log.debug("[OddsAPINet] Events fetch failed: %s", exc)
-        return {}
-
-    if not events:
-        return {}
-
-    ref: dict = {}
-    for event in events[:20]:
-        eid = event.get("event_id")
-        if not eid:
-            continue
-        try:
-            o_resp = requests.get(
-                f"{_OAN_BASE}/events/{eid}/odds/snapshot",
-                headers=hdr,
-                params={
-                    "bookmakers":   "bet365,betr",
-                    "price_fields": "odds,novig",
-                    "limit":        2000,
-                },
-                timeout=20,
-            )
-            if o_resp.status_code in (404, 422):
-                continue
-            if o_resp.status_code == 429:
-                log.warning("[OddsAPINet] Rate limited on odds snapshot — stopping mid-fetch")
-                break
-            o_resp.raise_for_status()
-            items = o_resp.json().get("items", [])
-        except Exception as exc:
-            log.debug("[OddsAPINet] Odds snapshot failed for %s: %s", eid, exc)
-            continue
-        time.sleep(0.1)
-
-        for item in items:
-            if not item.get("is_available", True):
-                continue
-
-            mk_raw = (item.get("market_key") or "").lower().replace(" ", "_")
-            mk     = _OAN_MARKET_MAP.get(mk_raw)
-            if not mk:
-                continue
-
-            pname = _normalize(item.get("selection_name") or "")
-            side  = (item.get("side") or "").strip().title()   # "Over" / "Under"
-            if not pname or side not in ("Over", "Under"):
-                continue
-
-            # Prefer vig-stripped price; fall back to raw with rough strip
-            novig_dec = item.get("novig_odds") or item.get("fair_odds")
-            raw_dec   = item.get("odds")
-
-            if novig_dec and float(novig_dec) > 1.0:
-                sb_prob = round(1.0 / float(novig_dec), 4)
-            elif raw_dec and float(raw_dec) > 1.0:
-                # ~5% avg vig strip across both sides
-                raw_p = 1.0 / float(raw_dec)
-                sb_prob = round(raw_p * 0.95 / (raw_p * 0.95 + (1 - raw_p) * 0.95), 4)
-            else:
-                continue
-
-            sb_prob = max(0.38, min(0.72, sb_prob))
-
-            raw_dec_f = float(raw_dec) if raw_dec else 1.909
-            american  = _decimal_to_american(raw_dec_f)
-            line_val  = item.get("point") or item.get("line")
-            if line_val is None:
-                continue
-
-            k = (pname, mk, side)
-            if k not in ref or sb_prob > ref[k]["sb_implied_prob"]:
-                ref[k] = {
-                    "sb_implied_prob": sb_prob,
-                    "line":            float(line_val),
-                    "bookmaker":       item.get("bookmaker", "bet365"),
-                    "over_odds":       american if side == "Over"  else None,
-                    "under_odds":      american if side == "Under" else None,
-                }
-
-    log.info("[OddsAPINet] Tier 1.5b complete: %d prop lines from bet365/betr", len(ref))
-    return ref
-
 def _fetch_live(date_int: int) -> dict:
     """Full live fetch: events → per-event props.  Returns reference dict."""
     events = _fetch_events()
@@ -1095,27 +937,6 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
                 for (pn, mk, side), v in ref.items()
             ]
             _pg_save(date_int, flat)
-
-
-    # ── odds-api.net fallback — Tier 1.5b (bet365 + betr; X-API-Key) ─────────
-    # ODDS_API_NET_KEY set in Railway. 20M credits/month. Key = oa_f2ji...
-    # Fires after Pinnacle direct (no key) → gives real sharp lines when
-    # OddsAPI KEY_1 quota=0 and KEY_3 dead.
-    if not _mem_ref:
-        try:
-            _oan_ref = _fetch_odds_api_net()
-            if _oan_ref:
-                log.info("[SBRef] odds-api.net Tier 1.5b: %d entries (bet365/betr)", len(_oan_ref))
-                _mem_ref    = _oan_ref
-                _fetch_date = date_int
-                _file_save(date_int, _oan_ref)
-                flat = [
-                    {"player_name": pn, "market_key": mk, "side": side, **v}
-                    for (pn, mk, side), v in _oan_ref.items()
-                ]
-                _pg_save(date_int, flat)
-        except Exception as _oan_err:
-            log.debug("[SBRef] odds-api.net Tier 1.5b failed: %s", _oan_err)
 
     # ── Covers.com fallback — Tier 3 (after Pinnacle direct, before DraftEdge) ─
     # Covers aggregates DK/FD/BetMGM/Caesars lines pre-game and also provides
@@ -1489,26 +1310,6 @@ def enrich_props_with_sportsbook(props: list, date: str | None = None) -> list:
         log.debug("[SBRef] enrich_props_with_sportsbook: no reference data for %d", date_int)
         return props
 
-    # ── DraftKings direct sharp line — Tier 0 (highest priority) ───────────────
-    # Checks DK milestone / O/U API before the existing sportsbook ref tiers.
-    # Works from datacenter IPs via curl_cffi TLS spoof (confirmed HTTP 200).
-    # Supported: hits_runs_rbis, strikeouts, hitter_strikeouts, hits,
-    #            total_bases, pitching_outs.
-    _dk_prob_fn = None
-    _dk_subcats = set()
-    _dk_redis   = None
-    _date_str_dk = str(date_int)
-    try:
-        from draftkings_layer import get_dk_prob as _dk_prob_fn, _DK_SUBCATS as _dk_subcats_dict  # noqa
-        _dk_subcats = set(_dk_subcats_dict.keys())
-        import redis as _redis_mod
-        import os as _dk_os
-        _redis_url = _dk_os.getenv("REDIS_URL") or _dk_os.getenv("REDIS_PUBLIC_URL")
-        if _redis_url:
-            _dk_redis = _redis_mod.from_url(_redis_url, decode_responses=True)
-    except Exception as _dk_import_err:
-        log.debug("[SBRef] DK Tier 0 import error: %s", _dk_import_err)
-
     stamped = 0
     for prop in props:
         player = _normalize(
@@ -1523,31 +1324,6 @@ def enrich_props_with_sportsbook(props: list, date: str | None = None) -> list:
         side_raw = str(prop.get("side", "OVER")).upper()
         sb_side = "Over" if side_raw in ("OVER", "HIGHER") else "Under"
         opp_side = "Under" if sb_side == "Over" else "Over"
-
-        # ── DK Tier 0: direct DraftKings sharp line ──────────────────────────
-        if _dk_prob_fn and prop_type in _dk_subcats:
-            try:
-                raw_name = prop.get("player", "") or prop.get("player_name", "")
-                dk_prob = _dk_prob_fn(
-                    player_name=raw_name,
-                    prop_type=prop_type,
-                    line=ud_line,
-                    side=sb_side,
-                    date_str=_date_str_dk,
-                    redis_client=_dk_redis,
-                )
-                if dk_prob is not None:
-                    prop["sb_implied_prob"]       = round(dk_prob, 6)
-                    prop["sb_implied_prob_over"]  = round(dk_prob if sb_side == "Over" else 1.0 - dk_prob, 6)
-                    prop["sb_implied_prob_under"] = round(dk_prob if sb_side == "Under" else 1.0 - dk_prob, 6)
-                    prop["sb_line"]               = ud_line
-                    prop["sb_line_gap"]           = 0.0
-                    prop["_sb_line_adj"]          = 0.0
-                    prop["bookmaker"]             = "draftkings"
-                    stamped += 1
-                    continue  # skip existing tier lookup — DK is highest priority
-            except Exception as _dk_err:
-                log.debug("[SBRef] DK Tier 0 lookup error: %s", _dk_err)
 
         # Look up our side first, then try deriving from opposite side
         entry = ref.get((player, market_key, sb_side))

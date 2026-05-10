@@ -505,55 +505,99 @@ def _fetch_steamer_draftedge(hub: dict | None = None) -> dict[str, dict]:
     """
     try:
         # Try to get DraftEdge data from the hub if passed, otherwise import from module
+        # ── Get raw DraftEdge data ─────────────────────────────────────────────
         if hub is None:
             try:
-                from draftedge_scraper import fetch_all_projections as _de_fetch
-                de_data = _de_fetch()
+                from draftedge_scraper import fetch_all_projections as _de_fetch  # noqa: PLC0415
+                raw_de = _de_fetch()  # returns {"batters": DataFrame, "pitchers": DataFrame}
             except Exception:
                 return {}
         else:
-            de_data = hub.get("dfs", {}).get("prop_projections", [])
+            # hub["dfs"]["prop_projections"] is list[dict] with keys:
+            #   player_name, prop_type, projected_prob, source="draftedge"
+            # This is already processed by _fetch_draftedge_projections() in tasklets.py
+            raw_de = hub.get("dfs", {}).get("prop_projections")
 
-        if not de_data:
+        if not raw_de:
             return {}
 
         projections: dict[str, dict] = {}
-        for row in de_data:
-            name = str(row.get("player_name") or row.get("player") or "")
-            if not name:
-                continue
-            key = _norm(name)
-            if not key:
-                continue
 
-            # DraftEdge uses probability fractions (0-1) for each outcome
-            hit_pct = float(row.get("hit_pct") or 0.0)
-            hr_pct  = float(row.get("hr_pct")  or 0.0)
-            run_pct = float(row.get("run_pct") or row.get("runs_pct") or 0.0)
-            rbi_pct = float(row.get("rbi_pct") or 0.0)
+        # ── Handle list[dict] from hub (the normal runtime path) ──────────────
+        if isinstance(raw_de, list):
+            # Group by player_name — accumulate per-prop-type projected_prob
+            player_props: dict[str, dict] = {}
+            for row in raw_de:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("player_name") or row.get("player") or "")
+                key = _norm(name)
+                if not key:
+                    continue
+                prop_type = str(row.get("prop_type", ""))
+                prob = float(row.get("projected_prob") or 0.0)
+                if key not in player_props:
+                    player_props[key] = {}
+                player_props[key][prop_type] = prob
 
-            if hit_pct == 0.0 and hr_pct == 0.0:
-                continue  # pitcher row or missing data
+            for key, pmap in player_props.items():
+                hit_pct = pmap.get("hits",          0.0)
+                hr_pct  = pmap.get("home_runs",     0.0)
+                run_pct = pmap.get("runs",          0.0)
+                rbi_pct = pmap.get("rbis",          0.0)
+                sb_pct  = pmap.get("stolen_bases",  0.0)
+                if hit_pct == 0.0 and hr_pct == 0.0:
+                    continue
+                projections[key] = {
+                    "avg":    round(hit_pct, 4),
+                    "obp":    round(min(hit_pct * 1.15, 0.500), 4),
+                    "slg":    round(hit_pct + hr_pct * 3.0, 4),
+                    "r":      round(run_pct * 162, 2),
+                    "rbi":    round(rbi_pct * 162, 2),
+                    "hr":     round(hr_pct  * 162, 2),
+                    "sb":     round(sb_pct  * 162, 2),
+                    "pa":     4.2,
+                    "g":      1.0,
+                    "r_pg":   round(run_pct, 4),
+                    "rbi_pg": round(rbi_pct, 4),
+                    "hr_pg":  round(hr_pct,  4),
+                    "sb_pg":  round(sb_pct,  4),
+                    "_source": "draftedge_hub",
+                }
 
-            # Convert per-game probabilities to per-game rates
-            # Assuming ~4 PA/game average: hits = hit_pct * 4 / (PA * hit_rate)
-            # Simpler: use the probability directly as projected hits/game (rough approximation)
-            projections[key] = {
-                "avg":    round(hit_pct,  4),
-                "obp":    round(min(hit_pct * 1.15, 0.500), 4),  # rough OBP proxy
-                "slg":    round(hit_pct + hr_pct * 3.0, 4),      # rough SLG proxy
-                "r":      round(run_pct * 162, 2),
-                "rbi":    round(rbi_pct * 162, 2),
-                "hr":     round(hr_pct  * 162, 2),
-                "sb":     round(float(row.get("sb_pct") or 0.0) * 162, 2),
-                "pa":     4.2,
-                "g":      1.0,
-                "r_pg":   round(run_pct, 4),
-                "rbi_pg": round(rbi_pct, 4),
-                "hr_pg":  round(hr_pct,  4),
-                "sb_pg":  round(float(row.get("sb_pct") or 0.0), 4),
-                "_source": "draftedge",
-            }
+        # ── Handle {"batters": DataFrame, "pitchers": DataFrame} from draftedge_scraper ──
+        elif isinstance(raw_de, dict):
+            import pandas as _pd  # noqa: PLC0415
+            batters = raw_de.get("batters")
+            if batters is not None and hasattr(batters, "iterrows") and not batters.empty:
+                for _, row in batters.iterrows():
+                    name = str(row.get("player_name", "") or "").strip()
+                    key = _norm(name)
+                    if not key:
+                        continue
+                    hit_pct = float(row.get("hit_pct") or 0.0)
+                    hr_pct  = float(row.get("hr_pct")  or 0.0)
+                    run_pct = float(row.get("run_pct") or row.get("runs_pct") or 0.0)
+                    rbi_pct = float(row.get("rbi_pct") or 0.0)
+                    sb_pct  = float(row.get("sb_pct")  or 0.0)
+                    if hit_pct == 0.0 and hr_pct == 0.0:
+                        continue
+                    projections[key] = {
+                        "avg":    round(hit_pct, 4),
+                        "obp":    round(min(hit_pct * 1.15, 0.500), 4),
+                        "slg":    round(hit_pct + hr_pct * 3.0, 4),
+                        "r":      round(run_pct * 162, 2),
+                        "rbi":    round(rbi_pct * 162, 2),
+                        "hr":     round(hr_pct  * 162, 2),
+                        "sb":     round(sb_pct  * 162, 2),
+                        "pa":     4.2,
+                        "g":      1.0,
+                        "r_pg":   round(run_pct, 4),
+                        "rbi_pg": round(rbi_pct, 4),
+                        "hr_pg":  round(hr_pct,  4),
+                        "sb_pg":  round(sb_pct,  4),
+                        "_source": "draftedge_scraper",
+                    }
 
         logger.info(
             "[Steamer] Tier 4 DraftEdge fallback: %d batters with projections", len(projections)
@@ -566,16 +610,6 @@ def _fetch_steamer_draftedge(hub: dict | None = None) -> dict[str, dict]:
 
 
 def prefetch(hub: dict | None = None) -> int:
-    """Pre-warm the Steamer cache at DataHub startup.
-
-    Returns:
-        >0   — projections loaded (player count)
-         0   — fresh failure today (caller should warn once)
-        -1   — already attempted and failed today (caller should stay silent)
-    """
-    today = _today()
-    # Already tried and failed today — return sentinel so caller doesn't re-warn
-    if _FETCH_ATTEMPTED_DATE == today and not _CACHE:
-        return -1
+    """Pre-warm the Steamer cache at DataHub startup. Returns player count."""
     cache = _get_cache(hub=hub)
     return len(cache)
