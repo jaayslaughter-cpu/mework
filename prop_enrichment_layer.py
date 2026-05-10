@@ -923,9 +923,10 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     _fg_batter_cache:  dict[str, dict] = {}
 
     # ── Per-team chase score cache ────────────────────────────────────────────
-    _chase_cache:   dict[str, dict] = {}
-    _weather_cache: dict[str, dict] = {}
-    _park_cache:    dict[str, dict] = {}
+    _chase_cache:      dict[str, dict] = {}
+    _weather_cache:    dict[str, dict] = {}
+    _park_cache:       dict[str, dict] = {}
+    _game_total_cache: dict = {}  # (team|opp) -> SBR O/U
 
     # ── Load injury layer — stamps flags before any agent sees the prop ─────────
     try:
@@ -1457,9 +1458,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             prop.setdefault("_o_swing",  prop.get("o_swing",  0.316))
             prop.setdefault("_k_pct",    _k_src)
             prop.setdefault("_bb_pct",   _bb_src)
-        # ── Pitcher quality layer (SIERA proxy + QS probability) ─────────────
-        # Feeds SIERA-proxy nudge and QS-prob for pitcher prop types.
-        # Computed from 2026 game logs: K/9, BB/9, ERA, SIERA-proxy, QS-rate.
+        # ── Pitcher quality layer (SIERA-proxy, QS-rate, K/9, FIP) ──────────
+        # Computed from 2026 game logs; adjusts model_prob ±4pp for pitcher props.
         if is_pitcher_prop:
             try:
                 from fg_pitcher_quality_layer import get_pitcher_quality_adj as _pqa  # noqa: PLC0415
@@ -1620,6 +1620,38 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _raw_prob, _adj_prob, round(_inj_pen*100),
             )
 
+        # ── DraftKings direct de-vigged probability (Tier 0 sharp stamp) ──────
+        try:
+            import datetime as _dt_dk
+            from draftkings_layer import get_dk_prob as _get_dk_prob
+            _dk_side = prop.get("side", "over").lower()
+            _dk_line = float(prop.get("line", 1.5) or 1.5)
+            _dk_date = _dt_dk.date.today().strftime("%Y-%m-%d")
+            _dk_p = _get_dk_prob(player, prop_type, _dk_line, _dk_side, _dk_date)
+            prop["_dk_prob"] = round(_dk_p * 100, 2) if _dk_p is not None else None
+        except Exception:
+            prop["_dk_prob"] = None
+
+        # ── SBR sharp consensus game O/U total ──────────────────────────────
+        try:
+            from sportsbookreview_layer import get_sharp_game_total as _get_sgt
+            _team_sbr = prop.get("team", "")
+            _opp_sbr  = opp_team or prop.get("opp_team", "")
+            _sbr_key  = f"{_team_sbr}|{_opp_sbr}"
+            if _sbr_key not in _game_total_cache:
+                _game_total_cache[_sbr_key] = _get_sgt(_team_sbr, _opp_sbr)
+            prop["_sharp_game_total"] = _game_total_cache[_sbr_key]
+        except Exception:
+            prop["_sharp_game_total"] = None
+
+        # ── WPA drama BVI adjustment ─────────────────────────────────────────
+        try:
+            from wpa_drama_layer import get_team_bvi_adjustment as _get_bvi
+            _bvi_team = prop.get("team", "")
+            prop["_bvi_drama_adj"] = _get_bvi(_bvi_team) if _bvi_team else 0.0
+        except Exception:
+            prop["_bvi_drama_adj"] = 0.0
+
         enriched_count += 1
 
     # ── Statcast batch enrichment ── (moved above main loop; mlbam_ids pre-attached)
@@ -1637,4 +1669,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         _platoon_hits, _arsenal_hits,
         len(_chase_cache), len(_weather_cache),
     )
+    _dk_hits  = sum(1 for p in props if p.get("_dk_prob") is not None)
+    _sbr_hits = sum(1 for p in props if p.get("_sharp_game_total") is not None)
+    _bvi_hits = sum(1 for p in props if p.get("_bvi_drama_adj", 0.0) != 0.0)
+    logger.info("[Enrichment] DK direct: %d | SBR game total: %d games | BVI drama: %d props", _dk_hits, len(_game_total_cache), _bvi_hits)
     return props
