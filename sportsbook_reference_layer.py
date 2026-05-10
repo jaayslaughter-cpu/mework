@@ -1489,6 +1489,26 @@ def enrich_props_with_sportsbook(props: list, date: str | None = None) -> list:
         log.debug("[SBRef] enrich_props_with_sportsbook: no reference data for %d", date_int)
         return props
 
+    # ── DraftKings direct sharp line — Tier 0 (highest priority) ───────────────
+    # Checks DK milestone / O/U API before the existing sportsbook ref tiers.
+    # Works from datacenter IPs via curl_cffi TLS spoof (confirmed HTTP 200).
+    # Supported: hits_runs_rbis, strikeouts, hitter_strikeouts, hits,
+    #            total_bases, pitching_outs.
+    _dk_prob_fn = None
+    _dk_subcats = set()
+    _dk_redis   = None
+    _date_str_dk = str(date_int)
+    try:
+        from draftkings_layer import get_dk_prob as _dk_prob_fn, _DK_SUBCATS as _dk_subcats_dict  # noqa
+        _dk_subcats = set(_dk_subcats_dict.keys())
+        import redis as _redis_mod
+        import os as _dk_os
+        _redis_url = _dk_os.getenv("REDIS_URL") or _dk_os.getenv("REDIS_PUBLIC_URL")
+        if _redis_url:
+            _dk_redis = _redis_mod.from_url(_redis_url, decode_responses=True)
+    except Exception as _dk_import_err:
+        log.debug("[SBRef] DK Tier 0 import error: %s", _dk_import_err)
+
     stamped = 0
     for prop in props:
         player = _normalize(
@@ -1503,6 +1523,31 @@ def enrich_props_with_sportsbook(props: list, date: str | None = None) -> list:
         side_raw = str(prop.get("side", "OVER")).upper()
         sb_side = "Over" if side_raw in ("OVER", "HIGHER") else "Under"
         opp_side = "Under" if sb_side == "Over" else "Over"
+
+        # ── DK Tier 0: direct DraftKings sharp line ──────────────────────────
+        if _dk_prob_fn and prop_type in _dk_subcats:
+            try:
+                raw_name = prop.get("player", "") or prop.get("player_name", "")
+                dk_prob = _dk_prob_fn(
+                    player_name=raw_name,
+                    prop_type=prop_type,
+                    line=ud_line,
+                    side=sb_side,
+                    date_str=_date_str_dk,
+                    redis_client=_dk_redis,
+                )
+                if dk_prob is not None:
+                    prop["sb_implied_prob"]       = round(dk_prob, 6)
+                    prop["sb_implied_prob_over"]  = round(dk_prob if sb_side == "Over" else 1.0 - dk_prob, 6)
+                    prop["sb_implied_prob_under"] = round(dk_prob if sb_side == "Under" else 1.0 - dk_prob, 6)
+                    prop["sb_line"]               = ud_line
+                    prop["sb_line_gap"]           = 0.0
+                    prop["_sb_line_adj"]          = 0.0
+                    prop["bookmaker"]             = "draftkings"
+                    stamped += 1
+                    continue  # skip existing tier lookup — DK is highest priority
+            except Exception as _dk_err:
+                log.debug("[SBRef] DK Tier 0 lookup error: %s", _dk_err)
 
         # Look up our side first, then try deriving from opposite side
         entry = ref.get((player, market_key, sb_side))

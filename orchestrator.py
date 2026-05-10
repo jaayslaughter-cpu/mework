@@ -440,6 +440,30 @@ async def job_predict_plus_prefetch():
     except Exception as _sbr_exc:
         logger.warning("[SBR] Prefetch failed (non-fatal): %s", _sbr_exc)
 
+    # ── DraftKings player props (PR #521) — Tier 0 sharp lines ──────────────
+    # Fetches all 6 supported MLB prop categories from DK's public nash API
+    # (curl_cffi TLS spoof; confirmed 200 from datacenter IPs).
+    # Warms Redis cache so enrich_props_with_sportsbook() Tier 0 lookup is instant.
+    try:
+        import redis as _redis_mod  # noqa: PLC0415
+        import os as _dk_os          # noqa: PLC0415
+        from draftkings_layer import prefetch_dk_props as _dk_prefetch  # noqa: PLC0415
+        from datetime import datetime
+        import pytz
+        _dk_date = datetime.now(pytz.timezone("America/Los_Angeles")).strftime("%Y%m%d")
+        _dk_redis = None
+        _redis_url = _dk_os.getenv("REDIS_URL") or _dk_os.getenv("REDIS_PUBLIC_URL")
+        if _redis_url:
+            _dk_redis = _redis_mod.from_url(_redis_url, decode_responses=True)
+        _dk_summary = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _dk_prefetch(_dk_date, _dk_redis)
+        )
+        total_dk = sum(v for v in _dk_summary.values() if v >= 0)
+        logger.info("[DK] Prefetch complete — %d prop lines across %d categories: %s",
+                    total_dk, len(_dk_summary), _dk_summary)
+    except Exception as _dk_exc:
+        logger.warning("[DK] Prefetch failed (non-fatal): %s", _dk_exc)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
