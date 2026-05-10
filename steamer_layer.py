@@ -344,10 +344,22 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
                 len(de_data),
             )
         else:
-            logger.warning(
-                "[Steamer] All tiers failed (1=FanGraphs 2=ScraperAPI 3=pybaseball 4=DraftEdge). "
-                "Model using league-average priors. Set SCRAPERAPI_KEY to fix.",
-            )
+            # Tier 5: static CSV bundled in data/fg/steamer_ros_2026.csv
+            logger.info("[Steamer] Tier 4 failed — trying bundled static CSV (Tier 5)...")
+            static_data = _fetch_steamer_static_csv()
+            if static_data:
+                _CACHE = static_data
+                _CACHE_DATE = today
+                logger.info(
+                    "[Steamer] Tier 5 static CSV active: %d players. "
+                    "Data from FanGraphs ATC+Steamer RoS export.",
+                    len(static_data) // 2,
+                )
+            else:
+                logger.warning(
+                    "[Steamer] All tiers failed (1=FanGraphs 2=ScraperAPI 3=pybaseball "
+                    "4=DraftEdge 5=StaticCSV). Model using league-average priors.",
+                )
 
     return _CACHE
 
@@ -607,6 +619,56 @@ def _fetch_steamer_draftedge(hub: dict | None = None) -> dict[str, dict]:
 
     except Exception as exc:
         logger.warning("[Steamer] Tier 4 DraftEdge fallback failed: %s", exc)
+        return {}
+
+
+def _fetch_steamer_static_csv() -> dict[str, dict]:
+    """
+    Tier 5 static fallback: load steamer_ros_2026.csv from data/fg/.
+    Built from the FanGraphs percentile projections export (ATC RoS primary,
+    Steamer RoS secondary, Steamer full-season tertiary).
+    Never fails — returns {} only if file is missing.
+    """
+    import os as _os  # noqa: PLC0415
+    csv_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "data", "fg", "steamer_ros_2026.csv"
+    )
+    if not _os.path.exists(csv_path):
+        logger.debug("[Steamer] Static CSV not found at %s", csv_path)
+        return {}
+    try:
+        import csv as _csv  # noqa: PLC0415
+        projections: dict[str, dict] = {}
+        with open(csv_path, encoding="utf-8-sig") as f:
+            for row in _csv.DictReader(f):
+                key = (row.get("name_key") or _norm(row.get("name", ""))).strip()
+                mlbam = row.get("mlbam_id", "").strip()
+                if not key:
+                    continue
+                proj = {
+                    "avg":    float(row.get("avg")    or _LG["avg"]),
+                    "obp":    float(row.get("obp")    or _LG["obp"]),
+                    "slg":    float(row.get("slg")    or _LG["slg"]),
+                    "r":      float(row.get("r")      or 0),
+                    "rbi":    float(row.get("rbi")    or 0),
+                    "sb":     float(row.get("sb")     or 0),
+                    "hr":     float(row.get("hr")     or 0),
+                    "pa":     float(row.get("pa")     or 4.2),
+                    "g":      float(row.get("g")      or 1.0),
+                    "r_pg":   float(row.get("r_pg")   or _LG["r_pg"]),
+                    "rbi_pg": float(row.get("rbi_pg") or _LG["rbi_pg"]),
+                    "sb_pg":  float(row.get("sb_pg")  or _LG["sb_pg"]),
+                    "hr_pg":  float(row.get("hr_pg")  or _LG["hr_pg"]),
+                    "_source": "static_csv",
+                }
+                projections[key] = proj
+                if mlbam:
+                    projections[f"mlbam:{mlbam}"] = proj
+        logger.info("[Steamer] Static CSV loaded: %d players", len(projections) // 2)
+        return projections
+    except Exception as exc:
+        logger.warning("[Steamer] Static CSV load failed: %s", exc)
         return {}
 
 

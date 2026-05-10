@@ -40,3 +40,4 @@ statsmodels>=0.14.2
 pyarrow
 pybaseball>=2.2.7
 mlb-statsapi>=1.7.2
+curl_cffi>=0.6.0
