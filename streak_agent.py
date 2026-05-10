@@ -128,7 +128,7 @@ logger = logging.getLogger("propiq.streak")
 # Constants
 # ---------------------------------------------------------------------------
 
-STREAK_CONF_MIN    = 6.0   # prob-first: 5.0 = model_prob ≥ 55%    # PR #429: lowered from 7.0 — max achievable at prob=0.62 is ~6.71,
+STREAK_CONF_MIN    = 6.0   # PR #429: minimum confidence gate. 6.0 = model_prob ≥ 59%. Aligns with api/streak_agent.py.
                             # so 7.0 was mathematically impossible (no picks could ever fire).
                             # Do NOT raise above 6.0 until 200+ real graded legs with features_json
                             # AND post-retrain Brier < 0.20 in xgb_model_store.
