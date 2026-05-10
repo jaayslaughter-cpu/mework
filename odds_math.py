@@ -504,3 +504,37 @@ KELLY_FRACTION: float = 0.25
 
 #: Maximum bankroll fraction per bet.
 MAX_UNIT_CAP: float = 0.05          # 5% bankroll cap
+
+
+# ---------------------------------------------------------------------------
+# Power devig — PR #530 (propiq_signal_upgrades bridge)
+# More theoretically correct than multiplicative devig for asymmetric lines.
+# Source: Shin (1993) bisection — see propiq_signal_upgrades.devig_power()
+# ---------------------------------------------------------------------------
+
+def no_vig_prob_power(over_american: float, under_american: float) -> tuple:
+    """Return (fair_over_prob, fair_under_prob) using power (Shin) devig.
+
+    Use in place of calculate_true_probability() when over/under odds are
+    asymmetric (e.g. over -130 / under +110).  Multiplicative devig
+    distributes overround equally; power devig is more accurate.
+    """
+    try:
+        from propiq_signal_upgrades import no_vig_prob_power as _power
+        return _power(over_american, under_american)
+    except Exception:
+        # Fallback to existing additive devig
+        return calculate_true_probability(over_american, under_american)
+
+
+def devig_all_methods(over_american: float, under_american: float) -> dict:
+    """Full devig diagnostic — returns additive, multiplicative, and power results.
+
+    Useful for Discord logging when lines are asymmetric.
+    """
+    try:
+        from propiq_signal_upgrades import devig_all as _da
+        return _da(over_american, under_american)
+    except Exception:
+        p_over, p_under = calculate_true_probability(over_american, under_american)
+        return {"recommended": {"over_fair_prob": p_over, "under_fair_prob": p_under}}

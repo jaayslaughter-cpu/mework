@@ -3642,7 +3642,7 @@ class _F5Agent(_BaseAgent):
         if n_starts <= 0:
             return 0.0
         weight    = n_starts / (n_starts + 10.0)
-        raw_delta = (current_swstr - career_swstr) * 30.0
+        raw_delta = (current_swstr - career_swstr) * 16.0
         return round(raw_delta * weight, 2)
 
     @staticmethod

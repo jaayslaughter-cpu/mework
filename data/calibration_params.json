@@ -1,0 +1,14 @@
+{
+  "lambda_bias": -0.067,
+  "swstr_k9_scale": 16.0,
+  "ump_scale": 0.9,
+  "weight_season_cap": 0.40,
+  "weight_recent": 0.05,
+  "calibration_notes": [
+    "[2026-05-10] Initial params — lambda_bias pre-loaded from BaseballbettingEdge live calibration",
+    "[2026-05-10] swstr_k9_scale set to 16.0 (reduced from default 30.0 per live BBE evidence)",
+    "[2026-05-10] ump_scale set to 0.9 (umpire adjustment less reliable than expected)"
+  ],
+  "sample_size": 0,
+  "updated_at": "2026-05-10T00:00:00Z"
+}

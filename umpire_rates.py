@@ -294,3 +294,49 @@ def get_umpire_rates(name: str) -> dict:
         "accuracy":   accuracy,
         "known":      _norm(name) in _UMPIRE_TABLE,
     }
+
+
+# ---------------------------------------------------------------------------
+# PR #530 — Upgraded 90-umpire K/9 adjustment table
+# Source: propiq_signal_upgrades.UMPIRE_K_ADJ_TABLE
+# Replaces the 30-entry static table above with empirically calibrated
+# K/9 adjustments from BaseballbettingEdge career_k_rates.json (2022-2026).
+# ---------------------------------------------------------------------------
+
+def get_umpire_k_adj(name: str, scale: float = 0.9) -> dict:
+    """Return K/9 adjustment for a given HP umpire using 90-umpire table.
+
+    This supplements get_umpire_rates() with the upgraded table from
+    propiq_signal_upgrades. Use this for EV calculations; use
+    get_umpire_rates() for BB rate and other factors.
+
+    Returns:
+        k_adj (float)  — K/9 delta (positive = K-inflator, negative = suppressor)
+        found (bool)   — True if umpire is in the 90-entry table
+        scaled_adj     — k_adj * scale (apply this to model probability)
+
+    Key extremes:
+        Ron Kulpa        +1.928  — top K inflator (fire overs)
+        Junior Valentine +1.263  — significant inflator
+        Mike Estabrook   +1.080  — significant inflator
+        Shane Livensparger -1.395 — top K suppressor (fire unders)
+        James Jean        -1.234 — significant suppressor
+        Ben May           -1.182 — significant suppressor
+    """
+    try:
+        from propiq_signal_upgrades import get_umpire_k_adj as _upgraded
+        raw_adj, found = _upgraded(name)
+        return {
+            "k_adj":      raw_adj,
+            "found":      found,
+            "scaled_adj": round(raw_adj * scale, 4),
+        }
+    except Exception:
+        # Fallback to legacy table
+        rates = get_umpire_rates(name)
+        raw_adj = rates["k_rate"] - 8.8  # delta from league avg
+        return {
+            "k_adj":      raw_adj,
+            "found":      rates.get("known", False),
+            "scaled_adj": round(raw_adj * scale, 4),
+        }

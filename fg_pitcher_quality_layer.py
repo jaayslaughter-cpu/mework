@@ -317,3 +317,52 @@ def get_k9(player: str, mlbam_id: int | None = None) -> float:
             return rec["k9"]
     rec = _BY_NAME.get(_norm(player))
     return rec["k9"] if rec else _LG_K9
+
+
+# ---------------------------------------------------------------------------
+# PR #530 — PAR Score (Pitcher Appearance Rating)
+# Source: sequencebaseball via propiq_signal_upgrades.compute_par_score()
+# Use par_avg_5 / par_avg_3 as XGBoost K-model context features.
+# ---------------------------------------------------------------------------
+
+def get_pitcher_par_score(recent_game_logs: list) -> dict:
+    """Compute PAR score context features for K prop evaluation.
+
+    Args:
+        recent_game_logs: list of game dicts with keys:
+            outs_recorded, strikeouts, walks, earned_runs
+
+    Returns dict with:
+        par_avg_5   — rolling average PAR over last 5 starts (0–100)
+        par_avg_3   — rolling average PAR over last 3 starts (more recent)
+        par_last    — PAR score object for most recent start (None if no logs)
+        par_grade   — letter grade of most recent start
+    """
+    try:
+        from propiq_signal_upgrades import compute_par_score, rolling_par_avg
+
+        par_avg_5 = rolling_par_avg(recent_game_logs, n_starts=5)
+        par_avg_3 = rolling_par_avg(recent_game_logs, n_starts=3)
+
+        par_last = None
+        par_grade = None
+        if recent_game_logs:
+            last = recent_game_logs[-1]
+            par_last = compute_par_score(
+                pitcher_name="",
+                outs_recorded=int(last.get("outs_recorded", 0)),
+                strikeouts=int(last.get("strikeouts", 0)),
+                walks=int(last.get("walks", 0)),
+                earned_runs=int(last.get("earned_runs", 0)),
+            )
+            par_grade = par_last.grade
+
+        return {
+            "par_avg_5":  par_avg_5,
+            "par_avg_3":  par_avg_3,
+            "par_last":   par_last,
+            "par_grade":  par_grade,
+        }
+    except Exception as exc:
+        logger.debug("[FGPitcherQuality] PAR score unavailable: %s", exc)
+        return {"par_avg_5": None, "par_avg_3": None, "par_last": None, "par_grade": None}
