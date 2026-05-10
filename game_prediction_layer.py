@@ -50,14 +50,14 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/2.0)"}
 # League-average fallbacks used when a team has <5 games played
 _LEAGUE_AVG = {
     "win_pct":   0.500,
-    "rs_per_g":  4.30,   # FG 2025: actual R/G (was 4.38 in 2024)
-    "ra_per_g":  4.30,   # FG 2025: actual R/G (was 4.38 in 2024)
-    "era":       4.08,   # FG 2025: actual ERA (was 4.15 in 2024)
+    "rs_per_g":  4.41,   # FG 2026: R/G through game 44
+    "ra_per_g":  4.41,   # FG 2026: R/G through game 44
+    "era":       4.18,   # FG 2026: ERA through game 44
     "whip":      1.28,
     "k9":        8.80,
     "ba":        0.248,
     "slg":       0.410,
-    "sp_era":    4.08,   # FG 2025: actual SP ERA (was 4.15 in 2024)
+    "sp_era":    4.18,   # FG 2026: SP ERA through game 44
     "sp_whip":   1.28,
     "sp_k9":     8.80,
 }
@@ -324,8 +324,8 @@ def _predict_game(features: dict) -> dict:
     logit_over = (
           0.00
         + 0.35 * (exp_total - 8.80)       # teams scoring more = over lean
-        - 0.25 * (avg_sp_era - 4.08)      # FG 2025: center 4.08
-        - 0.15 * (avg_era - 4.08)         # FG 2025: center 4.08
+        - 0.25 * (avg_sp_era - 4.18)      # FG 2026: center 4.18
+        - 0.15 * (avg_era - 4.18)         # FG 2026: center 4.18
         + 0.10 * h["slg_diff"]            # power hitters = over lean
     )
     over_prob = 1.0 / (1.0 + (2.718281828 ** -logit_over))

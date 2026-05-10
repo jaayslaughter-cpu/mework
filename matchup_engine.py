@@ -109,8 +109,8 @@ LEAGUE_AVG_OVERALL: dict[str, float] = {
     "whiff_rate": 0.248,
     "chase_rate": 0.307,
     "barrel_rate": 0.055,
-    "k_rate": 0.223,
-    "bb_rate": 0.087,
+    "k_rate": 0.228,
+    "bb_rate": 0.083,
 }
 
 # Pitch family groupings — used as fallback when specific pitch type has thin data

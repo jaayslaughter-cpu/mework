@@ -371,24 +371,24 @@ def apply_shrinkage_to_prop(
     try:
         from confidence_shrinkage import LEAGUE_RATES, LEAGUE_WOBA
         _LEAGUE_FALLBACKS = {
-            "k_rate":          LEAGUE_RATES.get("K",  0.223),
-            "k_pct":           LEAGUE_RATES.get("K",  0.223),
-            "bb_pct":          LEAGUE_RATES.get("BB", 0.087),
-            "csw_pct":         0.284,    # 2025 MLB average CSW%
-            "era":             4.12,     # 2025 MLB ERA
+            "k_rate":          LEAGUE_RATES.get("K",  0.228),
+            "k_pct":           LEAGUE_RATES.get("K",  0.228),
+            "bb_pct":          LEAGUE_RATES.get("BB", 0.083),
+            "csw_pct":         0.282,    # 2026 MLB CSW% through game 44
+            "era":             4.18,     # 2026 MLB ERA through game 44 (up slightly)
             "xfip":            4.10,
             "fip":             4.10,
             "woba":            LEAGUE_WOBA,
             "sc_xwoba":        LEAGUE_WOBA,
             "wrc_plus":        100.0,    # league average by definition
-            "sc_xslg":         0.401,    # 2025 MLB xSLG approx
-            "sc_barrel_rate":  0.077,    # 2025 MLB barrel%
-            "iso":             0.159,    # 2025 MLB ISO
+            "sc_xslg":         0.403,    # 2026 MLB xSLG approx through game 44
+            "sc_barrel_rate":  0.076,    # 2026 MLB barrel% through game 44
+            "iso":             0.157,    # 2026 MLB ISO through game 44
             "hr_fb_pct":       0.125,    # 2025 MLB HR/FB%
-            "o_swing":         0.316,    # 2025 MLB O-swing%
-            "h_rate":          0.204,    # 2025 H/PA (not H/BIP) — 2025 actual
+            "o_swing":         0.317,    # 2026 MLB O-swing% through game 44
+            "h_rate":          0.205,    # 2026 H/PA through game 44
             "hits":            0.204,    # same
-            "tb_rate":         0.350,    # 2025 TB/PA approx
+            "tb_rate":         0.351,    # 2026 TB/PA approx through game 44
         }
     except ImportError:
         _LEAGUE_FALLBACKS = {}

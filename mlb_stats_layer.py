@@ -326,7 +326,7 @@ def _parse_pitcher(raw: dict, name: str) -> dict[str, float]:
       k_pct      = SO / battersFaced
       bb_pct     = BB / battersFaced
       k_bb_pct   = k_pct - bb_pct
-      fip        = (13*HR + 3*BB - 2*K) / IP + 3.20   (FIP constant ≈ 3.20 for 2025)
+      fip        = (13*HR + 3*BB - 2*K) / IP + 3.10   (FIP constant ≈ 3.10 for 2026)
       xfip       = fip  (best available proxy without HR/FB from Statcast)
       siera      = fip  (best available proxy)
       csw_pct    = k_pct  (proxy: r ≈ 0.85 with CSW%)
@@ -850,7 +850,7 @@ def get_career_pitcher(player_id: int) -> dict[str, float]:
             _CAREER_PITCHER_CACHE[player_id] = {}
             return {}
 
-        season_weights = {2025: 0.40, 2024: 0.35, 2023: 0.25}
+        season_weights = {2026: 0.50, 2025: 0.30, 2024: 0.20}
         weighted = {"k_rate": 0.0, "bb_rate": 0.0, "era": 0.0, "whip": 0.0}
         total_weight = 0.0
 

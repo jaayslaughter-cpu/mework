@@ -49,11 +49,11 @@ MAX_NUDGE = 0.025            # Hard cap — Bayes cannot swing a pick by more th
 # a 50 PA rookie gets pulled strongly toward these; a 600 PA vet less so.
 # alpha / (alpha + beta) = league mean rate
 LEAGUE_PRIORS = {
-    "k_rate":  {"alpha": 22.2, "beta": 77.8},   # FG 2025: 22.2% K/PA
-    "h_rate":  {"alpha": 20.4, "beta": 79.6},   # FG 2025: 20.4% H/PA actual (was 24.2% — was H/BIP not H/PA)
+    "k_rate":  {"alpha": 22.8, "beta": 77.2},   # FG 2026: 22.8% K/PA through game 44
+    "h_rate":  {"alpha": 20.5, "beta": 79.5},   # FG 2026: 20.5% H/PA through game 44 (was 24.2% — was H/BIP not H/PA)
     "hr_rate": {"alpha":  3.3, "beta": 96.7},   # FG 2025: 3.3% HR/PA (elevated power season)
     "tb_rate": {"alpha": 35.0, "beta": 65.0},   # FG 2025: ~35.0% TB/PA actual
-    "bb_rate": {"alpha":  8.4, "beta": 91.6},   # FG 2025: 8.4% BB/PA confirmed
+    "bb_rate": {"alpha":  8.3, "beta": 91.7},   # FG 2026: 8.3% BB/PA through game 44
 }
 
 # Maps prop type strings from dispatcher to rate keys above

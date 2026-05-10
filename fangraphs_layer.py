@@ -240,12 +240,12 @@ _FG_FETCH_ATTEMPTED_DATE: str = ""  # "YYYY-MM-DD" once attempted, "" resets nex
 # Used as fallback when FanGraphs API is unavailable or player not found
 LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
     "pitcher": {
-        "csw_pct":   0.275,   # FG 2025: ~27.5% (was 0.280)
+        "csw_pct":   0.273,   # FG 2026: ~27.3% through game 44
         "swstr_pct": 0.110,   # FG 2025: ~11.0% (unchanged)
         "k_bb_pct":  0.130,   # FG 2025: ~13.0% (unchanged)
-        "xfip":      4.06,    # FG 2025 (was 4.15)  
-        "siera":     4.06,    # FG 2025 (was 4.15)  
-        "fip":       4.06,    # FG 2025 (was 4.15)  
+        "xfip":      4.10,    # FG 2026: xFIP through game 44  
+        "siera":     4.10,    # FG 2026: SIERA through game 44  
+        "fip":       4.10,    # FG 2026: FIP through game 44  
         "hr_fb_pct": 0.119,   # FG 2025: 11.9% (confirmed VSiN Feb 2026): ~11.8% (was 0.120)
         "lob_pct":   0.720,   # unchanged
         "babip":     0.288,   # FG 2025: .289 (confirmed VSiN Feb 2026): ~0.298 (was 0.300)

@@ -63,13 +63,13 @@ logger = logging.getLogger("propiq.marcel")
 # FIX: Updated to 2025 MLB actuals (FanGraphs leaderboards)
 _LEAGUE_AVG: dict = {
     # Batter rates
-    "batter_k_pct":  0.223,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
-    "batter_bb_pct": 0.087,   # FG 2025: 8.4% (confirmed VSiN Feb 2026) 
+    "batter_k_pct":  0.228,   # FG 2026: 22.8% through game 44 
+    "batter_bb_pct": 0.083,   # FG 2026: 8.3% through game 44 
     "batter_hr_pa":  0.033,   # FG 2025: elevated power 
-    "batter_woba":   0.308,   # FG 2025: ~.308 (was 0.312) 
+    "batter_woba":   0.309,   # FG 2026: .309 through game 44 
     "batter_iso":    0.156,   # FG 2025: elevated power (was 0.158) 
     # Pitcher rates (rates *allowed*)
-    "pitcher_k_pct":  0.223,  # FG 2025: 22.2% (confirmed)
+    "pitcher_k_pct":  0.228,  # FG 2026: 22.8% through game 44
     "pitcher_bb_pct": 0.087,  # FG 2025: 8.4% (confirmed)
     "pitcher_hr9":    1.28,   # FG 2025: ~1.28 HR/9 (was 1.30)
 }

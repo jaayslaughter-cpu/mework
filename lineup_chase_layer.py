@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # League average baselines (2024)
 _LEAGUE_O_SWING  = 0.316  # FG 2025: O-Swing% (was 0.318 in 2024)
-_LEAGUE_K_PCT    = 0.222  # FG 2025: 22.2% K% (confirmed VSiN Feb 2026)
+_LEAGUE_K_PCT    = 0.228  # FG 2026: 22.8% K% through game 44
 _LEAGUE_Z_CONTACT = 0.850
 
 # Chase thresholds

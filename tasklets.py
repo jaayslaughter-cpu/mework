@@ -3648,7 +3648,7 @@ class _F5Agent(_BaseAgent):
     @staticmethod
     def _bayesian_opp_k(obs_k_rate: float,
                         n_games: int,
-                        league_avg: float = 0.227) -> float:
+                        league_avg: float = 0.228) -> float:
         """Bayesian shrinkage of opposing lineup K rate toward league average.
         Source: BaseballBettingEdge bayesian_opp_k().
         adj = (games × obs_k + 50 × league_avg) / (games + 50).
@@ -5026,7 +5026,7 @@ class _StackSmithAgent(_BaseAgent):
         # league_era from hub or fallback blend; positive score = pitcher worse than avg
         _league_era = float(self.hub.get("league_era", era))  # hub sets this from MLB Stats
         _era_score  = (era - _league_era) / max(_league_era, 1.0)   # >0 = worse than avg
-        _k_score    = (0.227 - k_rate) / 0.227                       # >0 = fewer Ks than avg
+        _k_score    = (0.228 - k_rate) / 0.228                       # >0 = fewer Ks than avg
         pitcher_quality_score = (_era_score * 0.6 + _k_score * 0.4)  # weighted composite
 
         # Require meaningful weakness: score > 0.08 ≈ ERA ~4.50 equivalent
@@ -5481,8 +5481,8 @@ def _get_props(hub: dict) -> list[dict]:
                 "player_id":        _pp_pitcher.get("mlbam_id"),
                 "opposing_team":    _pp_pitcher.get("opposing_team", ""),
                 "_context_lineups": hub.get("context", {}).get("lineups", []),
-                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.223)),
-                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.087)),
+                "k_rate":           _fg_pitcher.get("k_pct",  _fg_pitcher.get("k_rate",  0.228)),
+                "bb_rate":          _fg_pitcher.get("bb_pct", _fg_pitcher.get("bb_rate", 0.083)),
                 "era":              _fg_pitcher.get("era",    4.06),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })

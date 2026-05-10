@@ -807,7 +807,7 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
         if wrc > 80:
             base += (wrc - 100.0) / 100.0 * 0.12   # ±12pp per 100 wRC+
         if woba > 0.01:
-            base += (woba - 0.308) / 0.060 * 0.08   # FG 2025: center 0.308
+            base += (woba - 0.309) / 0.060 * 0.08   # FG 2026: center 0.309
         # Lineup position bonus: top-4 hitters see more high-leverage PA
         _slot = int(prop.get("_batting_order_slot", 0) or 0)
         if 1 <= _slot <= 4:
@@ -834,7 +834,7 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
             xslg_adj = (xslg - 0.420) / 0.100 * 0.05  # ±5pp per .100 xSLG
             base += xslg_adj
         if xwoba > 0.01:
-            xwoba_adj = (xwoba - 0.308) / 0.060 * 0.04  # FG 2025: center 0.308
+            xwoba_adj = (xwoba - 0.309) / 0.060 * 0.04  # FG 2026: center 0.309
             base += xwoba_adj
         base = max(0.35, min(0.80, base))
         p = base if is_over else (1.0 - base)

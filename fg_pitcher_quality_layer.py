@@ -41,7 +41,7 @@ logger = logging.getLogger("propiq.fg_pitcher_quality")
 # League-average baselines (2026 MLB)
 # ---------------------------------------------------------------------------
 _LG_SIERA   = 3.75
-_LG_ERA     = 4.25
+_LG_ERA     = 4.18   # FG 2026: through game 44 (was 4.25)
 _LG_K9      = 8.50
 _LG_BB9     = 3.20
 _LG_H9      = 8.80
