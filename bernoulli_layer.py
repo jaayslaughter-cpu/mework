@@ -349,8 +349,10 @@ def enrich_prop_with_bernoulli(prop: dict) -> dict:
         game_er = float(prop.get("earned_runs",  0.0) or 0.0)
         if game_ip >= 1.0:
             season_ip   = game_ip
-            season_divr = game_er   # single-game ER used as DivR proxy
-            logger.debug("[Bernoulli] %s: using single-game fallback IP=%.1f ER=%.1f",
+            # DivR is an ER/IP rate — use rate, not raw ER count
+            # (raw ER would corrupt the Bernoulli tier for a 7-ER blowout starter)
+            season_divr = game_er / game_ip
+            logger.debug("[Bernoulli] %s: using single-game fallback IP=%.1f ER/IP=%.2f",
                          player, season_ip, season_divr)
 
     if season_ip < 1.0:

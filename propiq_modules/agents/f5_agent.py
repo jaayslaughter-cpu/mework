@@ -116,11 +116,23 @@ class F5Agent(BaseAgent):
             if base_ev < self.ev_threshold:
                 continue
 
-            model_prob = min(0.65, 0.54 + (base_ev / 100))
+            # model_prob: prefer enriched model_prob from hub props (pitching_outs or strikeouts)
+            enriched_prop = self._find_enriched_prop(pitcher_name, "pitching_outs", hub_data)                             or self._find_enriched_prop(pitcher_name, "strikeouts", hub_data)
+            if enriched_prop and enriched_prop.get("model_prob", 0) > 0:
+                model_prob = min(0.78, float(enriched_prop["model_prob"]) / 100.0)
+            else:
+                model_prob = min(0.65, 0.54 + (base_ev / 100))
 
-            # Estimate F5 total line (avg runs * 5/9 innings)
-            f5_line = round((k9 / 9.0) * 5.0 * 0.6, 1)  # rough F5 run estimate
-            f5_line = max(3.5, min(5.5, f5_line))
+            # F5 line: read from hub's F5 game totals if available, else estimate
+            game_f5_total = hub_data.get("f5_totals", {}).get(game_info.get("matchup_str", ""), 0)
+            if game_f5_total > 0:
+                f5_line = float(game_f5_total)
+            else:
+                # Fallback estimate from SIERA-adjusted run rate × 5 innings
+                siera = float(pitcher_info.get("siera", pitcher_info.get("fip", 4.20)))
+                runs_per_9 = siera * 0.92  # ERA ≈ SIERA × 0.92 for run suppression
+                f5_line = round(runs_per_9 / 9.0 * 5.0, 1)
+                f5_line = max(3.5, min(5.5, f5_line))
 
             bet = BetRecommendation(
                 agent=self.name,
@@ -159,6 +171,19 @@ class F5Agent(BaseAgent):
             )
 
         return sorted(recommendations, key=lambda b: b.ev_pct, reverse=True)
+
+
+    def _find_enriched_prop(self, pitcher_name: str, prop_type: str, hub: dict) -> dict | None:
+        """Look up enriched prop for this pitcher/prop_type from hub['props']."""
+        props = hub.get("props", [])
+        if not isinstance(props, list):
+            return None
+        pn_lower = pitcher_name.lower()
+        for p in props:
+            name = str(p.get("player_name", p.get("player", ""))).lower()
+            if name == pn_lower and str(p.get("prop_type", "")).lower() == prop_type.lower():
+                return p
+        return None
 
     def _find_game(self, team: str, games: list) -> dict:
         """Find today's game info for a given team."""

@@ -37,9 +37,9 @@ _LG_HIT_RATE      = 0.204   # FG 2025: H/PA actual (lower BABIP .289, was 0.209 
 _LG_HR_RATE       = 0.033   # FG 2025: HR/PA elevated power env (was 0.032) 
 _LG_K_RATE        = 0.222   # FG 2025: 22.2% K/PA (confirmed VSiN Feb 2026, was 0.223) 
 _LG_PITCHER_K9    = 8.7     # average K/9 for starters — unchanged (FG 2025: ~8.7)
-_LG_STARTER_IP    = 5.2     # average innings before bullpen (FG 2025) — was 5.5 (5.8% too high)
+_LG_STARTER_IP    = 5.0     # average innings before bullpen (2026 YTD through 44 games — opener/piggyback usage ↑)
 _LG_BULLPEN_ERA   = 4.00    # FG 2025: league bullpen ERA (was 4.05 in 2024, now 2025)  
-_LG_TEAM_TOTAL    = 4.30    # FG 2025: R/G actual (was 4.38 in 2024, now 2025)  
+_LG_TEAM_TOTAL    = 4.41    # 2026 YTD R/G through 44 games (elevated vs 4.30 in 2025)
 
 # Empirical PA-per-game by lineup slot (2021-2024 MLB)
 # Includes home bottom-9 not always played + late-game pinch-hit effects

@@ -31,17 +31,18 @@ from typing import Optional
 
 logger = logging.getLogger("propiq.pa_model")
 
-# ── 2025 MLB league-average PA outcome rates ──────────────────────────────
-# Source: FanGraphs 2025 season (confirmed via VSiN Feb 2026)
+# ── 2026 MLB league-average PA outcome rates ──────────────────────────────
+# Source: FanGraphs / Baseball Reference through 44 games of 2026
+# K↑ 22.8%, BB↓ 8.3%, HR↓ 3.1% vs 2025; run environment elevated (+0.11 R/G)
 LEAGUE_RATES: dict[str, float] = {
-    "K":   0.223,   # strikeout
-    "BB":  0.087,   # walk (non-IBB)
-    "HBP": 0.011,   # hit by pitch
-    "HR":  0.033,   # home run
-    "3B":  0.004,   # triple
-    "2B":  0.047,   # double
-    "1B":  0.143,   # single
-    "OUT": 0.452,   # field out (all other)
+    "K":   0.228,   # strikeout  (↑ from 0.223 — 2026 YTD trending higher)
+    "BB":  0.083,   # walk (non-IBB)  (↓ from 0.087)
+    "HBP": 0.011,   # hit by pitch  (unchanged)
+    "HR":  0.031,   # home run  (↓ from 0.033)
+    "3B":  0.004,   # triple  (unchanged)
+    "2B":  0.047,   # double  (unchanged)
+    "1B":  0.143,   # single  (unchanged)
+    "OUT": 0.453,   # field out (residual — keeps sum=1.0)
 }
 assert abs(sum(LEAGUE_RATES.values()) - 1.0) < 0.01, "LEAGUE_RATES must sum to 1"
 

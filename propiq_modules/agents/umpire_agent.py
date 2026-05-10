@@ -127,14 +127,24 @@ class UmpireAgent(BaseAgent):
                 swstr_bonus = max(0, (swstr - PITCHER_SWSTR_THRESHOLD) * 0.3)
 
                 total_ev = base_ev + pitch_ev_bonus + fip_bonus + swstr_bonus
-                model_prob = min(0.68, 0.52 + (total_ev / 100))
+                # model_prob: prefer enriched prop from hub, fall back to ev-based estimate
+                enriched_prop = self._find_enriched_prop(pitcher_name, "strikeouts", hub_data)
+                if enriched_prop and enriched_prop.get("model_prob", 0) > 0:
+                    model_prob = min(0.82, float(enriched_prop["model_prob"]) / 100.0)
+                else:
+                    # ev-based estimate — capped at 0.68 per prior behavior
+                    model_prob = min(0.68, 0.52 + (total_ev / 100))
 
                 if total_ev < self.ev_threshold:
                     continue
 
-                # Estimate K line (K9/9 × 6 innings = avg start)
-                expected_k_line = round((k9 / 9.0) * 5.5)
-                prop_line = max(4.5, float(expected_k_line))
+                # K line: prefer actual market line from hub props
+                enriched_prop = enriched_prop or self._find_enriched_prop(pitcher_name, "strikeouts", hub_data)
+                if enriched_prop and enriched_prop.get("line", 0) > 0:
+                    prop_line = float(enriched_prop["line"])
+                else:
+                    # Fallback: K9 × avg start length (5.5 inn)
+                    prop_line = max(4.5, float(round((k9 / 9.0) * 5.5)))
 
                 bet = BetRecommendation(
                     agent=self.name,
@@ -167,6 +177,19 @@ class UmpireAgent(BaseAgent):
                 )
 
         return sorted(recommendations, key=lambda b: b.ev_pct, reverse=True)
+
+
+    def _find_enriched_prop(self, pitcher_name: str, prop_type: str, hub: dict) -> dict | None:
+        """Look up enriched prop for this pitcher/prop_type from hub['props']."""
+        props = hub.get("props", [])
+        if not isinstance(props, list):
+            return None
+        pn_lower = pitcher_name.lower()
+        for p in props:
+            name = str(p.get("player_name", p.get("player", ""))).lower()
+            if name == pn_lower and str(p.get("prop_type", "")).lower() == prop_type.lower():
+                return p
+        return None
 
     def _find_game_pitchers(self, game_str: str, games: list, all_pitchers: list) -> dict:
         """Match umpire game assignment to starting pitchers."""

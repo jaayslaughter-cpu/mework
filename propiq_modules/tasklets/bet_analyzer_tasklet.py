@@ -157,9 +157,101 @@ class BetAnalyzerTasklet:
             return base   # still at prior since 0-0
         return base
 
+    # ── prop-type encoding (10 buckets, divided by 9) — matches XGBoost training ──
+    _PT_ENC: dict[str, float] = {
+        "strikeouts":        0 / 9,
+        "hits_allowed":      1 / 9,
+        "walks_allowed":     2 / 9,
+        "pitching_outs":     3 / 9,
+        "earned_runs":       4 / 9,
+        "hitter_strikeouts": 5 / 9,
+        "hits":              6 / 9,
+        "total_bases":       7 / 9,
+        "hits_runs_rbis":    8 / 9,
+        "rbis":              9 / 9,
+    }
+
     def _build_features(self, player: str, prop: str, hub: dict) -> list:
-        """Build XGBoost feature vector."""
-        return [0.0] * 20   # placeholder; real features from hub
+        """
+        Build XGBoost feature vector from hub-enriched prop data.
+        20 features matching the training schema from tasklets.py / bet_ledger.
+        Falls back to league-average priors for missing fields.
+        """
+        # 1. Find this player's enriched prop in hub["props"] (keyed by player name)
+        enriched: dict = {}
+        props_list = hub.get("props", [])
+        if isinstance(props_list, list):
+            pn_lower = player.lower()
+            prop_lower = prop.lower()
+            for p in props_list:
+                if (
+                    str(p.get("player_name", p.get("player", ""))).lower() == pn_lower
+                    and str(p.get("prop_type", "")).lower() == prop_lower
+                ):
+                    enriched = p
+                    break
+
+        # 2. Pitcher row from hub["pitchers"]
+        pitcher: dict = {}
+        for row in hub.get("pitchers", []) or []:
+            if str(row.get("pitcher", "")).lower() == player.lower():
+                pitcher = row
+                break
+
+        # ── Feature extraction with league-average fallbacks ──────────────────
+        def _f(key, default, *dicts):
+            for d in dicts:
+                v = d.get(key)
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            return float(default)
+
+        prop_enc      = self._PT_ENC.get(prop.lower().replace(" ", "_"), 0.5)
+        model_prob    = _f("model_prob",    50.0, enriched) / 100.0   # 0-1
+        ev_pct        = _f("ev_pct",         0.0, enriched) / 100.0   # 0-1
+        line          = _f("line",            1.5, enriched)
+        wrc_plus      = _f("wrc_plus",      100.0, enriched) / 100.0  # 0-2
+        woba          = _f("woba",           0.315, enriched)
+        k_pct         = _f("k_pct",          0.223, enriched, pitcher)
+        park_factor   = _f("_park_factor",   1.000, enriched)
+        ump_k_mod     = _f("_abs_umpire_k_adj", 0.0, enriched)
+        siera_proxy   = _f("_siera_proxy",   4.06, enriched, pitcher)
+        qs_prob       = _f("_qs_prob",       0.50, enriched, pitcher)
+        k9_quality    = _f("_k9_quality",    8.0, enriched, pitcher)
+        bb9_quality   = _f("_bb9_quality",   3.0, enriched, pitcher)
+        fip           = _f("fip",            4.20, enriched, pitcher)
+        whip          = _f("whip",           1.30, enriched, pitcher)
+        season_weight = _f("season_weight_2026", 0.50, hub)
+        injury_pen    = _f("injury_penalty",  0.0, enriched)
+        implied_prob  = _f("_implied_prob",  50.0, enriched) / 100.0
+        confidence    = _f("confidence",      5.0, enriched) / 10.0   # 0-1
+        side_enc      = 1.0 if str(enriched.get("side", "over")).lower() == "over" else 0.0
+
+        return [
+            prop_enc,       # 0  prop type bucket
+            model_prob,     # 1  enriched model probability (0-1)
+            ev_pct,         # 2  expected value (0-1)
+            line,           # 3  prop line
+            wrc_plus,       # 4  opponent wRC+ / 100
+            woba,           # 5  wOBA
+            k_pct,          # 6  K%
+            park_factor,    # 7  park run factor
+            ump_k_mod,      # 8  umpire K adjustment
+            siera_proxy,    # 9  SIERA proxy
+            qs_prob,        # 10 quality start probability
+            k9_quality,     # 11 K/9 from quality layer
+            bb9_quality,    # 12 BB/9 from quality layer
+            fip,            # 13 FIP
+            whip,           # 14 WHIP
+            season_weight,  # 15 2026 season blend weight
+            injury_pen,     # 16 injury penalty (0 = healthy)
+            implied_prob,   # 17 implied probability from market
+            confidence,     # 18 confidence score / 10
+            side_enc,       # 19 over=1.0 / under=0.0
+        ]
 
     def _load_xgb(self):
         """Lazy-load trained XGBoost model."""
