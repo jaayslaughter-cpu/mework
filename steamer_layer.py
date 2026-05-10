@@ -356,10 +356,25 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
                     len(static_data) // 2,
                 )
             else:
-                logger.warning(
-                    "[Steamer] All tiers failed (1=FanGraphs 2=ScraperAPI 3=pybaseball "
-                    "4=DraftEdge 5=StaticCSV). Model using league-average priors.",
-                )
+                # Tier 5b: Baseball Savant xStats (2026 actuals)
+                logger.info("[Steamer] Tier 5 failed — trying Savant xStats (Tier 5b)...")
+                savant_data = _fetch_steamer_savant()
+                if savant_data:
+                    _CACHE = savant_data
+                    _CACHE_DATE = today
+                else:
+                    # Tier 5c: BBRef static CSV / live scrape
+                    logger.info("[Steamer] Tier 5b failed — trying BBRef stats (Tier 5c)...")
+                    bbref_data = _fetch_steamer_bbref_static()
+                    if bbref_data:
+                        _CACHE = bbref_data
+                        _CACHE_DATE = today
+                    else:
+                        logger.warning(
+                            "[Steamer] All tiers failed (1=FG 2=ScraperAPI 3=pybaseball "
+                            "4=DraftEdge 5=StaticCSV 5b=Savant 5c=BBRef). "
+                            "Model using league-average priors.",
+                        )
 
     return _CACHE
 
@@ -669,6 +684,244 @@ def _fetch_steamer_static_csv() -> dict[str, dict]:
         return projections
     except Exception as exc:
         logger.warning("[Steamer] Static CSV load failed: %s", exc)
+        return {}
+
+
+def _fetch_steamer_savant() -> dict[str, dict]:
+    """
+    Tier 5b: Baseball Savant expected statistics CSV (2026 actuals).
+    Endpoint: baseballsavant.mlb.com/expected_statistics?type=batter&year=2026&min=1&csv=true
+    Provides: ba, slg, woba per batter + MLBAM player_id for exact key lookup.
+    OBP is estimated from wOBA (woba*0.90 + 0.030) — close enough for a fallback tier.
+    Per-game counting rates (r_pg/rbi_pg/hr_pg/sb_pg) default to league average because
+    the expected-stats endpoint doesn't carry R/RBI/HR/SB season totals.
+    Savant blocks no DC IPs — no proxy needed, but ScraperAPI is tried on 403.
+    """
+    import csv as _csv, io as _io  # noqa: PLC0415
+
+    SAVANT_URL = (
+        "https://baseballsavant.mlb.com/expected_statistics"
+        "?type=batter&year=2026&position=&team=&min=1&csv=true"
+    )
+    _SAVANT_HDRS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,text/plain,*/*",
+        "Referer": "https://baseballsavant.mlb.com/",
+    }
+    try:
+        resp = requests.get(SAVANT_URL, headers=_SAVANT_HDRS, timeout=30)
+        if resp.status_code in (403, 429):
+            scraper_key = os.getenv("SCRAPERAPI_KEY", "")
+            if scraper_key:
+                proxy = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
+                resp = requests.get(
+                    SAVANT_URL, headers=_SAVANT_HDRS, timeout=60,
+                    proxies={"https": proxy}, verify=False,
+                )
+        resp.raise_for_status()
+
+        # Strip BOM; column 0 is the combined "last_name, first_name" field
+        text = resp.text.lstrip("\ufeff")
+        reader = _csv.DictReader(_io.StringIO(text))
+
+        projections: dict[str, dict] = {}
+        for row in reader:
+            name_raw = row.get("last_name, first_name", "").strip()
+            mlbam    = row.get("player_id", "").strip()
+            if not name_raw:
+                continue
+
+            # "Wood, James" → "James Wood"
+            if "," in name_raw:
+                last, first = [x.strip() for x in name_raw.split(",", 1)]
+                full_name = f"{first} {last}".strip()
+            else:
+                full_name = name_raw
+
+            key = _norm(full_name)
+            if not key:
+                continue
+
+            def _sv(col: str, default: float = 0.0) -> float:
+                try:
+                    return float(row.get(col) or default)
+                except (TypeError, ValueError):
+                    return default
+
+            ba   = _sv("ba",   _LG["avg"])
+            slg  = _sv("slg",  _LG["slg"])
+            woba = _sv("woba", 0.315)
+            # wOBA × 0.90 + 0.030 ≈ OBP (avg: 0.315*0.90+0.030=0.314 vs actual 0.318)
+            obp  = round(min(woba * 0.90 + 0.030, 0.550), 3)
+
+            proj = {
+                "avg":    round(ba,  4),
+                "obp":    obp,
+                "slg":    round(slg, 4),
+                "r":      0,  "rbi": 0,  "sb": 0,  "hr": 0,
+                "pa":     float(row.get("pa") or 4.2),
+                "g":      1.0,
+                # Counting rates unavailable from this endpoint — use league averages
+                "r_pg":   _LG["r_pg"],
+                "rbi_pg": _LG["rbi_pg"],
+                "sb_pg":  _LG["sb_pg"],
+                "hr_pg":  _LG["hr_pg"],
+                "_source": "savant_xstats",
+            }
+            projections[key] = proj
+            # MLBAM lookup alias for player_id_resolver hits
+            if mlbam:
+                projections[f"mlbam:{mlbam}"] = proj
+
+        logger.info("[Steamer] Tier 5b Savant xStats: %d batters (2026 actuals)", len(projections) // 2 or len(projections))
+        return projections
+
+    except Exception as exc:
+        import traceback as _tb  # noqa: PLC0415
+        logger.warning(
+            "[Steamer] Tier 5b Savant failed (%s: %s)\n%s",
+            type(exc).__name__, exc, _tb.format_exc(limit=3),
+        )
+        return {}
+
+
+def _fetch_steamer_bbref_static() -> dict[str, dict]:
+    """
+    Tier 5c: Baseball Reference 2026 batting stats from repo CSV.
+    Primary: data/bbref/bbref_batting_2026_v2.csv  (300+ players, actual 2026 season).
+    Fallback: live HTML scrape via ScraperAPI if CSV missing from deploy.
+
+    CSV columns: Season,Name,Tm,G,PA,AB,H,1B,2B,3B,HR,R,RBI,BB,IBB,SO,HBP,SF,SH,GDP,SB,CS,AVG
+    OBP computed exactly: (H+BB+HBP) / (AB+BB+HBP+SF)
+    SLG computed exactly: (1B + 2*2B + 3*3B + 4*HR) / AB
+    Per-game rates: actual R/G, RBI/G, HR/G, SB/G from season totals.
+
+    Advantage over Savant 5b: full per-game counting rates (r_pg, rbi_pg, hr_pg, sb_pg).
+    Advantage over Savant 5b: OBP/SLG are exact, not estimated.
+    Limitation: only ~300 players (qualified starters); bench players fall to league avg.
+    """
+    import os as _os, csv as _csv  # noqa: PLC0415
+
+    csv_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "data", "bbref", "bbref_batting_2026_v2.csv",
+    )
+
+    def _parse_bbref_csv(path: str) -> dict[str, dict]:
+        projections: dict[str, dict] = {}
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                for row in _csv.DictReader(f):
+                    name = (row.get("Name") or "").strip()
+                    key  = _norm(name)
+                    # Skip header rows (BBRef repeats headers mid-table) and blanks
+                    if not key or key == "name":
+                        continue
+
+                    def _i(col: str, default: int = 0) -> int:
+                        try:
+                            return int(row.get(col) or default)
+                        except (TypeError, ValueError):
+                            return default
+
+                    def _f(col: str, default: float = 0.0) -> float:
+                        try:
+                            return float(row.get(col) or default)
+                        except (TypeError, ValueError):
+                            return default
+
+                    g  = max(1, _i("G",   1))
+                    ab = max(1, _i("AB",  1))
+                    h  = _i("H"); bb = _i("BB"); hbp = _i("HBP"); sf = _i("SF")
+                    b1 = _i("1B"); b2 = _i("2B"); b3 = _i("3B"); hr = _i("HR")
+                    r  = _i("R");  rbi = _i("RBI"); sb = _i("SB")
+
+                    obp = (h + bb + hbp) / max(1, ab + bb + hbp + sf)
+                    tb  = b1 + 2 * b2 + 3 * b3 + 4 * hr
+                    slg = tb / ab
+
+                    projections[key] = {
+                        "avg":    round(_f("AVG", _LG["avg"]), 4),
+                        "obp":    round(obp, 4),
+                        "slg":    round(slg, 4),
+                        "r":      float(r),
+                        "rbi":    float(rbi),
+                        "sb":     float(sb),
+                        "hr":     float(hr),
+                        "pa":     float(_i("PA") or 4.2),
+                        "g":      float(g),
+                        "r_pg":   round(r   / g, 4),
+                        "rbi_pg": round(rbi / g, 4),
+                        "hr_pg":  round(hr  / g, 4),
+                        "sb_pg":  round(sb  / g, 4),
+                        "_source": "bbref_csv",
+                    }
+        except Exception as exc:
+            logger.warning("[Steamer] Tier 5c BBRef CSV parse error: %s", exc)
+        return projections
+
+    # ── Primary: static CSV bundled in repo ───────────────────────────────
+    if _os.path.exists(csv_path):
+        data = _parse_bbref_csv(csv_path)
+        if data:
+            logger.info("[Steamer] Tier 5c BBRef static CSV: %d batters (2026 actuals)", len(data))
+            return data
+
+    # ── Fallback: live ScraperAPI scrape of BBRef 2026 standard batting ──
+    scraper_key = os.getenv("SCRAPERAPI_KEY", "")
+    if not scraper_key:
+        logger.warning("[Steamer] Tier 5c BBRef: static CSV missing and SCRAPERAPI_KEY not set — skipping live scrape")
+        return {}
+
+    BBREF_URL = "https://www.baseball-reference.com/leagues/majors/2026-standard-batting.shtml"
+    scrape_url = f"https://api.scraperapi.com/?api_key={scraper_key}&url={BBREF_URL}&render=false"
+    try:
+        import pandas as _pd  # noqa: PLC0415
+        tables = _pd.read_html(scrape_url, attrs={"id": "players_standard_batting"}, flavor="lxml")
+        if not tables:
+            raise ValueError("No table found")
+        df = tables[0]
+        df.columns = [str(c) for c in df.columns]
+        # Drop duplicate header rows (BBRef repeats "Name" rows)
+        df = df[df["Name"] != "Name"].dropna(subset=["Name"])
+        projections: dict[str, dict] = {}
+        for _, row in df.iterrows():
+            key = _norm(str(row.get("Name", "")))
+            if not key:
+                continue
+            def _fi(col: str, default: float = 0.0) -> float:
+                try:
+                    return float(row.get(col) or default)
+                except (TypeError, ValueError):
+                    return default
+            g  = max(1.0, _fi("G", 1))
+            ab = max(1.0, _fi("AB", 1))
+            h  = _fi("H"); bb = _fi("BB"); hbp = _fi("HBP", 0.0); sf = _fi("SF", 0.0)
+            b1 = _fi("1B", 0.0); b2 = _fi("2B"); b3 = _fi("3B"); hr = _fi("HR")
+            r  = _fi("R"); rbi = _fi("RBI"); sb = _fi("SB", 0.0)
+            obp = (h + bb + hbp) / max(1, ab + bb + hbp + sf)
+            tb  = b1 + 2 * b2 + 3 * b3 + 4 * hr
+            slg = tb / ab
+            projections[key] = {
+                "avg":    round(_fi("BA", _LG["avg"]), 4),
+                "obp":    round(obp, 4),
+                "slg":    round(slg, 4),
+                "r":      r, "rbi": rbi, "sb": sb, "hr": hr,
+                "pa":     _fi("PA", 4.2), "g": g,
+                "r_pg":   round(r   / g, 4),
+                "rbi_pg": round(rbi / g, 4),
+                "hr_pg":  round(hr  / g, 4),
+                "sb_pg":  round(sb  / g, 4),
+                "_source": "bbref_live",
+            }
+        logger.info("[Steamer] Tier 5c BBRef live scrape: %d batters", len(projections))
+        return projections
+    except Exception as exc:
+        import traceback as _tb  # noqa: PLC0415
+        logger.warning("[Steamer] Tier 5c BBRef live scrape failed: %s\n%s", exc, _tb.format_exc(limit=3))
         return {}
 
 
