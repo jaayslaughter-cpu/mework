@@ -2971,6 +2971,27 @@ class _BaseAgent:
             except ImportError:
                 pass
 
+        # ── Per-line XGBoost hit blend (xgb_k_layer) ──────────────────────────
+        # 80/20 formula/XGB blend for hit-type props. No-op until xgb_hits.pkl
+        # is trained; auto-activates on 2:30 AM retrain when Brier < 0.22.
+        # When XGB is active a 15% pa_model hit signal is blended as tertiary.
+        if prop_type in {"hits", "total_bases", "hits_runs_rbis", "fantasy_score"}:
+            try:
+                from xgb_k_layer import xgb_hit_ready, xgb_hit_prob as _xgb_hit_prob  # noqa: PLC0415
+                if xgb_hit_ready():
+                    _h_line_val = float(prop.get("line", 1.5) or 1.5)
+                    _xhp = _xgb_hit_prob(prop, line=_h_line_val)
+                    if _xhp is not None:
+                        raw_p = round(0.80 * raw_p + 0.20 * _xhp * 100, 2)
+                        raw_p = max(5.0, min(95.0, raw_p))
+                        # 15% pa_model hit probability when XGB is active
+                        _pa_hit = prop.get("_pa_model_hit_prob")
+                        if _pa_hit is not None:
+                            raw_p = round(0.85 * raw_p + 0.15 * float(_pa_hit) * 100, 2)
+                            raw_p = max(5.0, min(95.0, raw_p))
+            except ImportError:
+                pass
+
         raw_prob = round(max(5.0, min(95.0, raw_p)), 2)
         return self._apply_temperature(raw_prob)
 
@@ -4118,6 +4139,19 @@ class _BullpenAgent(_BaseAgent):
 
         # ── 2. BVI structural adjustment ─────────────────────────────────────
         bvi_entry  = bvi_map.get(opp_abbrev, {})
+        # ── WPA Drama → BVI impact_volatility feed (PR #512/commit 7bc2528) ──
+        # get_team_bvi_adjustment returns +0.12 for walkoff wins, −0.04 for
+        # blowouts. impact_volatility is 40% of BVI composite, so the BVI
+        # point shift = drama_delta × 40.
+        try:
+            from wpa_drama_layer import get_team_bvi_adjustment as _wpa_bvi_adj  # noqa: PLC0415
+            _drama_delta = _wpa_bvi_adj(opp_abbrev)
+            if _drama_delta != 0.0 and bvi_entry:
+                bvi_entry = dict(bvi_entry)  # shallow copy — never mutate hub cache
+                _cur_bvi = float(bvi_entry.get("bvi", 50.0))
+                bvi_entry["bvi"] = max(0.0, min(100.0, _cur_bvi + _drama_delta * 40.0))
+        except Exception:
+            pass
         bvi_score  = float(bvi_entry.get("bvi", 50.0)) if bvi_entry else 50.0
         # Directional BVI boost: volatile bullpen → OVER; stable → UNDER
         if bvi_score > 60.0:
