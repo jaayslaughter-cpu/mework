@@ -186,8 +186,8 @@ def _get_fg_batter(name: str) -> dict:
             "o_swing":    stats.get("o_swing",    0.316),
             "z_contact":  stats.get("z_contact",  0.850),
             "hr_fb_pct":  stats.get("hr_fb_pct",  0.105),
-            "k_pct":      stats.get("k_pct",      0.223),
-            "bb_pct":     stats.get("bb_pct",     0.087),
+            "k_pct":      stats.get("k_pct",      0.228),
+            "bb_pct":     stats.get("bb_pct",     0.083),
         }
     except Exception:
         return {}
@@ -425,7 +425,7 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
         _is_pitcher_pt = prop_type in {"strikeouts","pitching_outs","earned_runs",
                                         "hits_allowed","walks_allowed","fantasy_pitcher"}
         if _is_pitcher_pt:
-            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.223)) or 0.223)
+            player_rate = float(prop.get("k_rate", prop.get("k_pct", 0.228)) or 0.223)
             player_pa   = 27
         else:
             # Batter props: use wRC+ normalized, BABIP, or hit rate proxy
@@ -923,10 +923,9 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     _fg_batter_cache:  dict[str, dict] = {}
 
     # ── Per-team chase score cache ────────────────────────────────────────────
-    _chase_cache:      dict[str, dict] = {}
-    _weather_cache:    dict[str, dict] = {}
-    _park_cache:       dict[str, dict] = {}
-    _game_total_cache: dict = {}  # (team|opp) -> SBR O/U
+    _chase_cache:   dict[str, dict] = {}
+    _weather_cache: dict[str, dict] = {}
+    _park_cache:    dict[str, dict] = {}
 
     # ── Load injury layer — stamps flags before any agent sees the prop ─────────
     try:
@@ -1228,13 +1227,13 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     pass
                 prop.update({
                     "wrc_plus":    fg.get("wrc_plus",  100.0),
-                    "woba":        fg.get("woba",       0.308),
+                    "woba":        fg.get("woba",       0.309),
                     "iso":         fg.get("iso",        0.156),
                     "o_swing":     fg.get("o_swing",    0.316),
                     "z_contact":   fg.get("z_contact",  0.850),
                     "hr_fb_pct":   fg.get("hr_fb_pct",  0.105),
-                    "k_pct":       fg.get("k_pct",      0.223),
-                    "bb_pct":      fg.get("bb_pct",     0.087),
+                    "k_pct":       fg.get("k_pct",      0.228),
+                    "bb_pct":      fg.get("bb_pct",     0.083),
                 })
                 # ── Platoon splits overlay ──────────────────────────────────────────
                 # Override season stats with vs-hand splits when pitcher hand is known
@@ -1305,8 +1304,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     prop.setdefault("wrc_plus", _mlbapi_b.get("wrc_plus", 100.0))
                     prop.setdefault("babip",    _mlbapi_b.get("babip",    0.288))
                     prop.setdefault("iso",      _mlbapi_b.get("iso",      0.156))
-                    prop.setdefault("k_pct",    _mlbapi_b.get("k_pct",    0.223))
-                    prop.setdefault("bb_pct",   _mlbapi_b.get("bb_pct",   0.087))
+                    prop.setdefault("k_pct",    _mlbapi_b.get("k_pct",    0.228))
+                    prop.setdefault("bb_pct",   _mlbapi_b.get("bb_pct",   0.083))
                     prop.setdefault("slg",      _mlbapi_b.get("slg",      0.410))
                     prop.setdefault("obp",      _mlbapi_b.get("obp",      0.315))
                     logger.debug("[Enrichment] Batter %s using statsapi 2026 fallback", player)
@@ -1448,10 +1447,10 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         else:
             # Batter keys — use platoon splits when available (overrides season stats)
             # woba_vs_hand / k_pct_vs_hand are set by _get_mlbapi_batter_splits
-            _woba_src = prop.get("woba_vs_hand")   or prop.get("woba",    0.308)
+            _woba_src = prop.get("woba_vs_hand")   or prop.get("woba",    0.309)
             _iso_src  = prop.get("iso_vs_hand")    or prop.get("iso",     0.156)
-            _k_src    = prop.get("k_pct_vs_hand")  or prop.get("k_pct",   0.223)
-            _bb_src   = prop.get("bb_pct_vs_hand") or prop.get("bb_pct",  0.087)
+            _k_src    = prop.get("k_pct_vs_hand")  or prop.get("k_pct",   0.228)
+            _bb_src   = prop.get("bb_pct_vs_hand") or prop.get("bb_pct",  0.083)
             prop.setdefault("_wrc_plus", prop.get("wrc_plus", 100.0))
             prop.setdefault("_woba",     _woba_src)
             prop.setdefault("_iso",      _iso_src)
@@ -1620,38 +1619,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _raw_prob, _adj_prob, round(_inj_pen*100),
             )
 
-        # ── DraftKings direct de-vigged probability (Tier 0 sharp stamp) ──────
-        try:
-            import datetime as _dt_dk
-            from draftkings_layer import get_dk_prob as _get_dk_prob
-            _dk_side = prop.get("side", "over").lower()
-            _dk_line = float(prop.get("line", 1.5) or 1.5)
-            _dk_date = _dt_dk.date.today().strftime("%Y-%m-%d")
-            _dk_p = _get_dk_prob(player, prop_type, _dk_line, _dk_side, _dk_date)
-            prop["_dk_prob"] = round(_dk_p * 100, 2) if _dk_p is not None else None
-        except Exception:
-            prop["_dk_prob"] = None
-
-        # ── SBR sharp consensus game O/U total ──────────────────────────────
-        try:
-            from sportsbookreview_layer import get_sharp_game_total as _get_sgt
-            _team_sbr = prop.get("team", "")
-            _opp_sbr  = opp_team or prop.get("opp_team", "")
-            _sbr_key  = f"{_team_sbr}|{_opp_sbr}"
-            if _sbr_key not in _game_total_cache:
-                _game_total_cache[_sbr_key] = _get_sgt(_team_sbr, _opp_sbr)
-            prop["_sharp_game_total"] = _game_total_cache[_sbr_key]
-        except Exception:
-            prop["_sharp_game_total"] = None
-
-        # ── WPA drama BVI adjustment ─────────────────────────────────────────
-        try:
-            from wpa_drama_layer import get_team_bvi_adjustment as _get_bvi
-            _bvi_team = prop.get("team", "")
-            prop["_bvi_drama_adj"] = _get_bvi(_bvi_team) if _bvi_team else 0.0
-        except Exception:
-            prop["_bvi_drama_adj"] = 0.0
-
         enriched_count += 1
 
     # ── Statcast batch enrichment ── (moved above main loop; mlbam_ids pre-attached)
@@ -1669,8 +1636,4 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         _platoon_hits, _arsenal_hits,
         len(_chase_cache), len(_weather_cache),
     )
-    _dk_hits  = sum(1 for p in props if p.get("_dk_prob") is not None)
-    _sbr_hits = sum(1 for p in props if p.get("_sharp_game_total") is not None)
-    _bvi_hits = sum(1 for p in props if p.get("_bvi_drama_adj", 0.0) != 0.0)
-    logger.info("[Enrichment] DK direct: %d | SBR game total: %d games | BVI drama: %d props", _dk_hits, len(_game_total_cache), _bvi_hits)
     return props

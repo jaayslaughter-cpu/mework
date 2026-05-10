@@ -96,7 +96,7 @@ class SeasonBlender:
     def __init__(
         self,
         opening_day: datetime.date | None = None,
-        pa_per_game:  float = 4.30,   # FG 2025: R/G (was 4.38)
+        pa_per_game:  float = 4.41,   # FG 2026: R/G through game 44
         bf_per_start: float = 23.0,   # ~23 BF per start for average starter
         starts_per_game: float = 0.2, # 1 start per 5 days
     ):

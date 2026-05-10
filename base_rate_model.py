@@ -43,7 +43,7 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
 
 # FIX: Updated to 2025 MLB actuals — used as normalization denominators in _fg_adj
 _LG = {"csw":0.275,"swstr":0.110,"k_bb":0.130,"xfip":4.06,"siera":4.06,
-       "wrc":100.0,"woba":0.308,"iso":0.156,"hr_fb":0.119,"o_sw":0.316,"k_pct":0.223}
+       "wrc":100.0,"woba":0.309,"iso":0.156,"hr_fb":0.119,"o_sw":0.316,"k_pct":0.228}
 _FG_CAP = 0.030
 
 def _interp(rates, line):

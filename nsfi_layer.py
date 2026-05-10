@@ -54,8 +54,8 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/2.0)"}
 # ---------------------------------------------------------------------------
 
 MLB_AVGS = {
-    "K_Rate":  0.222,   # FG 2025: 22.2% (confirmed VSiN Feb 2026) 
-    "BB_Rate": 0.084,   # FG 2025: 8.4%  (confirmed VSiN Feb 2026) 
+    "K_Rate":  0.228,   # FG 2026: 22.8% through game 44
+    "BB_Rate": 0.083,   # FG 2026: 8.3% through game 44
     "1B_Rate": 0.143,
     "2B_Rate": 0.047,
     "3B_Rate": 0.004,

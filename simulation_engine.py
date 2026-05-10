@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 # Previously several values were overestimates causing systematic OVER bias on hit props
 _LG_HIT_RATE      = 0.204   # FG 2025: H/PA actual (lower BABIP .289, was 0.209 in 2024, now 2025) 
 _LG_HR_RATE       = 0.033   # FG 2025: HR/PA elevated power env (was 0.032) 
-_LG_K_RATE        = 0.222   # FG 2025: 22.2% K/PA (confirmed VSiN Feb 2026, was 0.223) 
-_LG_PITCHER_K9    = 8.7     # average K/9 for starters — unchanged (FG 2025: ~8.7)
-_LG_STARTER_IP    = 5.0     # average innings before bullpen (2026 YTD through 44 games — opener/piggyback usage ↑)
+_LG_K_RATE        = 0.228   # FG 2026: 22.8% K/PA through game 44 (up from 22.2% in 2025) 
+_LG_PITCHER_K9    = 8.9     # FG 2026: 8.9 K/9 through game 44 (strikeout environment elevated vs 2025)
+_LG_STARTER_IP    = 5.0     # FG 2026: 5.0 IP/start through game 44 (opener/piggyback use up from 2025)
 _LG_BULLPEN_ERA   = 4.00    # FG 2025: league bullpen ERA (was 4.05 in 2024, now 2025)  
-_LG_TEAM_TOTAL    = 4.41    # 2026 YTD R/G through 44 games (elevated vs 4.30 in 2025)
+_LG_TEAM_TOTAL    = 4.41    # FG 2026: R/G through game 44 (up from 4.30 in 2025)  
 
 # Empirical PA-per-game by lineup slot (2021-2024 MLB)
 # Includes home bottom-9 not always played + late-game pinch-hit effects
@@ -131,7 +131,7 @@ def _get_starter_pa_fraction(prop: dict, mean_pa: float) -> float:
 def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     """P(hit) per plate appearance against the starting pitcher."""
     # Pitcher skill inputs
-    k_pct   = _safe(prop, "_k_pct",  0.222)   # FG 2025: 22.2% pitcher K% (was 0.225)
+    k_pct   = _safe(prop, "_k_pct",  0.228)   # FG 2026: 22.8% pitcher K% through game 44
     bb_pct  = _safe(prop, "_bb_pct", 0.080)
     whip    = _safe(prop, "_whip",   1.30)
 
@@ -143,8 +143,8 @@ def _hit_prob_per_pa_vs_starter(prop: dict) -> float:
     # Base hit rate adjusted by pitcher
     pitcher_hit_factor = _clamp(1.30 / max(whip, 0.50), 0.70, 1.40)
 
-    # Batter wOBA adjustment: 0.312 = average (2024 MLB); scale ±20%
-    batter_hit_factor  = _clamp(woba / 0.308, 0.70, 1.45)   # FG 2025: center 0.308
+    # Batter wOBA adjustment: 0.309 = average (2026 MLB through game 44); scale ±20%
+    batter_hit_factor  = _clamp(woba / 0.309, 0.70, 1.45)   # FG 2026: center 0.309
 
     # Whiff rate: higher whiff → more Ks → fewer balls in play
     whiff_factor = _clamp(1.0 - (whiff_h - 0.25) * 1.5, 0.60, 1.20)
@@ -159,7 +159,7 @@ def _hit_prob_per_pa_vs_bullpen(prop: dict) -> float:
     Elite bullpen (ERA 2.5) → fewer hits; weak bullpen (ERA 5.5) → more.
     """
     bp_era    = _safe(prop, "_bullpen_era", _LG_BULLPEN_ERA)
-    batter_hit_factor = _clamp(_safe(prop, "_woba", 0.308) / 0.308, 0.70, 1.45)  # FG 2025
+    batter_hit_factor = _clamp(_safe(prop, "_woba", 0.309) / 0.309, 0.70, 1.45)  # FG 2026
 
     # Bullpen ERA factor: 4.1 = average; below = good bullpen (fewer hits), above = weak
     era_factor = _clamp(bp_era / _LG_BULLPEN_ERA, 0.70, 1.50)

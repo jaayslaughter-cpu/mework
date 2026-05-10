@@ -91,7 +91,7 @@ _SAVANT_HEADERS = {
 # 2025 Statcast league-average baselines by pitch type
 # Source: Baseball Savant 2025 pitch arsenal leaderboard
 LEAGUE_AVG_BY_PITCH_TYPE: dict[str, dict[str, float]] = {
-    "FF": {"whiff_rate": 0.213, "chase_rate": 0.295, "barrel_rate": 0.075},
+    "FF": {"whiff_rate": 0.218, "chase_rate": 0.295, "barrel_rate": 0.075},
     "SI": {"whiff_rate": 0.165, "chase_rate": 0.280, "barrel_rate": 0.065},
     "FC": {"whiff_rate": 0.245, "chase_rate": 0.320, "barrel_rate": 0.055},
     "SL": {"whiff_rate": 0.335, "chase_rate": 0.350, "barrel_rate": 0.045},
