@@ -4,6 +4,9 @@
 --   1. Original V48 INSERT omitted `filename` → null constraint violation
 --   2. V48 never recorded in migration_history (filename=NULL, version='V48')
 --   3. Runner checks WHERE filename='V48__...' → NULL row doesn't match → re-runs V48 every startup
+--   4. V48 re-run: ON CONFLICT (version) DO NOTHING → INSERT skipped, no error
+--   5. Runner's own INSERT (filename only) adds correct row BUT V49 ordering still uncertain
+--   6. Belt-and-suspenders: this migration guarantees the columns exist regardless
 --   4. Re-run: ON CONFLICT (version) DO NOTHING → INSERT skipped, no error
 --   5. Runner's own INSERT (filename only) should add a correct row...
 --   6. BUT if it somehow doesn't → V49 (strikeouts/pa columns) never reaches execution
@@ -28,6 +31,7 @@ INSERT INTO migration_history (filename, version, description, applied_at)
 VALUES ('V48__pitch_whiff_live_tables.sql', 'V48', 'pitch_whiff_live_tables', NOW())
 ON CONFLICT (filename) DO NOTHING;
 
+-- ── 2. Guarantee pitch_whiff_live has the columns V49 was supposed to add ─────
 -- ── 2. Ensure pitch_whiff_live has the columns V49 was supposed to add ────────
 -- V49 may not have run yet because V48 was blocking it. Add all three columns
 -- with IF NOT EXISTS so this is safe regardless of whether V49 already ran.
@@ -40,6 +44,7 @@ ALTER TABLE pitch_whiff_live
 ALTER TABLE batter_pitch_whiff_live
     ADD COLUMN IF NOT EXISTS strikeouts INTEGER NOT NULL DEFAULT 0;
 
+-- ── 3. Ensure V49 is recorded so it doesn't double-run ───────────────────────
 -- ── 3. Also ensure V49 is recorded (so it doesn't re-run after V50) ──────────
 INSERT INTO migration_history (filename, version, description, applied_at)
 VALUES ('V49__fix_pitch_whiff_missing_columns.sql', 'V49',
