@@ -845,6 +845,89 @@ def _player_specific_rate(prop: dict, side: str) -> float | None:
 
     return None
 
+def _pa_model_hit_prob(prop: dict) -> "float | None":
+    """
+    Bill James odds-ratio PA model for batter hit probability.
+    Uses compute_pa_probabilities(batter_profile, pitcher_profile) from pa_model.py.
+    Returns P(hit per PA) or None when insufficient batter/pitcher data.
+    Stamped on props as '_pa_model_hit_prob'; blended as 15% tertiary in tasklets.py
+    when xgb_hit_ready() is True (80/20 formula/XGB blend already active).
+    """
+    try:
+        from pa_model import compute_pa_probabilities, LEAGUE_RATES  # noqa: PLC0415
+    except ImportError:
+        return None
+
+    lg = LEAGUE_RATES
+
+    # ── Batter profile ──────────────────────────────────────────────────────
+    xba    = float(prop.get("xba",    prop.get("sc_xba",  0.0)) or 0.0)
+    k_pct  = float(prop.get("k_pct",  prop.get("_k_pct",  0.0)) or 0.0)
+    bb_pct = float(prop.get("bb_pct", prop.get("_bb_pct", 0.0)) or 0.0)
+    iso    = float(prop.get("iso",    0.0) or 0.0)
+
+    if xba < 0.01 and k_pct < 0.01:
+        return None  # no batter signal
+
+    # Decompose xBA + ISO into 1B/2B/HR per-PA rates
+    _hr_rate = max(0.010, iso * 0.35) if iso > 0.01 else lg.get("HR", 0.030)
+    _2b_rate = max(0.005, iso * 0.55) if iso > 0.01 else lg.get("2B", 0.045)
+    _1b_rate = max(0.010, (xba if xba > 0.10 else lg.get("1B", 0.150)) - _hr_rate - _2b_rate * 0.70)
+
+    batter = {
+        "K":  max(0.05, k_pct)  if k_pct  > 0.05 else lg.get("K",  0.223),
+        "BB": max(0.02, bb_pct) if bb_pct > 0.02 else lg.get("BB", 0.087),
+        "HR": _hr_rate,
+        "2B": _2b_rate,
+        "1B": _1b_rate,
+    }
+
+    # ── Pitcher profile ─────────────────────────────────────────────────────
+    p_k_pct  = float(prop.get("k_rate",    prop.get("k_pct",   0.0)) or 0.0)
+    p_bb_pct = float(prop.get("bb_rate",   prop.get("bb_pct",  0.0)) or 0.0)
+    p_whip   = float(prop.get("whip",      1.30) or 1.30)
+    p_hr_fb  = float(prop.get("hr_fb_pct", 0.105) or 0.105)
+
+    # Estimate hits-per-PA from WHIP: BB/IP ≈ p_bb_pct × 3.5 BF/IP
+    _bb_per_ip  = (p_bb_pct if p_bb_pct > 0.02 else 0.09) * 3.5
+    _h_per_ip   = max(0.4, p_whip - _bb_per_ip)
+    _p_hit_rate = min(0.40, _h_per_ip / 3.5)
+
+    pitcher = {
+        "K":  max(0.05, p_k_pct)  if p_k_pct  > 0.05 else lg.get("K",  0.223),
+        "BB": max(0.02, p_bb_pct) if p_bb_pct > 0.02 else lg.get("BB", 0.087),
+        "HR": max(0.010, p_hr_fb * 0.33),
+        "2B": max(0.005, _p_hit_rate * 0.15),
+        "1B": max(0.010, _p_hit_rate * 0.55),
+    }
+
+    # ── Park factors ─────────────────────────────────────────────────────────
+    park_pf = None
+    try:
+        from park_factors import get_park_factor as _gpf  # noqa: PLC0415
+        _venue = prop.get("venue") or prop.get("stadium") or prop.get("team", "")
+        if _venue:
+            park_pf = {
+                "HR": float(_gpf(_venue, "hr") or 1.0),
+                "1B": float(_gpf(_venue, "1b") or 1.0),
+            }
+    except Exception:
+        pass
+
+    try:
+        probs = compute_pa_probabilities(batter, pitcher, park_factors=park_pf)
+    except Exception:
+        return None
+
+    p_hit = (
+        probs.get("1B", 0.0)
+        + probs.get("2B", 0.0)
+        + probs.get("3B", 0.0)
+        + probs.get("HR", 0.0)
+    )
+    return round(max(0.10, min(0.60, p_hit)), 4)
+
+
 def _compute_arsenal_k_sig(prop: dict) -> float:
     """
     Arsenal K-Signature: reliability-weighted whiff/command score for pitcher K props.
@@ -1038,6 +1121,17 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         _ps_rate = _player_specific_rate(prop, _side_hint)
         if _ps_rate is not None:
             prop["_player_specific_prob"] = _ps_rate
+
+        # ── PA model hit probability (Bill James odds-ratio) ──────────────────
+        # Stamped for hits/total_bases/hits_runs_rbis props. Blended in
+        # tasklets.py as 15% tertiary signal when xgb_hit_ready() is True.
+        if prop_type in ("hits", "total_bases", "hits_runs_rbis"):
+            try:
+                _pah = _pa_model_hit_prob(prop)
+                if _pah is not None:
+                    prop["_pa_model_hit_prob"] = _pah
+            except Exception:
+                pass
 
         team     = prop.get("team", "")
         opp_team = prop.get("opposing_team", "")
