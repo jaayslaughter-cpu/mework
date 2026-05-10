@@ -699,6 +699,64 @@ async def lifespan(_app: FastAPI):
         replace_existing=True,
     )
 
+
+async def _startup_dispatch_catchup() -> None:
+    """
+    Option-A startup catch-up: if the service restarts while the dispatch
+    window is open (8:30 AM to cutoff PT), fire job_agents immediately after
+    a short hub-warm delay rather than waiting up to 30 s for the interval tick.
+
+    This prevents missed dispatches caused by deployments that finish a few
+    minutes after the window opened — today's root cause (service restarted at
+    8:49 AM, cutoff was 8:45 AM, picks silently skipped).
+    """
+    import asyncio as _asyncio
+    # Give DataHub 12 s to populate before we read game times
+    await _asyncio.sleep(12)
+
+    _pt_now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    _open_pt = _pt_now.replace(hour=8, minute=30, second=0, microsecond=0)
+
+    if _pt_now < _open_pt:
+        logger.debug("[orchestrator] startup_catchup: pre-window (%02d:%02d PT) — no catchup needed.",
+                     _pt_now.hour, _pt_now.minute)
+        return
+
+    # Compute cutoff the same way job_agents does
+    _hub_snap   = read_hub()
+    _game_times = (_hub_snap.get("context") or {}).get("game_times", {})
+    _earliest   = None
+    for _e in _game_times.values():
+        _gtp = _e.get("game_time_pt", "")
+        if not _gtp:
+            continue
+        if _e.get("abstract_state", "") in ("Live", "InProgress", "Final", "Completed"):
+            continue
+        if _earliest is None or _gtp < _earliest:
+            _earliest = _gtp
+
+    if _earliest:
+        _fh, _fm   = int(_earliest[:2]), int(_earliest[3:])
+        _cut_total = _fh * 60 + _fm - 30
+        _cutoff_h, _cutoff_m = _cut_total // 60, _cut_total % 60
+    else:
+        _cutoff_h, _cutoff_m = 12, 30  # fallback ceiling
+
+    _cutoff_pt = _pt_now.replace(hour=_cutoff_h, minute=_cutoff_m, second=0, microsecond=0)
+
+    if _pt_now >= _cutoff_pt:
+        logger.info("[orchestrator] startup_catchup: already past cutoff (%02d:%02d PT) — skipping.",
+                    _cutoff_h, _cutoff_m)
+        return
+
+    logger.info(
+        "[orchestrator] startup_catchup: service restarted inside dispatch window "
+        "(%02d:%02d PT, cutoff %02d:%02d PT) — firing job_agents immediately.",
+        _pt_now.hour, _pt_now.minute, _cutoff_h, _cutoff_m,
+    )
+    await job_agents()
+
+
     scheduler.start()
 
     # Discord startup ping — guarded: at most once per PT calendar day
@@ -706,6 +764,9 @@ async def lifespan(_app: FastAPI):
 
     # Kick off initial data pull
     asyncio.create_task(job_data_hub())
+
+    # Startup catch-up: fire immediately if we restart inside the dispatch window
+    asyncio.create_task(_startup_dispatch_catchup())
 
     logger.info(
         "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
