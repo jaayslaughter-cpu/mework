@@ -1457,6 +1457,31 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             prop.setdefault("_o_swing",  prop.get("o_swing",  0.316))
             prop.setdefault("_k_pct",    _k_src)
             prop.setdefault("_bb_pct",   _bb_src)
+        # ── Pitcher quality layer (SIERA proxy + QS probability) ─────────────
+        # Feeds SIERA-proxy nudge and QS-prob for pitcher prop types.
+        # Computed from 2026 game logs: K/9, BB/9, ERA, SIERA-proxy, QS-rate.
+        if is_pitcher_prop:
+            try:
+                from fg_pitcher_quality_layer import get_pitcher_quality_adj as _pqa  # noqa: PLC0415
+                _quality = _pqa(prop)
+                if _quality:
+                    prop["_siera_adj"]      = _quality.get("siera_adj",      0.0)
+                    prop["_siera_proxy"]    = _quality.get("siera_proxy",     3.75)
+                    prop["_qs_prob"]        = _quality.get("qs_prob",         0.45)
+                    prop["_qs_adj"]         = _quality.get("qs_adj",          0.0)
+                    prop["_k9_quality"]     = _quality.get("k9",              0.0)
+                    prop["_bb9_quality"]    = _quality.get("bb9",             0.0)
+                    prop["_h9_quality"]     = _quality.get("h9",              0.0)
+                    prop["_quality_fip"]    = _quality.get("fip",             4.25)
+                    prop["_quality_starts"] = _quality.get("num_starts",      0)
+                    _mp_adj = _quality.get("model_prob_adj", 0.0)
+                    if _mp_adj != 0.0:
+                        _raw_mp_q = float(prop.get("model_prob", 50.0))
+                        prop["model_prob"] = max(5.0, min(95.0, _raw_mp_q + _mp_adj))
+                        prop["_quality_mp_adj"] = round(_mp_adj, 2)
+            except Exception as _pqa_err:
+                logger.debug("[Enrichment] Pitcher quality layer skipped for %s: %s", player, _pqa_err)
+
         if team not in _weather_cache:
             _weather_cache[team] = _get_weather(team, hub)
         prop.update(_weather_cache[team])
