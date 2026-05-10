@@ -2971,6 +2971,27 @@ class _BaseAgent:
             except ImportError:
                 pass
 
+        # ── XGBoost hit model blend (xgb_k_layer) ────────────────────────────
+        # 70/30 blend — hit model trained on Statcast xBA/xwOBA/EV features.
+        # Mirrors the K blend above; same file, same lazy-load mechanism.
+        # No-op when xgb_hits.pkl not yet trained (xgb_hit_ready() → False).
+        if prop_type in ("hits", "total_bases", "hits_runs_rbis",
+                         "fantasy_score", "fantasy_hitter"):
+            try:
+                from xgb_k_layer import xgb_hit_ready, xgb_hit_prob as _xgb_hit_prob  # noqa: PLC0415
+                if xgb_hit_ready():
+                    _xhp = _xgb_hit_prob(prop, prop)   # prop as pitcher proxy for opp fields
+                    if _xhp is not None:
+                        raw_p = round(0.70 * raw_p + 0.30 * _xhp * 100, 2)
+                        raw_p = max(5.0, min(95.0, raw_p))
+                    # Secondary: pa_model matchup probability (blended 15% when present)
+                    _pa_hp = prop.get("_pa_model_hit_prob")
+                    if _pa_hp is not None:
+                        raw_p = round(0.85 * raw_p + 0.15 * float(_pa_hp) * 100, 2)
+                        raw_p = max(5.0, min(95.0, raw_p))
+            except ImportError:
+                pass
+
         raw_prob = round(max(5.0, min(95.0, raw_p)), 2)
         return self._apply_temperature(raw_prob)
 
@@ -3642,7 +3663,7 @@ class _F5Agent(_BaseAgent):
         if n_starts <= 0:
             return 0.0
         weight    = n_starts / (n_starts + 10.0)
-        raw_delta = (current_swstr - career_swstr) * 16.0
+        raw_delta = (current_swstr - career_swstr) * 30.0
         return round(raw_delta * weight, 2)
 
     @staticmethod
