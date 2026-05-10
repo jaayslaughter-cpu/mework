@@ -831,18 +831,13 @@ _CAREER_BATTER_CACHE:  dict[int, dict] = {}
 
 def get_career_pitcher(player_id: int) -> dict[str, float]:
     """
-    Career-weighted pitcher stats blending:
-      • 50% — 2026 YTD from mlb_pitching_logs.csv (if ≥5 IP available)
-      • 50% — MLB Stats API yearByYear 2023/2024/2025 weighted 25/35/40
-    When 2026 CSV data is unavailable, falls back to API-only (2023-2025).
+    Fetch career-weighted pitcher stats from MLB Stats API yearByYear endpoint.
+    Weights recent seasons more heavily (2025 = 40%, 2024 = 35%, 2023 = 25%).
+    Falls back to current season if career data unavailable.
     Returns LEAGUE_DEFAULTS on complete failure.
     """
     if player_id in _CAREER_PITCHER_CACHE:
         return _CAREER_PITCHER_CACHE[player_id]
-
-    # Ensure 2026 CSV data is loaded
-    _load_2026_game_logs()
-    csv_data = _2026_PITCHER_STATS.get(player_id)
 
     try:
         import requests as _req
@@ -852,15 +847,9 @@ def get_career_pitcher(player_id: int) -> dict[str, float]:
             timeout=8,
         )
         if resp.status_code != 200:
-            if csv_data:
-                # API failed but we have 2026 CSV data — use it alone
-                result = {**csv_data, "_source": "csv_2026_only"}
-                _CAREER_PITCHER_CACHE[player_id] = result
-                return result
             _CAREER_PITCHER_CACHE[player_id] = {}
             return {}
 
-        # API weights: 2025=40%, 2024=35%, 2023=25% of the API half
         season_weights = {2025: 0.40, 2024: 0.35, 2023: 0.25}
         weighted = {"k_rate": 0.0, "bb_rate": 0.0, "era": 0.0, "whip": 0.0}
         total_weight = 0.0
@@ -879,6 +868,7 @@ def get_career_pitcher(player_id: int) -> dict[str, float]:
                 h  = float(s.get("hits",           0) or 0)
                 if ip < 5:
                     continue
+                # Estimate batters faced from IP (average ~4.35 BF/IP for starters)
                 bf_est = max(ip * 4.35, 1)
                 weighted["k_rate"]  += w * (so / bf_est)
                 weighted["bb_rate"] += w * (bb / bf_est)
@@ -886,67 +876,37 @@ def get_career_pitcher(player_id: int) -> dict[str, float]:
                 weighted["whip"]    += w * ((h + bb) / ip if ip else 1.28)
                 total_weight += w
 
-        if total_weight == 0 and not csv_data:
+        if total_weight == 0:
             _CAREER_PITCHER_CACHE[player_id] = {}
             return {}
 
-        if total_weight == 0:
-            # No historical API data — use CSV alone
-            result = {**csv_data, "_source": "csv_2026_only"}
-        elif csv_data:
-            # 50% 2026 CSV + 50% scaled API (most predictive: current-season first)
-            api_k = weighted["k_rate"]  / total_weight
-            api_b = weighted["bb_rate"] / total_weight
-            api_e = weighted["era"]     / total_weight
-            api_w = weighted["whip"]    / total_weight
-            result = {
-                "k_rate":  round(csv_data["k_rate"]  * 0.50 + api_k * 0.50, 4),
-                "bb_rate": round(csv_data["bb_rate"] * 0.50 + api_b * 0.50, 4),
-                "era":     round(csv_data["era"]     * 0.50 + api_e * 0.50, 2),
-                "whip":    round(csv_data["whip"]    * 0.50 + api_w * 0.50, 3),
-                "_source": "csv_2026+api_career",
-            }
-        else:
-            # API only (no 2026 CSV data for this player)
-            result = {
-                "k_rate":  round(weighted["k_rate"]  / total_weight, 4),
-                "bb_rate": round(weighted["bb_rate"] / total_weight, 4),
-                "era":     round(weighted["era"]     / total_weight, 2),
-                "whip":    round(weighted["whip"]    / total_weight, 3),
-                "_source": "mlbapi_career",
-            }
-
+        result = {
+            "k_rate":    round(weighted["k_rate"]  / total_weight, 4),
+            "bb_rate":   round(weighted["bb_rate"] / total_weight, 4),
+            "era":       round(weighted["era"]     / total_weight, 2),
+            "whip":      round(weighted["whip"]    / total_weight, 3),
+            "_source":   "mlbapi_career",
+        }
         logger.info(
-            "[MLBStats] Career stats for pitcher %d: k_rate=%.3f era=%.2f source=%s",
-            player_id, result["k_rate"], result["era"], result.get("_source", "?"),
+            "[MLBStats] Career stats for pitcher %d: k_rate=%.3f era=%.2f (weight=%.2f)",
+            player_id, result["k_rate"], result["era"], total_weight,
         )
         _CAREER_PITCHER_CACHE[player_id] = result
         return result
 
     except Exception as exc:
         logger.debug("[MLBStats] Career pitcher fetch failed for %d: %s", player_id, exc)
-        if csv_data:
-            result = {**csv_data, "_source": "csv_2026_only"}
-            _CAREER_PITCHER_CACHE[player_id] = result
-            return result
         _CAREER_PITCHER_CACHE[player_id] = {}
         return {}
 
 
 def get_career_batter(player_id: int) -> dict[str, float]:
     """
-    Career-weighted batter stats blending:
-      • 50% — 2026 YTD from mlb_batting_logs.csv (if ≥30 PA available)
-        (k_pct, avg, slg — no walks column in batting log so obp/bb_pct from API only)
-      • 50% — MLB Stats API yearByYear 2023/2024/2025 weighted 25/35/40
-    When 2026 CSV data is unavailable, falls back to API-only (2023-2025).
+    Fetch career-weighted batter stats from MLB Stats API yearByYear endpoint.
+    Weights: 2025=40%, 2024=35%, 2023=25%.
     """
     if player_id in _CAREER_BATTER_CACHE:
         return _CAREER_BATTER_CACHE[player_id]
-
-    # Ensure 2026 CSV data is loaded
-    _load_2026_game_logs()
-    csv_data = _2026_BATTER_STATS.get(player_id)
 
     try:
         import requests as _req
@@ -956,10 +916,6 @@ def get_career_batter(player_id: int) -> dict[str, float]:
             timeout=8,
         )
         if resp.status_code != 200:
-            if csv_data:
-                result = {**csv_data, "_source": "csv_2026_only"}
-                _CAREER_BATTER_CACHE[player_id] = result
-                return result
             _CAREER_BATTER_CACHE[player_id] = {}
             return {}
 
@@ -986,50 +942,26 @@ def get_career_batter(player_id: int) -> dict[str, float]:
                 weighted["bb_pct"] += w * (bb / pa if pa else 0.087)
                 total_weight += w
 
-        if total_weight == 0 and not csv_data:
+        if total_weight == 0:
             _CAREER_BATTER_CACHE[player_id] = {}
             return {}
 
-        if total_weight == 0:
-            # No historical API data — use CSV alone
-            result = {**csv_data, "_source": "csv_2026_only"}
-        elif csv_data:
-            # k_pct, avg, slg: 50% CSV 2026 + 50% API
-            # obp, bb_pct: API only (no walks in batting log CSV)
-            api_k   = weighted["k_pct"]  / total_weight
-            api_avg = weighted["avg"]    / total_weight
-            api_slg = weighted["slg"]    / total_weight
-            result = {
-                "k_pct":   round(csv_data["k_pct"] * 0.50 + api_k   * 0.50, 4),
-                "avg":     round(csv_data["avg"]   * 0.50 + api_avg  * 0.50, 3),
-                "slg":     round(csv_data["slg"]   * 0.50 + api_slg  * 0.50, 3),
-                "obp":     round(weighted["obp"]   / total_weight, 3),  # API only
-                "bb_pct":  round(weighted["bb_pct"] / total_weight, 4),  # API only
-                "_source": "csv_2026+api_career",
-            }
-        else:
-            # API only (no 2026 CSV data for this player)
-            result = {
-                "avg":     round(weighted["avg"]    / total_weight, 3),
-                "slg":     round(weighted["slg"]    / total_weight, 3),
-                "obp":     round(weighted["obp"]    / total_weight, 3),
-                "k_pct":   round(weighted["k_pct"]  / total_weight, 4),
-                "bb_pct":  round(weighted["bb_pct"] / total_weight, 4),
-                "_source": "mlbapi_career",
-            }
-
+        result = {
+            "avg":     round(weighted["avg"]    / total_weight, 3),
+            "slg":     round(weighted["slg"]    / total_weight, 3),
+            "obp":     round(weighted["obp"]    / total_weight, 3),
+            "k_pct":   round(weighted["k_pct"]  / total_weight, 4),
+            "bb_pct":  round(weighted["bb_pct"] / total_weight, 4),
+            "_source": "mlbapi_career",
+        }
         logger.info(
-            "[MLBStats] Career stats for batter %d: avg=%.3f k_pct=%.3f source=%s",
-            player_id, result["avg"], result["k_pct"], result.get("_source", "?"),
+            "[MLBStats] Career stats for batter %d: avg=%.3f k_pct=%.3f (weight=%.2f)",
+            player_id, result["avg"], result["k_pct"], total_weight,
         )
         _CAREER_BATTER_CACHE[player_id] = result
         return result
 
     except Exception as exc:
         logger.debug("[MLBStats] Career batter fetch failed for %d: %s", player_id, exc)
-        if csv_data:
-            result = {**csv_data, "_source": "csv_2026_only"}
-            _CAREER_BATTER_CACHE[player_id] = result
-            return result
         _CAREER_BATTER_CACHE[player_id] = {}
         return {}

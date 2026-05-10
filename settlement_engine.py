@@ -165,16 +165,6 @@ def _resolve_actual(
     if prop_type == "fantasy_score":
         return _calc_fantasy_score(pstats, platform)
 
-    # PR#502: hits_runs_rbis — try pre-computed field first, then sum components
-    if prop_type == "hits_runs_rbis":
-        direct = pstats.get("hits_runs_rbis")
-        if direct is not None:
-            return float(direct)
-        h   = float(pstats.get("hits",  0.0) or 0.0)
-        r   = float(pstats.get("runs",  0.0) or 0.0)
-        rbi = float(pstats.get("rbis",  pstats.get("rbi", 0.0)) or 0.0)
-        return h + r + rbi
-
     if prop_type == "singles":
         hits    = float(pstats.get("hits",      0.0))
         doubles = float(pstats.get("doubles",   0.0))
@@ -323,39 +313,17 @@ def settle_parlay(
         leg_platform = (leg.get("platform") or platform).lower()
 
         # Stat lookup — case-insensitive, with partial-name fallback
-        # PR#502: robust name lookup — accent strip + last-name fallback
-        import unicodedata as _ud_se
-        def _se_norm(s):
-            return "".join(c for c in _ud_se.normalize("NFD", s) if _ud_se.category(c) != "Mn").lower()
-        _pn_norm = _se_norm(player_name)
-        _pn_nohyphen = _pn_norm.replace("-", " ")
-        _pn_lastname = player_name.strip().split()[-1].lower() if player_name.strip() else ""
-        pstats = (
-            player_stats.get(player_name.lower())
-            or player_stats.get(_pn_norm)
-            or player_stats.get(_pn_nohyphen)
-        )
+        pstats = player_stats.get(player_name.lower())
         if pstats is None:
             name_lower = player_name.lower()
             for k, v in player_stats.items():
-                k_norm = _se_norm(k)
-                if name_lower in k or k in name_lower or _pn_norm == k_norm:
+                if name_lower in k or k in name_lower:
                     pstats = v
                     logger.debug(
                         "[Settlement] Fuzzy name match: '%s' → '%s'",
                         player_name, k
                     )
                     break
-            # Last-name-only fallback
-            if pstats is None and _pn_lastname:
-                for k, v in player_stats.items():
-                    if k.split()[-1].lower() == _pn_lastname if k.strip() else False:
-                        pstats = v
-                        logger.debug(
-                            "[Settlement] Last-name match: '%s' → '%s'",
-                            player_name, k
-                        )
-                        break
 
         if not pstats:
             logger.warning(
