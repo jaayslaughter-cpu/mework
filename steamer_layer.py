@@ -29,7 +29,8 @@ Add to prop_enrichment_layer.py around line 1330:
 Data source
 -----------
 FanGraphs public API — same endpoint fangraphs_layer.py already uses.
-Steamer projections use type=steamer parameter instead of type=8 (dashboard).
+Steamer600 projections use type=steamer600 parameter (rest-of-season, in-season).
+type=steamer returns 404 after Opening Day — Steamer600 is the live in-season equivalent.
 No API key required.  Cached in Postgres via layer_cache_helper (7-day TTL).
 
 Prop-type coverage
@@ -92,7 +93,7 @@ _STEAMER_PARAMS = {
     "ind":       "0",
     "rost":      "0",
     "players":   "0",
-    "type":      "steamer",     # ← Steamer projections, not dashboard stats
+    "type":      "steamer600",  # Steamer600 = in-season ROS projection (type=steamer is pre-season only, 404 after Opening Day)
     "postseason": "",
     "sortdir":   "default",
     "sortstat":  "PA",
