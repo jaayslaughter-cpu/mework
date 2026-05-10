@@ -430,6 +430,16 @@ async def job_predict_plus_prefetch():
     except Exception as exc:
         logger.warning("[PredictPlus] Prefetch failed (non-fatal): %s", exc)
 
+    # ── SBR sharp game lines (PR #520) — warm cache for inject_team_total ──
+    # Runs alongside Predict+ at 8:15 AM so hub context["games"] is warm
+    # before the 8:30 AM dispatch window opens.
+    try:
+        from sportsbookreview_layer import prefetch as _sbr_prefetch  # noqa: PLC0415
+        _sbr_count = await asyncio.get_event_loop().run_in_executor(None, _sbr_prefetch)
+        logger.info("[SBR] Prefetch complete — %d games loaded.", _sbr_count)
+    except Exception as _sbr_exc:
+        logger.warning("[SBR] Prefetch failed (non-fatal): %s", _sbr_exc)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):

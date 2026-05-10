@@ -47,6 +47,7 @@ except ImportError:
     def _should_skip_prop(prop, game_times): return (False, "gate_unavailable")   # noqa: E704
     def _stamp_prop(prop, game_times): return prop                                 # noqa: E704
     def _fetch_game_times_today(): return {}                                       # noqa: E704
+    def _fetch_sbr_game_lines(): return []                                            # noqa: E704
     def _data_is_contaminated(prop, ts, game_times): return False                 # noqa: E704
 try:
     from clv_feedback_engine import (
@@ -1902,6 +1903,34 @@ def _fetch_weather_today() -> list[dict]:
     logger.info("[DataHub] Weather fetched for %d stadiums", len(results))
     return results
 
+def _fetch_sbr_game_lines() -> list:
+    """Fetch sharp game totals + moneylines from SportsBookReview (PR #520).
+    Returns list of game dicts compatible with inject_team_total():
+    {home_team, away_team, over_under, home_moneyline, away_moneyline, ...}
+    """
+    try:
+        from sportsbookreview_layer import get_all_games as _sbr_games  # noqa: PLC0415
+        result = []
+        for gl in _sbr_games():
+            result.append({
+                "home_team":      gl.home_abbr,
+                "away_team":      gl.away_abbr,
+                "over_under":     gl.current_total or gl.sharp_total,
+                "home_moneyline": gl.consensus_home_ml,
+                "away_moneyline": gl.consensus_away_ml,
+                "sharp_total":    gl.sharp_total,
+                "total_movement": gl.total_movement,
+                "home_implied":   gl.home_implied,
+                "away_implied":   gl.away_implied,
+                "start_time_utc": gl.start_time_utc,
+            })
+        logger.info("[DataHub] SBR game lines: %d games", len(result))
+        return result
+    except Exception as exc:
+        logger.debug("[DataHub] SBR game lines unavailable: %s", exc)
+        return []
+
+
 def _refresh_sample_counts() -> None:
     """Seed xgb_sample_counts in Redis from bet_ledger settled rows.
 
@@ -2520,6 +2549,7 @@ def run_data_hub_tasklet() -> None:
                 "projected_starters": _fetch_mlb_probable_starters(),
                 "standings":          _fetch_mlb_standings(),
                 "game_times":         _fetch_game_times_today(),  # Step 3: first-pitch UTC + status
+                "games":              _fetch_sbr_game_lines(),   # PR #520: sharp game totals+ML
             }
             _hub_setex(r, context_key, TTL_CONTEXT, json.dumps(context))
         except Exception as _ctx_err:
