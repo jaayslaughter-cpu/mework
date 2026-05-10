@@ -52,80 +52,6 @@ from typing import Any
 
 logger = logging.getLogger("propiq.enrichment")
 
-# ── pa_model: hit-prop matchup probability ────────────────────────────────────
-def _pa_model_hit_prob(
-    prop: dict,
-    line: float = 0.5,
-    side: str = "Over",
-) -> "float | None":
-    """
-    Compute P(batter ≥ line hits) using the Bill James odds-ratio PA model.
-    Returns None if pa_model unavailable (caller uses existing probability).
-    """
-    try:
-        from pa_model import (  # noqa: PLC0415
-            prop_matchup_prob,
-            LEAGUE_RATES,
-        )
-    except ImportError:
-        return None
-
-    def _safe(d: dict, *keys: str, default: float = 0.0) -> float:
-        for k in keys:
-            v = d.get(k)
-            if v is not None:
-                try:
-                    f = float(v)
-                    return f / 100.0 if f > 1.0 else f
-                except (TypeError, ValueError):
-                    pass
-        return default
-
-    lg = LEAGUE_RATES
-    batter_profile = {
-        "K":   _safe(prop, "fg_kpct",  "k_pct",  "k_rate",  default=lg["K"]),
-        "BB":  _safe(prop, "fg_bbpct", "bb_pct", "bb_rate", default=lg["BB"]),
-        "HBP": lg["HBP"],
-        "HR":  _safe(prop, "sv_brl_pct", "hr_rate", default=lg["HR"]),
-        "3B":  lg["3B"],
-        "2B":  _safe(prop, "fg_2b_rate", default=lg["2B"]),
-        "1B":  _safe(prop, "sv_xba", "hit_rate", default=lg["1B"]),
-        "OUT": max(0.01, 1.0 - _safe(prop, "fg_kpct", "k_pct", default=lg["K"])
-                         - _safe(prop, "fg_bbpct", "bb_pct", default=lg["BB"])
-                         - _safe(prop, "sv_xba", default=lg["1B"] + lg["2B"] + lg["HR"])),
-    }
-    # Pitcher profile from opposing-pitcher fields stamped on prop by enrichment
-    pit_k  = _safe(prop, "_opp_avg_k_pct", default=lg["K"])
-    pit_bb = _safe(prop, "_opp_bb_pct",    default=lg["BB"])
-    pit_hr = _safe(prop, "_opp_hr_rate",   default=lg["HR"])
-    pit_h  = max(0.01, (1.0 - pit_k - pit_bb - pit_hr - lg["HBP"]) * 0.60)
-    pitcher_profile = {
-        "K":   min(0.40, pit_k),
-        "BB":  min(0.20, pit_bb),
-        "HBP": lg["HBP"],
-        "HR":  min(0.08, pit_hr),
-        "3B":  lg["3B"],
-        "2B":  lg["2B"],
-        "1B":  pit_h - lg["2B"] - lg["3B"],
-        "OUT": max(0.01, 1.0 - pit_k - pit_bb - lg["HBP"] - pit_hr - pit_h),
-    }
-    park_factors = {
-        "1B": float(prop.get("_park_hit_factor", 1.0) or 1.0),
-        "k":  float(prop.get("_park_k_factor",   1.0) or 1.0),
-    }
-    try:
-        return prop_matchup_prob(
-            prop_type=prop.get("prop_type", "hits"),
-            batter_profile=batter_profile,
-            pitcher_profile=pitcher_profile,
-            line=float(line),
-            side=side,
-            park_factors=park_factors,
-        )
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Pitcher prop types — used to decide whether to look up pitcher vs batter
 # ---------------------------------------------------------------------------
@@ -583,7 +509,7 @@ def _get_chase_score(opposing_team: str, hub: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _get_weather(team: str, hub: dict) -> dict:
-    default = {"_wind_speed": 8.0, "_temp_f": 72.0, "_wind_direction": ""}
+    default = {"_wind_speed": 8.0, "_temp_f": 72.0, "_wind_direction": "", "_wind_deg": 0.0}
     weather_list = hub.get("context", {}).get("weather", [])
     if not weather_list:
         return default
@@ -596,6 +522,7 @@ def _get_weather(team: str, hub: dict) -> dict:
                 "_wind_speed":     float(w.get("wind_speed_mph", 8.0) or 8.0),
                 "_temp_f":         float(w.get("temp_f", 72.0) or 72.0),
                 "_wind_direction": str(w.get("wind_direction", "") or ""),
+                "_wind_deg":       float(w.get("wind_deg", 0.0) or 0.0),
             }
     return default
 
@@ -1630,15 +1557,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             prop["_opp_avg_k_pct"]    = float(chase.get("avg_k_pct", 0.227) or 0.227)
             prop["_opp_o_swing_avg"]  = float(chase.get("avg_chase_rate",    0.316))
             prop["_lineup_difficulty"] = chase.get("lineup_difficulty", "NEUTRAL")
-
-
-        # ── pa_model hit-prop matchup probability ────────────────────────────
-        if prop_type in ("hits", "total_bases", "hits_runs_rbis"):
-            _side_val = prop.get("side", "Over")
-            _line_val = float(prop.get("line", 0.5) or 0.5)
-            _pa_hp    = _pa_model_hit_prob(prop, _line_val, _side_val)
-            if _pa_hp is not None:
-                prop["_pa_model_hit_prob"] = round(_pa_hp, 4)
 
         # ── CV consistency nudge ──────────────────────────────────────────────
         pid = prop.get("player_id") or prop.get("mlbam_id")

@@ -208,6 +208,96 @@ def _get(path: str, params: dict | None = None) -> dict | None:
         return None
 
 
+def _safe_get(d: dict, *keys, default=None):
+    """Safe nested dict navigation (adapted from baseball-predict starter_logs.py)."""
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(k)
+        if cur is None:
+            return default
+    return cur
+
+
+def select_starter_pitcher(side_data: dict) -> dict | None:
+    """Identify the starting pitcher from a boxscore side dict.
+
+    5-level priority chain (adapted from baseball-predict/src/starter_logs.py):
+      1. team_id match + gamesStarted == 1  → most certain
+      2. team_id match, any pitcher          → callup/parentTeamId mismatch guard
+      3. any pitcher with gamesStarted == 1  → fallback without team match
+      4. first pitcher available             → last resort
+      5. None if no pitchers at all
+
+    Handles the parentTeamId mismatch problem: when a pitcher is called up, his
+    parentTeamId may not match the side team_id. Without this check, PropIQ
+    would sometimes select the wrong pitcher from a multi-pitcher boxscore.
+    """
+    team_id = _safe_get(side_data, "team", "id")
+    pitchers = side_data.get("pitchers", [])
+    players  = side_data.get("players", {})
+
+    candidates = []
+    for pid in pitchers:
+        pdata = players.get(f"ID{pid}", {})
+        if not pdata:
+            continue
+        pstats        = _safe_get(pdata, "stats", "pitching") or {}
+        parent_team   = pdata.get("parentTeamId")
+        games_started = int(pstats.get("gamesStarted", 0) or 0)
+        candidates.append({
+            "player_id":    pid,
+            "full_name":    _safe_get(pdata, "person", "fullName") or "",
+            "team_match":   1 if parent_team == team_id else 0,
+            "games_started": games_started,
+        })
+
+    if not candidates:
+        return None
+
+    matching = [c for c in candidates if c["team_match"] == 1]
+
+    # Priority 1: team match + confirmed start
+    started_match = [c for c in matching if c["games_started"] == 1]
+    if started_match:
+        return {**started_match[0], "rule": "team_match_and_games_started"}
+
+    # Priority 2: team match, any
+    if matching:
+        return {**matching[0], "rule": "team_match_fallback"}
+
+    # Priority 3: confirmed start, any team (handles parentTeamId callup edge case)
+    started_any = [c for c in candidates if c["games_started"] == 1]
+    if started_any:
+        return {**started_any[0], "rule": "games_started_any_team"}
+
+    # Priority 4: first available
+    return {**candidates[0], "rule": "first_pitcher_fallback"}
+
+
+def _fetch_starter_from_boxscore(game_pk: int, side_key: str) -> dict | None:
+    """Fallback: identify starter from live boxscore when probablePitcher absent.
+
+    Only returns a result when the boxscore is available (game started or lineups
+    posted). Returns None silently for pre-game calls — caller falls through.
+    """
+    data = _get(f"/game/{game_pk}/boxscore")
+    if not data:
+        return None
+    side_data = data.get("teams", {}).get(side_key, {})
+    if not side_data:
+        return None
+    starter = select_starter_pitcher(side_data)
+    if starter and starter.get("full_name"):
+        logger.debug(
+            "[MLBStats] Boxscore fallback starter: %s (gamePk=%d %s, rule=%s)",
+            starter["full_name"], game_pk, side_key, starter.get("rule"),
+        )
+        return starter
+    return None
+
+
 def _fetch_today_players(today: str) -> tuple[list[dict], list[dict]]:
     """
     Return (starters, batters) for today's games using proven Railway endpoints.
@@ -234,7 +324,8 @@ def _fetch_today_players(today: str) -> tuple[list[dict], list[dict]]:
             home_name = teams.get("home", {}).get("team", {}).get("name", "")
             away_name = teams.get("away", {}).get("team", {}).get("name", "")
 
-            # Probable pitchers
+            # Probable pitchers — with boxscore fallback for unconfirmed starters
+            game_pk = game.get("gamePk")
             for side_key, team_name in (("home", home_name), ("away", away_name)):
                 sp = teams.get(side_key, {}).get("probablePitcher")
                 if sp and sp.get("id"):
@@ -243,6 +334,15 @@ def _fetch_today_players(today: str) -> tuple[list[dict], list[dict]]:
                         "full_name": sp.get("fullName", ""),
                         "team": team_name,
                     })
+                elif game_pk:
+                    # probablePitcher absent — try live boxscore (works post-lineup-post)
+                    fb = _fetch_starter_from_boxscore(game_pk, side_key)
+                    if fb and fb.get("player_id"):
+                        starters.append({
+                            "player_id": fb["player_id"],
+                            "full_name": fb["full_name"],
+                            "team": team_name,
+                        })
 
             # Confirmed lineups
             lineups = game.get("lineups", {})

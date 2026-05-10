@@ -2971,27 +2971,6 @@ class _BaseAgent:
             except ImportError:
                 pass
 
-        # ── XGBoost hit model blend (xgb_k_layer) ────────────────────────────
-        # 70/30 blend — hit model trained on Statcast xBA/xwOBA/EV features.
-        # Mirrors the K blend above; same file, same lazy-load mechanism.
-        # No-op when xgb_hits.pkl not yet trained (xgb_hit_ready() → False).
-        if prop_type in ("hits", "total_bases", "hits_runs_rbis",
-                         "fantasy_score", "fantasy_hitter"):
-            try:
-                from xgb_k_layer import xgb_hit_ready, xgb_hit_prob as _xgb_hit_prob  # noqa: PLC0415
-                if xgb_hit_ready():
-                    _xhp = _xgb_hit_prob(prop, prop)   # prop as pitcher proxy for opp fields
-                    if _xhp is not None:
-                        raw_p = round(0.80 * raw_p + 0.20 * _xhp * 100, 2)  # 80/20 until 200+ graded hit props + Brier < 0.22
-                        raw_p = max(5.0, min(95.0, raw_p))
-                    # Secondary: pa_model matchup probability (blended 15% when present)
-                    _pa_hp = prop.get("_pa_model_hit_prob")
-                    if _pa_hp is not None:
-                        raw_p = round(0.85 * raw_p + 0.15 * float(_pa_hp) * 100, 2)
-                        raw_p = max(5.0, min(95.0, raw_p))
-            except ImportError:
-                pass
-
         raw_prob = round(max(5.0, min(95.0, raw_p)), 2)
         return self._apply_temperature(raw_prob)
 
@@ -4200,36 +4179,36 @@ class _WeatherAgent(_BaseAgent):
     # HR factors are read dynamically from park_factors.py (the canonical source)
     # so _WeatherAgent and XGBoost training always use the same park numbers.
     _PARK_META: dict[str, dict] = {
-        "Angels Stadium":           {"lhh_hr_boost": False, "wind_critical": False},
-        "Chase Field":              {"lhh_hr_boost": False, "wind_critical": False},
-        "Camden Yards":             {"lhh_hr_boost": True,  "wind_critical": False},
-        "Fenway Park":              {"lhh_hr_boost": False, "wind_critical": False},
-        "Wrigley Field":            {"lhh_hr_boost": False, "wind_critical": True},
-        "Guaranteed Rate Field":    {"lhh_hr_boost": False, "wind_critical": False},
-        "Great American Ball Park": {"lhh_hr_boost": True,  "wind_critical": False},
-        "Progressive Field":        {"lhh_hr_boost": False, "wind_critical": False},
-        "Coors Field":              {"lhh_hr_boost": False, "wind_critical": False},
-        "Comerica Park":            {"lhh_hr_boost": False, "wind_critical": False},
-        "Minute Maid Park":         {"lhh_hr_boost": False, "wind_critical": False},
-        "Kauffman Stadium":         {"lhh_hr_boost": False, "wind_critical": False},
-        "Dodger Stadium":           {"lhh_hr_boost": False, "wind_critical": False},
-        "LoanDepot Park":           {"lhh_hr_boost": False, "wind_critical": False},
-        "American Family Field":    {"lhh_hr_boost": False, "wind_critical": False},
-        "Target Field":             {"lhh_hr_boost": False, "wind_critical": False},
-        "Citi Field":               {"lhh_hr_boost": False, "wind_critical": False},
-        "Yankee Stadium":           {"lhh_hr_boost": True,  "wind_critical": False},
-        "Oakland Coliseum":         {"lhh_hr_boost": False, "wind_critical": False},
-        "Citizens Bank Park":       {"lhh_hr_boost": False, "wind_critical": False},
-        "PNC Park":                 {"lhh_hr_boost": False, "wind_critical": False},
-        "Petco Park":               {"lhh_hr_boost": False, "wind_critical": False},
-        "Oracle Park":              {"lhh_hr_boost": False, "wind_critical": False},
-        "T-Mobile Park":            {"lhh_hr_boost": False, "wind_critical": False},
-        "Busch Stadium":            {"lhh_hr_boost": False, "wind_critical": False},
-        "Tropicana Field":          {"lhh_hr_boost": False, "wind_critical": False},
-        "Globe Life Field":         {"lhh_hr_boost": False, "wind_critical": False},
-        "Rogers Centre":            {"lhh_hr_boost": False, "wind_critical": False},
-        "Nationals Park":           {"lhh_hr_boost": False, "wind_critical": False},
-        "Truist Park":              {"lhh_hr_boost": False, "wind_critical": False},
+        "Angels Stadium":            {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 214.0},
+        "Chase Field":               {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 195.0},
+        "Camden Yards":              {"lhh_hr_boost": True,  "wind_critical": False, "azimuth_angle": 255.0},
+        "Fenway Park":               {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 94.0},
+        "Wrigley Field":             {"lhh_hr_boost": False,  "wind_critical": True, "azimuth_angle": 93.0},
+        "Guaranteed Rate Field":     {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 45.0},
+        "Great American Ball Park":  {"lhh_hr_boost": True,  "wind_critical": False, "azimuth_angle": 154.0},
+        "Progressive Field":         {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 29.0},
+        "Coors Field":               {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 291.0},
+        "Comerica Park":             {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 330.0},
+        "Minute Maid Park":          {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 195.0},
+        "Kauffman Stadium":          {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 5.0},
+        "Dodger Stadium":            {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 157.0},
+        "LoanDepot Park":            {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 353.0},
+        "American Family Field":     {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 135.0},
+        "Target Field":              {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 340.0},
+        "Citi Field":                {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 343.0},
+        "Yankee Stadium":            {"lhh_hr_boost": True,  "wind_critical": False, "azimuth_angle": 225.0},
+        "Oakland Coliseum":          {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 180.0},
+        "Citizens Bank Park":        {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 300.0},
+        "PNC Park":                  {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 84.0},
+        "Petco Park":                {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 38.0},
+        "Oracle Park":               {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 316.0},
+        "T-Mobile Park":             {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 185.0},
+        "Busch Stadium":             {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 10.0},
+        "Tropicana Field":           {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 183.0},
+        "Globe Life Field":          {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 317.0},
+        "Rogers Centre":             {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 218.0},
+        "Nationals Park":            {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 327.0},
+        "Truist Park":               {"lhh_hr_boost": False,  "wind_critical": False, "azimuth_angle": 40.0},
     }
 
     @staticmethod
@@ -4260,19 +4239,26 @@ class _WeatherAgent(_BaseAgent):
     }
 
     @staticmethod
-    def _wind_along_spray(wind_spd: float, wind_dir: str, stadium: str,
-                          outfield_compass: dict, compass_deg: dict) -> float:
-        """Signed wind speed along primary batted-ball spray axis.
-        Positive = out (HR boost), negative = in (HR suppression).
-        Source: mc_upgrades.py build_weather_multipliers().
+    def _wind_along_spray(wind_spd: float, wind_from_deg: float, stadium: str,
+                          park_meta: dict) -> float:
+        """Signed wind component along the HP→CF spray axis.
+
+        wind_from_deg: meteorological direction the wind comes FROM (0=N, 90=E).
+        azimuth_angle: bearing from HP toward CF (from MLB Stats API azimuthAngle).
+        Positive = wind blowing OUT toward CF (HR/TB boost).
+        Negative = wind blowing IN from CF direction (HR/TB suppression).
+
+        Math: mlb_data_pipeline weather_features.py (Nathan 2017 decomposition).
+          wind_out = -wind_speed * cos(wind_from_deg - azimuth_angle)
+        Sign: wind FROM behind HP (wind_from ≈ azimuth + 180°) → delta ≈ π → -cos(π)=+1 → positive (blowing out).
+              wind FROM CF direction (wind_from ≈ azimuth) → delta ≈ 0 → -cos(0)=-1 → negative (blowing in).
         """
         import math as _m
-        if not wind_dir or wind_spd <= 0:
+        if wind_spd <= 0:
             return 0.0
-        out_deg  = outfield_compass.get(stadium, 180.0)
-        wind_deg = compass_deg.get(wind_dir.strip().upper(), 0.0)
-        diff_rad = _m.radians(wind_deg - out_deg)
-        return wind_spd * _m.cos(diff_rad)
+        azimuth = park_meta.get(stadium, {}).get("azimuth_angle", 180.0)
+        delta_rad = _m.radians(wind_from_deg - azimuth)
+        return -wind_spd * _m.cos(delta_rad)
 
     def evaluate(self, prop: dict) -> dict | None:
         """Physics-grade weather adjustments for power and contact props.
@@ -4310,9 +4296,10 @@ class _WeatherAgent(_BaseAgent):
             except Exception:
                 pass
 
-        wind_mph = float(prop.get("_wind_speed", 0) or 0)
-        wind_dir = str(prop.get("_wind_direction", "") or "")
-        temp_f   = float(prop.get("_temp_f", 72) or 72)
+        wind_mph     = float(prop.get("_wind_speed", 0) or 0)
+        wind_dir     = str(prop.get("_wind_direction", "") or "")
+        wind_deg_raw = float(prop.get("_wind_deg", 0.0) or 0.0)
+        temp_f       = float(prop.get("_temp_f", 72) or 72)
 
         if wind_mph == 0:
             for w in self.hub.get("context", {}).get("weather", []):
@@ -4321,9 +4308,10 @@ class _WeatherAgent(_BaseAgent):
                 team = prop.get("team", "")
                 if (venue and venue.lower() in str(w).lower()) or \
                    (team and team.lower() in str(w.get("team", "")).lower()):
-                    wind_mph = float(w.get("wind_speed_mph", w.get("wind_speed", 0)) or 0)
-                    wind_dir = str(w.get("wind_direction", "") or "")
-                    temp_f   = float(w.get("temp_f", 72) or 72)
+                    wind_mph     = float(w.get("wind_speed_mph", w.get("wind_speed", 0)) or 0)
+                    wind_dir     = str(w.get("wind_direction", "") or "")
+                    wind_deg_raw = float(w.get("wind_deg", 0.0) or 0.0)
+                    temp_f       = float(w.get("temp_f", 72) or 72)
                     break
 
         _POWER_PROPS   = {"home_runs", "total_bases", "hits_runs_rbis",
@@ -4345,7 +4333,7 @@ class _WeatherAgent(_BaseAgent):
 
         # ── 2. Wind: signed component along spray axis ──────────────────────
         along         = self._wind_along_spray(
-            wind_mph, wind_dir, stadium, self._OUTFIELD_COMPASS, self._COMPASS_DEG,
+            wind_mph, wind_deg_raw, stadium, self._PARK_META,
         )
         wind_hr_boost = along * 0.4   # +0.4pp per mph outward
 
