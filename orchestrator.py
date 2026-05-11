@@ -305,6 +305,7 @@ async def job_agents():
             _record_dispatch_ran_today()
     except Exception as exc:
         logger.error("[orchestrator] AgentTasklet FAILED: %s", exc, exc_info=True)
+        _last_agent_run = f"ERROR at {datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%H:%M PT')}: {type(exc).__name__}: {exc}"
 
 
 async def job_leaderboard():
@@ -976,20 +977,29 @@ async def trigger_leaderboard():
 @app.get("/propiq/status")
 async def get_propiq_status():
     """Full system status."""
-    hub = read_hub()
-    lb = read_leaderboard()
-    return JSONResponse({
-        "service": "PropIQ Agent Army",
-        "version": "2.2.0",
-        "status": "healthy",
-        "scheduler_running": scheduler.running,
-        "hub_props": len(hub.get("player_props", [])),
-        "hub_games": len(hub.get("games_today", [])),
-        "leaderboard_agents": len(lb.get("leaderboard", [])),
-        "last_hub_run": _last_hub_run,
-        "last_agent_run": _last_agent_run,
-        "last_leaderboard_run": _last_leaderboard_run,
-    })
+    try:
+        hub = read_hub()
+        lb = read_leaderboard()
+        return JSONResponse({
+            "service": "PropIQ Agent Army",
+            "version": "2.2.0",
+            "status": "healthy",
+            "scheduler_running": scheduler.running,
+            "hub_props": len(hub.get("player_props", [])),
+            "hub_games": len(hub.get("games_today", [])),
+            "leaderboard_agents": len(lb.get("leaderboard", [])),
+            "last_hub_run": _last_hub_run,
+            "last_agent_run": _last_agent_run,
+            "last_leaderboard_run": _last_leaderboard_run,
+        })
+    except Exception as _st_exc:
+        return JSONResponse({
+            "service": "PropIQ Agent Army",
+            "status": "error",
+            "error": str(_st_exc),
+            "last_hub_run": _last_hub_run,
+            "last_agent_run": _last_agent_run,
+        })
 
 
 @app.get("/propiq/record")
@@ -1124,6 +1134,29 @@ async def admin_bp2vec_train():
                    "Models activate automatically once saved.",
     })
 
+
+
+
+@app.get("/admin/force-dispatch")
+async def admin_force_dispatch():
+    """Diagnostic: run run_agent_tasklet() RIGHT NOW, bypass window check.
+    Returns the result or error details so crashes can be diagnosed."""
+    import traceback as _tb  # noqa: PLC0415
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, run_agent_tasklet)
+        global _last_agent_run
+        _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
+        if result is True:
+            _record_dispatch_ran_today()
+        return JSONResponse({"status": "ok", "result": str(result), "last_agent_run": _last_agent_run})
+    except Exception as exc:
+        return JSONResponse({
+            "status": "error",
+            "exception": type(exc).__name__,
+            "message": str(exc),
+            "traceback": _tb.format_exc(),
+        }, status_code=500)
 
 
 if __name__ == "__main__":
