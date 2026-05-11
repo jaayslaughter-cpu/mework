@@ -1034,6 +1034,33 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     if not props:
         return props
 
+    # ── Load adaptive calibration params ─────────────────────────────────────
+    # Reads data/calibration_params.json (written nightly by adaptive calibration).
+    # Provides lambda_bias and swstr_k9_scale to K-prop Poisson computation.
+    # Falls back to BBE-calibrated defaults if file not found.
+    _lambda_bias    = -0.067   # BBE live default: systematic K over-prediction
+    _swstr_k9_scale = 16.0     # BBE live default: reduced from 30→16 in 2026
+    _ump_scale      = 0.9      # BBE live default
+    try:
+        from propiq_adaptive_calibration import AdaptiveCalibrator as _AdaptiveCal  # noqa: PLC0415
+        _cal_params      = _AdaptiveCal().load_params()
+        _lambda_bias     = _cal_params.get("lambda_bias",     _lambda_bias)
+        _swstr_k9_scale  = _cal_params.get("swstr_k9_scale",  _swstr_k9_scale)
+        _ump_scale       = _cal_params.get("ump_scale",        _ump_scale)
+    except Exception:
+        pass   # use BBE defaults above
+
+    # ── (batter|pitcher)2vec matchup embeddings ───────────────────────────────
+    # Lazy-load: returns 0.0 until bp2vec_train.py has been run once.
+    try:
+        from bp2vec_integration import apply_bp2vec_adjustment as _bp2vec_adj_fn, bp2vec_ready as _bp2vec_ready  # noqa: PLC0415
+        _BP2VEC_AVAILABLE = _bp2vec_ready()
+    except ImportError:
+        _bp2vec_ready     = lambda: False       # noqa: E731
+        _bp2vec_adj_fn    = lambda prop: 0.0   # noqa: E731
+        _BP2VEC_AVAILABLE = False
+
+
     # ── Batch enrichment (whole prop list, single API call each) ─────────────
     try:
         from bernoulli_layer import update_league_rate_from_hub as _update_bl  # noqa: PLC0415
@@ -1104,6 +1131,17 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         if not prop.get("player_id") and p2mlbam.get(pn):
             prop["player_id"] = p2mlbam[pn]
             prop["mlbam_id"]  = p2mlbam[pn]
+
+        # ── Apply adaptive calibration to K props ──────────────────────────────
+        # lambda_bias corrects systematic K over/under-prediction.
+        # swstr_k9_scale converts SwStr% delta → K/9 contribution.
+        # Both params updated nightly by propiq_adaptive_calibration.py.
+        if prop_type in ("strikeouts", "pitcher_strikeouts"):
+            prop["_lambda_bias"]    = _lambda_bias
+            prop["_swstr_k9_scale"] = _swstr_k9_scale
+            prop["_ump_scale"]      = _ump_scale
+            if prop.get("k_rate"):
+                prop["k_rate"] = float(prop["k_rate"]) + _lambda_bias
 
         # ── ABS (Automated Ball-Strike) adjustments — 2026 structural shift ────
         try:
@@ -1794,7 +1832,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             if _b2v_pit:
                 prop.setdefault("mlb_pitcher_id", str(_b2v_pit))
             try:
-                _bpv_adj = _bp2vec_adj(prop)
+                _bpv_adj = _bp2vec_adj_fn(prop)
                 if _bpv_adj != 0.0:
                     _raw_mp_bpv = float(prop.get("model_prob", 50.0))
                     prop["model_prob"]   = max(5.0, min(95.0, _raw_mp_bpv + _bpv_adj))

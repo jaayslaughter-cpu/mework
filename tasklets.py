@@ -7393,6 +7393,30 @@ def run_grading_tasklet() -> None:
     except Exception as _tc_err:
         logger.warning("[GradingTasklet] Temperature calibration failed (non-fatal): %s", _tc_err)
 
+    # ── Adaptive calibration update (propiq_adaptive_calibration.py) ─────────
+    # Runs after temperature calibration. Reads today's graded bet records from
+    # bet_ledger and updates lambda_bias, swstr_k9_scale, ump_scale in
+    # data/calibration_params.json. Parameters take effect on the next
+    # DataHub cycle (prop_enrichment_layer.py reads them at enrich_props start).
+    try:
+        from propiq_adaptive_calibration import AdaptiveCalibrator as _AdaptiveCal  # noqa: PLC0415
+        _adaptive_cal = _AdaptiveCal()
+        _cal_result   = _adaptive_cal.run_daily_update()
+        if _cal_result.get("updated"):
+            logger.info(
+                "[GradingTasklet] Adaptive calibration updated: %s",
+                {k: round(v, 4) for k, v in _cal_result.get("new_params", {}).items()},
+            )
+        else:
+            logger.info(
+                "[GradingTasklet] Adaptive calibration: n=%d (phase threshold: %d)",
+                _cal_result.get("n_graded", 0),
+                _cal_result.get("phase_threshold", 30),
+            )
+    except Exception as _ac_err:
+        logger.warning("[GradingTasklet] Adaptive calibration failed (non-fatal): %s", _ac_err)
+
+
 
 def _get_stat(stats: dict, prop_type: str, platform: str = "prizepicks") -> float | None:
     """
