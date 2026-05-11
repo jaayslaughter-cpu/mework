@@ -757,6 +757,12 @@ async def _startup_dispatch_catchup() -> None:
     await job_agents()
 
 
+        # (batter|pitcher)2vec monthly retrain — 3:00 AM PT 1st of month
+    scheduler.add_job(
+        job_bp2vec_retrain,
+        CronTrigger(day=1, hour=3, minute=0, timezone="America/Los_Angeles"),
+        id="bp2vec_retrain", replace_existing=True,
+    )
     scheduler.start()
 
     # Discord startup ping — guarded: at most once per PT calendar day

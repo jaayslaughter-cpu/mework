@@ -1784,6 +1784,24 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 _raw_prob, _adj_prob, round(_inj_pen*100),
             )
 
+        # ── (batter|pitcher)2vec matchup adjustment ──────────────────────────────
+        if is_batter_prop and _bp2vec_ready():
+            # Stamp IDs so bp2vec resolver can find them
+            _b2v_bat = prop.get("mlbam_id") or prop.get("player_id") or ""
+            _b2v_pit = _team_to_pitcher_id.get(prop.get("opposing_team", ""), "") if is_batter_prop else ""
+            if _b2v_bat:
+                prop.setdefault("mlb_batter_id", str(_b2v_bat))
+            if _b2v_pit:
+                prop.setdefault("mlb_pitcher_id", str(_b2v_pit))
+            try:
+                _bpv_adj = _bp2vec_adj(prop)
+                if _bpv_adj != 0.0:
+                    _raw_mp_bpv = float(prop.get("model_prob", 50.0))
+                    prop["model_prob"]   = max(5.0, min(95.0, _raw_mp_bpv + _bpv_adj))
+                    prop["_bp2vec_adj"]  = round(_bpv_adj, 2)
+            except Exception as _bpv_err:
+                logger.debug("[Enrichment] bp2vec skipped for %s: %s", player, _bpv_err)
+
         enriched_count += 1
 
     # ── Statcast batch enrichment ── (moved above main loop; mlbam_ids pre-attached)
