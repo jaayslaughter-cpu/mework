@@ -479,7 +479,7 @@ async def job_bp2vec_retrain():
             return
         bp2vec_train = importlib.import_module("bp2vec_train")
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, bp2vec_train.train)
+        await loop.run_in_executor(None, bp2vec_train.train, [2022, 2023, 2024, 2025])
         logger.info("[bp2vec] Monthly retrain complete.")
     except Exception as exc:
         logger.error("[bp2vec] Retrain failed: %s", exc, exc_info=True)
