@@ -40,6 +40,18 @@ import requests
 
 logger = logging.getLogger("propiq.form")
 
+
+# ── Trend significance gates (from sequencebaseball/cogs/trends.py) ───────────
+try:
+    from fix_trend_significance import gate_form_adjustment, is_significant_trend
+    _TREND_GATES_AVAILABLE = True
+except ImportError:
+    _TREND_GATES_AVAILABLE = False
+    def gate_form_adjustment(metric, delta, n, adj_value, player_type="pitcher"):
+        return adj_value  # no-op fallback — all adjustments pass through
+    def is_significant_trend(metric, delta, n, player_type="pitcher"):
+        return abs(delta) > 0  # no-op fallback — everything is "significant"
+
 _MLBAPI_BASE = "https://statsapi.mlb.com/api/v1"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (PropIQ/1.0)"}
 

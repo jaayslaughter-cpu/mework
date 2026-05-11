@@ -2971,6 +2971,17 @@ class _BaseAgent:
             except ImportError:
                 pass
 
+        # ── TTOP K-rate decay (from prop_enrichment_layer stamp) ──────────────
+        # Reduces K probability based on expected times through the order.
+        # TTO2 = -2.5pp, TTO3 = -5.5pp. Only active when prop_enrichment
+        # was able to derive tto_expected from l5_ip.
+        if prop_type == "strikeouts" and prop:
+            _tto_adj = prop.get("_tto_k_adj")
+            if _tto_adj:
+                # _tto_k_adj is a rate adjustment (e.g. -0.025 = -2.5%)
+                # raw_p is in percent, so scale accordingly.
+                raw_p = round(max(5.0, min(95.0, raw_p + float(_tto_adj) * 100)), 2)
+
         # ── Per-line XGBoost hit blend (xgb_k_layer) ──────────────────────────
         # 80/20 formula/XGB blend for hit-type props. No-op until xgb_hits.pkl
         # is trained; auto-activates on 2:30 AM retrain when Brier < 0.22.

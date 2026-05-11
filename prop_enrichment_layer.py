@@ -52,6 +52,61 @@ from typing import Any
 
 logger = logging.getLogger("propiq.enrichment")
 
+
+# ── TTOP: Times Through Order Penalty ─────────────────────────────────────────
+def _ttop_k_decay(prop: dict) -> float:
+    """
+    Apply Times Through Order Penalty to a pitcher's effective K-rate.
+
+    Pitchers lose strikeout effectiveness as the lineup sees them more.
+    TTO2 batters have seen the pitcher's stuff once; TTO3 twice.
+    K-rate declines ~2.5-5.5% per additional time through the order.
+
+    Source: mc_upgrades.py Phase 4 (mlb-analytics-hub), calibrated
+    against 2019-2024 Statcast TTO splits.
+
+    Args:
+        prop: enriched prop dict with "tto_expected" or "avg_tto" key
+              (number of times through order, float 1.0-4.0)
+
+    Returns:
+        float: additive adjustment to K-rate in percentage points.
+               Negative = fewer Ks expected (lineup is adjusted).
+               Zero if TTO data unavailable.
+
+    Integration:
+        In prop_enrichment_layer.py, after base K-rate is set:
+            tto_adj = _ttop_k_decay(prop)
+            if tto_adj != 0.0:
+                prop["_tto_k_adj"] = tto_adj
+                # Apply to the Poisson lambda or model_prob adjustment
+                # A -2.5pp adjustment reduces K probability by ~2.5pp
+    """
+    _TTOP_DECAY = {1: 0.000, 2: -0.025, 3: -0.055, 4: -0.085}
+
+    tto_raw = prop.get("tto_expected") or prop.get("avg_tto") or prop.get("_tto")
+    if tto_raw is None:
+        return 0.0
+
+    try:
+        tto = float(tto_raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if tto <= 0:
+        return 0.0
+
+    # Fractional TTO: interpolate between brackets
+    tto_floor = max(1, min(4, int(tto)))
+    tto_ceil  = min(4, tto_floor + 1)
+    frac = tto - tto_floor
+
+    decay_floor = _TTOP_DECAY.get(tto_floor, -0.085)
+    decay_ceil  = _TTOP_DECAY.get(tto_ceil, -0.085)
+    decay = decay_floor + frac * (decay_ceil - decay_floor)
+
+    return round(decay, 4)
+
 # ---------------------------------------------------------------------------
 # Pitcher prop types — used to decide whether to look up pitcher vs batter
 # ---------------------------------------------------------------------------
@@ -1468,6 +1523,21 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 logger.debug(
                     "[Enrichment] %s arsenal_k_sig=%.3f → nudge=%.3f",
                     player, _k_sig, _k_sig_nudge,
+                )
+
+        # ── TTOP: Times Through Order Penalty (pitcher K props) ────────────────
+        # Approximates expected TTO from l5_ip if not already provided by hub.
+        # _tto_k_adj is read by tasklets.py and added to raw_p before EV calc.
+        if is_pitcher_prop and prop_type == "strikeouts":
+            if not prop.get("tto_expected"):
+                _l5_ip = float(prop.get("l5_ip") or prop.get("_l5_ip") or 5.0)
+                prop["tto_expected"] = round(max(1.0, _l5_ip / 4.5), 2)
+            _tto_decay = _ttop_k_decay(prop)
+            if _tto_decay != 0.0:
+                prop["_tto_k_adj"] = _tto_decay
+                logger.debug(
+                    "[Enrichment] TTOP %s tto_expected=%.2f decay=%.4f",
+                    player, prop["tto_expected"], _tto_decay,
                 )
 
         # ── Rolling window stats (last 15 games) ─────────────────────────────────

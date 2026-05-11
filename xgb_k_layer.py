@@ -150,84 +150,110 @@ def _sf(d: dict, *keys, default: float = 0.0) -> float:
 
 # ── Feature lists (must match xgb_k_training.py exactly) ───────────────────
 
-# Pitcher strikeout features — 10 dimensions
+# TRAINING_ALIGNED — feature names match xgb_training_pipeline.py
+# K model feature names — must match xgb_training_pipeline.py exactly
 K_FEATURES = [
-    "sv_xera",          # Statcast xERA (expected ERA from quality of contact)
-    "fg_era",           # FanGraphs ERA (season)
-    "fg_kpct",          # FanGraphs K% (season, 0–100)
-    "fg_bbpct",         # FanGraphs BB% (season, 0–100)
-    "sv_swstr_pct",     # Statcast SwStr% / whiff rate (0–100)
-    "l5_ks",            # Rolling L5-start avg strikeouts
-    "l5_k_rate",        # Rolling L5-start K rate (0–100)
-    "l10_ks",           # Rolling L10-start avg strikeouts
-    "opp_k_pct",        # Opposing lineup avg K% (regressed, 0–100)
-    "opp_xwoba",        # Opposing lineup avg xwOBA
+    "sv_xera",                  # Statcast xERA
+    "sv_era",                   # ERA (FanGraphs, stored as sv_era in training)
+    "sv_k_pct",                 # K% (0-100 scale)
+    "sv_bb_pct",                # BB% (0-100 scale)
+    "sv_whiff_pct",             # SwStr% (0-100 scale)
+    "l3_ks",                    # L3-start avg strikeouts
+    "l5_ks",                    # L5-start avg strikeouts
+    "l10_ks",                   # L10-start avg strikeouts
+    "l3_ip",                    # L3-start avg IP
+    "l5_ip",                    # L5-start avg IP
+    "days_rest",                # Days since last start
+    "opp_lineup_k_pct_proxy",   # Opposing lineup K% (0-100)
+    "opp_lineup_xwoba_proxy",   # Opposing lineup xwOBA
 ]
 
-# Batter hit features — 19 dimensions
+# Hit model feature names — must match xgb_training_pipeline.py exactly
 HITS_FEATURES = [
-    "sv_xba",           # Statcast xBA
-    "sv_xwoba",         # Statcast xwOBA
-    "sv_xslg",          # Statcast xSLG
-    "sv_ev",            # Avg exit velocity
-    "sv_brl_pct",       # Barrel % (0–100)
-    "sv_hh_pct",        # Hard-hit % (0–100)
-    "sv_swstr_pct",     # SwStr% (batter)
-    "sv_la",            # Launch angle (degrees)
-    "fg_kpct",          # FanGraphs batter K% (0–100)
-    "fg_bbpct",         # FanGraphs batter BB% (0–100)
-    "opp_xera",         # Opposing pitcher xERA
-    "opp_k_pct",        # Pitcher K% (0–100)
-    "opp_bb_pct",       # Pitcher BB% (0–100)
-    "opp_swstr_pct",    # Pitcher SwStr%
-    "bats_L",           # 1 = left-handed batter
-    "throws_R",         # 1 = right-handed pitcher
-    "platoon_adv",      # 1 = favorable handedness matchup
-    "l7_hits",          # L7-game rolling hit total
-    "l7_hit_rate",      # L7-game rolling hit rate (0–1)
+    "sv_xba",       # Statcast xBA
+    "sv_xwoba",     # Statcast xwOBA
+    "sv_xslg",      # Statcast xSLG
+    "sv_ev",        # Exit velocity
+    "sv_brl_pct",   # Barrel %
+    "sv_hh_pct",    # Hard-hit %
+    "sv_ss_pct",    # SwStr% (NOTE: training key is sv_ss_pct, not sv_swstr_pct)
+    "sv_la",        # Launch angle
+    "sv_k_pct",     # Batter K% (training key is sv_k_pct, not fg_kpct)
+    "sv_bb_pct",    # Batter BB% (training key is sv_bb_pct, not fg_bbpct)
+    "opp_xera",     # Pitcher xERA
+    "opp_k_pct",    # Pitcher K%
+    "opp_bb_pct",   # Pitcher BB%
+    "opp_whiff",    # Pitcher SwStr% (was missing — always 0.0 before)
+    "bats_L",       # 1 = left-handed batter
+    "throws_R",     # 1 = right-handed pitcher
+    "platoon_adv",  # 1 = favorable platoon matchup
+    "l7_hits",      # L7-game hit total
+    "l7_hit_rate",  # L7-game hit rate
 ]
+
 
 
 def _build_k_features(prop: dict, feat_order: list) -> Optional[np.ndarray]:
     """
-    Build the K feature vector from a PropIQ enriched prop dict.
-    All our prop dicts use underscore_separated keys — no translation needed.
-    Percentage columns stored as 0–1 are scaled to 0–100.
+    Build the K feature vector — column names match xgb_training_pipeline.py exactly.
+
+    Mapping from PropIQ prop dict keys to training column names:
+      fg_era / sv_era_p    → sv_era          (ERA stored as sv_era in training)
+      fg_kpct / sv_kpct    → sv_k_pct        (K% in 0-100 scale)
+      fg_bbpct             → sv_bb_pct       (BB% in 0-100 scale)
+      sv_swstr_pct / csw   → sv_whiff_pct    (SwStr% in 0-100 scale)
+      _l3_ks / l3_ks       → l3_ks           (L3-start avg Ks — was missing)
+      _l3_ip / l3_ip       → l3_ip           (L3-start avg IP — was missing)
+      _l5_ip / l5_ip       → l5_ip           (L5-start avg IP — was missing)
+      _days_rest           → days_rest       (days since last start — was missing)
+      _opp_avg_k_pct       → opp_lineup_k_pct_proxy
+      _opp_avg_xwoba       → opp_lineup_xwoba_proxy
     """
     raw: dict[str, float] = {
-        "sv_xera":      _sf(prop, "sv_xera",     "fg_era",    default=4.50),
-        "fg_era":       _sf(prop, "fg_era",       "sv_era_p",  default=4.50),
-        "fg_kpct":      _sf(prop, "fg_kpct",                   default=22.0),
-        "fg_bbpct":     _sf(prop, "fg_bbpct",                  default=8.0),
-        "sv_swstr_pct": _sf(prop, "sv_swstr_pct", "swstr_pct", "csw_pct",
-                            default=24.0),
-        "l5_ks":        _sf(prop, "l5_ks",        "_l5_ks",   default=4.5),
-        "l5_k_rate":    _sf(prop, "l5_k_rate",    "_l5_k_rate", default=22.0),
-        "l10_ks":       _sf(prop, "l10_ks",       "_l10_ks",  default=4.5),
-        "opp_k_pct":    _sf(prop, "_opp_avg_k_pct", "opp_k_rate",
-                            "opp_k_pct", default=22.0),
-        "opp_xwoba":    _sf(prop, "_opp_avg_xwoba", "opp_xwoba", default=0.320),
+        "sv_xera":                  _sf(prop, "sv_xera",           default=4.50),
+        "sv_era":                   _sf(prop, "fg_era", "sv_era_p", "era",
+                                        default=4.50),
+        "sv_k_pct":                 _sf(prop, "fg_kpct", "sv_kpct", "k_pct",
+                                        default=22.0),
+        "sv_bb_pct":                _sf(prop, "fg_bbpct", "sv_bbpct", "bb_pct",
+                                        default=8.0),
+        "sv_whiff_pct":             _sf(prop, "sv_swstr_pct", "swstr_pct",
+                                        "csw_pct", "sv_whiff_pct", default=24.0),
+        "l3_ks":                    _sf(prop, "l3_ks", "_l3_ks",   default=4.5),
+        "l5_ks":                    _sf(prop, "l5_ks", "_l5_ks",   default=4.5),
+        "l10_ks":                   _sf(prop, "l10_ks", "_l10_ks", default=4.5),
+        "l3_ip":                    _sf(prop, "l3_ip", "_l3_ip",   default=5.0),
+        "l5_ip":                    _sf(prop, "l5_ip", "_l5_ip",   default=5.0),
+        "days_rest":                _sf(prop, "days_rest", "_days_rest",
+                                        "rest_days",               default=5.0),
+        "opp_lineup_k_pct_proxy":   _sf(prop, "_opp_avg_k_pct", "opp_k_pct",
+                                        "opp_lineup_k_pct_proxy",  default=22.0),
+        "opp_lineup_xwoba_proxy":   _sf(prop, "_opp_avg_xwoba", "opp_xwoba",
+                                        "opp_lineup_xwoba_proxy",  default=0.320),
     }
 
-    # Scale fractions → percent
-    for pct_key in ("fg_kpct", "fg_bbpct", "sv_swstr_pct",
-                    "l5_k_rate", "opp_k_pct"):
+    # Scale fractions → percent (training data used 0-100 scale for pct cols)
+    for pct_key in ("sv_k_pct", "sv_bb_pct", "sv_whiff_pct", "opp_lineup_k_pct_proxy"):
         if 0.0 < raw[pct_key] <= 1.0:
             raw[pct_key] *= 100.0
 
-    cols = feat_order if feat_order else K_FEATURES
+    cols = feat_order if feat_order else TRAINING_K_FEATURES
     try:
         return np.array([[raw.get(c, 0.0) for c in cols]], dtype=np.float32)
     except Exception:
         logger.debug("[xgb_k] K feature build error", exc_info=True)
         return None
 
-
 def _build_hit_features(prop: dict, pitcher: dict,
                          feat_order: list) -> Optional[np.ndarray]:
     """
-    Build the batter-hit feature vector.
-    prop = batter prop dict (enriched); pitcher = enriched pitcher sub-dict.
+    Build the batter-hit feature vector — column names match xgb_training_pipeline.py.
+
+    Key corrections vs prior version:
+      sv_swstr_pct → sv_ss_pct  (training used sv_ss_pct for SwStr%)
+      fg_kpct      → sv_k_pct   (training used sv_k_pct, not fg_kpct)
+      fg_bbpct     → sv_bb_pct  (training used sv_bb_pct, not fg_bbpct)
+      opp_whiff now populated from pitcher dict (was always 0.0 before)
     """
     bat_side = str(prop.get("batter_hand", prop.get("bats", "R")) or "R").upper()[:1]
     pit_hand = str(pitcher.get("_pitcher_hand", pitcher.get("pitcher_hand",
@@ -236,39 +262,43 @@ def _build_hit_features(prop: dict, pitcher: dict,
                    (bat_side == "R" and pit_hand == "L") else 0
 
     raw: dict[str, float] = {
-        # Batter Statcast
-        "sv_xba":       _sf(prop, "sv_xba",      default=0.250),
-        "sv_xwoba":     _sf(prop, "sv_xwoba",    "fg_woba",  default=0.320),
-        "sv_xslg":      _sf(prop, "sv_xslg",     "fg_slg",   default=0.400),
-        "sv_ev":        _sf(prop, "sv_ev",                    default=88.0),
-        "sv_brl_pct":   _sf(prop, "sv_brl_pct",              default=4.0),
-        "sv_hh_pct":    _sf(prop, "sv_hh_pct",               default=35.0),
-        "sv_swstr_pct": _sf(prop, "sv_swstr_pct", "swstr_pct", default=10.0),
-        "sv_la":        _sf(prop, "sv_la",                    default=12.0),
-        "fg_kpct":      _sf(prop, "fg_kpct",                  default=22.0),
-        "fg_bbpct":     _sf(prop, "fg_bbpct",                 default=8.0),
-        # Pitcher opposition metrics
-        "opp_xera":     _sf(pitcher, "sv_xera",  "fg_era",   default=4.50),
-        "opp_k_pct":    _sf(pitcher, "fg_kpct",              default=22.0),
-        "opp_bb_pct":   _sf(pitcher, "fg_bbpct",             default=8.0),
-        "opp_swstr_pct":_sf(pitcher, "sv_swstr_pct", "swstr_pct", default=24.0),
+        # Batter Statcast — use sv_ prefix to match training column names
+        "sv_xba":       _sf(prop, "sv_xba",                       default=0.250),
+        "sv_xwoba":     _sf(prop, "sv_xwoba",    "fg_woba",        default=0.320),
+        "sv_xslg":      _sf(prop, "sv_xslg",     "fg_slg",         default=0.400),
+        "sv_ev":        _sf(prop, "sv_ev",                         default=88.0),
+        "sv_brl_pct":   _sf(prop, "sv_brl_pct",                   default=4.0),
+        "sv_hh_pct":    _sf(prop, "sv_hh_pct",                    default=35.0),
+        # sv_ss_pct = SwStr% (training key) — was wrongly keyed as sv_swstr_pct
+        "sv_ss_pct":    _sf(prop, "sv_swstr_pct", "sv_ss_pct",
+                            "swstr_pct",                           default=10.0),
+        "sv_la":        _sf(prop, "sv_la",                         default=12.0),
+        # sv_k_pct and sv_bb_pct — training used sv_ prefix, not fg_
+        "sv_k_pct":     _sf(prop, "fg_kpct", "sv_k_pct", "k_pct", default=22.0),
+        "sv_bb_pct":    _sf(prop, "fg_bbpct", "sv_bb_pct", "bb_pct", default=8.0),
+        # Pitcher opposition — keyed from pitcher sub-dict
+        "opp_xera":     _sf(pitcher, "sv_xera",  "fg_era",         default=4.50),
+        "opp_k_pct":    _sf(pitcher, "fg_kpct", "sv_k_pct",        default=22.0),
+        "opp_bb_pct":   _sf(pitcher, "fg_bbpct", "sv_bb_pct",      default=8.0),
+        # opp_whiff = pitcher SwStr% — was always 0.0 before (key was missing)
+        "opp_whiff":    _sf(pitcher, "sv_swstr_pct", "sv_whiff_pct",
+                            "swstr_pct", "opp_whiff",              default=24.0),
         # Platoon flags
         "bats_L":       1.0 if bat_side == "L" else 0.0,
         "throws_R":     1.0 if pit_hand == "R" else 0.0,
         "platoon_adv":  float(platoon),
         # Rolling form
-        "l7_hits":      _sf(prop, "l7_hits",      "_l7_hits", default=1.5),
-        "l7_hit_rate":  _sf(prop, "l7_hit_rate",  "_l7_hit_rate", default=0.50),
+        "l7_hits":      _sf(prop, "l7_hits",    "_l7_hits",        default=1.5),
+        "l7_hit_rate":  _sf(prop, "l7_hit_rate", "_l7_hit_rate",   default=0.50),
     }
 
-    # Scale fractions → percent (pct columns expected in 0–100)
-    for pct_key in ("fg_kpct", "fg_bbpct", "sv_swstr_pct",
-                    "sv_brl_pct", "sv_hh_pct",
-                    "opp_k_pct", "opp_bb_pct", "opp_swstr_pct"):
+    # Scale fractions → percent
+    for pct_key in ("sv_ss_pct", "sv_brl_pct", "sv_hh_pct",
+                    "sv_k_pct", "sv_bb_pct", "opp_k_pct", "opp_bb_pct", "opp_whiff"):
         if 0.0 < raw[pct_key] <= 1.0:
             raw[pct_key] *= 100.0
 
-    cols = feat_order if feat_order else HITS_FEATURES
+    cols = feat_order if feat_order else TRAINING_HITS_FEATURES
     try:
         return np.array([[raw.get(c, 0.0) for c in cols]], dtype=np.float32)
     except Exception:
