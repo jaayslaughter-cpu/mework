@@ -465,6 +465,26 @@ async def job_predict_plus_prefetch():
         logger.warning("[DK] Prefetch failed (non-fatal): %s", _dk_exc)
 
 
+
+async def job_bp2vec_retrain():
+    """Monthly (batter|pitcher)2vec retrain — 3:00 AM PT on the 1st.
+    Trains on 4 seasons of Statcast PA data; saves models/bp2vec_*.pkl.
+    No-op if bp2vec_train.py is not present (graceful degradation).
+    """
+    try:
+        import importlib, sys as _sys  # noqa: PLC0415
+        spec = importlib.util.find_spec("bp2vec_train")
+        if spec is None:
+            logger.warning("[bp2vec] bp2vec_train.py not found — skipping retrain")
+            return
+        bp2vec_train = importlib.import_module("bp2vec_train")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, bp2vec_train.train)
+        logger.info("[bp2vec] Monthly retrain complete.")
+    except Exception as exc:
+        logger.error("[bp2vec] Retrain failed: %s", exc, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
@@ -1088,6 +1108,21 @@ async def admin_run_seed(token: str = "", clear: bool = False):
                     pass
 
     return StreamingResponse(_stream(), media_type="text/plain")
+
+
+@app.post("/admin/bp2vec-train")
+async def admin_bp2vec_train():
+    """Trigger a (batter|pitcher)2vec background retrain immediately.
+    Models are saved to models/bp2vec_batter.pkl + bp2vec_pitcher.pkl.
+    Once saved, apply_bp2vec_adjustment() activates automatically.
+    """
+    asyncio.create_task(job_bp2vec_retrain())
+    return JSONResponse({
+        "status": "started",
+        "message": "bp2vec retrain running in background (~15-25 min). "
+                   "Models activate automatically once saved.",
+    })
+
 
 
 if __name__ == "__main__":
