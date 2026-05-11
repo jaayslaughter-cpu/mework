@@ -1071,6 +1071,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     # Run sportsbook reference first — provides sharp-book market_implied
     props = _get_sportsbook_ref(props)
 
+    # ── Covers reference enrichment (Tier 3: sb_implied_prob fallback + THE BAT X) ──
+    # Fills sb_implied_prob for props OddsAPI/Pinnacle missed; stamps covers_batx_proj.
+    # Postgres 4h cache — no-op on subsequent calls within the same hub cycle.
+    try:
+        from covers_layer import enrich_props_with_covers as _covers_enrich  # noqa: PLC0415
+        props = _covers_enrich(props)
+    except Exception as _cov_err:
+        logger.debug("[Enrichment] covers_layer skipped: %s", _cov_err)
+
     # Run Statcast enrichment — provides player-specific barrel/whiff/xwOBA
     # so we defer to after the lookup maps are built.
     p2team, p2opp, p2mlbam, p2hand = _build_lookup_maps(hub)
@@ -1327,6 +1336,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                         prop["_poisson_expected_k"] = _kres["expected_ks"]
                         prop["_poisson_reliability"] = _kres["reliability"]
                         prop["_poisson_trend"]       = _kres["trend"]
+                        # Bernoulli Drama penalty — computed from bernoulli_layer math
+                        # (no markdown file needed). Consumed by agent loop as fallback.
+                        try:
+                            from wire_model_layers import get_bernoulli_drama_penalty as _gdrama  # noqa: PLC0415
+                            _dp = _gdrama(player, prop)
+                            if _dp != 0.0:
+                                prop["_drama_penalty_pp"] = _dp
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 

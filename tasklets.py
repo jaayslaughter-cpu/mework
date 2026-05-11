@@ -2380,6 +2380,30 @@ def run_data_hub_tasklet() -> None:
     except Exception as _spe:
         logger.warning("[DataHub] Steamer prefetch failed: %s", _spe)
     r = _redis()
+
+    # ── DraftKings player props cache warm (Tier 0 sharp source) ─────────────
+    # prefetch_dk_props() is cache-guarded (Redis 2h TTL) — safe to call every hub cycle.
+    try:
+        from draftkings_layer import prefetch_dk_props as _dk_prefetch  # noqa: PLC0415
+        _dk_date_str = _today_pt().strftime("%Y%m%d")
+        _dk_summary  = _dk_prefetch(_dk_date_str, r)
+        if any(v > 0 for v in (_dk_summary or {}).values()):
+            logger.info("[DataHub] DraftKings props warm: %s", _dk_summary)
+        else:
+            logger.debug("[DataHub] DraftKings props: cache hit")
+    except Exception as _dke:
+        logger.debug("[DataHub] DraftKings prefetch skipped: %s", _dke)
+
+    # ── Covers reference cache warm (Tier 3: multi-book odds + THE BAT X proj) ─
+    # fetch_covers_reference() is cache-guarded (Postgres 4h TTL) — safe every cycle.
+    try:
+        from covers_layer import fetch_covers_reference as _covers_prefetch  # noqa: PLC0415
+        _cov_date_int = int(_today_pt().strftime("%Y%m%d"))
+        _cov_ref      = _covers_prefetch(_cov_date_int)
+        logger.info("[DataHub] Covers reference warm: %d entries", len(_cov_ref))
+    except Exception as _cove:
+        logger.debug("[DataHub] Covers prefetch skipped: %s", _cove)
+
     hub: dict = {}  # pre-declared so bullpen section can write to it before merge block
     game_states: dict[str, str] = {}
     try:
@@ -2940,6 +2964,10 @@ class _BaseAgent:
                 _hub_rankings = getattr(self, "_bernoulli_rankings", {})
                 if _hub_rankings:
                     _dp, _dn = _gdp(player, _hub_rankings)
+                    if _dp != 0.0:
+                        raw_p = max(5.0, min(95.0, raw_p + _dp))
+                elif prop:  # fallback: prop-stamped value from enrichment math path
+                    _dp = float(prop.get("_drama_penalty_pp", 0.0))
                     if _dp != 0.0:
                         raw_p = max(5.0, min(95.0, raw_p + _dp))
             except Exception:
