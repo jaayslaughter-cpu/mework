@@ -700,6 +700,35 @@ async def lifespan(_app: FastAPI):
     )
 
 
+    # (batter|pitcher)2vec monthly retrain — 3:00 AM PT 1st of month
+    scheduler.add_job(
+        job_bp2vec_retrain,
+        CronTrigger(day=1, hour=3, minute=0, timezone="America/Los_Angeles"),
+        id="bp2vec_retrain", replace_existing=True,
+    )
+    scheduler.start()
+
+    # Discord startup ping — guarded: at most once per PT calendar day
+    _startup_ping_if_needed()
+
+    # Kick off initial data pull
+    asyncio.create_task(job_data_hub())
+
+    # Startup catch-up: fire immediately if we restart inside the dispatch window
+    asyncio.create_task(_startup_dispatch_catchup())
+
+    logger.info(
+        "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
+        "predict_plus_prefetch@8:15AM, streak@8:45AM, log_watcher@9:15AM, "
+        "line_stream@30min, leaderboard@monthly, "
+        "backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
+    )
+    yield
+
+    scheduler.shutdown()
+    logger.info("PropIQ Agent Army shut down.")
+
+
 async def _startup_dispatch_catchup() -> None:
     """
     Option-A startup catch-up: if the service restarts while the dispatch
@@ -757,33 +786,6 @@ async def _startup_dispatch_catchup() -> None:
     await job_agents()
 
 
-        # (batter|pitcher)2vec monthly retrain — 3:00 AM PT 1st of month
-    scheduler.add_job(
-        job_bp2vec_retrain,
-        CronTrigger(day=1, hour=3, minute=0, timezone="America/Los_Angeles"),
-        id="bp2vec_retrain", replace_existing=True,
-    )
-    scheduler.start()
-
-    # Discord startup ping — guarded: at most once per PT calendar day
-    _startup_ping_if_needed()
-
-    # Kick off initial data pull
-    asyncio.create_task(job_data_hub())
-
-    # Startup catch-up: fire immediately if we restart inside the dispatch window
-    asyncio.create_task(_startup_dispatch_catchup())
-
-    logger.info(
-        "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
-        "predict_plus_prefetch@8:15AM, streak@8:45AM, log_watcher@9:15AM, "
-        "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
-    )
-    yield
-
-    scheduler.shutdown()
-    logger.info("PropIQ Agent Army shut down.")
 
 
 app = FastAPI(
