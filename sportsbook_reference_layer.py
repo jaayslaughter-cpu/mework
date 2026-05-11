@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -805,6 +806,102 @@ def _fetch_live(date_int: int) -> dict:
 
 # ── Public interface ───────────────────────────────────────────────────────────
 
+
+
+# ── FanDuel Internal API ──────────────────────────────────────────────────────
+# Endpoint: api.sportsbook.fanduel.com internal sportsbook API (no auth beyond
+# the public frontend key). Returns real O/U pitcher strikeout lines with odds.
+# Railway-accessible. Provides ~10 pitcher strikeout O/U lines per day.
+# PR #539
+
+_FD_AK = "FhMFpcPWXMeyZxOx"
+_FD_HDRS: dict = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://sportsbook.fanduel.com/",
+    "Origin": "https://sportsbook.fanduel.com",
+    "x-sportsbook-region": "VA",
+}
+_FD_MTYPE_RE = re.compile(r"^PITCHER_[A-Z]_TOTAL_STRIKEOUTS$")
+_FD_COMP_URL = (
+    f"https://api.sportsbook.fanduel.com/sbapi/competition-page"
+    f"?_ak={_FD_AK}&eventTypeId=7511&competitionId=11196870"
+)
+
+
+def _fetch_fanduel_internal() -> dict:
+    """
+    Fetch pitcher strikeout O/U lines from FanDuel's internal sportsbook API.
+
+    Flow:
+      1. GET competition-page → today's MLB event IDs (~6 per day)
+      2. For each event: GET event-page?tab=same-game-parlay- → full market list
+      3. Filter PITCHER_[X]_TOTAL_STRIKEOUTS markets → 2-runner O/U with odds
+      4. Vig-strip and return dict keyed (player_norm, 'pitcher_strikeouts', side)
+
+    Sharper than VegasInsider/RotoWire/DraftEdge. No API key required.
+    Primary source when OddsAPI quota empty; supplement otherwise.
+    """
+    import urllib.request as _urlreq  # noqa: PLC0415
+    ref: dict = {}
+    try:
+        req0 = _urlreq.Request(_FD_COMP_URL, headers=_FD_HDRS)
+        with _urlreq.urlopen(req0, timeout=10) as _r0:
+            _comp = json.loads(_r0.read())
+        event_ids = list(_comp.get("attachments", {}).get("events", {}).keys())
+        if not event_ids:
+            log.debug("[FD] No MLB events found via competition-page")
+            return ref
+
+        for eid in event_ids:
+            url = (
+                f"https://api.sportsbook.fanduel.com/sbapi/event-page"
+                f"?_ak={_FD_AK}&eventId={eid}&tab=same-game-parlay-"
+                f"&useCombinedTouchdownsVirtualMarket=true"
+            )
+            try:
+                req1 = _urlreq.Request(url, headers=_FD_HDRS)
+                with _urlreq.urlopen(req1, timeout=12) as _r1:
+                    edata = json.loads(_r1.read())
+            except Exception as _ee:
+                log.debug("[FD] event %s fetch failed: %s", eid, _ee)
+                continue
+
+            for _mid, mkt in edata.get("attachments", {}).get("markets", {}).items():
+                mtype = mkt.get("marketType", "")
+                if not _FD_MTYPE_RE.match(mtype):
+                    continue
+                runners = mkt.get("runners", [])
+                if len(runners) < 2:
+                    continue
+                ov = next((r for r in runners if "Over" in r.get("runnerName", "")), None)
+                un = next((r for r in runners if "Under" in r.get("runnerName", "")), None)
+                if not ov or not un:
+                    continue
+                line = ov.get("handicap")
+                o_odds = ov.get("winRunnerOdds", {}).get("americanDisplayOdds", {}).get("americanOddsInt")
+                u_odds = un.get("winRunnerOdds", {}).get("americanDisplayOdds", {}).get("americanOddsInt")
+                if None in (line, o_odds, u_odds):
+                    continue
+                player_raw = re.sub(r"\s+(Over|Under)\s*$", "", ov["runnerName"]).strip()
+                player_norm = _normalize(player_raw)
+                o_impl, u_impl = _vig_strip(int(o_odds), int(u_odds))
+                for side, si in [("Over", o_impl), ("Under", u_impl)]:
+                    ref[(player_norm, "pitcher_strikeouts", side)] = {
+                        "sb_implied_prob": si,
+                        "line":            float(line),
+                        "bookmaker":       "fanduel_internal",
+                        "over_odds":       int(o_odds),
+                        "under_odds":      int(u_odds),
+                    }
+            time.sleep(0.3)
+
+        pitcher_count = sum(1 for k in ref if k[2] == "Over")
+        log.info("[FD] Internal API: %d pitcher_strikeouts O/U props", pitcher_count)
+    except Exception as exc:
+        log.debug("[FD] _fetch_fanduel_internal failed: %s", exc)
+    return ref
+
 def build_sportsbook_reference(date_int: int | None = None) -> dict:
     """
     Return today's sportsbook prop reference dict.
@@ -1269,6 +1366,55 @@ def build_sportsbook_reference(date_int: int | None = None) -> dict:
                 log.info("[SBRef] RotoWire supplement: +%d entries (strikeouts+er)", _rw_added)
         except Exception as _rw_err:
             log.debug("[SBRef] RotoWire supplement failed: %s", _rw_err)
+
+    # ── FanDuel Internal supplement — real O/U pitcher strikeout lines ────────
+    # FanDuel's internal sportsbook API: real pitcher K lines with actual odds.
+    # Sharper than VegasInsider/RotoWire/DraftEdge. Redis-cached 12h. PR #539.
+    if _mem_ref is not None:
+        try:
+            _fd_redis_key = f"fd_props_{date_int}"
+            _fd_cached_json = _redis_get(_fd_redis_key)
+            if _fd_cached_json:
+                try:
+                    _fd_raw = json.loads(_fd_cached_json)
+                    _fd_data: dict = {}
+                    for _fk_str, _fv in _fd_raw.items():
+                        _fk_list = json.loads(_fk_str)
+                        _fd_data[(str(_fk_list[0]), str(_fk_list[1]), str(_fk_list[2]))] = _fv
+                    log.debug("[FD] Loaded %d entries from Redis", len(_fd_data))
+                except Exception as _fce:
+                    log.debug("[FD] Redis parse failed: %s", _fce)
+                    _fd_data = _fetch_fanduel_internal()
+            else:
+                _fd_data = _fetch_fanduel_internal()
+                if _fd_data:
+                    _fd_serial = {json.dumps(list(k)): v for k, v in _fd_data.items()}
+                    _redis_setex(_fd_redis_key, 43200, json.dumps(_fd_serial))
+
+            _FD_WEAK_BOOKS = frozenset({
+                "draftedge", "action_network_money_pct", "vegasinsider",
+                "covers", "therundown",
+            })
+            _fd_added = _fd_updated = 0
+            for _fd_k, _fd_entry in _fd_data.items():
+                _fd_existing = _mem_ref.get(_fd_k)
+                if _fd_existing is None:
+                    _mem_ref[_fd_k] = _fd_entry
+                    _fd_added += 1
+                elif any(
+                    _fd_existing.get("bookmaker", "").lower().startswith(_wb)
+                    for _wb in _FD_WEAK_BOOKS
+                ):
+                    _mem_ref[_fd_k] = _fd_entry
+                    _fd_updated += 1
+            if _fd_added or _fd_updated:
+                log.info(
+                    "[SBRef] FanDuel internal supplement: +%d new, %d updated",
+                    _fd_added, _fd_updated,
+                )
+        except Exception as _fd_err:
+            log.debug("[SBRef] FanDuel internal supplement failed: %s", _fd_err)
+
 
     return _mem_ref
 
