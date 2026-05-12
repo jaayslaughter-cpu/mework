@@ -47,6 +47,7 @@ That's the only change needed.
 from __future__ import annotations
 
 import logging
+from zoneinfo import ZoneInfo as _ZoneInfo
 import re
 from typing import Any
 
@@ -272,7 +273,7 @@ def _get_mlbapi_pitcher(player_name: str, player_id: int | None) -> dict:
     try:
         import requests as _req  # noqa: PLC0415
         import datetime as _dt   # noqa: PLC0415
-        season = _dt.date.today().year
+        season = _dt.datetime.now(_ZoneInfo("America/Los_Angeles")).date().year
         resp = _req.get(
             f"{_MLBAPI_FALLBACK_BASE}/people/{player_id}/stats",
             params={"stats": "season", "group": "pitching", "season": str(season)},
@@ -335,7 +336,7 @@ def _get_mlbapi_batter(player_name: str, player_id: int | None) -> dict:
     try:
         import requests as _req  # noqa: PLC0415
         import datetime as _dt   # noqa: PLC0415
-        season = _dt.date.today().year
+        season = _dt.datetime.now(_ZoneInfo("America/Los_Angeles")).date().year
         resp = _req.get(
             f"{_MLBAPI_FALLBACK_BASE}/people/{player_id}/stats",
             params={"stats": "season", "group": "hitting", "season": str(season)},
@@ -410,7 +411,7 @@ def _get_mlbapi_batter_splits(player_id: int | None, pitcher_hand: str) -> dict:
     try:
         import requests as _req
         import datetime as _dt
-        season = _dt.date.today().year
+        season = _dt.datetime.now(_ZoneInfo("America/Los_Angeles")).date().year
         resp = _req.get(
             f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats",
             params={
@@ -739,7 +740,7 @@ def _get_sportsbook_ref(props: list[dict]) -> list[dict]:
             enrich_props_with_sportsbook,
         )
         import datetime as _dt
-        date_str = _dt.date.today().isoformat()
+        date_str = _dt.datetime.now(_ZoneInfo("America/Los_Angeles")).date().isoformat()
         return enrich_props_with_sportsbook(props, date=date_str)
     except Exception as exc:
         logger.debug("[Enrichment] Sportsbook reference skipped: %s", exc)
@@ -1029,7 +1030,7 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     """
     import datetime
     if season is None:
-        season = datetime.date.today().year
+        season = datetime.datetime.now(_ZoneInfo("America/Los_Angeles")).date().year
 
     if not props:
         return props
@@ -1175,7 +1176,8 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     break
             # season_day: days since Opening Day 2026-03-26
             from datetime import date as _date
-            _szn_day = (_date.today() - _date(2026, 3, 26)).days + 1
+            import datetime as _dt_szn
+            _szn_day = (_dt_szn.datetime.now(_ZoneInfo("America/Los_Angeles")).date() - _date(2026, 3, 26)).days + 1
             _abs = _abs_ctx(prop_type, _ump_name, _szn_day)
             prop["_abs_prop_adj"]         = _abs["abs_prop_adj"]
             prop["_abs_umpire_k_adj"]     = _abs["abs_umpire_k_adj"]
