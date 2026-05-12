@@ -822,7 +822,15 @@ _FD_HDRS: dict = {
     "Origin": "https://sportsbook.fanduel.com",
     "x-sportsbook-region": "VA",
 }
-_FD_MTYPE_RE = re.compile(r"^PITCHER_[A-Z]_TOTAL_STRIKEOUTS$")
+# Maps keyword fragment → internal prop_type for FanDuel pitcher prop markets.
+# All targeted market types start with PITCHER_ — "WALKS" won't collide with batter markets.
+_FD_PITCHER_KWMAP: dict = {
+    "STRIKEOUTS":  "pitcher_strikeouts",   # PITCHER_X_TOTAL_STRIKEOUTS
+    "OUTS":        "pitching_outs",         # PITCHER_X_OUTS / PITCHER_X_PITCHER_OUTS
+    "HITS_ALLOW":  "hits_allowed",          # PITCHER_X_HITS_ALLOWED
+    "WALKS":       "walks_allowed",         # PITCHER_X_WALKS
+    "EARNED_RUN":  "earned_runs",           # PITCHER_X_EARNED_RUNS
+}
 _FD_COMP_URL = (
     f"https://api.sportsbook.fanduel.com/sbapi/competition-page"
     f"?_ak={_FD_AK}&eventTypeId=7511&competitionId=11196870"
@@ -869,7 +877,14 @@ def _fetch_fanduel_internal() -> dict:
 
             for _mid, mkt in edata.get("attachments", {}).get("markets", {}).items():
                 mtype = mkt.get("marketType", "")
-                if not _FD_MTYPE_RE.match(mtype):
+                if not mtype.startswith("PITCHER_"):
+                    continue
+                _fd_prop_type = None
+                for _kw, _pt in _FD_PITCHER_KWMAP.items():
+                    if _kw in mtype:
+                        _fd_prop_type = _pt
+                        break
+                if _fd_prop_type is None:
                     continue
                 runners = mkt.get("runners", [])
                 if len(runners) < 2:
@@ -887,7 +902,7 @@ def _fetch_fanduel_internal() -> dict:
                 player_norm = _normalize(player_raw)
                 o_impl, u_impl = _vig_strip(int(o_odds), int(u_odds))
                 for side, si in [("Over", o_impl), ("Under", u_impl)]:
-                    ref[(player_norm, "pitcher_strikeouts", side)] = {
+                    ref[(player_norm, _fd_prop_type, side)] = {
                         "sb_implied_prob": si,
                         "line":            float(line),
                         "bookmaker":       "fanduel_internal",
@@ -896,8 +911,11 @@ def _fetch_fanduel_internal() -> dict:
                     }
             time.sleep(0.3)
 
-        pitcher_count = sum(1 for k in ref if k[2] == "Over")
-        log.info("[FD] Internal API: %d pitcher_strikeouts O/U props", pitcher_count)
+        _fd_counts = {}
+        for _fk in ref:
+            if _fk[2] == "Over":
+                _fd_counts[_fk[1]] = _fd_counts.get(_fk[1], 0) + 1
+        log.info("[FD] Internal API: %s", " | ".join(f"{pt}:{n}" for pt, n in _fd_counts.items()))
     except Exception as exc:
         log.debug("[FD] _fetch_fanduel_internal failed: %s", exc)
     return ref

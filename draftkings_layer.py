@@ -481,3 +481,42 @@ def get_dk_all_props(
         records = _parse_raw(raw, sub_id, prop_type)
         _set_cached(redis_client, key, records)
     return records
+
+
+def get_dk_sharp_prob(
+    player_name: str,
+    prop_type: str,
+    date_str: str = None,
+    redis_client=None,
+) -> "Optional[float]":
+    """
+    Return DraftKings Over implied probability for (player, prop_type) at any
+    available market line.  No line required — uses first matching player record.
+
+    Used by _get_sharp_consensus() as a fallback tier when SBR/OddsAPI has no
+    market for specialty props (pitching_outs, hits_allowed, walks_allowed,
+    earned_runs, hitter_strikeouts, hits_runs_rbis).
+
+    Returns probability as a float (0.0–1.0), or None if not found.
+    """
+    if date_str is None:
+        try:
+            import pytz
+            from datetime import datetime
+            date_str = datetime.now(pytz.timezone("America/Los_Angeles")).strftime("%Y-%m-%d")
+        except Exception:
+            from datetime import date
+            date_str = date.today().isoformat()
+
+    records = get_dk_all_props(prop_type, date_str, redis_client)
+    for rec in records:
+        if _name_match(rec.get("player_name", ""), player_name):
+            prob = rec.get("over_prob")
+            if prob is not None:
+                logger.debug(
+                    "[DK] sharp_prob(no-line)=%.3f for %s %s (line=%.1f)",
+                    prob, player_name, prop_type, rec.get("line", 0.0)
+                )
+            return prob
+    return None
+
