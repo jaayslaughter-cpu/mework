@@ -1084,6 +1084,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     # so we defer to after the lookup maps are built.
     p2team, p2opp, p2mlbam, p2hand = _build_lookup_maps(hub)
 
+    # ── team → starting pitcher MLBAM ID (for BPV + bp2vec) ──────────────────
+    # Built from projected_starters: {team_abbr: pitcher_player_id}
+    _team_to_pitcher_id: dict[str, str] = {}
+    for _s in hub.get("context", {}).get("projected_starters", []):
+        _st = _s.get("team", "")
+        _sp = _s.get("player_id")
+        if _st and _sp:
+            _team_to_pitcher_id[_st] = str(_sp)
+
     # ── Pre-attach mlbam_ids so statcast can batch-fetch ──────────────────────
     for _p in props:
         _pn = _norm(_p.get("player", ""))
