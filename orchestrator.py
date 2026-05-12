@@ -874,13 +874,15 @@ async def get_props():
 async def get_insights():
     """Agent rankings + active bet queue."""
     lb = read_leaderboard()
-    hub = read_hub()
+    hub = read_hub() or {}
+    if not isinstance(hub, dict):
+        hub = {}
     agents = get_agents()
     return JSONResponse({
         "leaderboard": lb,
         "agents": agents,
-        "games_today": len(hub.get("games_today", [])),
-        "timestamp": lb.get("timestamp"),
+        "games_today": len(hub.get("game_states", {})),
+        "timestamp": None,
     })
 
 
@@ -978,16 +980,25 @@ async def trigger_leaderboard():
 async def get_propiq_status():
     """Full system status."""
     try:
-        hub = read_hub()
+        hub = read_hub() or {}
+        if not isinstance(hub, dict):
+            hub = {}
         lb = read_leaderboard()
+        lb_list = lb if isinstance(lb, list) else lb.get("leaderboard", []) if isinstance(lb, dict) else []
+        # Compute hub prop count from actual dfs subkey
+        _dfs = hub.get("dfs", {}) or {}
+        _ud_count = len(_dfs.get("underdog", []))
+        _pp_count = len(_dfs.get("prizepicks", []))
         return JSONResponse({
             "service": "PropIQ Agent Army",
             "version": "2.2.0",
             "status": "healthy",
             "scheduler_running": scheduler.running,
-            "hub_props": len(hub.get("player_props", [])),
-            "hub_games": len(hub.get("games_today", [])),
-            "leaderboard_agents": len(lb.get("leaderboard", [])),
+            "hub_props_ud": _ud_count,
+            "hub_props_pp": _pp_count,
+            "hub_props_total": _ud_count + _pp_count,
+            "hub_games": len(hub.get("game_states", {})),
+            "leaderboard_agents": len(lb_list),
             "last_hub_run": _last_hub_run,
             "last_agent_run": _last_agent_run,
             "last_leaderboard_run": _last_leaderboard_run,
@@ -1144,7 +1155,10 @@ async def admin_force_dispatch():
     import traceback as _tb  # noqa: PLC0415
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(None, run_agent_tasklet)
+        # force=True bypasses the internal window gate in run_agent_tasklet
+        import functools as _ft  # noqa: PLC0415
+        _fn = _ft.partial(run_agent_tasklet, force=True) if "force" in __import__("inspect").signature(run_agent_tasklet).parameters else run_agent_tasklet
+        result = await loop.run_in_executor(None, _fn)
         global _last_agent_run
         _last_agent_run = datetime.now(ZoneInfo("America/Los_Angeles")).isoformat()
         if result is True:

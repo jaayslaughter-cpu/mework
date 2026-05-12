@@ -5615,7 +5615,7 @@ def _get_props(hub: dict) -> list[dict]:
     return []
 
 
-def run_agent_tasklet() -> bool:
+def run_agent_tasklet(force: bool = False) -> bool:
     """
     Run all 10 agents INDEPENDENTLY against live Underdog Fantasy props.
 
@@ -5628,8 +5628,15 @@ def run_agent_tasklet() -> bool:
 
     No shared consensus vote — each agent fires independently.
     Sharp consensus gate still applied per-pick to confirm Underdog mispricing.
+
+    Args:
+        force: If True, bypass the time-window gate (for diagnostics/admin use).
     """
     hub   = read_hub()
+    # Guard: hub must be a dict. Stale Redis key may hold a list from older code.
+    if not isinstance(hub, dict):
+        logger.warning("[AgentTasklet] read_hub() returned %s — resetting to empty dict.", type(hub).__name__)
+        hub = {}
     model = _load_xgb_model()
 
     import zoneinfo as _zi_entry
@@ -5641,7 +5648,7 @@ def run_agent_tasklet() -> bool:
     # Mirrors orchestrator.py gate logic exactly (pure HH:MM string comparison).
     _pt_now = _entry_now
     _open_pt  = _pt_now.replace(hour=8, minute=30, second=0, microsecond=0)
-    if _pt_now < _open_pt:
+    if not force and _pt_now < _open_pt:
         logger.info("[AgentTasklet] Before 8:30 AM PT open (%02d:%02d PT) — skipping cycle.",
                     _pt_now.hour, _pt_now.minute)
         return
@@ -5663,7 +5670,7 @@ def run_agent_tasklet() -> bool:
     else:
         _cutoff = "12:30"   # fallback ceiling if no game time data in hub
 
-    if _now_str >= _cutoff:
+    if not force and _now_str >= _cutoff:
         logger.info("[AgentTasklet] Past cutoff %s PT (earliest pitch %s) — skipping cycle.",
                     _cutoff, _earliest_pt or "unknown")
         return
