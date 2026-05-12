@@ -283,7 +283,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 5   # prob-first scoring — 5 = model_prob ≥ 55%
+MIN_CONFIDENCE    = 6   # Phase 121: prob-first scoring — 6 = model_prob ≥ 59%
 # MIN_PROB cold-start schedule:
 #   Apr 16 launch:  0.52  (cold-start — XGBoost not yet trained)
 #   Apr 20 retrain: bump to 0.57 manually after first successful retrain
