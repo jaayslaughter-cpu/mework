@@ -194,24 +194,46 @@ def _get_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def _fetch_prizepicks() -> list[dict]:
-    """Fetch active PrizePicks MLB props.
-    Uses live_dispatcher's fetch_prizepicks_props() which has correct
-    session warm-up and handles Railway IP blocks gracefully.
-    Falls back to empty list on any error.
+    """Fetch active PrizePicks MLB props via direct API (no live_dispatcher dependency).
+    PR #545: replaced lazy live_dispatcher import with direct requests call.
+    live_dispatcher.py was deleted in PR #417.
     """
     try:
-        from live_dispatcher import fetch_prizepicks_props  # noqa: PLC0415
-        raw = fetch_prizepicks_props()
-        # Normalise keys to line_stream format
+        resp = requests.get(
+            "https://partner-api.prizepicks.com/projections?per_page=1000",
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            logger.warning("[PP] API returned %d", resp.status_code)
+            return []
+        data = resp.json()
+        player_map: dict = {}
+        for inc in data.get("included", []):
+            if inc.get("type") == "new_player":
+                pid = inc.get("id", "")
+                attrs = inc.get("attributes", {})
+                player_map[pid] = attrs.get("display_name", attrs.get("name", ""))
         props = []
-        for p in raw:
+        for proj in data.get("data", []):
+            attrs  = proj.get("attributes", {})
+            rels   = proj.get("relationships", {})
+            if attrs.get("league", "").upper() != "MLB":
+                continue
+            if attrs.get("is_promo"):
+                continue
+            # Resolve player name
+            player_id = (rels.get("new_player", {}).get("data") or {}).get("id", "")
+            name = player_map.get(player_id, "")
+            if not name:
+                continue
             props.append({
-                "player_name": p.get("player_name", p.get("player", "")),
-                "prop_type":   str(p.get("prop_type", p.get("stat_type", ""))).lower(),
+                "player_name": name,
+                "prop_type":   str(attrs.get("stat_type", "")).lower(),
                 "platform":    "prizepicks",
-                "line":        float(p.get("line", p.get("line_score", 1.5)) or 1.5),
+                "line":        float(attrs.get("line_score", 1.5) or 1.5),
             })
-        logger.info("[PP] %d props fetched via live_dispatcher", len(props))
+        logger.info("[PP] %d props fetched direct", len(props))
         return props
     except Exception as exc:
         logger.warning("[PP] fetch failed: %s", exc)
@@ -219,26 +241,57 @@ def _fetch_prizepicks() -> list[dict]:
 
 
 def _fetch_underdog() -> list[dict]:
-    """Fetch active Underdog Fantasy MLB props.
-    Uses live_dispatcher's fetch_underdog_props() which has the correct
-    beta/v5 endpoint and proper join chain through appearances/players maps.
-    The v1 endpoint used here previously returned empty body from Railway.
+    """Fetch active Underdog Fantasy MLB props via direct API (no live_dispatcher dependency).
+    PR #545: replaced lazy live_dispatcher import with direct requests call.
+    live_dispatcher.py was deleted in PR #417.
     """
     try:
-        from live_dispatcher import fetch_underdog_props  # noqa: PLC0415
-        raw = fetch_underdog_props()
-        # Normalise keys to line_stream format
+        resp = requests.get(
+            "https://api.underdogfantasy.com/beta/v5/over_under_lines",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            logger.warning("[UD] API returned %d", resp.status_code)
+            return []
+        data = resp.json()
+        players_map  = {p["id"]: p for p in data.get("players", [])}
+        appearances_map = {a["id"]: a for a in data.get("appearances", [])}
         props = []
-        for p in raw:
+        seen: set = set()
+        for line in data.get("over_under_lines", []):
+            if line.get("status") != "active":
+                continue
+            if line.get("line_type", "balanced") != "balanced":
+                continue
+            stable_id = line.get("stable_id", line.get("id", ""))
+            if stable_id in seen:
+                continue
+            seen.add(stable_id)
+            ou = line.get("over_under") or {}
+            app_stat = ou.get("appearance_stat") or {}
+            stat_ud = str(app_stat.get("stat", "")).lower()
+            app_id = app_stat.get("appearance_id", "")
+            appearance = appearances_map.get(app_id, {})
+            player_id = appearance.get("player_id", "")
+            player = players_map.get(player_id, {})
+            if player.get("sport_id") != "MLB":
+                continue
+            name = f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+            if not name:
+                continue
             props.append({
-                "player_name":   p.get("player_name", p.get("player", "")),
-                "prop_type":     str(p.get("prop_type", p.get("stat_type", ""))).lower(),
+                "player_name":   name,
+                "prop_type":     stat_ud,
                 "platform":      "underdog",
-                "line":          float(p.get("line", 1.5) or 1.5),
-                "over_american": int(p.get("over_american", -115) or -115),
-                "under_american":int(p.get("under_american", -115) or -115),
+                "line":          float(line.get("stat_value") or ou.get("stat_value") or 1.5),
+                "over_american": int(line.get("over_american", -115) or -115),
+                "under_american":int(line.get("under_american", -115) or -115),
             })
-        logger.info("[UD] %d props fetched via live_dispatcher", len(props))
+        logger.info("[UD] %d props fetched direct", len(props))
         return props
     except Exception as exc:
         logger.warning("[UD] fetch failed: %s", exc)

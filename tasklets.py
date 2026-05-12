@@ -283,7 +283,7 @@ TTL_HUB      = 600    # 10 min — master hub key
 # Works with or without Redis. Keyed agent_name → "YYYY-MM-DD".
 # An agent may send AT MOST ONE play per calendar day.
 _AGENT_SENT_TODAY: dict = {}   # { agent_name: "2026-03-29" }
-MIN_CONFIDENCE    = 5   # prob-first scoring — 5 = model_prob ≥ 55%
+MIN_CONFIDENCE    = 6   # prob-first scoring — 6 = model_prob ≥ 59% (Phase 121)
 # MIN_PROB cold-start schedule:
 #   Apr 16 launch:  0.52  (cold-start — XGBoost not yet trained)
 #   Apr 20 retrain: bump to 0.57 manually after first successful retrain
@@ -5529,11 +5529,25 @@ def _build_pitcher_enrich_map(hub: dict) -> dict[str, dict]:
 
 
 def _get_props(hub: dict) -> list[dict]:
-    """Return real props from hub — PrizePicks first, Underdog second, synthetic last resort."""
-    # 1. Try PrizePicks from hub (6,500+ real MLB props)
+    """Return real props — UD default (Dual-Platform Directive), PP appended for tiebreaker.
+    Both platforms returned in one merged list; _make_parlay enforces per-slip platform purity.
+    PR #545: removed early-return that silently dropped UD when PP had data.
+    """
+    all_props: list[dict] = []
+
+    # ── 1. Underdog props (default platform per Dual-Platform Directive) ─────
+    ud_props = _extract_underdog_props(hub)
+    if ud_props:
+        all_props.extend(ud_props)  # already tagged platform="Underdog"
+        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
+
+    # ── 2. PrizePicks props (tiebreaker — appended alongside UD) ─────────────
+    # PLATFORM PURITY: each prop tagged with its own platform.
+    # _make_parlay ensures no slip mixes UD + PP legs.
+    _pp_enrich = _build_pitcher_enrich_map(hub)
     pp_picks = hub.get("dfs", {}).get("prizepicks", [])
+    _pp_added = 0
     if pp_picks and isinstance(pp_picks, list):
-        props = []
         for pick in pp_picks:
             if not isinstance(pick, dict):
                 continue
@@ -5542,7 +5556,6 @@ def _get_props(hub: dict) -> list[dict]:
             line = pick.get("line", pick.get("line_score", pick.get("value", 1.5)))
             if not player or not prop_type:
                 continue
-            _pp_enrich = _build_pitcher_enrich_map(hub)
             _pp_pitcher = _pp_enrich.get((player or "").strip().lower(), {})
             _fg_pitcher = {}
             try:
@@ -5550,7 +5563,7 @@ def _get_props(hub: dict) -> list[dict]:
                 _fg_pitcher = _fg_get_pitcher(player) or {}
             except Exception:
                 pass
-            props.append({
+            all_props.append({
                 "player":           player,
                 "prop_type":        str(prop_type).lower(),
                 "line":             float(line or 1.5),
@@ -5568,19 +5581,23 @@ def _get_props(hub: dict) -> list[dict]:
                 "era":              _fg_pitcher.get("era",    4.06),
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
-        if props:
-            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
-            return props
+            _pp_added += 1
+    if _pp_added:
+        logger.info("[AgentTasklet] PrizePicks: %d props", _pp_added)
 
-    # 2. Underdog from hub — returned as separate tagged props alongside PP props.
-    # PLATFORM PURITY: both PP and UD props are returned together in the full list,
-    # each tagged with their platform. _make_parlay enforces that every leg in a slip
-    # must share the same platform — no cross-platform mixing allowed.
-    ud_props = _extract_underdog_props(hub)
-    if ud_props:
+    if all_props:
+        logger.info("[AgentTasklet] Total props available: %d (UD=%d PP=%d)",
+                    len(all_props), len(ud_props or []), _pp_added)
+        return all_props
+
+    # ── Merged fallback path (legacy — only reached when both UD+PP are empty) ─
+    # Below this line: old Block 2 code was: if ud_props: props.extend... but since
+    # we already handled UD above, nothing to do here — fall through to synthetic.
+    ud_props_dummy: list[dict] = []
+    if ud_props_dummy:
         props = []
-        props.extend(ud_props)  # already tagged platform="underdog"
-        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props))
+        props.extend(ud_props_dummy)  # never reached — kept to preserve line structure
+        logger.info("[AgentTasklet] Underdog: %d props", len(ud_props_dummy))
 
         # Append PP props separately — keep platform tag "prizepicks" intact.
         # Agents evaluate all props; _make_parlay splits them by platform at slip-build time.
@@ -5813,10 +5830,25 @@ def run_agent_tasklet(force: bool = False) -> bool:
 
                 sharp_prob = _get_sharp_consensus(hub, player, prop_type)
                 if sharp_prob is None:
-                    # No sharp book data for this specific player/prop.
-                    # The reference chain (OddsAPI → PropOdds → Pinnacle → Covers →
-                    # DraftEdge → ActionNetwork → TheRundown) already ran — if it's
-                    # still None this prop genuinely has no coverage today.
+                    # Specialty pitcher props have no sportsbook O/U market (PR #503/#545).
+                    # Fall through using F5Agent's own EV — do NOT reject.
+                    _SPECIALTY_NO_SHARP = frozenset({
+                        "pitching_outs", "walks_allowed", "hits_allowed", "earned_runs"
+                    })
+                    if prop_type in _SPECIALTY_NO_SHARP:
+                        # Use agent's own model_prob as the sharp proxy
+                        _sp_fallback = float(bet.get("model_prob", 57.0) or 57.0)
+                        if _sp_fallback < 57.0:
+                            _rj_no_sharp += 1
+                            continue
+                        # Keep agent's own EV; mark as no-sharp specialty pick
+                        bet["sharp_consensus"]  = False
+                        bet["specialty_no_sharp"] = True
+                        if "ev_pct" not in bet or bet["ev_pct"] is None:
+                            bet["ev_pct"] = 3.0   # floor EV for specialty props
+                        agent_hits.append(bet)
+                        continue
+                    # Non-specialty prop with no sharp data → reject
                     logger.debug(
                         "[AgentTasklet] %s %s %s — no sharp consensus data, skipping",
                         agent.name, player, prop_type,
