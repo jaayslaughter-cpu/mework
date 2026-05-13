@@ -116,7 +116,7 @@ def _fetch_settled_parlays(conn, lookback_days: int = 90) -> list[dict]:
                     bl.parlay_id,
                     bl.bet_date,
                     bl.agent_name,
-                    AVG(bl.confidence)   AS avg_conf,
+                    ROUND(AVG(bl.model_prob) * 10, 1) AS avg_conf,
                     AVG(bl.model_prob)   AS avg_prob,
                     AVG(bl.ev_pct)       AS avg_ev,
                     SUM(bl.stake)        AS total_stake,
