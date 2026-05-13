@@ -2709,12 +2709,22 @@ def run_data_hub_tasklet() -> None:
                 "No picks will go out this cycle."
             )
             try:
-                from DiscordAlertService import discord_alert  # noqa: PLC0415
-                discord_alert.send(
-                    "⚠️ **PropIQ Pipeline Alert** — Zero props returned from both "
-                    "Underdog AND PrizePicks. No picks will go out until props are "
-                    "available. Check UD/PP API status immediately."
-                )
+                _zp_key = f"zero_prop_alert:{_today_pt}"
+                if not r.get(_zp_key):
+                    from DiscordAlertService import discord_alert  # noqa: PLC0415
+                    discord_alert._post({
+                        "embeds": [{
+                            "title": "🚨 PropIQ Pipeline Alert — ZERO Props",
+                            "description": (
+                                "Both **Underdog** and **PrizePicks** returned **0 props** this hub cycle.\n"
+                                "No picks will fire until props are available.\n\n"
+                                "**Action:** Check UD/PP API status and Railway logs immediately."
+                            ),
+                            "color": 0xFF0000,
+                        }]
+                    })
+                    r.setex(_zp_key, 86400, "1")
+                    logger.error("[DataHub] Zero-prop Discord alert fired.")
             except Exception as _da_err:
                 logger.warning("[DataHub] Discord zero-prop alert failed: %s", _da_err)
         elif _total_dfs_props < 20:

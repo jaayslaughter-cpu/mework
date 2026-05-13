@@ -516,18 +516,32 @@ async def lifespan(_app: FastAPI):
                     _mig_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
                     _sql_files = sorted(_glob.glob(os.path.join(_mig_dir, "V*.sql")))
 
+                    # Ensure status column exists (idempotent)
+                    try:
+                        _cur.execute("ALTER TABLE migration_history ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ok'")
+                        _mc.commit()
+                    except Exception:
+                        _mc.rollback()
+
                     _applied = 0
                     for _sql_path in _sql_files:
                         _fname = os.path.basename(_sql_path)
-                        _cur.execute("SELECT 1 FROM migration_history WHERE filename = %s", (_fname,))
-                        if _cur.fetchone():
-                            continue  # already applied
+                        _cur.execute("SELECT status FROM migration_history WHERE filename = %s", (_fname,))
+                        _mig_row = _cur.fetchone()
+                        if _mig_row:
+                            if _mig_row[0] == "failed":
+                                logger.warning(
+                                    "[Migrations] Skipping %s — previously failed. "
+                                    "Fix SQL then: DELETE FROM migration_history WHERE filename='%s'",
+                                    _fname, _fname,
+                                )
+                            continue  # already applied or permanently skipped
                         try:
                             with open(_sql_path) as _f:
                                 _sql = _f.read()
                             _cur.execute(_sql)
                             _cur.execute(
-                                "INSERT INTO migration_history (filename) VALUES (%s) ON CONFLICT DO NOTHING",
+                                "INSERT INTO migration_history (filename, status) VALUES (%s, 'ok') ON CONFLICT (filename) DO UPDATE SET status='ok'",
                                 (_fname,),
                             )
                             _mc.commit()
@@ -536,6 +550,22 @@ async def lifespan(_app: FastAPI):
                         except Exception as _mig_exc:
                             _mc.rollback()
                             logger.error("[Migrations] FAILED %s: %s", _fname, _mig_exc)
+                            # Circuit breaker: mark failed so we don't retry on every restart
+                            try:
+                                _cur.execute(
+                                    "INSERT INTO migration_history (filename, status) VALUES (%s, 'failed') "
+                                    "ON CONFLICT (filename) DO UPDATE SET status='failed'",
+                                    (_fname,),
+                                )
+                                _mc.commit()
+                            except Exception:
+                                _mc.rollback()
+                            # Discord notify once
+                            try:
+                                from DiscordAlertService import discord_alert as _da  # noqa: PLC0415
+                                _da._post({"embeds": [{"title": "🚨 DB Migration Failed", "description": f"**{_fname}** failed and will not retry automatically.\n```{str(_mig_exc)[:300]}```\nTo retry: `DELETE FROM migration_history WHERE filename=\'{_fname}\'` then redeploy.", "color": 0xFF0000}]})
+                            except Exception:
+                                pass
 
                     if _applied == 0:
                         logger.info("[Migrations] All migrations already applied.")

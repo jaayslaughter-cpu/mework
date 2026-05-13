@@ -391,6 +391,90 @@ def _check_fangraphs_data() -> tuple[str, str, str]:
         return "FanGraphs/Steamer", "warn", str(exc)
 
 
+
+def _check_steamer_coverage() -> tuple[str, str, str]:
+    """Flag if Steamer loaded < 500 players — means static CSV or API fallback failed."""
+    try:
+        import redis as _rd, json as _j
+        r = _rd.from_url(os.getenv("REDIS_URL", os.getenv("REDIS_PRIVATE_URL", "")), socket_timeout=3)
+        raw = r.get("mlb_hub")
+        if not raw:
+            return "Steamer Coverage", "warn", "Hub not loaded"
+        hub = _j.loads(raw)
+        proj = hub.get("physics", {}).get("steamer_projections", {})
+        count = len(proj)
+        if count < 100:
+            return "Steamer Coverage", "fail", f"Only {count} players loaded — static CSV fallback may be broken"
+        if count < 500:
+            return "Steamer Coverage", "warn", f"{count} players (expected 500+) — API tier degraded, using partial data"
+        return "Steamer Coverage", "ok", f"{count} players loaded"
+    except Exception as exc:
+        return "Steamer Coverage", "warn", str(exc)
+
+
+def _check_bp2vec_status() -> tuple[str, str, str]:
+    """Check if bp2vec embedding models are trained and active."""
+    try:
+        import os as _os
+        base = _os.path.dirname(_os.path.abspath(__file__))
+        batter_ok = _os.path.exists(_os.path.join(base, "models", "bp2vec_batter.pkl"))
+        pitcher_ok = _os.path.exists(_os.path.join(base, "models", "bp2vec_pitcher.pkl"))
+        if batter_ok and pitcher_ok:
+            return "bp2vec Embeddings", "ok", "Batter + pitcher models active"
+        missing = []
+        if not batter_ok:
+            missing.append("bp2vec_batter.pkl")
+        if not pitcher_ok:
+            missing.append("bp2vec_pitcher.pkl")
+        return "bp2vec Embeddings", "warn", f"Missing: {', '.join(missing)} — matchup signal inactive until monthly retrain"
+    except Exception as exc:
+        return "bp2vec Embeddings", "warn", str(exc)
+
+
+def _check_xgb_model_health() -> tuple[str, str, str]:
+    """Check XGBoost Brier score and sample count from DB."""
+    try:
+        import psycopg2 as _pg
+        db_url = os.getenv("DATABASE_URL", "")
+        if not db_url:
+            return "XGB Model", "warn", "DATABASE_URL not set"
+        with _pg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT brier_score, sample_count, created_at
+                    FROM brier_ledger
+                    ORDER BY created_at DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+        if not row:
+            return "XGB Model", "warn", "No Brier scores recorded yet"
+        brier, samples, ts = row
+        status = "ok" if brier < 0.22 else ("warn" if brier < 0.25 else "fail")
+        return "XGB Model", status, f"Brier={brier:.4f} | Samples={samples:,} | Updated {str(ts)[:10]}"
+    except Exception as exc:
+        return "XGB Model", "warn", str(exc)
+
+
+def _check_prop_volume() -> tuple[str, str, str]:
+    """Check last hub cycle prop count — flag if below 20."""
+    try:
+        import redis as _rd, json as _j
+        r = _rd.from_url(os.getenv("REDIS_URL", os.getenv("REDIS_PRIVATE_URL", "")), socket_timeout=3)
+        raw = r.get("mlb_hub")
+        if not raw:
+            return "Prop Volume", "warn", "Hub not loaded"
+        hub = _j.loads(raw)
+        ud_props = len(hub.get("dfs", {}).get("underdog", []))
+        pp_props = len(hub.get("dfs", {}).get("prizepicks", []))
+        total = ud_props + pp_props
+        if total == 0:
+            return "Prop Volume", "fail", "ZERO props in hub — dispatch will produce no picks!"
+        if total < 20:
+            return "Prop Volume", "warn", f"Only {total} props (UD={ud_props} PP={pp_props}) — very sparse"
+        return "Prop Volume", "ok", f"{total} props in hub (UD={ud_props} PP={pp_props})"
+    except Exception as exc:
+        return "Prop Volume", "warn", str(exc)
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def run_bug_checker() -> None:
@@ -398,10 +482,14 @@ def run_bug_checker() -> None:
 
     checks = [
         _check_postgres,
+        _check_prop_volume,
+        _check_steamer_coverage,
         _check_fangraphs_data,
         _check_redis,
         _check_datahub,
         _check_dispatch_fired,
+        _check_xgb_model_health,
+        _check_bp2vec_status,
         _check_banned_props,
         _check_draftedge,
         _check_odds_api_quota,
