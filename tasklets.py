@@ -5722,6 +5722,36 @@ def run_agent_tasklet(force: bool = False) -> bool:
     # Mirrors orchestrator.py gate logic exactly (pure HH:MM string comparison).
     _pt_now = _entry_now
     _open_pt  = _pt_now.replace(hour=8, minute=30, second=0, microsecond=0)
+    # ── Pre-dispatch health gate ──────────────────────────────────────────────
+    # Block dispatch if data pipeline is too degraded to produce quality picks.
+    # Fires once per day via Redis dedup to avoid Discord spam.
+    _ud_props = len(hub.get("dfs", {}).get("underdog", []) or [])
+    _pp_props = len(hub.get("dfs", {}).get("prizepicks", []) or [])
+    _total_props = _ud_props + _pp_props
+    _steamer_n = len(hub.get("context", {}).get("steamer_projections", {}) or {})
+
+    _gate_failures = []
+    if _total_props < 20:
+        _gate_failures.append(f"Only {_total_props} props in hub (UD={_ud_props} PP={_pp_props})")
+    if _steamer_n > 0 and _steamer_n < 100:
+        _gate_failures.append(f"Steamer only {_steamer_n} players — projections degraded")
+
+    if _gate_failures and not force:
+        _gate_key = f"dispatch_gate_alert:{_today_pt().strftime('%Y-%m-%d')}"
+        try:
+            if not r.get(_gate_key):
+                from DiscordAlertService import discord_alert as _da  # noqa: PLC0415
+                _da._post({"embeds": [{"title": "🚨 Dispatch Blocked — Data Degraded",
+                    "description": "\n".join(f"• {f}" for f in _gate_failures) +
+                        "\n\nNo picks will fire until pipeline recovers.",
+                    "color": 0xFF0000}]})
+                r.setex(_gate_key, 86400, "1")
+        except Exception:
+            pass
+        logger.error("[AgentTasklet] DISPATCH BLOCKED: %s", "; ".join(_gate_failures))
+        return False
+    # ── End health gate ───────────────────────────────────────────────────────
+
     if not force and _pt_now < _open_pt:
         logger.info("[AgentTasklet] Before 8:30 AM PT open (%02d:%02d PT) — skipping cycle.",
                     _pt_now.hour, _pt_now.minute)

@@ -1055,6 +1055,15 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
     except Exception:
         pass   # use BBE defaults above
 
+    # ── Adjustment dampener import (lazy, once per enrich_props call) ────────
+    try:
+        from adjustment_dampener import dampen_adjustments as _dampen  # noqa: PLC0415
+        _DAMPENER_OK = True
+    except ImportError:
+        _DAMPENER_OK = False
+        def _dampen(base_prob_pct, adjustments, **kw):   # noqa: E731
+            return base_prob_pct + sum(d for _, d in adjustments)
+
     # ── (batter|pitcher)2vec matchup embeddings ───────────────────────────────
     # Lazy-load: returns 0.0 until bp2vec_train.py has been run once.
     try:
@@ -1854,6 +1863,44 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                 prop.get("player",""), prop.get("injury_status",""),
                 _raw_prob, _adj_prob, round(_inj_pen*100),
             )
+
+        # ── Correlated signal dampening ───────────────────────────────────────
+        # Applies logit-space correlation decay to prevent same-direction
+        # signals from stacking linearly (e.g. +3pp bayesian + +5pp form +
+        # +4pp chase + +6pp arsenal = +18pp raw → ~+13pp dampened).
+        _all_adjs: list = []
+        for _adj_key, _adj_label in [
+            ("_bayesian_nudge", "bayesian"),
+            ("_cv_nudge",        "cv_consistency"),
+            ("_form_adj",        "mlb_form"),
+            ("_chase_k_adj",     "lineup_chase"),
+            ("_drama_penalty_pp", "bernoulli_drama"),
+            ("_arsenal_k_adj",   "arsenal_k_sig"),
+            ("_ump_k_adj",       "umpire"),
+            ("_steamer_adj",     "steamer"),
+            ("_tto_k_adj",       "ttop_decay"),
+        ]:
+            _v = float(prop.get(_adj_key, 0.0) or 0.0)
+            if _v != 0.0:
+                _scale = 100.0 if _adj_key != "_drama_penalty_pp" else 1.0
+                _all_adjs.append((_adj_label, _v * _scale))
+        if _all_adjs and _DAMPENER_OK:
+            _base_mp = float(prop.get("model_prob", 50.0) or 50.0)
+            try:
+                _dampened_pct = _dampen(
+                    base_prob_pct=_base_mp,
+                    adjustments=_all_adjs,
+                )
+                prop["model_prob"] = max(5.0, min(95.0, _dampened_pct))
+                prop["_dampener_applied"] = True
+                prop["_dampener_adj_count"] = len(_all_adjs)
+                if abs(_dampened_pct - _base_mp) > 2.0:
+                    logger.debug(
+                        "[Enrichment] Dampened %s %s: %.1f→%.1f (%d signals)",
+                        player, prop_type, _base_mp, _dampened_pct, len(_all_adjs),
+                    )
+            except Exception as _de:
+                logger.debug("[Enrichment] Dampener failed for %s: %s", player, _de)
 
         # ── (batter|pitcher)2vec matchup adjustment ──────────────────────────────
         if is_batter_prop and _bp2vec_ready():
