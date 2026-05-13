@@ -305,12 +305,19 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
         return _CACHE
 
     # L2 Postgres hit (cache empty in memory but written to DB earlier today)
+    # Require >= 100 players — rejects stale/partial DraftEdge-seeded rows
     pg_data = _load_from_pg(today)
-    if pg_data:
+    if pg_data and len(pg_data) >= 100:
         _CACHE = pg_data
         _CACHE_DATE = today
         logger.info("[Steamer] Cache hit from Postgres (%d players)", len(_CACHE))
         return _CACHE
+    elif pg_data:
+        logger.warning(
+            "[Steamer] Postgres cache only has %d players (< 100 threshold) — "
+            "discarding and falling through to live fetch / Tier 5 static CSV.",
+            len(pg_data),
+        )
 
     # Guard: if we already attempted a live fetch today and got nothing, don't
     # retry until tomorrow -- avoids hammering FanGraphs every 15 s.
@@ -334,7 +341,10 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
             today,
         )
         de_data = _fetch_steamer_draftedge(hub)
-        if de_data:
+        # Require >= 50 players from DraftEdge — when hub=None at startup,
+        # the live DraftEdge API only returns ~32 players and blocks the
+        # 5,663-player static CSV (Tier 5). Treat thin results as a miss.
+        if de_data and len(de_data) >= 50:
             _CACHE = de_data
             _CACHE_DATE = today
             logger.info(
@@ -344,12 +354,20 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
                 len(de_data),
             )
         else:
+            if de_data:
+                logger.warning(
+                    "[Steamer] Tier 4 DraftEdge only returned %d players "
+                    "(< 50 threshold) — falling through to Tier 5 static CSV.",
+                    len(de_data),
+                )
             # Tier 5: static CSV bundled in data/fg/steamer_ros_2026.csv
             logger.info("[Steamer] Tier 4 failed — trying bundled static CSV (Tier 5)...")
             static_data = _fetch_steamer_static_csv()
             if static_data:
                 _CACHE = static_data
                 _CACHE_DATE = today
+                # Persist to Postgres so next restart hits L2 cache (instant load)
+                _save_to_pg(static_data, today)
                 logger.info(
                     "[Steamer] Tier 5 static CSV active: %d players. "
                     "Data from FanGraphs ATC+Steamer RoS export.",
