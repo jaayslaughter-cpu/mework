@@ -498,7 +498,8 @@ def _get_bayesian_nudge(prop: dict, existing_prob: float) -> float:
             line=line,
             existing_prob=existing_prob / 100.0,
         )
-    except Exception:
+    except Exception as _pam_err:
+        logger.debug("[Enrich] pa_model failed: %s", _pam_err)
         return 0.0
 
 
@@ -514,7 +515,8 @@ def _get_cv_nudge(player_id: int | None, prop_type: str, season: int) -> float:
     try:
         from cv_consistency_layer import get_player_cv_nudge  # noqa: PLC0415
         return float(get_player_cv_nudge(player_id, prop_type, season, _cv_cache) or 0.0)
-    except Exception:
+    except Exception as _cv_err:
+        logger.debug("[Enrich] CV nudge failed: %s", _cv_err)
         return 0.0
 
 
@@ -537,7 +539,8 @@ def _get_form_adj(player_name: str, prop_type: str, hub: dict) -> float:
         if not pid:
             return 0.0
         return float(layer.get_adjustment(int(pid), prop_type) or 0.0)
-    except Exception:
+    except Exception as _frm_err:
+        logger.debug("[Enrich] form adjustment failed: %s", _frm_err)
         return 0.0
 
 
@@ -556,7 +559,8 @@ def _get_chase_score(opposing_team: str, hub: dict) -> dict:
         result  = get_lineup_chase_score(opposing_team, lineups)
         result["_opp_o_swing_avg"] = result.get("avg_chase_rate", 0.316)
         return result
-    except Exception:
+    except Exception as _lcs_err:
+        logger.debug("[Enrich] lineup_chase_score failed: %s", _lcs_err)
         return default
 
 
@@ -595,8 +599,8 @@ def _get_park_context(venue: str, team: str) -> dict:
     try:
         from dome_adjustment import is_dome_game  # noqa: PLC0415
         result["is_dome"] = bool(is_dome_game(venue or team))
-    except Exception:
-        pass
+    except Exception as _dome_err:
+        logger.debug("[Enrich] dome check failed: %s", _dome_err)
 
     try:
         from altitude_adjustment import (  # noqa: PLC0415

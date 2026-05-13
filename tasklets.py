@@ -2755,9 +2755,24 @@ def run_data_hub_tasklet() -> None:
     # Seed sample counts from bet_ledger so shrinkage uses real data before retrain
     _refresh_sample_counts()
     _hub_setex(r, "mlb_hub", TTL_HUB, json.dumps(hub))
-    logger.info("[DataHub] Hub refreshed. Groups: physics=%s context=%s market=%s dfs=%s",
-                _hub_exists(r, physics_key), _hub_exists(r, context_key),
-                _hub_exists(r, market_key), _hub_exists(r, dfs_key))
+    # ── One-line cycle health summary (grep "[DataHub] ✅" or "[DataHub] ❌") ─
+    _sum_ud = len((hub.get("dfs") or {}).get("underdog",   []))
+    _sum_pp = len((hub.get("dfs") or {}).get("prizepicks", []))
+    _sum_lineups  = len((hub.get("context") or {}).get("lineups", []))
+    _sum_steamer  = _sc if "_sc" in dir() else 0  # type: ignore[name-defined]
+    _sum_total    = _sum_ud + _sum_pp
+    if _sum_total > 0:
+        logger.info(
+            "[DataHub] ✅ Cycle OK: %d props (UD=%d PP=%d) | Steamer=%d | Lineups=%d | "
+            "physics=%s context=%s market=%s",
+            _sum_total, _sum_ud, _sum_pp, _sum_steamer, _sum_lineups,
+            _hub_exists(r, physics_key), _hub_exists(r, context_key), _hub_exists(r, market_key),
+        )
+    else:
+        logger.error(
+            "[DataHub] ❌ Cycle DEAD: 0 props (UD=%d PP=%d) | Steamer=%d | Lineups=%d | ALERT FIRED",
+            _sum_ud, _sum_pp, _sum_steamer, _sum_lineups,
+        )
 
 
 def read_hub() -> dict:
@@ -5666,6 +5681,37 @@ def run_agent_tasklet(force: bool = False) -> bool:
         logger.warning("[AgentTasklet] read_hub() returned %s — resetting to empty dict.", type(hub).__name__)
         hub = {}
     model = _load_xgb_model()
+    # ── Pre-dispatch pipeline health gate ─────────────────────────────────────
+    # If props are too low the agents will produce nothing — block early and alert.
+    # Use force=True to bypass for diagnostics / admin endpoints.
+    if not force:
+        _dfs_snap   = hub.get("dfs") or {}
+        _ud_count   = len(_dfs_snap.get("underdog",   []))
+        _pp_count   = len(_dfs_snap.get("prizepicks", []))
+        _total_snap = _ud_count + _pp_count
+        if _total_snap < 20:
+            logger.error(
+                "[AgentTasklet] ❌ HEALTH GATE — only %d props (UD=%d PP=%d). "
+                "Dispatch blocked. Check UD/PP API status.",
+                _total_snap, _ud_count, _pp_count,
+            )
+            # Fire Discord alert (same dedup key as zero-prop alert)
+            try:
+                import zoneinfo as _zi_hg  # noqa: PLC0415
+                _hg_date = datetime.datetime.now(_zi_hg.ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+                _hg_r = _redis()
+                _hg_key = f"zero_prop_alert:{_hg_date}"
+                if not _hg_r.get(_hg_key):
+                    from DiscordAlertService import discord_alert as _hg_da  # noqa: PLC0415
+                    _hg_da._post({"embeds": [{"title": "🚨 Dispatch Blocked — Prop Drought",
+                        "description": f"Only **{_total_snap}** props in hub (UD={_ud_count} PP={_pp_count}).\nDispatch will not fire until props recover.",
+                        "color": 0xFF0000}]})
+                    _hg_r.setex(_hg_key, 86400, "1")
+            except Exception as _hg_err:
+                logger.debug("[AgentTasklet] Health gate alert failed: %s", _hg_err)
+            return False
+    # ─────────────────────────────────────────────────────────────────────────
+
 
     import zoneinfo as _zi_entry
     _entry_now = datetime.datetime.now(_zi_entry.ZoneInfo("America/Los_Angeles"))

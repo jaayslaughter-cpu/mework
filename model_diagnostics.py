@@ -100,6 +100,43 @@ def compute_sharpe(daily_returns: list[float], risk_free: float = 0.0) -> float:
     return round(daily_sharpe * math.sqrt(252), 3)
 
 
+
+
+def _brier_by_prop_type(conn, lookback_days: int = 30) -> dict[str, dict]:
+    """Return Brier score, win-rate and sample count broken down by prop_type.
+
+    Only includes rows where actual_outcome IS NOT NULL and discord_sent = TRUE.
+    """
+    result: dict[str, dict] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    prop_type,
+                    COUNT(*)                                             AS n,
+                    ROUND(AVG((model_prob - CASE WHEN actual_outcome = 'WIN' THEN 1.0 ELSE 0.0 END)^2)::numeric, 4) AS brier,
+                    ROUND(AVG(CASE WHEN actual_outcome = 'WIN' THEN 1.0 ELSE 0.0 END)::numeric, 3)                   AS win_rate
+                FROM bet_ledger
+                WHERE discord_sent = TRUE
+                  AND actual_outcome IS NOT NULL
+                  AND bet_date >= CURRENT_DATE - INTERVAL '%s days'
+                GROUP BY prop_type
+                ORDER BY brier DESC NULLS LAST
+                """,
+                (lookback_days,),
+            )
+            for row in cur.fetchall():
+                prop_type, n, brier, win_rate = row
+                result[prop_type or "unknown"] = {
+                    "n":        int(n),
+                    "brier":    float(brier or 0),
+                    "win_rate": float(win_rate or 0),
+                }
+    except Exception as exc:
+        logger.warning("[ModelDiag] Brier-by-prop query failed: %s", exc)
+    return result
+
 def _fetch_settled_parlays(conn, lookback_days: int = 90) -> list[dict]:
     """Fetch settled parlay records from bet_ledger.
 
@@ -229,7 +266,7 @@ def _write_to_diagnostics(conn, metrics: dict, run_date: "date") -> None:
         conn.rollback()
 
 
-def _discord_embed(metrics: dict) -> None:
+def _discord_embed(metrics: dict, brier_by_prop: dict | None = None) -> None:
     """Post risk-adjusted metrics to Discord."""
     try:
         from DiscordAlertService import discord_alert  # noqa: PLC0415
@@ -260,6 +297,15 @@ def _discord_embed(metrics: dict) -> None:
             f"Calmar: {overall.get('calmar', 0):.2f}"
         )
 
+    # Brier breakdown by prop type
+    if brier_by_prop:
+        _bp_sorted = sorted(brier_by_prop.items(), key=lambda x: -x[1]["brier"])[:8]
+        if _bp_sorted:
+            lines.append("\n**📉 Brier by Prop Type (30d)**")
+            for _pt, _bv in _bp_sorted:
+                _flag = "❌" if _bv["brier"] >= 0.25 else ("⚠️" if _bv["brier"] >= 0.22 else "✅")
+                lines.append(f"{_flag} `{_pt}`: Brier {_bv['brier']:.4f} WR {_bv['win_rate']:.1%} n={_bv['n']}")
+
     msg = "\n".join(lines)
     try:
         discord_alert.send_embed(
@@ -288,6 +334,7 @@ def run_weekly_diagnostics(lookback_days: int = 90) -> dict:
         return {}
 
     try:
+        brier_by_prop = _brier_by_prop_type(conn)
         parlays = _fetch_settled_parlays(conn, lookback_days)
         if not parlays:
             logger.info("[ModelDiag] No settled parlays in last %d days — skipping", lookback_days)
@@ -306,7 +353,7 @@ def run_weekly_diagnostics(lookback_days: int = 90) -> dict:
         _write_to_diagnostics(conn, metrics, datetime.now(_PT).date())
 
         # Discord embed
-        _discord_embed(metrics)
+        _discord_embed(metrics, brier_by_prop=brier_by_prop)
 
         logger.info(
             "[ModelDiag] Done: %d parlays analysed — "

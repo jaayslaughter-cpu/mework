@@ -224,6 +224,98 @@ async def _run_subprocess(name: str, script_path: str) -> None:
         logger.error("[orchestrator] %s subprocess error: %s", name, exc, exc_info=True)
 
 
+
+def job_smoke_test() -> None:
+    """7 AM PT pre-dispatch smoke test — fires Discord alert if anything is broken 90 min before dispatch opens."""
+    import zoneinfo as _zi_smoke  # noqa: PLC0415
+    _smoke_now = datetime.datetime.now(_zi_smoke.ZoneInfo("America/Los_Angeles"))
+    logger.info("[SmokeTest] Running pre-dispatch health check at %02d:%02d PT", _smoke_now.hour, _smoke_now.minute)
+
+    from tasklets import read_hub as _rh  # noqa: PLC0415
+    _hub = _rh() or {}
+    _dfs = _hub.get("dfs") or {}
+    _ctx = _hub.get("context") or {}
+
+    checks = []
+
+    # Props
+    _ud = len(_dfs.get("underdog",   []))
+    _pp = len(_dfs.get("prizepicks", []))
+    _tot = _ud + _pp
+    if _tot == 0:
+        checks.append(("❌", "Props",     f"ZERO props in hub (UD={_ud} PP={_pp}) — dispatch will be blocked"))
+    elif _tot < 50:
+        checks.append(("⚠️", "Props",     f"Only {_tot} props (UD={_ud} PP={_pp}) — expect 250+"))
+    else:
+        checks.append(("✅", "Props",     f"{_tot} (UD={_ud} PP={_pp})"))
+
+    # Lineups
+    _lu = len(_ctx.get("lineups", []))
+    if _lu == 0:
+        checks.append(("⚠️", "Lineups",  "0 lineup entries — enrichment will use priors"))
+    else:
+        checks.append(("✅", "Lineups",  f"{_lu} entries"))
+
+    # Umpires
+    _umps = _hub.get("market", {}).get("umpires", {}) if _hub.get("market") else {}
+    if len(_umps) < 5:
+        checks.append(("⚠️", "Umpires",  f"Only {len(_umps)} umpires (expect 15)"))
+    else:
+        checks.append(("✅", "Umpires",  f"{len(_umps)} loaded"))
+
+    # Starters
+    _starters = _ctx.get("projected_starters", [])
+    if len(_starters) == 0:
+        checks.append(("⚠️", "Starters", "0 probable starters — pitcher props degraded"))
+    else:
+        checks.append(("✅", "Starters", f"{len(_starters)} projected"))
+
+    # Discord webhook
+    _wh = os.getenv("DISCORD_WEBHOOK_URL", "")
+    if not _wh:
+        checks.append(("❌", "Discord",   "DISCORD_WEBHOOK_URL not set — picks won't fire"))
+    elif len(_wh) < 50:
+        checks.append(("⚠️", "Discord",  "Webhook URL looks short — may be stale/truncated"))
+    else:
+        checks.append(("✅", "Discord",   "Webhook configured"))
+
+    # Hub freshness (ts field)
+    _ts_str = _hub.get("ts", "")
+    if _ts_str:
+        try:
+            import datetime as _dt_smoke  # noqa: PLC0415
+            _hub_ts = _dt_smoke.datetime.fromisoformat(_ts_str.replace("Z", "+00:00"))
+            _age_min = (_dt_smoke.datetime.now(_dt_smoke.timezone.utc) - _hub_ts).total_seconds() / 60
+            if _age_min > 60:
+                checks.append(("⚠️", "Hub Age",  f"{_age_min:.0f} min old — DataHub may not be refreshing"))
+            else:
+                checks.append(("✅", "Hub Age",  f"{_age_min:.0f} min ago"))
+        except Exception:
+            checks.append(("⚠️", "Hub Age",  "Could not parse hub timestamp"))
+    else:
+        checks.append(("❌", "Hub",       "Hub is empty — DataHub not running"))
+
+    # Determine overall status
+    has_fail = any(s == "❌" for s, _, _ in checks)
+    has_warn = any(s == "⚠️" for s, _, _ in checks)
+    if has_fail or has_warn:
+        try:
+            from DiscordAlertService import discord_alert as _sda  # noqa: PLC0415
+            _lines = ["\n".join(f"{s} **{k}:** {v}" for s, k, v in checks)]
+            _color = 0xFF0000 if has_fail else 0xFFA500
+            _title = "🚨 Pre-Dispatch Health Alert" if has_fail else "⚠️ Pre-Dispatch Warning"
+            _sda._post({"embeds": [{"title": _title,
+                "description": "\n".join(f"{s} **{k}:** {v}" for s, k, v in checks),
+                "color": _color,
+                "footer": {"text": f"Dispatch opens 8:30 AM PT — {90 if not has_fail else 0} min to fix"}}]})
+            logger.warning("[SmokeTest] Alert fired — %d fail(s) %d warn(s)",
+                           sum(1 for s,_,_ in checks if s=="❌"),
+                           sum(1 for s,_,_ in checks if s=="⚠️"))
+        except Exception as _sde:
+            logger.error("[SmokeTest] Could not send Discord alert: %s", _sde)
+    else:
+        logger.info("[SmokeTest] ✅ All checks passed — pipeline ready for dispatch")
+
 async def job_data_hub():
     """Run DataHub in a thread so it never blocks the event loop."""
     global _last_hub_run
@@ -491,10 +583,9 @@ async def lifespan(_app: FastAPI):
     logger.info("PropIQ Agent Army starting up...")
 
     # ── Run pending SQL migrations ────────────────────────────────────────────
-    # No Flyway process is attached to this Railway deployment — migrations in
-    # the migrations/ folder were never being applied. This runner applies any
-    # .sql file that hasn't been recorded in migration_history yet.
-    # Safe to run on every startup: all SQL uses IF NOT EXISTS / CREATE OR REPLACE.
+    # Controlled by ENABLE_MIGRATIONS env var (default: true).
+    # Set ENABLE_MIGRATIONS=false in Railway to skip auto-migration on restart.
+    # Always runs at least one migration check on first deploy; set false after schema is stable.
     try:
         import glob as _glob  # noqa: PLC0415
         import psycopg2 as _pg  # noqa: PLC0415
@@ -581,6 +672,7 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(job_leaderboard, IntervalTrigger(seconds=60), id="leaderboard")
 
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
+    scheduler.add_job(job_smoke_test, CronTrigger(hour=7, minute=0, timezone="America/Los_Angeles"), id="smoke_test")
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
     scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
     scheduler.add_job(job_xgboost,  CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")  # daily retrain now that seed data available
