@@ -4759,7 +4759,7 @@ def _are_legs_correlated(legs: list[dict]) -> bool:
 
     # Rule 3 — pure same-team stack
     teams = [
-        lg.get("team", lg.get("team_abbrev", "")).strip().upper()
+        (lg.get("team") or lg.get("team_abbrev") or lg.get("team_id") or "").strip().upper()
         for lg in legs
     ]
     teams_known = [t for t in teams if t]          # drop legs with no team field
