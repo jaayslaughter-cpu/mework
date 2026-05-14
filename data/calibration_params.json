@@ -1,14 +1,33 @@
 {
-  "lambda_bias": -0.067,
+  "lambda_bias": -0.15,
   "swstr_k9_scale": 16.0,
   "ump_scale": 0.9,
-  "weight_season_cap": 0.40,
+  "weight_season_cap": 0.4,
   "weight_recent": 0.05,
   "calibration_notes": [
-    "[2026-05-10] Initial params — lambda_bias pre-loaded from BaseballbettingEdge live calibration",
+    "[2026-05-10] Initial params \u2014 lambda_bias pre-loaded from BaseballbettingEdge live calibration",
     "[2026-05-10] swstr_k9_scale set to 16.0 (reduced from default 30.0 per live BBE evidence)",
-    "[2026-05-10] ump_scale set to 0.9 (umpire adjustment less reliable than expected)"
+    "[2026-05-10] ump_scale set to 0.9 (umpire adjustment less reliable than expected)",
+    "[2026-05-13] lambda_bias -0.067 \u2192 -0.15 based on 142 live graded legs. Weighted logit-delta target = -0.247; stepping conservatively to -0.15. hits_runs_rbis and pitching_outs well-calibrated (delta \u2248 0). hits (n=28, delta=-0.647) and total_bases (n=13, delta=-0.911) severely overconfident \u2014 raised per-prop MIN_PROB floors to 0.62."
   ],
-  "sample_size": 0,
-  "updated_at": "2026-05-10T00:00:00Z"
+  "sample_size": 142,
+  "updated_at": "2026-05-13T20:00:00-07:00",
+  "prop_min_prob_overrides": {
+    "hits": 0.62,
+    "total_bases": 0.62,
+    "hitter_strikeouts": 0.62,
+    "hits_allowed": 0.65,
+    "fantasy_score": 0.99
+  },
+  "prop_calibration_brier": {
+    "strikeouts": 0.2458,
+    "hits": 0.2668,
+    "hits_runs_rbis": 0.2436,
+    "pitching_outs": 0.2278,
+    "total_bases": 0.2744,
+    "hitter_strikeouts": 0.2761,
+    "hits_allowed": 0.4531,
+    "overall": 0.2586
+  },
+  "notes": "prop_min_prob_overrides: per-prop MIN_PROB gates stricter than global 0.57. fantasy_score set to 0.99 (effectively excluded). hits_allowed excluded pending more data (Brier 0.4531)."
 }

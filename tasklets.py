@@ -292,7 +292,21 @@ MIN_CONFIDENCE    = 6   # Phase 121: prob-first scoring — 6 = model_prob ≥ 5
 # raise the bar from 52% without losing too many qualifying picks.
 # At 0.55 with correct multipliers: 2-leg PP needs 55%^2 * 3 - 1 = -9.2% → still
 # needs higher prob per leg, but combined_ev gate (+3%) now does the real work.
-MIN_PROB          = 0.57   # April 20 retrain: raised from 0.55 — first real model trained on historical data
+MIN_PROB          = 0.57
+
+# Per-prop MIN_PROB overrides — loaded from data/calibration_params.json
+# Format: {"hits": 0.62, "total_bases": 0.62, ...}
+try:
+    import json as _json, os as _os
+    _cal_params_path = _os.path.join(_os.path.dirname(__file__), "data", "calibration_params.json")
+    with open(_cal_params_path) as _f:
+        _cal_params = _json.load(_f)
+    _PROP_MIN_PROB_OVERRIDES: dict = _cal_params.get("prop_min_prob_overrides", {})
+    _LAMBDA_BIAS: float = _cal_params.get("lambda_bias", -0.067)
+except Exception:
+    _PROP_MIN_PROB_OVERRIDES = {}
+    _LAMBDA_BIAS = -0.067
+   # April 20 retrain: raised from 0.55 — first real model trained on historical data
 STREAK_MIN_LINE   = 0.5    # minimum DFS line value for streak tracking — filters junk sub-0.5 props
 
 # ── In-memory fallback cache (active when Redis is unavailable) ──────────────
@@ -6181,13 +6195,15 @@ def run_agent_tasklet(force: bool = False) -> bool:
                                play_conf, f"confidence<{MIN_CONFIDENCE}")
             continue
 
-        # Probability gate — every leg must have model_prob >= MIN_PROB (57%)
+        # Probability gate — per-leg MIN_PROB gate (global + per-prop overrides)
         _legs = parlay.get("legs", [])
-        _min_prob_pct = MIN_PROB * 100  # 57.0
+        _min_prob_pct = MIN_PROB * 100  # 57.0 global
         _low_legs = [
             lg.get("player", lg.get("player_name", "?"))
             for lg in _legs
-            if float(lg.get("model_prob", 0) or 0) < _min_prob_pct
+            if float(lg.get("model_prob", 0) or 0) < (
+                _PROP_MIN_PROB_OVERRIDES.get(lg.get("prop_type", ""), MIN_PROB) * 100
+            )
         ]
         if _low_legs:
             logger.info("[AgentTasklet] %s dropped — leg(s) below MIN_PROB %.0f%%: %s",

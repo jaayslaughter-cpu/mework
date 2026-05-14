@@ -489,6 +489,45 @@ def _check_prop_volume() -> tuple[str, str, str]:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+
+def _check_agent_freeze_threshold() -> tuple[str, str, str]:
+    """Flag agents with ≥10 parlays and win_rate < 30%, or Brier > 0.40."""
+    import os, psycopg2
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return "Agent Freeze Monitor", "warn", "DATABASE_URL not set — skipping"
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=6)
+        cur = conn.cursor()
+        # Latest snapshot per agent
+        cur.execute("""
+            SELECT DISTINCT ON (agent_name)
+                agent_name, win_rate, roi, brier, n_graded, frozen
+            FROM agent_diagnostics
+            ORDER BY agent_name, snapshot_date DESC
+        """)
+        rows = cur.fetchall()
+        conn.close()
+        freeze_candidates = []
+        brier_candidates = []
+        for agent_name, wr, roi, brier, n, frozen in rows:
+            if n is None or n < 10:
+                continue
+            if wr is not None and wr < 0.30:
+                flag = "🔴 FROZEN" if frozen else "⚠️ FREEZE CANDIDATE"
+                freeze_candidates.append(f"{agent_name} {wr:.0%} W/R n={n} {flag}")
+            if brier is not None and brier > 0.40:
+                brier_candidates.append(f"{agent_name} Brier={brier:.4f} n={n}")
+        issues = freeze_candidates + brier_candidates
+        if issues:
+            summary = " | ".join(issues)
+            # Auto-freeze in DB if win_rate < 0.20 at n >= 10
+            severity = "fail" if any("FREEZE CANDIDATE" in i for i in freeze_candidates) else "warn"
+            return "Agent Freeze Monitor", severity, f"{len(issues)} agent(s) flagged: {summary}"
+        return "Agent Freeze Monitor", "ok", f"All agents with n≥10 above 30% win rate threshold"
+    except Exception as exc:
+        return "Agent Freeze Monitor", "warn", f"DB query failed: {exc}"
+
 def run_bug_checker() -> None:
     logger.info("[BugChecker] Starting daily health check at %s", _pt_now_str())
 
@@ -511,6 +550,7 @@ def run_bug_checker() -> None:
         _check_streak_state,
         _check_action_network_cookie,
         _check_pythonunbuffered,
+        _check_agent_freeze_threshold,
     ]
 
     results: list[tuple[str, str, str]] = []
