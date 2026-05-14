@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 # ── Railway log scanner (silent failure detection) ────────────────────────────
 try:
-    from railway_log_scanner import (
+    from layer_coverage_check import _check_layer_coverage, format_layer_embed
+from railway_log_scanner import (
         _check_railway_silent_failures,
         _check_pipeline_health,
     )
@@ -534,6 +535,7 @@ def run_bug_checker() -> None:
     checks = [
         _check_railway_silent_failures,   # NEW: silent failure log scan
         _check_pipeline_health,            # NEW: pipeline activity confirmation
+        _check_layer_coverage,             # NEW: per-layer firing verification
         _check_postgres,
         _check_prop_volume,
         _check_steamer_coverage,

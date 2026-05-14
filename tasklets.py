@@ -6328,11 +6328,11 @@ def run_agent_tasklet(force: bool = False) -> bool:
                              kelly_units, model_prob, ev_pct, agent_name,
                              status, bet_date, platform, features_json,
                              units_wagered, mlbam_id, entry_type, discord_sent,
-                             lookahead_safe, parlay_id)
+                             lookahead_safe, parlay_id, layer_audit)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 'OPEN', %s, %s, %s,
                                 ABS(%s), %s, %s, FALSE,
-                                %s, %s)
+                                %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
                         (
@@ -6507,6 +6507,83 @@ def run_agent_tasklet(force: bool = False) -> bool:
                 )
         except Exception as _disc_err:
             logger.warning("[AgentTasklet] Discord alert error: %s", _disc_err)
+
+    # ── Write layer_health.json ───────────────────────────────────────────────
+    # Summarizes layer coverage across all props evaluated this cycle.
+    # Read by railway_log_scanner.py and bug_checker._check_layer_coverage().
+    # Written even if 0 props dispatched — shows the data pipeline health.
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        from datetime import datetime as _dt
+
+        _enriched = [p for p in props if p.get("_layer_audit")]
+        _n = len(_enriched)
+
+        def _pct(key, check=lambda v: bool(v)):
+            if _n == 0:
+                return 0.0
+            return round(sum(1 for p in _enriched
+                             if check(p["_layer_audit"].get(key))) / _n * 100, 1)
+
+        def _avg(key):
+            if _n == 0:
+                return 0.0
+            vals = [abs(float(p["_layer_audit"].get(key) or 0))
+                    for p in _enriched]
+            return round(sum(vals) / len(vals), 4) if vals else 0.0
+
+        _lh = {
+            "written_at":          _dt.utcnow().isoformat() + "Z",
+            "props_evaluated":     _n,
+            "layers": {
+                "dampener_pct":    _pct("dampener"),
+                "xgb_k_pct":       _pct("xgb_k"),
+                "xgb_hit_pct":     _pct("xgb_hit"),
+                "bp2vec_pct":      _pct("bp2vec",
+                                        check=lambda v: float(v or 0) != 0.0),
+                "bayesian_active": _avg("bayesian"),
+                "umpire_active":   _avg("umpire"),
+                "drama_active":    _avg("drama"),
+                "steamer_active":  _avg("steamer"),
+                "ttop_active":     _avg("ttop"),
+                "market_flagged":  sum(1 for p in _enriched
+                                       if p["_layer_audit"].get("market_flag",
+                                                                "CLEAN") != "CLEAN"),
+                "injury_blocked":  sum(1 for p in _enriched
+                                       if float(p["_layer_audit"].get(
+                                           "injury", 0) or 0) > 0),
+                "pa_model_active": sum(1 for p in _enriched
+                                       if p["_layer_audit"].get("pa_model")
+                                       is not None),
+            },
+            "zero_layers": [
+                k for k, v in {
+                    "dampener":  _pct("dampener"),
+                    "bayesian":  _avg("bayesian"),
+                    "umpire":    _avg("umpire"),
+                }.items() if v == 0 and _n > 0
+            ],
+        }
+
+        _Path("data").mkdir(exist_ok=True)
+        _Path("data/layer_health.json").write_text(_json.dumps(_lh, indent=2))
+        if _lh["zero_layers"]:
+            logger.warning(
+                "[AgentTasklet] Layer health: %d props, ZERO layers: %s",
+                _n, _lh["zero_layers"],
+            )
+        else:
+            logger.info(
+                "[AgentTasklet] Layer health: %d props | dampener=%.0f%% "
+                "xgb_k=%.0f%% bp2vec=%.0f%%",
+                _n,
+                _lh["layers"]["dampener_pct"],
+                _lh["layers"]["xgb_k_pct"],
+                _lh["layers"]["bp2vec_pct"],
+            )
+    except Exception as _lh_err:
+        logger.debug("[AgentTasklet] layer_health.json write failed: %s", _lh_err)
 
     # Flush decision log buffer to DB in one batch
     try:

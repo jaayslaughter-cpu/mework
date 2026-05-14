@@ -1920,6 +1920,32 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             except Exception as _bpv_err:
                 logger.debug("[Enrichment] bp2vec skipped for %s: %s", player, _bpv_err)
 
+        # ── Layer audit stamp ──────────────────────────────────────────────────
+        # Records exactly which layers fired and what they contributed.
+        # Written to bet_ledger.layer_audit JSONB and data/layer_health.json.
+        # A zero value means the layer ran but produced no signal.
+        # A missing key means the layer errored or was skipped entirely.
+        prop["_layer_audit"] = {
+            "bayesian":    round(float(prop.get("_bayesian_nudge",        0) or 0), 4),
+            "cv":          round(float(prop.get("_cv_nudge",              0) or 0), 4),
+            "form":        round(float(prop.get("_form_adj",              0) or 0), 4),
+            "chase":       round(float(prop.get("_chase_k_adj",           0) or 0), 4),
+            "drama":       round(float(prop.get("_drama_penalty_pp",      0) or 0), 4),
+            "arsenal":     round(float(prop.get("_arsenal_k_sig",         0) or 0), 4),
+            "umpire":      round(float(prop.get("_ump_k_adj",             0) or 0), 4),
+            "steamer":     round(float(prop.get("_steamer_adj",           0) or 0), 4),
+            "ttop":        round(float(prop.get("_tto_k_adj",             0) or 0), 4),
+            "bp2vec":      round(float(prop.get("_bp2vec_adj",            0) or 0), 2),
+            "pa_model":    prop.get("_pa_model_hit_prob"),
+            "dampener":    bool(prop.get("_dampener_applied",         False)),
+            "xgb_k":       bool(prop.get("_xgb_k_blended",           False)),
+            "xgb_hit":     bool(prop.get("_xgb_hit_blended",         False)),
+            "market_flag": str(prop.get("_market_flag",          "CLEAN")),
+            "injury":      round(float(prop.get("_injury_confidence_penalty", 0) or 0), 3),
+            "park":        round(float(prop.get("_park_k_factor",          1.0) or 1.0), 3),
+            "lambda_bias": round(float(prop.get("_lambda_bias",           0.0) or 0.0), 4),
+        }
+
         enriched_count += 1
 
     # ── Statcast batch enrichment ── (moved above main loop; mlbam_ids pre-attached)
