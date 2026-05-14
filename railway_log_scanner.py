@@ -54,6 +54,60 @@ def _dispatch_already_ran_today(full_text: str) -> bool:
                           full_text, re.IGNORECASE))
 
 
+def _dispatch_ran_today_db() -> bool | None:
+    """
+    Query bet_ledger for any discord_sent=TRUE row with today's PT date.
+    Returns True  → dispatch confirmed via DB
+    Returns False → DB confirms no dispatch today
+    Returns None  → DB unavailable, fall back to log check
+    """
+    try:
+        import psycopg2  # type: ignore
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            return None
+        today_pt = _now_pt().strftime("%Y-%m-%d")
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM bet_ledger WHERE bet_date = %s AND discord_sent = TRUE LIMIT 1",
+                    (today_pt,),
+                )
+                return cur.fetchone() is not None
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("[log_scanner] DB dispatch check failed (falling back to log): %s", e)
+        return None
+
+
+def _service_just_started(full_text: str, grace_minutes: int = 15) -> bool:
+    """
+    Return True if the service started within the last `grace_minutes`.
+    Detects startup log lines written by orchestrator at boot.
+    """
+    startup_patterns = [
+        r"PropIQ.*starting",
+        r"APScheduler.*started",
+        r"Orchestrator.*boot",
+        r"startup.*ping",
+        r"service.*start",
+        r"\[startup\]",
+    ]
+    now = _now_pt()
+    # Look for any startup pattern in recent text — if logs are short, service is fresh
+    lines = full_text.strip().splitlines()
+    # Heuristic: if we have fewer than 200 log lines total, service restarted recently
+    if len(lines) < 200:
+        return True
+    # Also check for explicit startup markers
+    for p in startup_patterns:
+        if re.search(p, full_text, re.IGNORECASE):
+            return True
+    return False
+
+
 def _k_props_active_today(full_text: str) -> bool:
     """
     Return True if any K-prop (strikeouts) was in today's active parlays.
@@ -257,6 +311,11 @@ def _check_datahub_absent(full_text: str) -> tuple[str, str, str, int] | None:
         if re.search(p, full_text, re.IGNORECASE):
             return None  # found — no issue
 
+    # Grace window: if service just (re)started, DataHub hasn't cycled yet — skip
+    if _service_just_started(full_text):
+        logger.debug("[log_scanner] DataHub check skipped — service freshly started")
+        return None
+
     return (
         "no_datahub_refresh",
         "fail",
@@ -308,14 +367,24 @@ def _check_dispatch_absent(full_text: str) -> tuple[str, str, str, int] | None:
         return None
 
     # After 2 PM — dispatch is done, don't flag absence in current window
-    # BUT do check that it ran at all today (in the full text across 24h)
+    # PRIMARY check: query bet_ledger DB — survives Railway redeploys
     close_time = now.replace(hour=DISPATCH_CLOSE_HOUR, minute=0, second=0)
     if now > close_time:
-        # Check if dispatch ran earlier today (would be outside 6h window)
-        # We can only check what's in the log — if nothing found, warn gently
+        db_result = _dispatch_ran_today_db()
+        if db_result is True:
+            return None  # DB confirms dispatch ran today — all good
+        if db_result is False:
+            # DB confirms NO dispatch today — real problem
+            return (
+                "no_dispatch_today",
+                "warn",
+                f"bet_ledger has no discord_sent rows for today (PT). "
+                "Dispatch was blocked by health gate or errored silently.",
+                0,
+            )
+        # db_result is None (DB unavailable) — fall back to log scan
         if _dispatch_already_ran_today(full_text):
-            return None  # dispatch ran earlier today, all good
-        # After 2 PM with no evidence of dispatch — worth flagging
+            return None
         return (
             "no_dispatch_today",
             "warn",
@@ -325,6 +394,9 @@ def _check_dispatch_absent(full_text: str) -> tuple[str, str, str, int] | None:
         )
 
     # Within dispatch window (8:30 AM – 2:00 PM PT) — check for activity
+    db_result = _dispatch_ran_today_db()
+    if db_result is True:
+        return None
     if _dispatch_already_ran_today(full_text):
         return None
 
