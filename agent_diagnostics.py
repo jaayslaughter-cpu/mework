@@ -348,7 +348,8 @@ def get_frozen_agents() -> set:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT agent_name FROM agent_freeze_log
-                WHERE unfreeze_date IS NULL
+                WHERE freeze_date <= CURRENT_DATE
+                  AND unfreeze_date > CURRENT_DATE
             """)
             frozen = {r[0] for r in cur.fetchall()}
         conn.close()
