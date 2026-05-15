@@ -292,7 +292,7 @@ MIN_CONFIDENCE    = 6   # Phase 121: prob-first scoring — 6 = model_prob ≥ 5
 # raise the bar from 52% without losing too many qualifying picks.
 # At 0.55 with correct multipliers: 2-leg PP needs 55%^2 * 3 - 1 = -9.2% → still
 # needs higher prob per leg, but combined_ev gate (+3%) now does the real work.
-MIN_PROB          = 0.57
+MIN_PROB          = 0.60  # PR #572: May 15 schedule — raised from 0.57
 
 # Per-prop MIN_PROB overrides — loaded from data/calibration_params.json
 # Format: {"hits": 0.62, "total_bases": 0.62, ...}
@@ -2436,7 +2436,7 @@ def run_data_hub_tasklet() -> None:
     # blend is consistent across all data paths and XGBoost training rows.
     _season_start = OPENING_DAY  # 2026-03-26
     _days_played  = max(0, (_today_pt() - _season_start).days)
-    _season_weight_2026 = round(min(1.0, _days_played / 80.0), 3)
+    _season_weight_2026 = round(min(1.0, _days_played / 55.0), 3)  # PR #572: 90/10 by day 49 (May 15)
     _season_weight_2025 = round(1.0 - _season_weight_2026, 3)
 
     def _is_pre_match(game_id: str) -> bool:
