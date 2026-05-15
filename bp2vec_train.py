@@ -262,8 +262,8 @@ def build_model(num_batters: int, num_pitchers: int, num_outcomes: int):
         from tensorflow import keras
         from tensorflow.keras import layers
     except ImportError:
-        log.error("TensorFlow not installed. Run: pip install tensorflow")
-        sys.exit(1)
+        log.error("TensorFlow not installed — bp2vec training skipped. Add tensorflow to requirements_army.txt")
+        return None
 
     batter_idx_in  = keras.Input(shape=(1,), dtype="int32", name="batter_idx")
     pitcher_idx_in = keras.Input(shape=(1,), dtype="int32", name="pitcher_idx")
@@ -312,6 +312,9 @@ def train(seasons: list[int]) -> None:
     log.info("Building model: %d batters, %d pitchers, %d outcomes",
              num_batters, num_pitchers, num_outcomes)
     model = build_model(num_batters, num_pitchers, num_outcomes)
+    if model is None:
+        log.warning("bp2vec training aborted — TensorFlow unavailable. Add tensorflow to requirements_army.txt")
+        return
     model.summary()
 
     log.info("Training for %d epochs...", NUM_EPOCHS)
