@@ -99,7 +99,8 @@ _PITCHER_ARSENAL_LHP:  dict[str, dict]   = {}   # str(player_id) → opponent-ba
 
 # Spin direction (2026)
 _spin_direction: dict[tuple, dict] = {}    # (player_id_int, api_pitch_type) → spin stats
-_pitcher_arm_angles: dict[int, dict] = {}  # pitcher_arm_angles.csv — ball_angle, pitch_hand, release_z
+_pitcher_arm_angles: dict[int, dict] = {}  # pitcher_arm_angles.csv
+_swing_take: dict[int, dict] = {}            # swing-take.csv — chase/shadow/waste zone runs
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -537,6 +538,26 @@ def _load() -> None:
             }
         logger.info("[StatcastStatic] pitcher_arm_angles: %d pitchers loaded", len(_pitcher_arm_angles))
 
+        # ── Batter swing-take discipline (swing-take.csv) ────────────────────────
+        # runs_heart/shadow/chase/waste: run value gained/lost per zone decision
+        # Negative runs_chase = losing runs from chasing = more Ks expected
+        for r in _read_csv("swing-take.csv"):
+            try:
+                pid = int(r.get("player_id", 0) or 0)
+                if not pid:
+                    continue
+                pa  = max(1, int(r.get("pa", 1) or 1))
+                _swing_take[pid] = {
+                    "runs_chase_pa":  round(_safe_float(r.get("runs_chase"))  / pa, 5) if r.get("runs_chase")  else None,
+                    "runs_shadow_pa": round(_safe_float(r.get("runs_shadow")) / pa, 5) if r.get("runs_shadow") else None,
+                    "runs_heart_pa":  round(_safe_float(r.get("runs_heart"))  / pa, 5) if r.get("runs_heart")  else None,
+                    "runs_waste_pa":  round(_safe_float(r.get("runs_waste"))  / pa, 5) if r.get("runs_waste")  else None,
+                    "pa": pa,
+                }
+            except (ValueError, TypeError, ZeroDivisionError):
+                continue
+        logger.info("[StatcastStatic] swing_take: %d batters loaded", len(_swing_take))
+
         # ── Bat tracking swing path (bat-tracking-swing-path.csv) ────────────
         # Supplements _batter_tracking with attack_angle, swing_tilt, ideal_attack_rate
         _swing_path_count = 0
@@ -938,6 +959,23 @@ def get_pitcher_arm_angle(player_id: int) -> dict:
     """
     _load()
     return _pitcher_arm_angles.get(int(player_id), {})
+
+
+def get_batter_chase_discipline(player_id: int) -> dict:
+    """Return batter swing-take zone discipline data.
+
+    Keys: runs_chase_pa, runs_shadow_pa, runs_heart_pa, runs_waste_pa, pa
+      runs_chase_pa < 0  → losing runs on chases → high K susceptibility
+      runs_chase_pa > 0  → disciplined or good contact on chase pitches
+
+    Falls back to empty dict if player not in dataset.
+    """
+    if not _LOADED:
+        _load()
+    try:
+        return _swing_take.get(int(player_id), {})
+    except (ValueError, TypeError):
+        return {}
 
 
 # -- Matchup --

@@ -1605,6 +1605,35 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     player, _k_sig, _k_sig_nudge,
                 )
 
+        # ── Arm angle deception signal (pitcher K props) ─────────────────────────
+        # Pitchers with extreme arm angles (very low/submarine or very high/overhand)
+        # generate more deception → more swing-and-miss vs. league-average arm slots.
+        # Signal: deviation from ~42° MLB average; max ±3pp adjustment.
+        if prop_type == "strikeouts":
+            _arm_pid = prop.get("player_id") or prop.get("mlbam_id")
+            if _arm_pid:
+                try:
+                    from statcast_static_layer import get_pitcher_arm_angle as _gaa  # noqa: PLC0415
+                    _arm_data = _gaa(int(_arm_pid))
+                    if _arm_data:
+                        _ball_angle = float(_arm_data.get("ball_angle") or 0)
+                        if _ball_angle > 0:
+                            prop["_ball_angle"] = round(_ball_angle, 1)
+                            # Deviation from 42° MLB average → deception premium
+                            _dev = abs(_ball_angle - 42.0)
+                            # <20°  = submarine (sidearmer) = +2-3pp deception bonus
+                            # 20-30° deviation = moderate deception = +1-2pp
+                            # <10° deviation = generic arm slot = no signal
+                            _arm_k_adj = round(min(0.030, max(0.0, (_dev - 8.0) / 22.0 * 0.030)), 4)
+                            if _arm_k_adj >= 0.005:
+                                prop["_arm_angle_adj"] = _arm_k_adj
+                                logger.debug(
+                                    "[Enrichment] %s arm_angle=%.1f dev=%.1f arm_k_adj=+%.3f",
+                                    player, _ball_angle, _dev, _arm_k_adj,
+                                )
+                except Exception as _aa_err:
+                    logger.debug("[Enrichment] arm_angle skipped for %s: %s", player, _aa_err)
+
         # ── TTOP: Times Through Order Penalty (pitcher K props) ────────────────
         # Approximates expected TTO from l5_ip if not already provided by hub.
         # _tto_k_adj is read by tasklets.py and added to raw_p before EV calc.
@@ -1638,6 +1667,60 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
                     prop["_bpv_adj"] = round(_bpv(int(_b_id), int(_p_id)), 4)
                 except Exception as _bpv_err:
                     logger.debug("[Enrichment] BPV skipped for %s: %s", player, _bpv_err)
+
+            # ── Swing path K-susceptibility (bat-tracking-swing-path.csv) ──────
+            # swing_tilt: high = more uppercut = more Ks (>25° is above avg)
+            # ideal_attack_angle_rate: low = poor mechanics = more Ks (<60% is weak)
+            if _b_id:
+                try:
+                    from statcast_static_layer import get_batter_bat_tracking as _gbt  # noqa: PLC0415
+                    _bt = _gbt(int(_b_id))
+                    if _bt:
+                        _tilt   = float(_bt.get("swing_tilt") or 0)
+                        _ideal  = float(_bt.get("ideal_attack_angle_rate") or 0)
+                        _swing_path_adj = 0.0
+                        if _tilt > 0:
+                            prop["_swing_tilt"] = round(_tilt, 2)
+                            # League avg ~22°; +2.5pp per 12° above average
+                            _swing_path_adj += (_tilt - 22.0) / 12.0 * 0.025
+                        if _ideal > 0:
+                            prop["_ideal_attack_rate"] = round(_ideal, 3)
+                            # League avg ~0.62; low ideal rate = bad mechanics = more Ks
+                            _swing_path_adj += (0.62 - _ideal) / 0.15 * 0.015
+                        _swing_path_adj = round(max(-0.030, min(0.040, _swing_path_adj)), 4)
+                        if abs(_swing_path_adj) >= 0.005:
+                            prop["_swing_path_k_adj"] = _swing_path_adj
+                            logger.debug(
+                                "[Enrichment] %s swing_path_k_adj=%.3f (tilt=%.1f ideal=%.2f)",
+                                player, _swing_path_adj, _tilt, _ideal,
+                            )
+                except Exception as _sp_err:
+                    logger.debug("[Enrichment] swing_path skipped for %s: %s", player, _sp_err)
+
+            # ── Chase zone discipline (swing-take.csv) ─────────────────────────
+            # runs_chase_pa < 0 = losing runs on chases = bad discipline = more Ks
+            # runs_chase_pa > 0 = disciplined = fewer Ks
+            if _b_id:
+                try:
+                    from statcast_static_layer import get_batter_chase_discipline as _gcd  # noqa: PLC0415
+                    _chase_data = _gcd(int(_b_id))
+                    if _chase_data:
+                        _runs_chase_pa = _chase_data.get("runs_chase_pa")
+                        if _runs_chase_pa is not None:
+                            prop["_chase_runs_pa"] = round(_runs_chase_pa, 4)
+                            # -0.04 runs/PA (very undisciplined) → +1.5pp Ks
+                            # +0.04 runs/PA (disciplined) → -1.5pp Ks
+                            _chase_k_adj = round(
+                                max(-0.025, min(0.025, -_runs_chase_pa / 0.04 * 0.015)), 4
+                            )
+                            if abs(_chase_k_adj) >= 0.005:
+                                prop["_chase_discipline_k_adj"] = _chase_k_adj
+                                logger.debug(
+                                    "[Enrichment] %s chase_discipline_k_adj=%.3f (runs/PA=%.4f)",
+                                    player, _chase_k_adj, _runs_chase_pa,
+                                )
+                except Exception as _cd_err:
+                    logger.debug("[Enrichment] chase_discipline skipped for %s: %s", player, _cd_err)
 
         # ── Defense OAA (batter props) ─────────────────────────────────────────
         if is_batter_prop:
@@ -1870,15 +1953,18 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         # +4pp chase + +6pp arsenal = +18pp raw → ~+13pp dampened).
         _all_adjs: list = []
         for _adj_key, _adj_label in [
-            ("_bayesian_nudge", "bayesian"),
-            ("_cv_nudge",        "cv_consistency"),
-            ("_form_adj",        "mlb_form"),
-            ("_chase_k_adj",     "lineup_chase"),
-            ("_drama_penalty_pp", "bernoulli_drama"),
-            ("_arsenal_k_adj",   "arsenal_k_sig"),
-            ("_ump_k_adj",       "umpire"),
-            ("_steamer_adj",     "steamer"),
-            ("_tto_k_adj",       "ttop_decay"),
+            ("_bayesian_nudge",         "bayesian"),
+            ("_cv_nudge",               "cv_consistency"),
+            ("_form_adj",               "mlb_form"),
+            ("_chase_k_adj",            "lineup_chase"),
+            ("_drama_penalty_pp",       "bernoulli_drama"),
+            ("_arsenal_k_adj",          "arsenal_k_sig"),
+            ("_ump_k_adj",              "umpire"),
+            ("_steamer_adj",            "steamer"),
+            ("_tto_k_adj",              "ttop_decay"),
+            ("_arm_angle_adj",          "arm_angle_deception"),
+            ("_swing_path_k_adj",       "swing_path_k"),
+            ("_chase_discipline_k_adj", "chase_discipline_k"),
         ]:
             _v = float(prop.get(_adj_key, 0.0) or 0.0)
             if _v != 0.0:
@@ -1943,7 +2029,10 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             "market_flag": str(prop.get("_market_flag",          "CLEAN")),
             "injury":      round(float(prop.get("_injury_confidence_penalty", 0) or 0), 3),
             "park":        round(float(prop.get("_park_k_factor",          1.0) or 1.0), 3),
-            "lambda_bias": round(float(prop.get("_lambda_bias",           0.0) or 0.0), 4),
+            "lambda_bias":   round(float(prop.get("_lambda_bias",           0.0) or 0.0), 4),
+            "arm_angle":     round(float(prop.get("_arm_angle_adj",         0.0) or 0.0), 4),
+            "swing_path_k":  round(float(prop.get("_swing_path_k_adj",      0.0) or 0.0), 4),
+            "chase_disc_k":  round(float(prop.get("_chase_discipline_k_adj",0.0) or 0.0), 4),
         }
 
         enriched_count += 1
