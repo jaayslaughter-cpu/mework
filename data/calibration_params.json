@@ -29,5 +29,19 @@
     "hits_allowed": 0.4531,
     "overall": 0.2586
   },
-  "notes": "prop_min_prob_overrides: per-prop MIN_PROB gates stricter than global 0.57. fantasy_score set to 0.99 (effectively excluded). hits_allowed excluded pending more data (Brier 0.4531)."
+  "notes": "prop_min_prob_overrides: per-prop MIN_PROB gates stricter than global 0.57. fantasy_score set to 0.99 (effectively excluded). hits_allowed excluded pending more data (Brier 0.4531).",
+  "league_constants": {
+    "_comment": "60/40 blend 2026/2025 \u2014 May 15 2026. Source: BBRef totals through May 14.",
+    "woba": 0.31,
+    "obp": 0.317,
+    "slg": 0.397,
+    "avg": 0.241,
+    "iso": 0.155,
+    "babip": 0.292,
+    "k_pct": 0.224,
+    "bb_pct": 0.091,
+    "era": 4.12,
+    "hr_fb_pct": 0.109,
+    "o_swing": 0.287
+  }
 }

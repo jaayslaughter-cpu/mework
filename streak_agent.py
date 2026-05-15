@@ -575,7 +575,7 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
                     # K-BB% quality adjustment
                     kbb_delta = (kbb - _LG_KP) * 0.5
                     # FIP quality: elite <3.50 adds small boost, high >5.00 subtracts
-                    fip_delta = max(-0.04, min(0.04, (4.06 - fip) * 0.015))
+                    fip_delta = max(-0.04, min(0.04, (4.12 - fip) * 0.015))
                     adj = csw_delta + kbb_delta + fip_delta
                     adj = max(-0.12, min(0.12, adj))  # cap at ±12pp
 
@@ -587,7 +587,7 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
                     era  = stats.get("era", 4.06)
                     # Below-average ERA/FIP → more likely to go deeper (more outs) 
                     # or give up fewer earned runs
-                    quality = (4.06 - ((fip + era) / 2)) * 0.02
+                    quality = (4.12 - ((fip + era) / 2)) * 0.02
                     adj = max(-0.08, min(0.08, quality))
                     if side == "Under":
                         adj = -adj  # inverse for Under on ER
@@ -597,11 +597,11 @@ def evaluate_props_for_streaks(raw_props: list[dict]) -> list[StreakCandidate]:
                 stats = _fg_bat(cand.player_name)
                 if stats:
                     wrc  = stats.get("wrc_plus", _LG_WRC)
-                    woba = stats.get("woba", 0.308)
+                    woba = stats.get("woba", 0.310)
                     xbh  = stats.get("xbh_per_game", 0.50)
                     # wRC+ above 100 → above-average hitter
                     wrc_delta = (wrc - 100.0) * 0.001  # 120 wRC+ → +2pp
-                    woba_delta = (woba - 0.308) * 0.15
+                    woba_delta = (woba - 0.310) * 0.15
                     adj = wrc_delta + woba_delta
                     if pt in ("total_bases", "hits_runs_rbis"):
                         # extra-base hit rate adds more weight for TB props

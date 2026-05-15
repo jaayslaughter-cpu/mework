@@ -34,14 +34,16 @@ logger = logging.getLogger("propiq.pa_model")
 # ── 2025 MLB league-average PA outcome rates ──────────────────────────────
 # Source: FanGraphs 2025 season (confirmed via VSiN Feb 2026)
 LEAGUE_RATES: dict[str, float] = {
-    "K":   0.228,   # strikeout — FG 2026: 22.8% through game 44
-    "BB":  0.083,   # walk — FG 2026: 8.3% through game 44
-    "HBP": 0.011,   # hit by pitch
-    "HR":  0.033,   # home run
-    "3B":  0.004,   # triple
-    "2B":  0.047,   # double
-    "1B":  0.143,   # single
-    "OUT": 0.452,   # field out (K+0.005 BB-0.004 net rounded)
+    # Blended 60/40 2026/2025 — May 15 2026 update
+    # 2026 actuals: BBRef totals through May 14 (49,542 PA, 30 teams)
+    "K":   0.224,   # strikeout — blended (2026: 22.2%, 2025: 22.6%)
+    "BB":  0.091,   # walk — blended (2026: 9.5% ABS effect, 2025: 8.5%)
+    "HBP": 0.011,   # hit by pitch — unchanged
+    "HR":  0.030,   # home run — blended (2026: 2.8%, 2025: 3.3%)
+    "3B":  0.004,   # triple — unchanged
+    "2B":  0.044,   # double — blended (2026: 4.1%, 2025: 4.7%)
+    "1B":  0.141,   # single — blended (2026: 14.0%, 2025: 14.3%)
+    "OUT": 0.455,   # field out — residual to sum=1.000
 }
 assert abs(sum(LEAGUE_RATES.values()) - 1.0) < 0.01, "LEAGUE_RATES must sum to 1"
 
