@@ -99,6 +99,7 @@ _PITCHER_ARSENAL_LHP:  dict[str, dict]   = {}   # str(player_id) → opponent-ba
 
 # Spin direction (2026)
 _spin_direction: dict[tuple, dict] = {}    # (player_id_int, api_pitch_type) → spin stats
+_pitcher_arm_angles: dict[int, dict] = {}  # pitcher_arm_angles.csv — ball_angle, pitch_hand, release_z
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -518,6 +519,44 @@ def _load() -> None:
                 "n_pitches":       _safe_float(r.get("n_pitches")),
             }
 
+        # ── Pitcher arm angles (pitcher_arm_angles.csv) ──────────────────────────
+        for r in _read_csv("pitcher_arm_angles.csv"):
+            pid_s = r.get("pitcher", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            _pitcher_arm_angles[pid] = {
+                "ball_angle":  _safe_float(r.get("ball_angle")),   # degrees: 0=overhead, 90=sidearm
+                "pitch_hand":  r.get("pitch_hand", "").strip(),
+                "release_z":   _safe_float(r.get("release_ball_z")),
+                "shoulder_z":  _safe_float(r.get("shoulder_z")),
+                "n_pitches":   _safe_float(r.get("n_pitches")),
+            }
+        logger.info("[StatcastStatic] pitcher_arm_angles: %d pitchers loaded", len(_pitcher_arm_angles))
+
+        # ── Bat tracking swing path (bat-tracking-swing-path.csv) ────────────
+        # Supplements _batter_tracking with attack_angle, swing_tilt, ideal_attack_rate
+        _swing_path_count = 0
+        for r in _read_csv("bat-tracking-swing-path.csv"):
+            pid_s = r.get("id", "").strip()
+            if not pid_s:
+                continue
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            entry = _batter_tracking.get(pid, {})
+            entry["swing_tilt"]        = _safe_float(r.get("swing_tilt"))        # degrees: higher = more uppercut
+            entry["attack_angle"]      = _safe_float(r.get("attack_angle"))      # degrees: optimal 8–12
+            entry["ideal_attack_rate"] = _safe_float(r.get("ideal_attack_angle_rate"))  # fraction 0–1
+            entry["attack_direction"]  = _safe_float(r.get("attack_direction"))  # + = pull-biased, - = oppo
+            _batter_tracking[pid] = entry
+            _swing_path_count += 1
+        logger.info("[StatcastStatic] bat-tracking-swing-path: %d batters supplemented", _swing_path_count)
+
         # ── Historical batter K% trend (statcast_batters_historical.csv) ──────
         # Store per-player list of {year, k_pct, woba, xwoba, whiff_pct, barrel_pct, hard_hit_pct}
         # Keep 2023 onward (earlier years less predictive)
@@ -580,6 +619,7 @@ def _load() -> None:
             "%d FG proj, %d sprint, %d baserunning, %d spin-dir entries, "
             "%d batter-vs-pitch, %d vs-LHP, %d batter-k-history",
             len(_pitcher_k_rate), len(_pitcher_xera), len(_pitcher_percentiles),
+            len(_pitcher_arm_angles),
             len(_batter_tracking), len(_batter_ev), len(_batter_xstats),
             len(_batter_fg_proj), len(_sprint_speed_data), len(_baserunning_data),
             len(_spin_direction), len(_batter_vs_pitch),
@@ -876,6 +916,28 @@ def get_batter_k_trend(player_id: int) -> dict:
         if earliest_k is not None and latest_k is not None:
             result["trend_delta"] = round(latest_k - earliest_k, 2)
     return result
+
+
+def get_pitcher_arm_angle(player_id: int) -> dict:
+    """Return pitcher arm angle data from pitcher_arm_angles.csv.
+
+    Keys:
+        ball_angle    – degrees from vertical (0 = straight overhead, 90 = pure sidearm)
+        pitch_hand    – 'R' or 'L'
+        release_z     – release height in feet
+        shoulder_z    – shoulder height in feet
+        n_pitches     – sample size
+
+    Deception guide:
+        ball_angle < 20   → nearly overhand — conventional, fewer K via deception
+        ball_angle 20–35  → three-quarter — most common; baseline
+        ball_angle 35–55  → low three-quarter / sidearm — deceptive for same-side batters
+        ball_angle > 55   → submarine — extreme deception vs same-side, easier vs opposite
+
+    Returns {} if not found.
+    """
+    _load()
+    return _pitcher_arm_angles.get(int(player_id), {})
 
 
 # -- Matchup --
