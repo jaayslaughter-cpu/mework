@@ -27,6 +27,23 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ── Read live calibration params (adaptive calibration system) ────────────────
+# Reads data/calibration_params.json written by propiq_adaptive_calibration.py.
+# This ensures calibration_layer.py uses the same lambda_bias and
+# swstr_k9_scale as prop_enrichment_layer.py — previously they were different.
+import os as _os, json as _json
+_CAL_PARAMS_FILE = _os.path.join(_os.path.dirname(__file__), "data", "calibration_params.json")
+try:
+    with open(_CAL_PARAMS_FILE) as _cpf:
+        _CAL_PARAMS = _json.load(_cpf)
+    _LAMBDA_BIAS_CAL    = float(_CAL_PARAMS.get("lambda_bias",    -0.067))
+    _SWSTR_K9_SCALE_CAL = float(_CAL_PARAMS.get("swstr_k9_scale", 16.0))
+    _UMP_SCALE_CAL      = float(_CAL_PARAMS.get("ump_scale",       0.9))
+except Exception:
+    _LAMBDA_BIAS_CAL    = -0.067
+    _SWSTR_K9_SCALE_CAL = 16.0
+    _UMP_SCALE_CAL      = 0.9
+
 # Re-export get_current_brier from drift_monitor so callers can import it from
 # either module without caring which one owns the implementation.
 try:

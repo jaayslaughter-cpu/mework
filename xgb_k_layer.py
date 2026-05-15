@@ -42,7 +42,7 @@ Wiring (F5Agent, tasklets.py):
       if prop_type in ("hits", "fantasy_score") and xgb_hit_ready():
           _xhp = xgb_hit_prob(prop, pitcher_dict)
           if _xhp is not None:
-              model_prob = round(0.70 * model_prob + 0.30 * _xhp * 100, 2)
+              model_prob = round(0.90 * model_prob + 0.10 * _xhp * 100, 2)  # Brier 0.2668 > null 0.25 — reduced to 10%
 
 All functions return None if models not loaded — existing formula runs unchanged.
 

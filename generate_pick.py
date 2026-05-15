@@ -23,6 +23,18 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Read adaptive calibration params ─────────────────────────────────────────
+import os as _gp_os, json as _gp_json
+_GP_CAL_FILE = _gp_os.path.join(_gp_os.path.dirname(__file__), "data", "calibration_params.json")
+try:
+    with open(_GP_CAL_FILE) as _gf:
+        _GP_CAL = _gp_json.load(_gf)
+    _LAMBDA_BIAS_GP = float(_GP_CAL.get("lambda_bias", -0.067))
+    _MIN_PROB_GPS   = _GP_CAL.get("prop_min_prob_overrides", {})
+except Exception:
+    _LAMBDA_BIAS_GP = -0.067
+    _MIN_PROB_GPS   = {}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
@@ -30,7 +42,7 @@ logger = logging.getLogger(__name__)
 MIN_EDGE: float = 0.04           # 4 pp minimum EV over market implied
 BREAK_EVEN: float = 0.5336       # -115 standard UD line break-even
 MAX_PROB: float = 0.82           # hard ceiling — prevents over-confidence
-MIN_PROB: float = 0.30           # hard floor
+MIN_PROB: float = 0.30  # hard floor — per-prop overrides in _MIN_PROB_GPS           # hard floor
 
 # Stat types where zone integrity / shadow whiff matters (pitcher K-props only)
 _PITCHER_K_STATS = {"strikeouts", "pitcher_strikeouts", "k", "ks", "strikeouts_pitcher"}
