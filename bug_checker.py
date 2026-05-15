@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ── Railway log scanner (silent failure detection) ────────────────────────────
 try:
     from layer_coverage_check import _check_layer_coverage, format_layer_embed
-from railway_log_scanner import (
+    from railway_log_scanner import (
         _check_railway_silent_failures,
         _check_pipeline_health,
     )
