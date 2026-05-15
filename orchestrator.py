@@ -1274,6 +1274,40 @@ async def admin_bp2vec_train():
 
 
 
+
+
+@app.get("/admin/walkforward")
+@app.post("/admin/walkforward")
+async def admin_walkforward(folds: int = 3):
+    """Run walk-forward backtest export + fold analysis.
+    Exports graded legs from bet_ledger, runs propiq_walkforward_backtest.py,
+    saves results to data/walkforward_results.json.
+    Usage: POST /admin/walkforward  or  GET /admin/walkforward?folds=5
+    """
+    async def _run_walkforward():
+        try:
+            loop = asyncio.get_event_loop()
+            spec_wf = importlib.util.find_spec("wire_walkforward_backtest")
+            spec_bt = importlib.util.find_spec("propiq_walkforward_backtest")
+            if spec_wf is None or spec_bt is None:
+                logger.warning("[walkforward] Required scripts not found — skipping")
+                return
+            wf_mod = importlib.import_module("wire_walkforward_backtest")
+            bt_mod = importlib.import_module("propiq_walkforward_backtest")
+            await loop.run_in_executor(None, wf_mod.export_from_db)
+            await loop.run_in_executor(None, bt_mod.run, folds)
+            logger.info("[walkforward] Walk-forward backtest complete (%d folds).", folds)
+        except Exception as exc:
+            logger.error("[walkforward] Failed: %s", exc, exc_info=True)
+
+    asyncio.create_task(_run_walkforward())
+    return JSONResponse({
+        "status": "started",
+        "message": f"Walk-forward backtest running in background (~3-5 min, {folds} folds). "
+                   "Results written to data/walkforward_results.json when complete.",
+    })
+
+
 @app.get("/admin/scan-logs")
 async def admin_scan_logs(hours: int = 6):
     """
