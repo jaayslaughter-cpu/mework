@@ -722,7 +722,7 @@ async def lifespan(_app: FastAPI):
         job_bug_checker,
         CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
         id="bug_checker",
-        misfire_grace_time=0,   # never fire if restarted after 10 AM — prevents 8 PM surprises
+        misfire_grace_time=1,   # skip if >1s late (effectively skip on restart) — prevents 8 PM surprises
         coalesce=True,          # fire once max even if multiple misfires stacked
     )
 
