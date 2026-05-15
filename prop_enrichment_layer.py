@@ -683,24 +683,13 @@ def _get_statcast(props: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Step 9 — Marcel projections (3-year weighted prior + current season blend)
 # ---------------------------------------------------------------------------
-_MARCEL_LAYER: object = None
-
 def _get_marcel_adj(player: str, prop_type: str, is_pitcher: bool) -> float:
-    """Return Marcel probability adjustment (max ±0.018).
-    Blends 3 years of FanGraphs data weighted by PA — stabilises early season.
+    """Marcel adjustment — no-op stub.
+    Real Marcel work is done by enrich_prop_with_marcel(prop, hub) in the per-prop
+    loop (see call below).  That function mutates sv_k_pct / sv_xba directly so the
+    adjusted values flow into the XGBoost blend at inference time in tasklets.py.
     """
-    global _MARCEL_LAYER
-    try:
-        from marcel_layer import MarcelLayer, marcel_adjustment  # noqa: PLC0415
-        if _MARCEL_LAYER is None:
-            _MARCEL_LAYER = MarcelLayer()
-        side = "Over"   # Marcel adjustment is symmetric; caller applies sign
-        player_type = "pitcher" if is_pitcher else "batter"
-        data = (_MARCEL_LAYER.get_pitcher(player)
-                if is_pitcher else _MARCEL_LAYER.get_batter(player))
-        return float(marcel_adjustment(prop_type, side, player_type, data) or 0.0)
-    except Exception:
-        return 0.0
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1730,62 +1719,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             except Exception as _def_err:
                 logger.debug("[Enrichment] Defense OAA skipped for %s: %s", player, _def_err)
 
-        # ── Batted-ball profile signal (hits + total_bases) ──────────────────
-        # Uses statcast_static_layer.get_batter_batted_ball() which reads
-        # batted-ball.csv (bbe, gb_rate, air_rate, fb_rate, ld_rate, pull_rate…)
-        #
-        # hits:        LD rate drives BABIP; GB heavy = infield-hit bonus
-        # total_bases: FB rate + pull rate = XBH/HR upside; GB heavy = drag
-        #
-        # Max effect: ±4pp per leg; flows through adjustment dampener.
-        if prop_type in ("hits", "total_bases") and is_batter_prop:
-            _b_id_bb = prop.get("player_id") or prop.get("mlbam_id")
-            if _b_id_bb:
-                try:
-                    from statcast_static_layer import get_batter_batted_ball as _gbb  # noqa: PLC0415
-                    _bb_prof = _gbb(int(_b_id_bb))
-                    if _bb_prof:
-                        _gb_r   = float(_bb_prof.get("gb_rate")   or 0)
-                        _fb_r   = float(_bb_prof.get("fb_rate")   or 0)
-                        _ld_r   = float(_bb_prof.get("ld_rate")   or 0)
-                        _pull_r = float(_bb_prof.get("pull_rate") or 0)
-                        _bb_adj = 0.0
-
-                        if prop_type == "hits":
-                            # LD rate is strongest BABIP driver; MLB avg ~22%
-                            # ±3pp per 6pp deviation from average
-                            if _ld_r > 0:
-                                _bb_adj += (_ld_r - 0.22) / 0.06 * 0.030
-                            # GB-heavy batters (>48%) get slight infield-hit bonus
-                            if _gb_r > 0.48:
-                                _bb_adj += (_gb_r - 0.48) / 0.10 * 0.010
-
-                        elif prop_type == "total_bases":
-                            # High FB rate = more fly balls = more XBH/HRs
-                            # MLB avg air_rate ~0.38 (includes LD + FB)
-                            if _fb_r > 0:
-                                _bb_adj += (_fb_r - 0.22) / 0.08 * 0.030   # FB avg ~22%
-                            # High pull rate = pull-side power = more XBH
-                            if _pull_r > 0:
-                                _bb_adj += (_pull_r - 0.38) / 0.10 * 0.020
-                            # GB-heavy batters suppress total bases
-                            if _gb_r > 0:
-                                _bb_adj -= (_gb_r - 0.40) / 0.10 * 0.015
-
-                        _bb_adj = round(max(-0.040, min(0.040, _bb_adj)), 4)
-                        if abs(_bb_adj) >= 0.005:
-                            prop["_bb_profile_adj"] = _bb_adj
-                            logger.debug(
-                                "[Enrichment] %s %s bb_profile_adj=%.3f "
-                                "(gb=%.2f fb=%.2f ld=%.2f pull=%.2f)",
-                                player, prop_type, _bb_adj,
-                                _gb_r, _fb_r, _ld_r, _pull_r,
-                            )
-                except Exception as _bb_err:
-                    logger.debug(
-                        "[Enrichment] batted_ball skipped for %s: %s", player, _bb_err
-                    )
-
         # ── FIX: Bridge enrichment keys → simulation engine underscore-prefixed keys ──
         # prop_enrichment_layer sets k_rate/k_pct, bb_rate/bb_pct, woba, wrc_plus (no prefix).
         # regardless of who the player is.  Chase Burns and a AAA call-up were identical.
@@ -1949,10 +1882,16 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
         prop["_form_adj"] = _get_form_adj(player, prop_type, hub)
 
         # ── Marcel projection adjustment (weighted 3-year prior) ────────────
+        # enrich_prop_with_marcel mutates sv_k_pct / sv_xba for small-sample regression.
+        # Adjusted values flow into the XGBoost K/hit blend run in tasklets.py.
         _is_pitcher_prop = prop_type in _PITCHER_PROP_TYPES
         _side_for_adj = prop.get("side", "OVER")
-        _marcel_adj = _get_marcel_adj(player, prop_type, _is_pitcher_prop)
-        prop["_marcel_adj"] = _marcel_adj
+        try:
+            from marcel_layer import enrich_prop_with_marcel as _emp  # noqa: PLC0415
+            prop = _emp(prop, hub)
+        except Exception:
+            pass
+        prop["_marcel_adj"] = prop.get("_marcel_k_pct") or prop.get("_marcel_hit_rate") or 0.0
 
         # ── Predict+ score (pitcher K unpredictability, K props only) ─────────
         _pp_adj = _get_predict_plus_adj(
@@ -2021,7 +1960,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             ("_arm_angle_adj",          "arm_angle_deception"),
             ("_swing_path_k_adj",       "swing_path_k"),
             ("_chase_discipline_k_adj", "chase_discipline_k"),
-            ("_bb_profile_adj",          "bb_profile"),
         ]:
             _v = float(prop.get(_adj_key, 0.0) or 0.0)
             if _v != 0.0:
@@ -2090,7 +2028,6 @@ def enrich_props(props: list[dict], hub: dict, season: int | None = None) -> lis
             "arm_angle":     round(float(prop.get("_arm_angle_adj",         0.0) or 0.0), 4),
             "swing_path_k":  round(float(prop.get("_swing_path_k_adj",      0.0) or 0.0), 4),
             "chase_disc_k":  round(float(prop.get("_chase_discipline_k_adj",0.0) or 0.0), 4),
-            "bb_profile":    round(float(prop.get("_bb_profile_adj",           0.0) or 0.0), 4),
         }
 
         enriched_count += 1

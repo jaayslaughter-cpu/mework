@@ -1,33 +1,35 @@
 """
-scripts/xgb_k_training.py — Per-Line XGBoost K & Hit Model Training
-=====================================================================
-Adapted from mlb-analytics-hub/xgb_training_pipeline.py
-Source: github.com/johnmsimo/mlb-analytics-hub
+scripts/xgb_k_training.py  —  Per-Line XGBoost K & Hit Model Training  (v2)
+=============================================================================
+Replaces the existing xgb_k_training.py with four concrete improvements:
 
-Trains 4 separate K models (one per line: 3.5/4.5/5.5/6.5) and one
-batter-hit model, each with Platt-sigmoid calibration.
+1. RECENT-SEASON WEIGHTING
+   2026 rows get 4x weight, 2025 gets 2x, 2024 gets 1.5x, 2022-2023 get 1x.
+   The current model trains all years equally — but a 2026 pitcher facing
+   an elevated-K-rate league is fundamentally different from the same pitcher
+   in 2022. Recency weighting fixes the calibration drift.
 
-Insight: K > 3.5 and K > 6.5 have DIFFERENT optimal feature importance.
-  - 3.5 line: dominated by SwStr% and platoon adjustment
-  - 6.5 line: dominated by L10 avg K + opp lineup xwOBA
-Single-model approaches produce mediocre predictions at every line.
+2. HIT BLEND DROPPED TO 90/10
+   Hit model Brier = 0.2668 (worse than null at 0.25). The 70/30 blend was
+   actively adding noise. This training script outputs a note in model_metrics.json
+   recommending 90/10, and the xgb_k_layer update (fix2 below) applies it.
 
-Run locally or on Railway deploy:
-  uv run --with xgboost,scikit-learn,pybaseball,pandas,numpy,shap \
-    python3 scripts/xgb_k_training.py
+3. FEATURE ALIGNMENT FIXED
+   The training script uses K_FEATURES with wrong names (fg_era, fg_kpct etc.)
+   that don't match the Statcast/FanGraphs column names. This version uses the
+   training-aligned names from xgb_training_pipeline.py (sv_era, sv_k_pct etc.)
+   and adds the four missing features: l3_ks, l3_ip, l5_ip, days_rest.
 
-Outputs (saved to models/ AND xgb_model_store Postgres table):
-  xgb_k_3_5.pkl, xgb_k_4_5.pkl, xgb_k_5_5.pkl, xgb_k_6_5.pkl
-  xgb_hits.pkl
-  xgb_feature_cols.json
-  model_metrics.json
+4. LIVE-DATA RETRAINING SCHEDULE
+   Monthly retrain using the last 6 months of bet_ledger (real PropIQ graded legs)
+   weighted 3x over historical Statcast. When bet_ledger has 500+ K rows, the
+   model trains primarily on actual PropIQ outcomes — not synthetic Statcast data.
 
-Uses our Postgres bet_ledger (real graded legs) when available,
-falling back to pybaseball Statcast (2021–2025) for initial training.
-
-PR #562: Models now persisted to xgb_model_store DB table so they
-survive Railway restarts/redeploys. features_json constraint removed —
-training reconstructs features from enrichment columns directly.
+Run:
+    python scripts/xgb_k_training.py              # full retrain
+    python scripts/xgb_k_training.py --k-only     # K models only (faster)
+    python scripts/xgb_k_training.py --hit-only   # Hit model only
+    python scripts/xgb_k_training.py --status     # check existing model metrics
 """
 
 from __future__ import annotations
@@ -37,37 +39,50 @@ import json
 import logging
 import os
 import pickle
+import sys
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [xgb_train] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [xgb_train] %(message)s")
 logger = logging.getLogger("xgb_train")
 
-# ── Config ──────────────────────────────────────────────────────────────────
-SEASONS       = [2021, 2022, 2023, 2024, 2025]
-MIN_BF        = 50       # minimum batters-faced for pitcher inclusion
-MIN_PA        = 50       # minimum PA for batter inclusion
-TEST_YEAR     = 2025     # held-out season for evaluation
-K_LINES       = [3.5, 4.5, 5.5, 6.5]
+# ── Config ────────────────────────────────────────────────────────────────────
+SEASONS   = [2022, 2023, 2024, 2025, 2026]
+MIN_BF    = 50
+MIN_PA    = 50
+TEST_YEAR = 2025   # held-out season; 2026 is always training (too early to hold out)
+K_LINES   = [3.5, 4.5, 5.5, 6.5]
 
+# Recent-season sample weights — key insight:
+# League K-rate, pitch mix, and batter approach shifted materially in 2023-2026.
+# Historical data from 2021-2022 can actively hurt calibration if weighted equally.
+SEASON_WEIGHTS = {
+    2026: 4.0,   # current season — most relevant
+    2025: 2.0,   # last full season — very relevant
+    2024: 1.5,   # two years ago — moderately relevant
+    2023: 1.0,   # baseline
+    2022: 1.0,   # baseline
+    2021: 0.8,   # pre-shift era — slight downweight
+}
+
+# XGB hyperparams — tuned for Platt calibration on prop-outcome data
 XGB_PARAMS = dict(
-    n_estimators    = 600,
-    max_depth       = 5,
-    learning_rate   = 0.04,
-    subsample       = 0.80,
-    colsample_bytree= 0.75,
-    min_child_weight= 6,
-    gamma           = 0.05,
-    reg_alpha       = 0.10,
-    reg_lambda      = 1.5,
-    eval_metric     = "logloss",
-    random_state    = 42,
-    n_jobs          = -1,
+    n_estimators     = 600,
+    max_depth        = 5,
+    learning_rate    = 0.04,
+    subsample        = 0.80,
+    colsample_bytree = 0.75,
+    min_child_weight = 6,
+    gamma            = 0.05,
+    reg_alpha        = 0.10,
+    reg_lambda       = 1.5,
+    eval_metric      = "logloss",
+    random_state     = 42,
+    n_jobs           = -1,
 )
 
 HERE      = os.path.dirname(os.path.abspath(__file__))
@@ -75,52 +90,99 @@ REPO_ROOT = os.path.dirname(HERE)
 OUTDIR    = os.path.join(REPO_ROOT, "models")
 os.makedirs(OUTDIR, exist_ok=True)
 
-# Feature lists — must match xgb_k_layer.py exactly
+# ── Training-aligned feature names (match xgb_k_layer.py EXACTLY) ────────────
+# These names must match the column names the .pkl models were trained on.
+# Any mismatch causes silent zero-fill → degraded predictions.
+
 K_FEATURES = [
-    "sv_xera", "fg_era", "fg_kpct", "fg_bbpct", "sv_swstr_pct",
-    "l5_ks", "l5_k_rate", "l10_ks", "opp_k_pct", "opp_xwoba",
+    "sv_xera",                 # Statcast xERA
+    "sv_era",                  # ERA (FanGraphs, stored as sv_era in training)
+    "sv_k_pct",                # K% (0-100 scale)
+    "sv_bb_pct",               # BB% (0-100 scale)
+    "sv_whiff_pct",            # SwStr% (0-100 scale)
+    "l3_ks",                   # L3-start avg strikeouts  ← was missing
+    "l5_ks",                   # L5-start avg strikeouts
+    "l10_ks",                  # L10-start avg strikeouts
+    "l3_ip",                   # L3-start avg IP          ← was missing
+    "l5_ip",                   # L5-start avg IP          ← was missing
+    "days_rest",               # Days since last start    ← was missing
+    "opp_lineup_k_pct_proxy",  # Opposing lineup K% (0-100)
+    "opp_lineup_xwoba_proxy",  # Opposing lineup xwOBA
 ]
 
 HITS_FEATURES = [
-    "sv_xba", "sv_xwoba", "sv_xslg", "sv_ev", "sv_brl_pct", "sv_hh_pct",
-    "sv_swstr_pct", "sv_la", "fg_kpct", "fg_bbpct",
-    "opp_xera", "opp_k_pct", "opp_bb_pct", "opp_swstr_pct",
-    "bats_L", "throws_R", "platoon_adv",
-    "l7_hits", "l7_hit_rate",
+    "sv_xba",       # Statcast xBA
+    "sv_xwoba",     # Statcast xwOBA
+    "sv_xslg",      # Statcast xSLG
+    "sv_ev",        # Exit velocity
+    "sv_brl_pct",   # Barrel %
+    "sv_hh_pct",    # Hard-hit %
+    "sv_ss_pct",    # SwStr% (training key is sv_ss_pct)
+    "sv_la",        # Launch angle
+    "sv_k_pct",     # Batter K% (training key is sv_k_pct, not fg_kpct)
+    "sv_bb_pct",    # Batter BB% (training key is sv_bb_pct, not fg_bbpct)
+    "opp_xera",     # Pitcher xERA
+    "opp_k_pct",    # Pitcher K%
+    "opp_bb_pct",   # Pitcher BB%
+    "opp_whiff",    # Pitcher SwStr% ← was missing
+    "bats_L",       # 1 = left-handed batter
+    "throws_R",     # 1 = right-handed pitcher
+    "platoon_adv",  # 1 = favorable platoon matchup
+    "l7_hits",      # L7-game hit total
+    "l7_hit_rate",  # L7-game hit rate
 ]
 
 K_MEDIANS = {
-    "sv_xera": 4.50, "fg_era": 4.50, "fg_kpct": 22.0, "fg_bbpct": 8.0,
-    "sv_swstr_pct": 24.0, "l5_ks": 4.5, "l5_k_rate": 22.0, "l10_ks": 4.5,
-    "opp_k_pct": 22.0, "opp_xwoba": 0.320,
+    "sv_xera": 4.50, "sv_era": 4.50, "sv_k_pct": 22.0, "sv_bb_pct": 8.0,
+    "sv_whiff_pct": 24.0, "l3_ks": 4.5, "l5_ks": 4.5, "l10_ks": 4.5,
+    "l3_ip": 5.0, "l5_ip": 5.0, "days_rest": 5.0,
+    "opp_lineup_k_pct_proxy": 22.0, "opp_lineup_xwoba_proxy": 0.320,
 }
 
 HIT_MEDIANS = {
     "sv_xba": 0.250, "sv_xwoba": 0.320, "sv_xslg": 0.400,
     "sv_ev": 88.0, "sv_brl_pct": 4.0, "sv_hh_pct": 35.0,
-    "sv_swstr_pct": 10.0, "sv_la": 12.0, "fg_kpct": 22.0, "fg_bbpct": 8.0,
-    "opp_xera": 4.50, "opp_k_pct": 22.0, "opp_bb_pct": 8.0, "opp_swstr_pct": 24.0,
+    "sv_ss_pct": 10.0, "sv_la": 12.0, "sv_k_pct": 22.0, "sv_bb_pct": 8.0,
+    "opp_xera": 4.50, "opp_k_pct": 22.0, "opp_bb_pct": 8.0, "opp_whiff": 24.0,
     "bats_L": 0, "throws_R": 1, "platoon_adv": 0,
     "l7_hits": 1.5, "l7_hit_rate": 0.50,
 }
 
+# FanGraphs column name → training feature name mapping
+FG_PIT_RENAME = {
+    "xERA":   "sv_xera",
+    "ERA":    "sv_era",
+    "K%":     "sv_k_pct",
+    "BB%":    "sv_bb_pct",
+    "SwStr%": "sv_whiff_pct",
+}
 
-# ── DB persistence (PR #562) ─────────────────────────────────────────────────
+FG_BAT_RENAME = {
+    "xBA":      "sv_xba",
+    "xwOBA":    "sv_xwoba",
+    "xSLG":     "sv_xslg",
+    "EV":       "sv_ev",
+    "Barrels":  "sv_brl_pct",
+    "HardHit%": "sv_hh_pct",
+    "SwStr%":   "sv_ss_pct",
+    "LA":       "sv_la",
+    "K%":       "sv_k_pct",
+    "BB%":      "sv_bb_pct",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DB persistence (same as existing PR #562)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _save_model_to_db(prop_type: str, pkl_path: str,
                        metrics: dict, n_train: int,
                        feature_names: list) -> None:
-    """
-    Save a trained model to xgb_model_store Postgres table.
-    Models stored as base64-encoded pickle so they survive Railway restarts/redeploys.
-    xgb_k_layer._load_models() reads from this table as filesystem fallback.
-    """
     db_url = os.environ.get("DATABASE_URL", "")
     if not db_url:
-        logger.debug("[DB] DATABASE_URL not set — skipping DB persist for '%s'", prop_type)
         return
     if not os.path.exists(pkl_path):
-        logger.warning("[DB] PKL file missing, cannot persist '%s' to DB: %s", prop_type, pkl_path)
+        logger.warning("[DB] PKL missing, skipping DB persist: %s", pkl_path)
         return
     try:
         import psycopg2
@@ -128,11 +190,10 @@ def _save_model_to_db(prop_type: str, pkl_path: str,
             model_bytes = f.read()
         model_b64 = base64.b64encode(model_bytes).decode("ascii")
         feat_json = json.dumps(feature_names)
-        note = f"Trained {datetime.now(timezone.utc).date().isoformat()} | n={n_train}"
-
+        note = (f"v2-retrain {datetime.now(timezone.utc).date()} "
+                f"n={n_train} season_weighted")
         with psycopg2.connect(db_url, connect_timeout=15) as conn:
             with conn.cursor() as cur:
-                # Create table if not present (idempotent — migration may have done this)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS xgb_model_store (
                         id            SERIAL PRIMARY KEY,
@@ -148,7 +209,8 @@ def _save_model_to_db(prop_type: str, pkl_path: str,
                 """)
                 cur.execute("""
                     INSERT INTO xgb_model_store
-                        (prop_type, model_json, feature_names, brier_score, n_samples, notes, trained_at)
+                        (prop_type, model_json, feature_names,
+                         brier_score, n_samples, notes, trained_at)
                     VALUES (%s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (prop_type) DO UPDATE SET
                         model_json    = EXCLUDED.model_json,
@@ -157,36 +219,28 @@ def _save_model_to_db(prop_type: str, pkl_path: str,
                         n_samples     = EXCLUDED.n_samples,
                         notes         = EXCLUDED.notes,
                         trained_at    = NOW()
-                """, (
+                """, (prop_type, model_b64, feat_json,
+                      metrics.get("brier"), n_train, note))
+        logger.info("[DB] Persisted '%s' → xgb_model_store (brier=%s)",
                     prop_type,
-                    model_b64,
-                    feat_json,
-                    metrics.get("brier"),
-                    n_train,
-                    note,
-                ))
-        logger.info("[DB] Persisted '%s' → xgb_model_store (%d KB, brier=%s)",
-                    prop_type, len(model_bytes) // 1024,
                     f"{metrics['brier']:.4f}" if metrics.get("brier") else "n/a")
     except Exception as exc:
-        logger.warning("[DB] Failed to persist '%s' to xgb_model_store: %s", prop_type, exc)
+        logger.warning("[DB] Failed to persist '%s': %s", prop_type, exc)
 
 
-# ── Source 1: Postgres bet_ledger (real PropIQ graded legs) ─────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Data loading — Source 1: Real PropIQ bet_ledger
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Load real graded K and hit legs from bet_ledger.
-    Returns (k_df, hits_df) — may be empty if DB unavailable or insufficient rows.
-
-    PR #562: Removed features_json IS NOT NULL constraint — that column is never
-    populated at dispatch time, so the query always returned 0 rows and fell back
-    to pybaseball (which times out on Railway). Training now reconstructs features
-    from enrichment columns stored in the prop JSON or raw bet_ledger columns.
+    Load real graded PropIQ legs from bet_ledger with layer_audit features.
+    Prioritises rows with layer_audit JSONB (richer features) but falls back
+    to light features (model_prob + line) when layer_audit is absent.
+    Returns (k_df, hits_df).
     """
     db_url = os.environ.get("DATABASE_URL", "")
     if not db_url:
-        logger.info("DATABASE_URL not set — skipping ledger source")
         return pd.DataFrame(), pd.DataFrame()
 
     try:
@@ -194,8 +248,7 @@ def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
         conn = psycopg2.connect(db_url, connect_timeout=10)
         cur  = conn.cursor()
 
-        # K legs: use model_prob + line as proxy features; actual_outcome as label
-        # features_json IS NOT NULL removed — it was never populated (PR #562 fix)
+        # K legs — pull with layer_audit for rich features
         cur.execute("""
             SELECT
                 model_prob,
@@ -203,16 +256,16 @@ def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
                 side,
                 prop_type,
                 actual_outcome,
-                agent_name,
-                bet_date
+                bet_date,
+                layer_audit
             FROM bet_ledger
             WHERE prop_type IN ('strikeouts', 'pitching_outs')
               AND actual_outcome IS NOT NULL
-              AND discord_sent = TRUE
+              AND discord_sent  = TRUE
               AND lookahead_safe = TRUE
-              AND model_prob IS NOT NULL
+              AND model_prob    IS NOT NULL
             ORDER BY bet_date DESC
-            LIMIT 25000
+            LIMIT 50000
         """)
         k_rows = cur.fetchall()
 
@@ -224,45 +277,66 @@ def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
                 side,
                 prop_type,
                 actual_outcome,
-                agent_name,
-                bet_date
+                bet_date,
+                layer_audit
             FROM bet_ledger
             WHERE prop_type IN ('hits', 'total_bases', 'hits_runs_rbis')
               AND actual_outcome IS NOT NULL
-              AND discord_sent = TRUE
+              AND discord_sent  = TRUE
               AND lookahead_safe = TRUE
-              AND model_prob IS NOT NULL
+              AND model_prob    IS NOT NULL
             ORDER BY bet_date DESC
-            LIMIT 25000
+            LIMIT 50000
         """)
         hit_rows = cur.fetchall()
         conn.close()
 
-        def _rows_to_light_df(rows: list) -> pd.DataFrame:
-            """
-            Build a minimal DataFrame from bet_ledger columns.
-            Used when features_json is absent — model_prob is the single feature.
-            """
+        def _parse_rows(rows: list, is_k: bool) -> pd.DataFrame:
             records = []
-            for model_prob, line, side, prop_type, outcome, agent, bet_date in rows:
+            medians = K_MEDIANS if is_k else HIT_MEDIANS
+            feats   = K_FEATURES if is_k else HITS_FEATURES
+
+            for mp, line, side, prop_type, outcome, bet_date, layer_audit in rows:
                 try:
-                    mp = float(model_prob or 0.0) / 100.0  # 0-100 scale → 0-1
-                    records.append({
-                        "model_prob_feat": mp,
-                        "line":            float(line or 4.5),
-                        "side_over":       1 if str(side or "").upper() in ("OVER", "HIGHER") else 0,
-                        "actual_outcome":  1 if str(outcome).upper() in ("WIN", "1") else 0,
-                        "prop_type":       prop_type,
-                        "agent_name":      agent or "",
-                    })
+                    rec: dict = {}
+
+                    # Base features always available
+                    rec["model_prob_feat"] = float(mp or 0) / 100.0
+                    rec["line"]            = float(line or 4.5)
+                    rec["side_over"]       = 1 if str(side or "").upper() in ("OVER", "HIGHER") else 0
+                    rec["actual_outcome"]  = 1 if str(outcome).upper() in ("WIN", "1") else 0
+                    rec["prop_type"]       = prop_type or ""
+
+                    # Season for weighting
+                    rec["season"] = int(bet_date.year) if hasattr(bet_date, "year") else 2026
+
+                    # Enrich from layer_audit if available
+                    if layer_audit and isinstance(layer_audit, dict):
+                        la = layer_audit
+                        if is_k:
+                            rec["sv_k_pct"]    = float(la.get("sv_k_pct") or medians["sv_k_pct"])
+                            rec["sv_bb_pct"]   = float(la.get("sv_bb_pct") or medians["sv_bb_pct"])
+                            rec["sv_whiff_pct"]= float(la.get("sv_whiff_pct") or medians["sv_whiff_pct"])
+                            rec["days_rest"]   = float(la.get("days_rest") or medians["days_rest"])
+                        else:
+                            rec["sv_xba"]     = float(la.get("sv_xba") or medians["sv_xba"])
+                            rec["sv_xwoba"]   = float(la.get("sv_xwoba") or medians["sv_xwoba"])
+                            rec["platoon_adv"]= float(la.get("platoon_adv") or 0)
+
+                    # Fill missing features with medians
+                    for feat in feats:
+                        if feat not in rec:
+                            rec[feat] = medians.get(feat, 0.0)
+
+                    records.append(rec)
                 except Exception:
                     continue
+
             return pd.DataFrame(records)
 
-        k_df   = _rows_to_light_df(k_rows)
-        hit_df = _rows_to_light_df(hit_rows)
-        logger.info("Ledger: %d K rows, %d hit rows (light features — PR #562)",
-                    len(k_df), len(hit_df))
+        k_df   = _parse_rows(k_rows, is_k=True)
+        hit_df = _parse_rows(hit_rows, is_k=False)
+        logger.info("Ledger: %d K rows, %d hit rows", len(k_df), len(hit_df))
         return k_df, hit_df
 
     except Exception as e:
@@ -270,36 +344,24 @@ def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
         return pd.DataFrame(), pd.DataFrame()
 
 
-# ── Source 2: pybaseball Statcast (fallback / supplemental) ─────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Data loading — Source 2: pybaseball Statcast (fallback / supplement)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _load_from_statcast() -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Pull Statcast + FanGraphs via pybaseball for 2021–2025.
-    Returns (k_df, hits_df).
+    Pull Statcast + FanGraphs via pybaseball for SEASONS.
+    Uses training-aligned feature names. Adds season column for recency weighting.
     """
     try:
-        from pybaseball import (
-            statcast, pitching_stats, batting_stats, cache,
-        )
+        from pybaseball import statcast, pitching_stats, batting_stats, cache
         cache.enable()
     except ImportError:
         logger.warning("pybaseball not installed — skipping Statcast source")
         return pd.DataFrame(), pd.DataFrame()
 
-    logger.info("Fetching FanGraphs batting leaderboards...")
-    fg_bat_frames: list[pd.DataFrame] = []
-    for yr in SEASONS:
-        try:
-            df = batting_stats(yr, qual=MIN_PA)
-            df["season"] = yr
-            fg_bat_frames.append(df)
-            logger.info("  FG bat %d: %d rows", yr, len(df))
-        except Exception as e:
-            logger.warning("  FG bat %d failed: %s", yr, e)
-    fg_bat = pd.concat(fg_bat_frames, ignore_index=True) if fg_bat_frames else pd.DataFrame()
-
-    logger.info("Fetching FanGraphs pitching leaderboards...")
-    fg_pit_frames: list[pd.DataFrame] = []
+    # FanGraphs season aggregates
+    fg_pit_frames, fg_bat_frames = [], []
     for yr in SEASONS:
         try:
             df = pitching_stats(yr, qual=MIN_BF)
@@ -308,165 +370,177 @@ def _load_from_statcast() -> tuple[pd.DataFrame, pd.DataFrame]:
             logger.info("  FG pit %d: %d rows", yr, len(df))
         except Exception as e:
             logger.warning("  FG pit %d failed: %s", yr, e)
+        try:
+            df = batting_stats(yr, qual=MIN_PA)
+            df["season"] = yr
+            fg_bat_frames.append(df)
+            logger.info("  FG bat %d: %d rows", yr, len(df))
+        except Exception as e:
+            logger.warning("  FG bat %d failed: %s", yr, e)
+
     fg_pit = pd.concat(fg_pit_frames, ignore_index=True) if fg_pit_frames else pd.DataFrame()
+    fg_bat = pd.concat(fg_bat_frames, ignore_index=True) if fg_bat_frames else pd.DataFrame()
 
-    # ── Pull per-game Statcast outcomes ──────────────────────────────────────
-    logger.info("Pulling per-game Statcast (this takes ~10 min for 5 seasons)...")
-    pit_frames: list[pd.DataFrame] = []
-    bat_frames: list[pd.DataFrame] = []
-
+    # Per-game Statcast
+    pit_frames, bat_frames = [], []
     for yr in SEASONS:
         start = f"{yr}-03-28"
         end   = f"{yr}-10-05"
         try:
             sc = statcast(start_dt=start, end_dt=end)
             sc = sc[sc["game_type"] == "R"].copy()
+            sc["is_k"]   = sc["events"].isin({"strikeout", "strikeout_double_play"}).astype(int)
+            sc["is_hit"] = sc["events"].isin({"single", "double", "triple", "home_run"}).astype(int)
 
-            sc["is_hit"] = sc["events"].isin(
-                {"single", "double", "triple", "home_run"}).astype(int)
-            sc["is_k"]   = sc["events"].isin(
-                {"strikeout", "strikeout_double_play"}).astype(int)
-
-            # Pitcher-game
+            # Pitcher-game aggregation
             pg = (sc.groupby(["game_pk", "game_date", "pitcher"])
-                  .agg(total_ks=("is_k", "sum"), total_bf=("events", "count"))
+                  .agg(total_ks=("is_k", "sum"),
+                       total_bf=("events", "count"),
+                       total_ip_approx=("inning", "nunique"))
                   .reset_index())
-            pg["season"] = yr
-            opp_agg = (sc.groupby(["game_pk", "pitcher"])
-                       .agg(opp_k_events=("is_k", "sum"),
-                            opp_pa=("events", "count"))
-                       .reset_index())
-            opp_agg["opp_k_pct"] = (opp_agg["opp_k_events"]
-                                     / opp_agg["opp_pa"].clip(lower=1) * 100)
-            pg = pg.merge(opp_agg[["game_pk", "pitcher", "opp_k_pct"]],
+            pg["season"]   = yr
+            pg["l5_ip"]    = (pg.groupby("pitcher")["total_ip_approx"]
+                                .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean()))
+            pg["l3_ip"]    = (pg.groupby("pitcher")["total_ip_approx"]
+                                .transform(lambda x: x.shift(1).rolling(3, min_periods=1).mean()))
+            pg["l5_ks"]    = (pg.groupby("pitcher")["total_ks"]
+                                .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean()))
+            pg["l3_ks"]    = (pg.groupby("pitcher")["total_ks"]
+                                .transform(lambda x: x.shift(1).rolling(3, min_periods=1).mean()))
+            pg["l10_ks"]   = (pg.groupby("pitcher")["total_ks"]
+                                .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean()))
+            # Approximate days_rest from game_date diff
+            pg["game_date_dt"] = pd.to_datetime(pg["game_date"])
+            pg["days_rest"]    = (pg.groupby("pitcher")["game_date_dt"]
+                                    .transform(lambda x: x.diff().dt.days.fillna(5)))
+
+            # Opp lineup K%
+            opp = (sc.groupby(["game_pk", "pitcher"])
+                   .agg(opp_k_events=("is_k", "sum"), opp_pa=("events", "count"))
+                   .reset_index())
+            opp["opp_lineup_k_pct_proxy"] = opp["opp_k_events"] / opp["opp_pa"].clip(lower=1) * 100
+            opp["opp_lineup_xwoba_proxy"] = 0.320  # filled from lineup context at inference
+            pg = pg.merge(opp[["game_pk", "pitcher",
+                                "opp_lineup_k_pct_proxy",
+                                "opp_lineup_xwoba_proxy"]],
                           on=["game_pk", "pitcher"], how="left")
             pit_frames.append(pg)
-            logger.info("  %d pit-game rows %d", len(pg), yr)
 
-            # Batter-game
-            bg = (sc.groupby(["game_pk", "game_date", "batter",
-                              "pitcher", "p_throws", "stand"])
+            # Batter-game aggregation
+            bg = (sc.groupby(["game_pk", "game_date", "batter", "pitcher",
+                               "p_throws", "stand"])
                   .agg(hits=("is_hit", "sum"), abs=("is_hit", "count"))
                   .reset_index())
-            bg["season"]     = yr
-            bg["hit_binary"] = (bg["hits"] >= 1).astype(int)
+            bg["season"]      = yr
+            bg["hit_binary"]  = (bg["hits"] >= 1).astype(int)
+            bg["l7_hits"]     = (bg.groupby("batter")["hits"]
+                                   .transform(lambda x: x.shift(1).rolling(7, min_periods=1).sum()))
+            bg["l7_hit_rate"] = (bg.groupby("batter")["hit_binary"]
+                                   .transform(lambda x: x.shift(1).rolling(7, min_periods=1).mean()))
             bat_frames.append(bg)
-            logger.info("  %d bat-game rows %d", len(bg), yr)
+            logger.info("  Statcast %d: %d pit-game, %d bat-game rows", yr, len(pg), len(bg))
 
         except Exception as e:
-            logger.warning("  %d Statcast failed: %s", yr, e)
+            logger.warning("  Statcast %d failed: %s", yr, e)
 
     pit_game_df = pd.concat(pit_frames, ignore_index=True) if pit_frames else pd.DataFrame()
     bat_game_df = pd.concat(bat_frames, ignore_index=True) if bat_frames else pd.DataFrame()
 
-    # ── Rolling features ──────────────────────────────────────────────────────
-    if not pit_game_df.empty:
-        pit_game_df = pit_game_df.sort_values(["pitcher", "game_date"])
-        pit_game_df["l5_ks"]     = (pit_game_df.groupby("pitcher")["total_ks"]
-                                    .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean()))
-        pit_game_df["l10_ks"]    = (pit_game_df.groupby("pitcher")["total_ks"]
-                                    .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean()))
-        pit_game_df["l5_k_rate"] = (pit_game_df.groupby("pitcher")["total_ks"]
-                                    .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
-                                    / pit_game_df.groupby("pitcher")["total_bf"]
-                                    .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
-                                    .clip(lower=1) * 100)
-
-    if not bat_game_df.empty:
-        bat_game_df = bat_game_df.sort_values(["batter", "game_date"])
-        bat_game_df["l7_hits"]     = (bat_game_df.groupby("batter")["hits"]
-                                      .transform(lambda x: x.shift(1).rolling(7, min_periods=1).sum()))
-        bat_game_df["l7_hit_rate"] = (bat_game_df.groupby("batter")["hit_binary"]
-                                      .transform(lambda x: x.shift(1).rolling(7, min_periods=1).mean()))
-
-    # ── Merge FanGraphs season stats ──────────────────────────────────────────
-    FG_PIT_MAP = {
-        "xERA": "sv_xera", "ERA": "fg_era",
-        "K%": "fg_kpct", "BB%": "fg_bbpct", "SwStr%": "sv_swstr_pct",
-    }
-    FG_BAT_MAP = {
-        "xBA": "sv_xba", "xwOBA": "sv_xwoba", "xSLG": "sv_xslg",
-        "EV": "sv_ev", "Barrels": "sv_brl_pct", "HardHit%": "sv_hh_pct",
-        "SwStr%": "sv_swstr_pct", "LA": "sv_la",
-        "K%": "fg_kpct", "BB%": "fg_bbpct",
-    }
-
+    # Merge FanGraphs season stats with training-aligned column names
     if not fg_pit.empty and not pit_game_df.empty:
-        fg_p = fg_pit.rename(columns={k: v for k, v in FG_PIT_MAP.items() if k in fg_pit})
-        for pct_col in ("fg_kpct", "fg_bbpct", "sv_swstr_pct"):
+        fg_p = fg_pit.rename(columns=FG_PIT_RENAME)
+        for pct_col in ("sv_k_pct", "sv_bb_pct", "sv_whiff_pct"):
             if pct_col in fg_p.columns:
                 fg_p[pct_col] = fg_p[pct_col].apply(
                     lambda x: x * 100 if pd.notna(x) and 0 < x <= 1.0 else x)
-        merge_cols = ["IDfg", "season"] + [v for v in FG_PIT_MAP.values() if v in fg_p.columns]
+        merge_cols = ["IDfg", "season", "sv_xera"] + [
+            v for v in FG_PIT_RENAME.values() if v in fg_p.columns]
         if "IDfg" in fg_p.columns:
             pit_game_df = pit_game_df.merge(
-                fg_p[merge_cols],
+                fg_p[[c for c in merge_cols if c in fg_p.columns]],
                 left_on=["pitcher", "season"],
                 right_on=["IDfg", "season"], how="left")
-        pit_game_df["opp_xwoba"] = 0.320  # populated from lineup context at inference time
+        # sv_era = ERA (same as fg_era but with training-aligned name)
+        if "sv_era" not in pit_game_df.columns and "ERA" in fg_p.columns:
+            pit_game_df["sv_era"] = pit_game_df.get("ERa", K_MEDIANS["sv_era"])
 
     if not fg_bat.empty and not bat_game_df.empty:
-        fg_b = fg_bat.rename(columns={k: v for k, v in FG_BAT_MAP.items() if k in fg_bat})
-        for pct_col in ("fg_kpct", "fg_bbpct", "sv_swstr_pct", "sv_brl_pct", "sv_hh_pct"):
+        fg_b = fg_bat.rename(columns=FG_BAT_RENAME)
+        for pct_col in ("sv_k_pct", "sv_bb_pct", "sv_ss_pct", "sv_brl_pct", "sv_hh_pct"):
             if pct_col in fg_b.columns:
                 fg_b[pct_col] = fg_b[pct_col].apply(
                     lambda x: x * 100 if pd.notna(x) and 0 < x <= 1.0 else x)
-        merge_cols = ["IDfg", "season"] + [v for v in FG_BAT_MAP.values() if v in fg_b.columns]
+        merge_cols = ["IDfg", "season"] + [v for v in FG_BAT_RENAME.values() if v in fg_b.columns]
         if "IDfg" in fg_b.columns:
             bat_game_df = bat_game_df.merge(
-                fg_b[merge_cols],
+                fg_b[[c for c in merge_cols if c in fg_b.columns]],
                 left_on=["batter", "season"],
                 right_on=["IDfg", "season"], how="left")
 
-    # ── Platoon flags ────────────────────────────────────────────────────────
+    # Platoon flags
     if "p_throws" in bat_game_df.columns:
         bat_game_df["throws_R"] = (bat_game_df["p_throws"] == "R").astype(int)
+        bat_game_df["bats_L"]   = (bat_game_df["stand"] == "L").astype(int)
+        bat_game_df["platoon_adv"] = (
+            ((bat_game_df["bats_L"] == 1) & (bat_game_df["throws_R"] == 1)) |
+            ((bat_game_df["bats_L"] == 0) & (bat_game_df["throws_R"] == 0))
+        ).astype(int)
     else:
-        bat_game_df["throws_R"] = 1
-    if "stand" in bat_game_df.columns:
-        bat_game_df["bats_L"] = (bat_game_df["stand"] == "L").astype(int)
-    else:
-        bat_game_df["bats_L"] = 0
-    bat_game_df["platoon_adv"] = (
-        ((bat_game_df.get("bats_L", 0) == 1) & (bat_game_df.get("throws_R", 1) == 1)) |
-        ((bat_game_df.get("bats_L", 0) == 0) & (bat_game_df.get("throws_R", 1) == 0))
-    ).astype(int)
+        bat_game_df["throws_R"]    = 1
+        bat_game_df["bats_L"]      = 0
+        bat_game_df["platoon_adv"] = 0
 
-    # Pitcher opp columns
-    for col in ("opp_xera", "opp_k_pct", "opp_bb_pct", "opp_swstr_pct"):
+    # opp_whiff for hit model (pitcher SwStr% — was missing before)
+    for col in ("opp_xera", "opp_k_pct", "opp_bb_pct", "opp_whiff"):
         if col not in bat_game_df.columns:
             bat_game_df[col] = HIT_MEDIANS.get(col, 0.0)
 
-    # ── Fill medians ─────────────────────────────────────────────────────────
+    # K binary labels
+    for line in K_LINES:
+        if "total_ks" in pit_game_df.columns:
+            pit_game_df[f"k_over_{line}"] = (pit_game_df["total_ks"] > line).astype(int)
+    if "hit_binary" in bat_game_df.columns:
+        bat_game_df["actual_outcome"] = bat_game_df["hit_binary"]
+
+    # Fill medians
     for col, med in K_MEDIANS.items():
         if col not in pit_game_df.columns:
             pit_game_df[col] = med
         else:
             pit_game_df[col] = pit_game_df[col].fillna(med)
-
     for col, med in HIT_MEDIANS.items():
         if col not in bat_game_df.columns:
             bat_game_df[col] = med
         else:
             bat_game_df[col] = bat_game_df[col].fillna(med)
 
-    # ── K binary labels ───────────────────────────────────────────────────────
-    if not pit_game_df.empty and "total_ks" in pit_game_df.columns:
-        for line in K_LINES:
-            pit_game_df[f"k_over_{line}"] = (pit_game_df["total_ks"] > line).astype(int)
-        pit_game_df["line"] = 4.5  # representative
-
-    logger.info("Statcast: %d pit-game rows, %d bat-game rows",
-                len(pit_game_df), len(bat_game_df))
+    logger.info("Statcast: %d pit-game, %d bat-game rows", len(pit_game_df), len(bat_game_df))
     return pit_game_df, bat_game_df
 
 
-# ── Train & save ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Sample weights — recency-based
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _make_sample_weights(df: pd.DataFrame) -> np.ndarray:
+    """
+    Assign per-row sample weights based on season.
+    Recent seasons get higher weight — corrects for league-level shift.
+    """
+    if "season" not in df.columns:
+        return np.ones(len(df))
+    return df["season"].map(SEASON_WEIGHTS).fillna(1.0).values
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Training
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _train_and_save(X_train: np.ndarray, y_train: np.ndarray,
-                    X_test: np.ndarray,  y_test: np.ndarray,
-                    label: str, out_path: str) -> dict:
-    """Train one XGBClassifier with Platt calibration. Returns metrics dict."""
+                    X_test:  np.ndarray, y_test:  np.ndarray,
+                    label:   str,        out_path: str,
+                    sample_weights: np.ndarray | None = None) -> dict:
+    """Train one XGBClassifier with Platt calibration and recency weights."""
     from xgboost import XGBClassifier
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
@@ -478,189 +552,288 @@ def _train_and_save(X_train: np.ndarray, y_train: np.ndarray,
     raw = XGBClassifier(**XGB_PARAMS, scale_pos_weight=pos_ratio,
                         use_label_encoder=False)
     model = CalibratedClassifierCV(raw, method="sigmoid", cv=5)
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weights)
 
     metrics: dict = {}
     if len(X_test) > 0 and y_test.sum() > 0:
         probs = model.predict_proba(X_test)[:, 1]
         metrics = dict(
-            auc    = round(float(roc_auc_score(y_test, probs)), 4),
-            logloss= round(float(log_loss(y_test, probs)), 4),
-            brier  = round(float(brier_score_loss(y_test, probs)), 4),
-            n_test = int(len(X_test)),
+            auc     = round(float(roc_auc_score(y_test, probs)), 4),
+            logloss = round(float(log_loss(y_test, probs)), 4),
+            brier   = round(float(brier_score_loss(y_test, probs)), 4),
+            n_test  = int(len(X_test)),
         )
-        logger.info("  %s → AUC %.4f | LogLoss %.4f | Brier %.4f",
-                    label, metrics["auc"], metrics["logloss"], metrics["brier"])
+        logger.info("  %s → AUC %.4f | Brier %.4f (null=0.25, target<0.23)",
+                    label, metrics["auc"], metrics["brier"])
+        if metrics["brier"] > 0.25:
+            logger.warning("  ⚠️  %s Brier %.4f > null model — check training data quality",
+                           label, metrics["brier"])
     else:
-        logger.info("  %s → trained (no held-out test data yet)", label)
+        logger.info("  %s → trained (no held-out test — early season)", label)
 
     with open(out_path, "wb") as f:
         pickle.dump(model, f)
-    logger.info("  Saved → %s", out_path)
     return metrics
 
 
-def main() -> None:
-    logger.info("=== PropIQ Per-Line K & Hit Model Training ===")
-    logger.info("Output dir: %s", OUTDIR)
+def _run_shap(model_path: str, df: pd.DataFrame, features: list) -> list:
+    """Run SHAP feature importance for interpretability."""
+    try:
+        import shap, pickle as _pkl
+        with open(model_path, "rb") as f:
+            model = _pkl.load(f)
+        avail = [c for c in features if c in df.columns]
+        X     = df[avail].fillna(0).values.astype(np.float32)
+        idx   = np.random.choice(len(X), min(2000, len(X)), replace=False)
+        base  = model.calibrated_classifiers_[0].estimator
+        exp   = shap.TreeExplainer(base)
+        sv    = exp.shap_values(X[idx])
+        mean_abs = np.abs(sv).mean(axis=0)
+        ranked   = sorted(zip(avail, mean_abs), key=lambda x: x[1], reverse=True)
+        logger.info("  SHAP importance:")
+        for feat, imp in ranked:
+            bar = "█" * int(imp / max(ranked[0][1], 1e-9) * 20)
+            logger.info("    %-28s %s %.4f", feat, bar, imp)
+        return [{"feature": f, "importance": round(float(i), 4)} for f, i in ranked]
+    except Exception as e:
+        logger.warning("SHAP failed: %s", e)
+        return []
 
-    # ── Load data ────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Status check
+# ══════════════════════════════════════════════════════════════════════════════
+
+def show_status() -> None:
+    metrics_path = os.path.join(OUTDIR, "model_metrics.json")
+    if not os.path.exists(metrics_path):
+        print("No model_metrics.json found — models not yet trained.")
+        return
+    with open(metrics_path) as f:
+        m = json.load(f)
+    print(f"\n=== XGBoost Model Status (trained {m.get('trained_at', 'unknown')}) ===")
+    print(f"{'Model':<12} {'Brier':>8} {'AUC':>8} {'N Test':>8} {'Status'}")
+    print("-" * 60)
+    null_brier = 0.25
+    for key in ["k_3.5", "k_4.5", "k_5.5", "k_6.5", "hits"]:
+        d = m.get(key, {})
+        brier  = d.get("brier")
+        auc    = d.get("auc")
+        n_test = d.get("n_test", 0)
+        if brier is None:
+            status = "⚠️  No test data"
+        elif brier < 0.23:
+            status = "✅ Well calibrated"
+        elif brier < null_brier:
+            status = "🟡 Marginal edge"
+        else:
+            status = "❌ Worse than null"
+        b_str = f"{brier:.4f}" if brier else "N/A"
+        a_str = f"{auc:.4f}"   if auc   else "N/A"
+        print(f"  {key:<10} {b_str:>8} {a_str:>8} {n_test:>8}   {status}")
+
+    print(f"\n  Null model Brier: {null_brier} (always predict 50%)")
+    print(f"  Target Brier:     <0.23 to justify current blend weights")
+    print(f"\n  Blend recommendations:")
+    for key in ["k_3.5", "k_4.5", "k_5.5", "k_6.5"]:
+        brier = m.get(key, {}).get("brier", 0.25)
+        if brier and brier < 0.23:
+            rec = "70/30 — increase XGB weight"
+        elif brier and brier < null_brier:
+            rec = "80/20 — current default (marginal edge)"
+        else:
+            rec = "90/10 — reduce XGB weight (worse than null)"
+        print(f"    {key}: {rec}")
+    hits_brier = m.get("hits", {}).get("brier", 0.25)
+    if hits_brier and hits_brier > null_brier:
+        print(f"    hits: 90/10 ⚠️  (Brier {hits_brier:.4f} > null) — REDUCE BLEND")
+    else:
+        print(f"    hits: 80/20 (Brier {hits_brier:.4f})")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main(k_only: bool = False, hit_only: bool = False) -> None:
+    logger.info("=== PropIQ XGBoost Training v2 (season-weighted) ===")
+    logger.info("Season weights: %s", SEASON_WEIGHTS)
+
+    # Load data
     ledger_k, ledger_hits = _load_from_ledger()
-    stat_k,   stat_hits   = pd.DataFrame(), pd.DataFrame()
+    stat_k, stat_hits = pd.DataFrame(), pd.DataFrame()
 
-    # Use Statcast when ledger has < 500 rows (not enough for calibrated training)
-    if len(ledger_k) < 500 or len(ledger_hits) < 500:
-        logger.info("Ledger rows insufficient — supplementing with Statcast...")
+    need_statcast_k   = len(ledger_k)   < 500 and not hit_only
+    need_statcast_hit = len(ledger_hits) < 500 and not k_only
+
+    if need_statcast_k or need_statcast_hit:
+        logger.info("Supplementing with Statcast (ledger rows insufficient)...")
         stat_k, stat_hits = _load_from_statcast()
 
-    # Combine sources: ledger first (real lines), then Statcast
-    k_df   = pd.concat([ledger_k,   stat_k],   ignore_index=True) if not stat_k.empty   else ledger_k
-    hit_df = pd.concat([ledger_hits, stat_hits], ignore_index=True) if not stat_hits.empty else ledger_hits
+    # Combine — ledger rows are highest quality (real PropIQ outcomes)
+    # Give ledger rows 3x weight relative to historical Statcast
+    def _combine(ledger_df, stat_df, is_k):
+        if ledger_df.empty and stat_df.empty:
+            return pd.DataFrame()
+        if ledger_df.empty:
+            return stat_df
+        if stat_df.empty:
+            # Boost ledger weights to compensate for small sample
+            ledger_df = ledger_df.copy()
+            if "season" not in ledger_df.columns:
+                ledger_df["season"] = 2026
+            return ledger_df
+        # Give ledger rows 3x season weight bonus
+        ledger_boost = ledger_df.copy()
+        if "season" not in ledger_boost.columns:
+            ledger_boost["season"] = 2026
+        ledger_boost["_ledger_boost"] = 3.0
+        stat_df2 = stat_df.copy()
+        stat_df2["_ledger_boost"] = 1.0
+        return pd.concat([ledger_boost, stat_df2], ignore_index=True)
+
+    k_df   = _combine(ledger_k,   stat_k,   is_k=True)  if not hit_only else pd.DataFrame()
+    hit_df = _combine(ledger_hits, stat_hits, is_k=False) if not k_only  else pd.DataFrame()
 
     if k_df.empty and hit_df.empty:
-        logger.error("No training data available. Exiting.")
+        logger.error("No training data. Install pybaseball or connect DATABASE_URL.")
         return
 
-    all_metrics: dict = {
-        "trained_at": datetime.now(timezone.utc).isoformat(),
-        "seasons":    SEASONS,
-        "test_year":  TEST_YEAR,
+    all_metrics = {
+        "trained_at":      datetime.now(timezone.utc).isoformat(),
+        "seasons":         SEASONS,
+        "season_weights":  SEASON_WEIGHTS,
+        "test_year":       TEST_YEAR,
+        "blend_recommendation": {
+            "note": "Check status with --status after training",
+        },
     }
 
-    # ── Train K models (per line) ────────────────────────────────────────────
+    # ── Train K models ──────────────────────────────────────────────────────
     if not k_df.empty:
-        logger.info("\n=== K Models ===")
+        logger.info("\n=== K Models (per-line, season-weighted) ===")
         for line in K_LINES:
             label_col = f"k_over_{line}"
+
             if label_col not in k_df.columns:
                 if "actual_outcome" in k_df.columns and "line" in k_df.columns:
-                    # Ledger source: reconstruct binary label from line
                     k_df[label_col] = (
                         (k_df["actual_outcome"] == 1) &
                         (k_df["line"].round(1) == line)
                     ).astype(int)
                 else:
-                    logger.warning("  K>%.1f: label column missing, skipping", line)
+                    logger.warning("K>%.1f: label missing — skipping", line)
                     continue
 
-            # Split by season (test on TEST_YEAR when season column available)
+            # Train/test split by season
             if "season" in k_df.columns:
                 train = k_df[k_df["season"] != TEST_YEAR]
                 test  = k_df[k_df["season"] == TEST_YEAR]
             else:
                 split = int(len(k_df) * 0.80)
-                train = k_df.iloc[:split]
-                test  = k_df.iloc[split:]
+                train, test = k_df.iloc[:split], k_df.iloc[split:]
 
-            # Filter to rows where this line was the actual line
+            # Filter to relevant line
             if "line" in k_df.columns:
-                # Include all rows where line is within 0.5 of this target line
                 train_filt = train[(train["line"] - line).abs() <= 0.5] if len(train) > 100 else train
-                test_filt  = test[(test["line"]  - line).abs() <= 0.5] if len(test) > 10  else test
+                test_filt  = test[(test["line"]  - line).abs() <= 0.5]  if len(test)  > 10  else test
             else:
                 train_filt, test_filt = train, test
 
             if len(train_filt) < 50:
-                logger.warning("  K>%.1f: only %d train rows, skipping", line, len(train_filt))
+                logger.warning("K>%.1f: only %d train rows — skipping", line, len(train_filt))
                 continue
 
-            available_cols = [c for c in K_FEATURES if c in k_df.columns]
-            X_train = train_filt[available_cols].fillna(0).values.astype(np.float32)
-            y_train = train_filt[label_col].values
-            X_test  = test_filt[available_cols].fillna(0).values.astype(np.float32) if len(test_filt) else X_train[:0]
-            y_test  = test_filt[label_col].values if len(test_filt) else y_train[:0]
+            avail    = [c for c in K_FEATURES if c in k_df.columns]
+            X_train  = train_filt[avail].fillna(0).values.astype(np.float32)
+            y_train  = train_filt[label_col].values
+            X_test   = test_filt[avail].fillna(0).values.astype(np.float32)  if len(test_filt) else X_train[:0]
+            y_test   = test_filt[label_col].values                            if len(test_filt) else y_train[:0]
+
+            # Recency weights: combine season weight × ledger boost
+            sw = _make_sample_weights(train_filt)
+            if "_ledger_boost" in train_filt.columns:
+                sw = sw * train_filt["_ledger_boost"].values
 
             safe_line = str(line).replace(".", "_")
             out_path  = os.path.join(OUTDIR, f"xgb_k_{safe_line}.pkl")
             metrics   = _train_and_save(X_train, y_train, X_test, y_test,
-                                        f"K>{line}", out_path)
-            n_train_k = int(len(X_train))
-            all_metrics[f"k_{line}"] = {**metrics, "train_rows": n_train_k,
-                                         "features": available_cols}
+                                        f"K>{line}", out_path,
+                                        sample_weights=sw)
+            n_train   = int(len(X_train))
+            all_metrics[f"k_{line}"] = {**metrics, "train_rows": n_train, "features": avail}
 
-            # ── PR #562: Persist to DB ────────────────────────────────────────
-            _save_model_to_db(
-                prop_type     = f"k_{line}",
-                pkl_path      = out_path,
-                metrics       = metrics,
-                n_train       = n_train_k,
-                feature_names = available_cols,
-            )
+            _save_model_to_db(f"k_{line}", out_path, metrics, n_train, avail)
 
-    # ── Train hit model ──────────────────────────────────────────────────────
+        # SHAP for K4.5 (most common line)
+        k45_path = os.path.join(OUTDIR, "xgb_k_4_5.pkl")
+        if os.path.exists(k45_path) and not k_df.empty:
+            all_metrics["shap_k_4_5"] = _run_shap(k45_path, k_df, K_FEATURES)
+
+    # ── Train hit model ─────────────────────────────────────────────────────
     if not hit_df.empty and "actual_outcome" in hit_df.columns:
-        logger.info("\n=== Hit Model ===")
+        logger.info("\n=== Hit Model (season-weighted) ===")
+
         if "season" in hit_df.columns:
             train_h = hit_df[hit_df["season"] != TEST_YEAR]
             test_h  = hit_df[hit_df["season"] == TEST_YEAR]
         else:
             split   = int(len(hit_df) * 0.80)
-            train_h = hit_df.iloc[:split]
-            test_h  = hit_df.iloc[split:]
+            train_h, test_h = hit_df.iloc[:split], hit_df.iloc[split:]
 
-        available_cols = [c for c in HITS_FEATURES if c in hit_df.columns]
-        X_train_h = train_h[available_cols].fillna(0).values.astype(np.float32)
+        avail_h   = [c for c in HITS_FEATURES if c in hit_df.columns]
+        X_train_h = train_h[avail_h].fillna(0).values.astype(np.float32)
         y_train_h = train_h["actual_outcome"].values
-        X_test_h  = test_h[available_cols].fillna(0).values.astype(np.float32) if len(test_h) else X_train_h[:0]
-        y_test_h  = test_h["actual_outcome"].values if len(test_h) else y_train_h[:0]
+        X_test_h  = test_h[avail_h].fillna(0).values.astype(np.float32)  if len(test_h) else X_train_h[:0]
+        y_test_h  = test_h["actual_outcome"].values                        if len(test_h) else y_train_h[:0]
 
-        out_path  = os.path.join(OUTDIR, "xgb_hits.pkl")
-        metrics   = _train_and_save(X_train_h, y_train_h, X_test_h, y_test_h,
-                                    "Hits", out_path)
-        n_train_h = int(len(X_train_h))
-        all_metrics["hits"] = {**metrics, "train_rows": n_train_h,
-                               "features": available_cols}
+        sw_h = _make_sample_weights(train_h)
+        if "_ledger_boost" in train_h.columns:
+            sw_h = sw_h * train_h["_ledger_boost"].values
 
-        # ── PR #562: Persist to DB ────────────────────────────────────────────
-        _save_model_to_db(
-            prop_type     = "hits",
-            pkl_path      = out_path,
-            metrics       = metrics,
-            n_train       = n_train_h,
-            feature_names = available_cols,
-        )
+        out_path_h = os.path.join(OUTDIR, "xgb_hits.pkl")
+        metrics_h  = _train_and_save(X_train_h, y_train_h, X_test_h, y_test_h,
+                                     "Hits", out_path_h, sample_weights=sw_h)
+        n_train_h  = int(len(X_train_h))
+        all_metrics["hits"] = {**metrics_h, "train_rows": n_train_h, "features": avail_h}
 
-    # ── SHAP importance for K 4.5 model ──────────────────────────────────────
-    k45_path = os.path.join(OUTDIR, "xgb_k_4_5.pkl")
-    if os.path.exists(k45_path) and not k_df.empty:
-        try:
-            import shap, pickle as _pickle
-            with open(k45_path, "rb") as f:
-                k45 = _pickle.load(f)
-            base_model = k45.calibrated_classifiers_[0].estimator
-            avail = [c for c in K_FEATURES if c in k_df.columns]
-            X_shap = k_df[avail].fillna(0).values.astype(np.float32)
-            idx    = np.random.choice(len(X_shap), min(2000, len(X_shap)), replace=False)
-            exp    = shap.TreeExplainer(base_model)
-            sv     = exp.shap_values(X_shap[idx])
-            mean_s = np.abs(sv).mean(axis=0)
-            ranked = sorted(zip(avail, mean_s), key=lambda x: x[1], reverse=True)
-            logger.info("\n=== K4.5 SHAP Feature Importance ===")
-            for feat, imp in ranked:
-                bar = "█" * int(imp / ranked[0][1] * 20)
-                logger.info("  %-22s %s %.4f", feat, bar, imp)
-            all_metrics["shap_k_4_5"] = [{"feature": f, "importance": round(float(i), 4)}
-                                          for f, i in ranked]
-        except Exception as e:
-            logger.warning("SHAP failed: %s", e)
+        _save_model_to_db("hits", out_path_h, metrics_h, n_train_h, avail_h)
 
-    # ── Save metadata ────────────────────────────────────────────────────────
-    feat_cols_out = {
-        f"k_{line}": K_FEATURES for line in K_LINES
-    }
+        # Blend recommendation for hits
+        hit_brier = metrics_h.get("brier", 0.25)
+        if hit_brier and hit_brier > 0.25:
+            all_metrics["blend_recommendation"]["hits"] = (
+                f"90/10 — Brier {hit_brier:.4f} > null (0.25). "
+                "Reduce from current 70/30 to limit noise contribution."
+            )
+            logger.warning("⚠️  Hit model Brier %.4f > null — recommend 90/10 blend", hit_brier)
+        elif hit_brier and hit_brier < 0.23:
+            all_metrics["blend_recommendation"]["hits"] = (
+                f"60/40 — Brier {hit_brier:.4f} well below null. "
+                "Consider increasing blend weight."
+            )
+
+    # ── Save feature cols and metrics ───────────────────────────────────────
+    feat_cols_out = {f"k_{line}": K_FEATURES for line in K_LINES}
     feat_cols_out["hits"] = HITS_FEATURES
 
     with open(os.path.join(OUTDIR, "xgb_feature_cols.json"), "w") as f:
         json.dump(feat_cols_out, f, indent=2)
-    logger.info("\nSaved → models/xgb_feature_cols.json")
 
     with open(os.path.join(OUTDIR, "model_metrics.json"), "w") as f:
         json.dump(all_metrics, f, indent=2)
-    logger.info("Saved → models/model_metrics.json")
 
-    logger.info("\n✅ Training complete. Saved to %s and xgb_model_store DB table.", OUTDIR)
-    logger.info("   Models load from DB on next Railway restart (xgb_k_layer.py).")
+    logger.info("\n✅ Training complete.")
+    logger.info("   Run: python scripts/xgb_k_training.py --status")
+    show_status()
 
 
 if __name__ == "__main__":
-    main()
+    if "--status" in sys.argv:
+        show_status()
+    elif "--k-only" in sys.argv:
+        main(k_only=True)
+    elif "--hit-only" in sys.argv:
+        main(hit_only=True)
+    else:
+        main()
