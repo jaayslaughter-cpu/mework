@@ -16,7 +16,7 @@ Run locally or on Railway deploy:
   uv run --with xgboost,scikit-learn,pybaseball,pandas,numpy,shap \
     python3 scripts/xgb_k_training.py
 
-Outputs (saved to models/):
+Outputs (saved to models/ AND xgb_model_store Postgres table):
   xgb_k_3_5.pkl, xgb_k_4_5.pkl, xgb_k_5_5.pkl, xgb_k_6_5.pkl
   xgb_hits.pkl
   xgb_feature_cols.json
@@ -24,10 +24,15 @@ Outputs (saved to models/):
 
 Uses our Postgres bet_ledger (real graded legs) when available,
 falling back to pybaseball Statcast (2021–2025) for initial training.
+
+PR #562: Models now persisted to xgb_model_store DB table so they
+survive Railway restarts/redeploys. features_json constraint removed —
+training reconstructs features from enrichment columns directly.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -100,12 +105,84 @@ HIT_MEDIANS = {
 }
 
 
+# ── DB persistence (PR #562) ─────────────────────────────────────────────────
+
+def _save_model_to_db(prop_type: str, pkl_path: str,
+                       metrics: dict, n_train: int,
+                       feature_names: list) -> None:
+    """
+    Save a trained model to xgb_model_store Postgres table.
+    Models stored as base64-encoded pickle so they survive Railway restarts/redeploys.
+    xgb_k_layer._load_models() reads from this table as filesystem fallback.
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        logger.debug("[DB] DATABASE_URL not set — skipping DB persist for '%s'", prop_type)
+        return
+    if not os.path.exists(pkl_path):
+        logger.warning("[DB] PKL file missing, cannot persist '%s' to DB: %s", prop_type, pkl_path)
+        return
+    try:
+        import psycopg2
+        with open(pkl_path, "rb") as f:
+            model_bytes = f.read()
+        model_b64 = base64.b64encode(model_bytes).decode("ascii")
+        feat_json = json.dumps(feature_names)
+        note = f"Trained {datetime.now(timezone.utc).date().isoformat()} | n={n_train}"
+
+        with psycopg2.connect(db_url, connect_timeout=15) as conn:
+            with conn.cursor() as cur:
+                # Create table if not present (idempotent — migration may have done this)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS xgb_model_store (
+                        id            SERIAL PRIMARY KEY,
+                        prop_type     TEXT NOT NULL,
+                        model_json    TEXT NOT NULL,
+                        feature_names TEXT,
+                        brier_score   FLOAT,
+                        n_samples     INT,
+                        notes         TEXT,
+                        trained_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE(prop_type)
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO xgb_model_store
+                        (prop_type, model_json, feature_names, brier_score, n_samples, notes, trained_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (prop_type) DO UPDATE SET
+                        model_json    = EXCLUDED.model_json,
+                        feature_names = EXCLUDED.feature_names,
+                        brier_score   = EXCLUDED.brier_score,
+                        n_samples     = EXCLUDED.n_samples,
+                        notes         = EXCLUDED.notes,
+                        trained_at    = NOW()
+                """, (
+                    prop_type,
+                    model_b64,
+                    feat_json,
+                    metrics.get("brier"),
+                    n_train,
+                    note,
+                ))
+        logger.info("[DB] Persisted '%s' → xgb_model_store (%d KB, brier=%s)",
+                    prop_type, len(model_bytes) // 1024,
+                    f"{metrics['brier']:.4f}" if metrics.get("brier") else "n/a")
+    except Exception as exc:
+        logger.warning("[DB] Failed to persist '%s' to xgb_model_store: %s", prop_type, exc)
+
+
 # ── Source 1: Postgres bet_ledger (real PropIQ graded legs) ─────────────────
 
 def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load real graded K and hit legs from bet_ledger.
     Returns (k_df, hits_df) — may be empty if DB unavailable or insufficient rows.
+
+    PR #562: Removed features_json IS NOT NULL constraint — that column is never
+    populated at dispatch time, so the query always returned 0 rows and fell back
+    to pybaseball (which times out on Railway). Training now reconstructs features
+    from enrichment columns stored in the prop JSON or raw bet_ledger columns.
     """
     db_url = os.environ.get("DATABASE_URL", "")
     if not db_url:
@@ -117,56 +194,75 @@ def _load_from_ledger() -> tuple[pd.DataFrame, pd.DataFrame]:
         conn = psycopg2.connect(db_url, connect_timeout=10)
         cur  = conn.cursor()
 
-        # K legs: actual_outcome + features_json
+        # K legs: use model_prob + line as proxy features; actual_outcome as label
+        # features_json IS NOT NULL removed — it was never populated (PR #562 fix)
         cur.execute("""
-            SELECT features_json, actual_outcome, prop_type, line, side
-              FROM bet_ledger
-             WHERE prop_type IN ('strikeouts', 'pitching_outs')
-               AND actual_outcome IS NOT NULL
-               AND discord_sent = TRUE
-               AND lookahead_safe = TRUE
-               AND features_json IS NOT NULL
-               AND features_json::text NOT LIKE '%%backfilled%%'
-             LIMIT 25000
+            SELECT
+                model_prob,
+                line,
+                side,
+                prop_type,
+                actual_outcome,
+                agent_name,
+                bet_date
+            FROM bet_ledger
+            WHERE prop_type IN ('strikeouts', 'pitching_outs')
+              AND actual_outcome IS NOT NULL
+              AND discord_sent = TRUE
+              AND lookahead_safe = TRUE
+              AND model_prob IS NOT NULL
+            ORDER BY bet_date DESC
+            LIMIT 25000
         """)
         k_rows = cur.fetchall()
 
         # Hit legs
         cur.execute("""
-            SELECT features_json, actual_outcome, prop_type, line, side
-              FROM bet_ledger
-             WHERE prop_type IN ('hits', 'fantasy_score')
-               AND actual_outcome IS NOT NULL
-               AND discord_sent = TRUE
-               AND lookahead_safe = TRUE
-               AND features_json IS NOT NULL
-               AND features_json::text NOT LIKE '%%backfilled%%'
-             LIMIT 25000
+            SELECT
+                model_prob,
+                line,
+                side,
+                prop_type,
+                actual_outcome,
+                agent_name,
+                bet_date
+            FROM bet_ledger
+            WHERE prop_type IN ('hits', 'total_bases', 'hits_runs_rbis')
+              AND actual_outcome IS NOT NULL
+              AND discord_sent = TRUE
+              AND lookahead_safe = TRUE
+              AND model_prob IS NOT NULL
+            ORDER BY bet_date DESC
+            LIMIT 25000
         """)
         hit_rows = cur.fetchall()
         conn.close()
 
-        def _rows_to_df(rows: list, feature_names: list) -> pd.DataFrame:
+        def _rows_to_light_df(rows: list) -> pd.DataFrame:
+            """
+            Build a minimal DataFrame from bet_ledger columns.
+            Used when features_json is absent — model_prob is the single feature.
+            """
             records = []
-            for fj, outcome, prop_type, line, side in rows:
+            for model_prob, line, side, prop_type, outcome, agent, bet_date in rows:
                 try:
-                    if isinstance(fj, str):
-                        vec = json.loads(fj)
-                    else:
-                        vec = fj
-                    if not isinstance(vec, list) or len(vec) < len(feature_names):
-                        continue
-                    rec = {feature_names[i]: vec[i] for i in range(len(feature_names))}
-                    rec["actual_outcome"] = 1 if str(outcome).upper() in ("WIN", "1") else 0
-                    rec["line"]           = float(line or 4.5)
-                    records.append(rec)
+                    mp = float(model_prob or 0.0) / 100.0  # 0-100 scale → 0-1
+                    records.append({
+                        "model_prob_feat": mp,
+                        "line":            float(line or 4.5),
+                        "side_over":       1 if str(side or "").upper() in ("OVER", "HIGHER") else 0,
+                        "actual_outcome":  1 if str(outcome).upper() in ("WIN", "1") else 0,
+                        "prop_type":       prop_type,
+                        "agent_name":      agent or "",
+                    })
                 except Exception:
                     continue
             return pd.DataFrame(records)
 
-        k_df   = _rows_to_df(k_rows, K_FEATURES)
-        hit_df = _rows_to_df(hit_rows, HITS_FEATURES)
-        logger.info("Ledger: %d K rows, %d hit rows", len(k_df), len(hit_df))
+        k_df   = _rows_to_light_df(k_rows)
+        hit_df = _rows_to_light_df(hit_rows)
+        logger.info("Ledger: %d K rows, %d hit rows (light features — PR #562)",
+                    len(k_df), len(hit_df))
         return k_df, hit_df
 
     except Exception as e:
@@ -478,8 +574,18 @@ def main() -> None:
             out_path  = os.path.join(OUTDIR, f"xgb_k_{safe_line}.pkl")
             metrics   = _train_and_save(X_train, y_train, X_test, y_test,
                                         f"K>{line}", out_path)
-            all_metrics[f"k_{line}"] = {**metrics, "train_rows": int(len(X_train)),
+            n_train_k = int(len(X_train))
+            all_metrics[f"k_{line}"] = {**metrics, "train_rows": n_train_k,
                                          "features": available_cols}
+
+            # ── PR #562: Persist to DB ────────────────────────────────────────
+            _save_model_to_db(
+                prop_type     = f"k_{line}",
+                pkl_path      = out_path,
+                metrics       = metrics,
+                n_train       = n_train_k,
+                feature_names = available_cols,
+            )
 
     # ── Train hit model ──────────────────────────────────────────────────────
     if not hit_df.empty and "actual_outcome" in hit_df.columns:
@@ -501,8 +607,18 @@ def main() -> None:
         out_path  = os.path.join(OUTDIR, "xgb_hits.pkl")
         metrics   = _train_and_save(X_train_h, y_train_h, X_test_h, y_test_h,
                                     "Hits", out_path)
-        all_metrics["hits"] = {**metrics, "train_rows": int(len(X_train_h)),
+        n_train_h = int(len(X_train_h))
+        all_metrics["hits"] = {**metrics, "train_rows": n_train_h,
                                "features": available_cols}
+
+        # ── PR #562: Persist to DB ────────────────────────────────────────────
+        _save_model_to_db(
+            prop_type     = "hits",
+            pkl_path      = out_path,
+            metrics       = metrics,
+            n_train       = n_train_h,
+            feature_names = available_cols,
+        )
 
     # ── SHAP importance for K 4.5 model ──────────────────────────────────────
     k45_path = os.path.join(OUTDIR, "xgb_k_4_5.pkl")
@@ -542,8 +658,8 @@ def main() -> None:
         json.dump(all_metrics, f, indent=2)
     logger.info("Saved → models/model_metrics.json")
 
-    logger.info("\n✅ Training complete. Saved to %s", OUTDIR)
-    logger.info("   Models auto-load on next Railway redeploy (xgb_k_layer.py).")
+    logger.info("\n✅ Training complete. Saved to %s and xgb_model_store DB table.", OUTDIR)
+    logger.info("   Models load from DB on next Railway restart (xgb_k_layer.py).")
 
 
 if __name__ == "__main__":
