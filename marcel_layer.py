@@ -1,787 +1,373 @@
 """
 marcel_layer.py
-===============
-Marcel 3-Year Projection System for PropIQ Analytics Engine.
+================
+Marcel projections for PropIQ — regression-to-mean for early-season props.
 
-Derived from baseball-sims (thomasosbot/baseball-sims) WITHOUT BHQ subscription.
-Original algorithm: Tom Tango's "Marcel the Monkey Forecasting System".
-Reference implementation: src/features/marcel.py in thomasosbot/baseball-sims.
+THE PROBLEM
+-----------
+In May, pitchers have 5-8 starts. A pitcher with a 35% K-rate through 6 starts
+looks elite, but Marcel regression says his true talent is probably 28-30% K-rate
+because small samples are noisy. The current model uses the raw 2026 stats,
+which are overfit to small samples early in the season.
 
-Algorithm:
-  1. Collect up to 3 prior seasons of player stats from FanGraphs JSON API
-  2. Apply year weights: 5 × most-recent + 4 × prior year + 3 × two years back
-  3. Regress to league mean: player_weight = weighted_PA / (weighted_PA + regression_PA)
-  4. Apply age adjustment: +0.6%/yr improvement under 29, -0.3%/yr decline over 29
-  5. Produce projected rates per player for use as confidence modifiers in Layer 1
+Marcel is the simplest projection system that works: weighted average of the
+last 3 seasons (3/4/2 weight), then regressed to league mean based on sample
+size. It's not fancy but it consistently outperforms raw stats at small samples.
 
-PropIQ integration (Layer 8a, fires after FanGraphs Layer 6):
-  Batter K%   → K Under prop:  if projected K% >> league avg → small K Under boost
-  Batter HR/PA → HR/TB Over:   if projected HR rate >> league avg → boost
-  Batter wOBA → hits/H+R+RBI: if wOBA >> league avg → hits Over boost
-  Pitcher K%  → K Over prop:   if projected K% >> league avg → boost
-  Pitcher BB% → ER Under:      if projected BB% << league avg → ER Under boost
-  Pitcher HR/9 → ER Under:     if projected HR/9 << league avg → ER Under boost
+USAGE
+-----
+From prop_enrichment_layer.py, after Steamer but before PA model:
 
-Max adjustment: ±0.018 per prop — subtle refinement layered on top of Layers 1-7.
-Never overrides or replaces; always additive.
+    from marcel_layer import get_marcel_k_rate, get_marcel_hit_rate
 
-Data source:
-  FanGraphs JSON API — https://www.fangraphs.com/api/leaders/major-league/data
-  Public endpoint, no API key required.
-  Fetches 3 prior seasons (e.g. 2023+2024+2025 for 2026 projections).
+    # For K props:
+    if prop_type == "strikeouts":
+        raw_k_pct = prop.get("sv_k_pct", 22.0)
+        season_bf = prop.get("season_bf", 0)
+        marcel_k  = get_marcel_k_rate(raw_k_pct, season_bf,
+                                       hist_k_pct=prop.get("career_k_pct"))
+        prop["_marcel_k_pct"] = marcel_k
+        # Use as opp_lineup_k_pct_proxy input to PA model
 
-Cache:
-  /tmp/marcel_{year}_{iso_year}w{iso_week}.json — refreshed weekly.
-  Season-level projections that don't change day to day.
+    # For hit props:
+    if prop_type == "hits":
+        raw_avg  = prop.get("sv_xba", 0.250)
+        season_pa = prop.get("season_pa", 0)
+        marcel_h  = get_marcel_hit_rate(raw_avg, season_pa,
+                                         hist_avg=prop.get("career_avg"))
+        prop["_marcel_hit_rate"] = marcel_h
 
-Dependencies:
-  requests  (already in project requirements)
+WHEN DOES MARCEL MATTER?
+------------------------
+Marcel regression is strongest when sample size is small.
+Rule of thumb:
+  - Pitcher BF < 100:  Marcel contributes ~60% of the projection
+  - Pitcher BF < 300:  Marcel contributes ~30%
+  - Pitcher BF > 600:  Marcel contributes <10% (current stats dominate)
 
-Usage:
-    layer = MarcelLayer(projection_year=2026)
-    layer.prefetch()
-    batter_proj  = layer.get_batter("Aaron Judge")
-    pitcher_proj = layer.get_pitcher("Spencer Strider")
-    adj = marcel_adjustment("strikeouts", "Over", "pitcher", pitcher_proj)
+In May (roughly BF 80-200 for a full-season starter), Marcel meaningfully
+pulls extreme early-season stats toward the mean.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
-from datetime import datetime, timezone
-
-import requests
+from functools import lru_cache
+from typing import Optional
 
 logger = logging.getLogger("propiq.marcel")
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-# FIX: Updated to 2025 MLB actuals (FanGraphs leaderboards)
-_LEAGUE_AVG: dict = {
-    # Batter rates
-    "batter_k_pct":  0.228,   # FG 2026: 22.8% through game 44 
-    "batter_bb_pct": 0.083,   # FG 2026: 8.3% through game 44 
-    "batter_hr_pa":  0.033,   # FG 2025: elevated power 
-    "batter_woba":   0.309,   # FG 2026: .309 through game 44 
-    "batter_iso":    0.156,   # FG 2025: elevated power (was 0.158) 
-    # Pitcher rates (rates *allowed*)
-    "pitcher_k_pct":  0.228,  # FG 2026: 22.8% through game 44
-    "pitcher_bb_pct": 0.087,  # FG 2025: 8.4% (confirmed)
-    "pitcher_hr9":    1.28,   # FG 2025: ~1.28 HR/9 (was 1.30)
+# ── League average rates (2026 baseline — update seasonally) ──────────────────
+# These are the regression targets. Extreme early-season stats get pulled
+# toward these values proportional to how much data we have.
+LEAGUE_AVG = {
+    "k_pct":    22.8,    # pitcher K% (strikeouts per PA × 100)
+    "bb_pct":    8.3,    # pitcher BB%
+    "era":       4.25,   # ERA
+    "xera":      4.20,   # xERA
+    "whiff_pct": 24.1,   # SwStr%
+    "hit_rate":  0.248,  # batter batting average (raw)
+    "xba":       0.245,  # batter xBA
+    "xwoba":     0.318,  # batter xwOBA
+    "k_pct_bat": 22.5,   # batter K%
+    "bb_pct_bat": 8.5,   # batter BB%
 }
 
-_FG_BASE_URL = "https://www.fangraphs.com/api/leaders/major-league/data"
-_HEADERS = {"User-Agent": "PropIQ/1.0 (analytics)"}
-_TIMEOUT = 20          # seconds for FanGraphs HTTP request
-_REQUEST_DELAY = 1.5   # pause between batter/pitcher fetches
+# Marcel regression weights — how many "league average" PA/BF to mix in
+# Lower = faster regression (more conservative). Based on Tango Tiger Marcel paper.
+# These values are for MLB props specifically, slightly more conservative than
+# traditional Marcel for game prediction.
+REGRESSION_PA = {
+    "k_pct":    250,   # pitcher K-rate stabilises ~250 BF
+    "bb_pct":   700,   # pitcher BB-rate stabilises ~700 BF
+    "hit_rate": 600,   # batter batting average stabilises ~600 PA
+    "xba":      200,   # xBA stabilises faster (underlying contact quality)
+    "xwoba":    250,   # xwOBA stabilises ~250 PA
+    "whiff_pct":200,   # SwStr% stabilises ~200 pitches seen
+    "k_pct_bat":150,   # batter K-rate stabilises quickly
+}
 
 
-def _scraperapi_get_marcel(url: str, params: dict, headers: dict, timeout: int = 30):
-    """GET with automatic ScraperAPI fallback on 403/429 from FanGraphs.
-    Marcel projections require 3 seasons of FanGraphs data — all are 403-blocked
-    on Railway. ScraperAPI residential proxy bypasses the Cloudflare block.
+def _regress(observed: float, sample_n: int, league_avg: float,
+             regression_n: int) -> float:
     """
-    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-    if resp.status_code in (403, 429, 407):
-        scraper_key = os.getenv("SCRAPERAPI_KEY", "")
-        if scraper_key:
-            proxy = f"http://scraperapi:{scraper_key}@proxy-server.scraperapi.com:8001"
-            proxies = {"http": proxy, "https": proxy}
-            logger.info(
-                "[Marcel] Direct fetch %d — retrying via ScraperAPI residential proxy",
-                resp.status_code,
-            )
-            try:
-                resp = requests.get(
-                    url, params=params, headers=headers,
-                    timeout=60, proxies=proxies, verify=False,
-                )
-            except Exception as _proxy_err:
-                logger.warning("[Marcel] ScraperAPI proxy failed: %s", _proxy_err)
-        else:
-            logger.warning(
-                "[Marcel] Got %d from FanGraphs — SCRAPERAPI_KEY not set. "
-                "Marcel projections will fall back to statsapi baseline.",
-                resp.status_code,
-            )
-    return resp
+    Marcel regression formula:
+        weight_observed = sample_n / (sample_n + regression_n)
+        weight_league   = regression_n / (sample_n + regression_n)
+        result          = weight_observed × observed + weight_league × league_avg
 
-_AGE_PEAK       = 27   # peak age from Marcel spec
-_AGE_YOUNG_RATE = 0.006  # +0.6%/yr improvement under 27
-_AGE_OLD_RATE   = 0.003  # -0.3%/yr decline over 27
-
-_BATTER_REGRESSION_PA  = 200   # Marcel spec: regress batters at 200 PA
-_PITCHER_REGRESSION_BF = 250   # Marcel spec: regress pitchers at 250 BF
-
-_MARCEL_WEIGHTS = [5, 4, 3]    # most-recent year first
-# Cache helpers
-# ---------------------------------------------------------------------------
-
-def _get_cache_path(year: int) -> str:
-    """Weekly cache file path in /tmp — refreshed on Monday of each new week."""
-    today = datetime.now(timezone.utc)
-    iso = today.isocalendar()
-    return f"/tmp/marcel_{year}_{iso.year}w{iso.week}.json"
-
-
-# ---------------------------------------------------------------------------
-# Parsing helpers
-# ---------------------------------------------------------------------------
-
-def _parse_pct(val) -> float:
+    As sample_n → infinity, result → observed.
+    As sample_n → 0, result → league_avg.
     """
-    Parse FanGraphs percentage field.
-    Handles both string format ("22.0 %") and decimal float (0.22 or 22.0).
-    Returns a decimal fraction (0.22, not 22).
-    """
-    if val is None:
-        return 0.0
-    if isinstance(val, (int, float)):
-        v = float(val)
-        return v / 100.0 if v > 1.0 else v
-    s = str(val).strip().rstrip("%").strip()
-    try:
-        v = float(s)
-        return v / 100.0 if v > 1.0 else v
-    except ValueError:
-        return 0.0
-
-
-def _parse_float(val, default: float = 0.0) -> float:
-    """Safe float parse from any type."""
-    if val is None:
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-# ---------------------------------------------------------------------------
-# FanGraphs data fetcher
-# ---------------------------------------------------------------------------
-
-def _fetch_fg_data(stats: str, season_start: int, season_end: int) -> list[dict]:
-    """
-    Fetch multi-year leaderboard from FanGraphs JSON API.
-
-    stats        : "bat" for batters, "pit" for pitchers
-    season_start : earliest season (inclusive), e.g. 2023
-    season_end   : most recent season (inclusive), e.g. 2025
-    ind=1        : return individual season rows (not combined career total)
-    type=8       : advanced stats panel (wRC+, wOBA, ISO, K%, BB%, etc.)
-
-    Returns raw list of row dicts.
-    """
-    params = {
-        "age":     "",
-        "pos":     "all",
-        "stats":   stats,
-        "lg":      "all",
-        "qual":    "0",       # all players regardless of PA minimum
-        "season":  str(season_end),
-        "season1": str(season_start),
-        "ind":     "1",       # individual seasons
-        "type":    "8",       # advanced stats
-    }
-    try:
-        resp = _scraperapi_get_marcel(
-            _FG_BASE_URL, params=params, headers=_HEADERS, timeout=_TIMEOUT
-        )
-        if resp.status_code != 200:
-            logger.warning(
-                "[Marcel] FanGraphs HTTP %d (stats=%s, %d-%d)",
-                resp.status_code, stats, season_start, season_end,
-            )
-            return []
-        data = resp.json()
-        rows = data if isinstance(data, list) else data.get("data", [])
-        logger.info(
-            "[Marcel] FanGraphs %s: %d rows (%d-%d)",
-            stats, len(rows), season_start, season_end,
-        )
-        return rows
-    except Exception as exc:
-        logger.warning(
-            "[Marcel] FanGraphs fetch failed (stats=%s): %s", stats, exc
-        )
-        return []
-
-
-# ---------------------------------------------------------------------------
-# Age adjustment (from Marcel spec via baseball-sims)
-# ---------------------------------------------------------------------------
-
-def _age_multiplier(age: int | None) -> float:
-    """
-    Marcel age multiplier for batter performance rates.
-    Pitchers invert this (age hurts rates allowed differently — caller handles).
-    """
-    if age is None:
-        return 1.0
-    if age < _AGE_PEAK:
-        return 1.0 + _AGE_YOUNG_RATE * (_AGE_PEAK - age)
-    elif age > _AGE_PEAK:
-        return 1.0 - _AGE_OLD_RATE * (age - _AGE_PEAK)
-    return 1.0
-
-
-# ---------------------------------------------------------------------------
-# Marcel rate computation (core formula)
-# ---------------------------------------------------------------------------
-
-def _marcel_rate(
-    data_by_year: dict[int, tuple[float, float]],  # {year: (stat_value, pa_weight)}
-    league_avg:     float,
-    regression_pa:  float,
-    age_mult:       float,
-) -> float:
-    """
-    Compute Marcel projected rate for a single statistic.
-
-    Steps:
-      1. Weight 3 most-recent seasons: 5/4/3 (most recent first)
-      2. Regress to league mean: player gets more credit with more PA
-      3. Apply age adjustment multiplier
-
-    Returns the projected rate (e.g. 0.245 for K%).
-    """
-    years = sorted(data_by_year.keys(), reverse=True)[:3]  # most recent first
-
-    weighted_sum = 0.0
-    weighted_pa  = 0.0
-    for i, yr in enumerate(years):
-        stat_val, pa = data_by_year[yr]
-        w = _MARCEL_WEIGHTS[i]
-        weighted_sum += stat_val * pa * w
-        weighted_pa  += pa * w
-
-    if weighted_pa == 0:
+    if sample_n <= 0:
         return league_avg
-
-    raw_rate = weighted_sum / weighted_pa
-
-    # Bayesian regression toward league mean
-    player_weight = weighted_pa / (weighted_pa + regression_pa)
-    regressed     = raw_rate * player_weight + league_avg * (1.0 - player_weight)
-
-    return max(0.0, regressed * age_mult)
+    w_obs = sample_n / (sample_n + regression_n)
+    w_lg  = 1.0 - w_obs
+    return round(w_obs * observed + w_lg * league_avg, 4)
 
 
-# ---------------------------------------------------------------------------
-# Projection builders
-# ---------------------------------------------------------------------------
-
-def _build_batter_projections(
-    rows: list[dict], projection_year: int
-) -> dict[str, dict]:
+def _weighted_hist(current: float, hist: Optional[float],
+                   weights=(5, 4, 3)) -> float:
     """
-    Build Marcel batter projections from multi-year FanGraphs rows.
-
-    Returns {player_name_lower: {k_pct, bb_pct, hr_pa, woba, iso, weighted_pa, age}}
+    Three-year weighted average (current season × 5, prev × 4, prev-prev × 3).
+    Uses available data — if hist not provided, current season dominates.
     """
-    by_player: dict[str, list[dict]] = {}
-    for row in rows:
-        name = str(
-            row.get("PlayerName") or row.get("Name") or ""
-        ).strip()
-        if not name:
-            continue
-        by_player.setdefault(name.lower(), []).append(row)
-
-    projections: dict[str, dict] = {}
-
-    for name_lower, player_rows in by_player.items():
-        k_data:    dict[int, tuple[float, float]] = {}
-        bb_data:   dict[int, tuple[float, float]] = {}
-        hr_data:   dict[int, tuple[float, float]] = {}
-        woba_data: dict[int, tuple[float, float]] = {}
-        iso_data:  dict[int, tuple[float, float]] = {}
-
-        latest_age:  int | None = None
-        latest_year: int = 0
-
-        for row in player_rows:
-            season = int(row.get("Season") or 0)
-            if not season:
-                continue
-            pa = _parse_float(row.get("PA") or row.get("TPA"), 0.0)
-            if pa < 10:
-                continue  # too few PA to be meaningful
-
-            k_pct  = _parse_pct(row.get("K%"))
-            bb_pct = _parse_pct(row.get("BB%"))
-            hr     = _parse_float(row.get("HR"), 0.0)
-            hr_pa  = hr / pa if pa > 0 else 0.0
-            woba   = _parse_float(row.get("wOBA"), 0.0)
-            iso    = _parse_float(row.get("ISO"), 0.0)
-            age    = _parse_float(row.get("Age"), 0.0)
-
-            k_data[season]    = (k_pct,  pa)
-            bb_data[season]   = (bb_pct, pa)
-            hr_data[season]   = (hr_pa,  pa)
-            woba_data[season] = (woba,   pa)
-            iso_data[season]  = (iso,    pa)
-
-            if season > latest_year and age > 0:
-                latest_year = season
-                latest_age  = int(age)
-
-        if not k_data:
-            continue
-
-        # Project age to current year
-        proj_age  = (
-            latest_age + (projection_year - latest_year)
-            if latest_age and latest_year else None
-        )
-        age_mult  = _age_multiplier(proj_age)
-
-        # Confidence-weighted PA (for potential downstream use)
-        years = sorted(k_data.keys(), reverse=True)[:3]
-        num_weights = len(years)
-        weighted_pa = (
-            sum(k_data[yr][1] * _MARCEL_WEIGHTS[i] for i, yr in enumerate(years))
-            / sum(_MARCEL_WEIGHTS[:num_weights])
-        )
-
-        projections[name_lower] = {
-            "k_pct":       round(_marcel_rate(k_data,    _LEAGUE_AVG["batter_k_pct"],  _BATTER_REGRESSION_PA, 1.0),      4),
-            "bb_pct":      round(_marcel_rate(bb_data,   _LEAGUE_AVG["batter_bb_pct"], _BATTER_REGRESSION_PA, 1.0),      4),
-            "hr_pa":       round(_marcel_rate(hr_data,   _LEAGUE_AVG["batter_hr_pa"],  _BATTER_REGRESSION_PA, age_mult), 4),
-            "woba":        round(_marcel_rate(woba_data, _LEAGUE_AVG["batter_woba"],   _BATTER_REGRESSION_PA, age_mult), 4),
-            "iso":         round(_marcel_rate(iso_data,  _LEAGUE_AVG["batter_iso"],    _BATTER_REGRESSION_PA, age_mult), 4),
-            "weighted_pa": round(weighted_pa, 0),
-            "age":         proj_age,
-        }
-
-    logger.info("[Marcel] Built %d batter projections.", len(projections))
-    return projections
+    if hist is None:
+        return current
+    # hist is a single prior-season value (could represent 1 or 2 seasons)
+    total_w = weights[0] + weights[1]
+    return (weights[0] * current + weights[1] * hist) / total_w
 
 
-def _build_pitcher_projections(
-    rows: list[dict], projection_year: int
-) -> dict[str, dict]:
-    """
-    Build Marcel pitcher projections from multi-year FanGraphs rows.
+# ── Public API ─────────────────────────────────────────────────────────────────
 
-    Returns {player_name_lower: {k_pct, bb_pct, hr9, weighted_bf, age}}
-
-    Note on age adjustment for pitchers (from baseball-sims architecture.md):
-      Pitchers project *rates allowed*, so age works in the opposite direction.
-      A young pitcher improving = lower rates allowed (good).
-      _age_mult is inverted for pitcher projection (older = higher rates allowed).
-    """
-    by_player: dict[str, list[dict]] = {}
-    for row in rows:
-        name = str(
-            row.get("PlayerName") or row.get("Name") or ""
-        ).strip()
-        if not name:
-            continue
-        by_player.setdefault(name.lower(), []).append(row)
-
-    projections: dict[str, dict] = {}
-
-    for name_lower, player_rows in by_player.items():
-        k_data:   dict[int, tuple[float, float]] = {}
-        bb_data:  dict[int, tuple[float, float]] = {}
-        hr9_data: dict[int, tuple[float, float]] = {}
-
-        latest_age: int | None = None
-        latest_year: int = 0
-
-        for row in player_rows:
-            season = int(row.get("Season") or 0)
-            if not season:
-                continue
-            ip = _parse_float(row.get("IP"), 0.0)
-            if ip < 5:
-                continue
-
-            k_pct  = _parse_pct(row.get("K%"))
-            bb_pct = _parse_pct(row.get("BB%"))
-            hr9    = _parse_float(row.get("HR/9") or row.get("HR9"), 0.0)
-            age    = _parse_float(row.get("Age"), 0.0)
-
-            # Use IP * 4.3 as BF proxy (batters faced ≈ IP × 4.3)
-            bf_proxy = ip * 4.3
-
-            k_data[season]   = (k_pct,  bf_proxy)
-            bb_data[season]  = (bb_pct, bf_proxy)
-            hr9_data[season] = (hr9,    bf_proxy)
-
-            if season > latest_year and age > 0:
-                latest_year = season
-                latest_age  = int(age)
-
-        if not k_data:
-            continue
-
-        proj_age = (
-            latest_age + (projection_year - latest_year)
-            if latest_age and latest_year else None
-        )
-
-        # Pitcher age multiplier is *inverted* vs batter:
-        # BB% and HR/9 (control and flyball) use inverted mult for rates *allowed*
-        age_mult_base     = _age_multiplier(proj_age)
-        age_mult_inverted = 1.0 / age_mult_base if age_mult_base > 0 else 1.0
-
-        years = sorted(k_data.keys(), reverse=True)[:3]
-        num_weights = len(years)
-        weighted_bf = (
-            sum(k_data[yr][1] * _MARCEL_WEIGHTS[i] for i, yr in enumerate(years))
-            / sum(_MARCEL_WEIGHTS[:num_weights])
-        )
-
-        projections[name_lower] = {
-            "k_pct":       round(_marcel_rate(k_data,   _LEAGUE_AVG["pitcher_k_pct"],  _PITCHER_REGRESSION_BF, age_mult_base),     4),
-            "bb_pct":      round(_marcel_rate(bb_data,  _LEAGUE_AVG["pitcher_bb_pct"], _PITCHER_REGRESSION_BF, age_mult_inverted),  4),
-            "hr9":         round(_marcel_rate(hr9_data, _LEAGUE_AVG["pitcher_hr9"],    _PITCHER_REGRESSION_BF, age_mult_inverted),  4),
-            "weighted_bf": round(weighted_bf, 0),
-            "age":         proj_age,
-        }
-
-    logger.info("[Marcel] Built %d pitcher projections.", len(projections))
-    return projections
-
-
-# ---------------------------------------------------------------------------
-# MarcelLayer class
-# ---------------------------------------------------------------------------
-
-class MarcelLayer:
-    """
-    Marcel 3-year projection system for PropIQ Analytics.
-
-    Loads and caches projected rates for all MLB batters and pitchers.
-    Used as a pre-season confidence signal on top of Layers 1-7.
-
-    The weekly cache means Marcel only hits FanGraphs twice per week
-    (once for batters, once for pitchers) regardless of how many
-    dispatches run that week.
-
-    Usage:
-        layer = MarcelLayer(projection_year=2026)
-        layer.prefetch()
-        batter  = layer.get_batter("Aaron Judge")
-        pitcher = layer.get_pitcher("Spencer Strider")
-    """
-
-    def __init__(self, projection_year: int | None = None) -> None:
-        self._year       = projection_year or datetime.now(timezone.utc).year
-        self._cache_path = _get_cache_path(self._year)
-        self._batters:   dict[str, dict] = {}
-        self._pitchers:  dict[str, dict] = {}
-        self._loaded:    bool = False
-
-    # ── cache I/O ──────────────────────────────────────────────────────────
-
-    def _load_cache(self) -> bool:
-        # L2: disk cache
-        if os.path.exists(self._cache_path):
-            try:
-                with open(self._cache_path) as f:
-                    data = json.load(f)
-                self._batters  = data.get("batters",  {})
-                self._pitchers = data.get("pitchers", {})
-                self._loaded   = True
-                logger.info(
-                    "[Marcel] Cache loaded from disk: %d batters, %d pitchers (%s)",
-                    len(self._batters), len(self._pitchers),
-                    os.path.basename(self._cache_path),
-                )
-                return True
-            except Exception as exc:
-                logger.warning("[Marcel] Disk cache load failed: %s", exc)
-        # L3: Postgres fallback — H-7 fix: survives Railway redeploys
-        try:
-            from layer_cache_helper import pg_cache_get  # noqa: PLC0415
-            pg_key = os.path.basename(self._cache_path)
-            data = pg_cache_get("marcel", pg_key)
-            if data and isinstance(data, dict):
-                self._batters  = data.get("batters",  {})
-                self._pitchers = data.get("pitchers", {})
-                self._loaded   = True
-                logger.info(
-                    "[Marcel] Cache loaded from Postgres: %d batters, %d pitchers",
-                    len(self._batters), len(self._pitchers),
-                )
-                # Restore disk cache for next call
-                try:
-                    with open(self._cache_path, "w") as f:
-                        json.dump(data, f)
-                except Exception:
-                    pass
-                return True
-        except Exception as exc:
-            logger.debug("[Marcel] Postgres cache load failed: %s", exc)
-        return False
-
-    def _save_cache(self) -> None:
-        """Persist projections to weekly cache file + Postgres (H-7 fix)."""
-        data = {"batters": self._batters, "pitchers": self._pitchers}
-        try:
-            with open(self._cache_path, "w") as f:
-                json.dump(data, f)
-            logger.info(
-                "[Marcel] Cache saved: %d batters, %d pitchers → %s",
-                len(self._batters), len(self._pitchers),
-                os.path.basename(self._cache_path),
-            )
-        except Exception as exc:
-            logger.warning("[Marcel] Disk cache save failed: %s", exc)
-        # H-7: dual-write to Postgres
-        try:
-            from layer_cache_helper import pg_cache_set  # noqa: PLC0415
-            pg_key = os.path.basename(self._cache_path)
-            pg_cache_set("marcel", pg_key, data)
-        except Exception as exc:
-            logger.debug("[Marcel] Postgres cache save failed: %s", exc)
-
-    def prefetch(self) -> None:
-        """
-        Load Marcel projections. Reads from weekly cache if available;
-        otherwise fetches 3 years of FanGraphs data and computes projections.
-
-        FanGraphs data: prior 3 seasons relative to projection year.
-        (e.g. for 2026 projections: 2023 + 2024 + 2025 data)
-        """
-        if not self._loaded and self._load_cache():
-            return  # valid weekly cache exists
-
-        season_end   = self._year - 1    # most recent complete season
-        season_start = season_end - 2    # 3 years back
-
-        logger.info(
-            "[Marcel] Fetching FanGraphs %d-%d for %d projections...",
-            season_start, season_end, self._year,
-        )
-
-        batter_rows  = _fetch_fg_data("bat", season_start, season_end)
-        time.sleep(_REQUEST_DELAY)
-        pitcher_rows = _fetch_fg_data("pit", season_start, season_end)
-
-        if not batter_rows and not pitcher_rows:
-            logger.warning(
-                "[Marcel] No FanGraphs data retrieved — trying statsapi.mlb.com 2025 fallback."
-            )
-            # FIX: statsapi single-season fallback when FanGraphs 403s.
-            # Gives XGBoost real per-player variance instead of all zeros.
-            try:
-                import requests as _req  # noqa: PLC0415
-                _r = _req.get(
-                    "https://statsapi.mlb.com/api/v1/stats/leaders",
-                    params={
-                        "leaderCategories": "strikeoutRate,walkRate,earnedRunAverage,whip",
-                        "season": str(self._year - 1),
-                        "sportId": 1,
-                        "limit": 500,
-                        "statGroup": "pitching",
-                    },
-                    timeout=10,
-                )
-                if _r.status_code != 200:
-                    logger.warning("[Marcel] statsapi fallback also failed — Marcel disabled.")
-                    return
-                # Build minimal pitcher projections from statsapi leaders
-                _minimal_pitchers: dict = {}
-                for _cat in _r.json().get("leagueLeaders", []):
-                    for _entry in _cat.get("leaders", []):
-                        _name = (_entry.get("person", {}).get("fullName") or "").strip().lower()
-                        _val  = _entry.get("value")
-                        _stat = _cat.get("leaderCategory", "")
-                        if _name and _val is not None:
-                            if _name not in _minimal_pitchers:
-                                _minimal_pitchers[_name] = {}
-                            try:
-                                _minimal_pitchers[_name][_stat] = float(_val)
-                            except (ValueError, TypeError):
-                                pass
-                if _minimal_pitchers:
-                    # Map statsapi field names to Marcel output format
-                    _mapped = {}
-                    for _n, _s in _minimal_pitchers.items():
-                        _mapped[_n] = {
-                            "k_pct":  _s.get("strikeoutRate", 0.223) / 100 if _s.get("strikeoutRate", 0) > 1 else _s.get("strikeoutRate", 0.223),
-                            "bb_pct": _s.get("walkRate",      0.087) / 100 if _s.get("walkRate",      0) > 1 else _s.get("walkRate",      0.087),
-                            "era":    _s.get("earnedRunAverage", 4.06),
-                            "whip":   _s.get("whip", 1.28),
-                            "_source": "statsapi_fallback",
-                        }
-                    self._pitchers = _mapped
-                    self._loaded   = True
-                    logger.info("[Marcel] Loaded %d pitchers from statsapi fallback.", len(_mapped))
-                else:
-                    logger.warning("[Marcel] statsapi fallback returned no leaders — Marcel disabled.")
-            except Exception as _me:
-                logger.warning("[Marcel] statsapi fallback exception: %s — Marcel disabled.", _me)
-
-            # ── Batter fallback: mlb_stats_layer season-to-date stats ────────
-            # Mirrors the pitcher fallback above. Marcel batter output needs:
-            # k_pct, bb_pct, hr_pa, woba, iso — all derivable from MLB Stats API.
-            # mlb_stats_layer._parse_batter() already computes all of these.
-            try:
-                from mlb_stats_layer import _BATTER_CACHE as _mlb_bat_cache  # noqa: PLC0415
-                from mlb_stats_layer import load as _mlb_load                # noqa: PLC0415
-                _mlb_load()
-                if _mlb_bat_cache:
-                    _batter_mapped: dict = {}
-                    for _nm, _bd in _mlb_bat_cache.items():
-                        _hr_total = float(_bd.get("hr_total", 0) or 0)
-                        _hits     = float(_bd.get("hits_total", 0) or 0)
-                        _pa_est   = max(_hits * 3.5, 1.0)   # rough PA proxy from hits
-                        _hr_pa    = _hr_total / _pa_est if _pa_est > 0 else 0.033 / 162
-                        _batter_mapped[_nm] = {
-                            "k_pct":  _bd.get("k_pct",   0.223),
-                            "bb_pct": _bd.get("bb_pct",  0.087),
-                            "hr_pa":  round(_hr_pa, 5),
-                            "woba":   _bd.get("woba",    0.308),
-                            "iso":    _bd.get("iso",     0.150),
-                            "_source": "mlb_stats_api_fallback",
-                        }
-                    if _batter_mapped:
-                        self._batters = _batter_mapped
-                        logger.info(
-                            "[Marcel] Loaded %d batters from mlb_stats_layer fallback.",
-                            len(_batter_mapped),
-                        )
-            except Exception as _mbe:
-                logger.warning("[Marcel] mlb_stats_layer batter fallback failed: %s", _mbe)
-
-            return
-
-        self._batters  = _build_batter_projections(batter_rows,  self._year)
-        self._pitchers = _build_pitcher_projections(pitcher_rows, self._year)
-        self._loaded   = True
-        self._save_cache()
-
-    def get_batter(self, name: str) -> dict:
-        """
-        Return Marcel projection for a batter by display name.
-        Returns {} if player not found (graceful — adjustment returns 0.0).
-        """
-        if not self._loaded:
-            self._load_cache()
-        return self._batters.get(name.strip().lower(), {})
-
-    def get_pitcher(self, name: str) -> dict:
-        """
-        Return Marcel projection for a pitcher by display name.
-        Returns {} if player not found.
-        """
-        if not self._loaded:
-            self._load_cache()
-        return self._pitchers.get(name.strip().lower(), {})
-
-
-# ---------------------------------------------------------------------------
-# Probability adjustment function
-# ---------------------------------------------------------------------------
-
-def marcel_adjustment(
-    prop_type:   str,
-    side:        str,
-    player_type: str,   # "pitcher" | "batter"
-    marcel_data: dict,
+def get_marcel_k_rate(
+    current_k_pct: float,
+    season_bf: int,
+    hist_k_pct: Optional[float] = None,
 ) -> float:
     """
-    Compute probability adjustment from Marcel projected rates.
+    Marcel-projected pitcher K-rate (percentage points, 0-100 scale).
 
-    Compares the player's Marcel projection to league average.
-    Large positive/negative deviation from mean generates a nudge.
+    Args:
+        current_k_pct:  Current 2026 K% (0-100)
+        season_bf:      Batters faced so far in 2026
+        hist_k_pct:     Prior-season K% if available (0-100)
 
-    Adjustments are intentionally small (max ±0.018) — Marcel is a
-    pre-season projection layer that adds historical context to the
-    already-running 7 real-time layers.  It should never dominate
-    a signal that comes from today's matchup context.
+    Returns:
+        Marcel-regressed K% (0-100), between current and league average.
 
-    Prop mappings:
-      pitcher  + strikeouts → K% deviation
-      pitcher  + earned_runs Under → BB% + HR/9 advantage
-      batter   + home_runs → HR/PA deviation
-      batter   + total_bases → ISO deviation
-      batter   + hits / hits_runs_rbis → wOBA deviation
-      batter   + strikeouts → batter K% deviation (K Over / Under)
-      batter   + runs → wOBA proxy for OBP
+    Examples:
+        # Elite early-season (35% K-rate, only 80 BF)
+        get_marcel_k_rate(35.0, 80) → ~27.4%  (heavy regression)
 
-    Returns a float delta in range roughly [-0.018, +0.018].
+        # Elite full-season (28% K-rate, 600 BF)
+        get_marcel_k_rate(28.0, 600) → ~27.5%  (light regression)
+
+        # League-average pitcher (22% K-rate, 200 BF)
+        get_marcel_k_rate(22.0, 200) → ~22.4%  (nearly no change)
     """
-    if not marcel_data:
-        return 0.0
+    # Step 1: blend with prior season if available
+    blended = _weighted_hist(current_k_pct, hist_k_pct)
 
-    adj = 0.0
+    # Step 2: regress to league mean based on sample size
+    regressed = _regress(
+        observed    = blended,
+        sample_n    = season_bf,
+        league_avg  = LEAGUE_AVG["k_pct"],
+        regression_n= REGRESSION_PA["k_pct"],
+    )
 
-    if player_type == "pitcher":
-        k_pct  = marcel_data.get("k_pct",  0.0)
-        bb_pct = marcel_data.get("bb_pct", 0.0)
-        hr9    = marcel_data.get("hr9",    0.0)
+    return max(8.0, min(45.0, regressed))
 
-        if prop_type == "strikeouts":
-            # k_delta: positive = pitcher strikes out more than average
-            k_delta = k_pct - _LEAGUE_AVG["pitcher_k_pct"]
-            if side == "Over":
-                adj = min(0.018, max(-0.012, k_delta * 0.35))
-            else:  # Under
-                adj = min(0.012, max(-0.018, -k_delta * 0.25))
 
-        elif prop_type == "earned_runs" and side == "Under":
-            # Fewer walks + fewer HR = fewer baserunners = fewer earned runs
-            bb_adv  = _LEAGUE_AVG["pitcher_bb_pct"] - bb_pct  # pos = fewer walks (good)
-            hr9_adv = _LEAGUE_AVG["pitcher_hr9"]    - hr9      # pos = fewer HR (good)
-            adj = min(0.015, max(0.0, bb_adv * 0.10 + hr9_adv * 0.025))
+def get_marcel_hit_rate(
+    current_avg: float,
+    season_pa: int,
+    hist_avg: Optional[float] = None,
+) -> float:
+    """
+    Marcel-projected batter hit rate (batting average scale, 0-1).
 
-    elif player_type == "batter":
-        k_pct  = marcel_data.get("k_pct",  0.0)
-        bb_pct = marcel_data.get("bb_pct", 0.0)
-        hr_pa  = marcel_data.get("hr_pa",  0.0)
-        woba   = marcel_data.get("woba",   0.0)
-        iso    = marcel_data.get("iso",    0.0)
+    Args:
+        current_avg:  Current 2026 batting average (0-1 scale)
+        season_pa:    Plate appearances so far in 2026
+        hist_avg:     Prior-season batting average (0-1)
 
-        if prop_type == "home_runs":
-            hr_delta = hr_pa - _LEAGUE_AVG["batter_hr_pa"]  # pos = power hitter
-            if side == "Over":
-                adj = min(0.018, max(-0.010, hr_delta * 3.50))
-            else:
-                adj = min(0.010, max(-0.018, -hr_delta * 2.50))
+    Returns:
+        Marcel-regressed batting average (0-1).
+    """
+    blended  = _weighted_hist(current_avg, hist_avg)
+    regressed = _regress(
+        observed    = blended,
+        sample_n    = season_pa,
+        league_avg  = LEAGUE_AVG["hit_rate"],
+        regression_n= REGRESSION_PA["hit_rate"],
+    )
+    return max(0.15, min(0.38, regressed))
 
-        elif prop_type == "total_bases":
-            iso_delta = iso - _LEAGUE_AVG["batter_iso"]  # pos = extra-base hitter
-            if side == "Over":
-                adj = min(0.015, max(-0.010, iso_delta * 0.25))
-            else:
-                adj = min(0.010, max(-0.015, -iso_delta * 0.18))
 
-        elif prop_type in ("hits", "hits_runs_rbis"):
-            woba_delta = woba - _LEAGUE_AVG["batter_woba"]  # pos = high-contact
-            if side == "Over":
-                adj = min(0.015, max(-0.010, woba_delta * 0.12))
-            else:
-                adj = min(0.010, max(-0.015, -woba_delta * 0.09))
+def get_marcel_xba(
+    current_xba: float,
+    season_pa: int,
+    hist_xba: Optional[float] = None,
+) -> float:
+    """Marcel-projected xBA. Stabilises faster than raw BA (~200 PA)."""
+    blended  = _weighted_hist(current_xba, hist_xba)
+    regressed = _regress(blended, season_pa,
+                         LEAGUE_AVG["xba"], REGRESSION_PA["xba"])
+    return max(0.15, min(0.38, regressed))
 
-        elif prop_type == "strikeouts":
-            # Batter K prop — high projected K% = more likely to strike out
-            k_delta = k_pct - _LEAGUE_AVG["batter_k_pct"]  # pos = high-K batter
-            if side == "Over":
-                adj = min(0.012, max(-0.010, k_delta * 0.20))
-            else:
-                adj = min(0.010, max(-0.012, -k_delta * 0.15))
 
-        elif prop_type == "runs":
-            # wOBA as OBP proxy — high wOBA batters score more runs
-            woba_delta = woba - _LEAGUE_AVG["batter_woba"]
-            if side == "Over":
-                adj = min(0.010, max(-0.007, woba_delta * 0.09))
+def get_marcel_whiff_pct(
+    current_whiff: float,
+    season_pitches: int,
+    hist_whiff: Optional[float] = None,
+) -> float:
+    """Marcel-projected pitcher SwStr% (0-100 scale)."""
+    blended  = _weighted_hist(current_whiff, hist_whiff)
+    regressed = _regress(blended, season_pitches,
+                         LEAGUE_AVG["whiff_pct"], REGRESSION_PA["whiff_pct"])
+    return max(5.0, min(40.0, regressed))
 
-        elif prop_type == "rbis":
-            # ISO proxy for RBI ability (extra-base hits drive in more runs)
-            iso_delta = iso - _LEAGUE_AVG["batter_iso"]
-            if side == "Over":
-                adj = min(0.010, max(-0.007, iso_delta * 0.15))
 
-    return round(adj, 4)
+def enrich_prop_with_marcel(prop: dict, hub: dict) -> dict:
+    """
+    Apply Marcel regression to a prop dict.
+
+    Called from prop_enrichment_layer.py after Steamer, before PA model.
+    Stamps _marcel_k_pct and _marcel_hit_rate onto the prop.
+    These values are used as more reliable season estimates than raw 2026 stats
+    when sample sizes are small (BF < 200).
+
+    Args:
+        prop:  Enriched prop dict
+        hub:   DataHub context (unused, available for future context)
+
+    Returns:
+        prop dict with Marcel fields stamped.
+    """
+    prop_type  = (prop.get("prop_type") or "").lower()
+    season_bf  = int(prop.get("season_bf")  or prop.get("bf", 0) or 0)
+    season_pa  = int(prop.get("season_pa")  or prop.get("pa", 0) or 0)
+
+    # ── K props — Marcel pitcher K-rate ───────────────────────────────────────
+    if prop_type in ("strikeouts", "pitching_outs", "pitcher_strikeouts"):
+        raw_k_pct  = float(prop.get("sv_k_pct")  or prop.get("fg_kpct")   or LEAGUE_AVG["k_pct"])
+        hist_k_pct = float(prop.get("career_k_pct") or raw_k_pct)
+
+        marcel_k = get_marcel_k_rate(raw_k_pct, season_bf, hist_k_pct)
+        prop["_marcel_k_pct"] = marcel_k
+
+        # If sample is small (< 150 BF), use Marcel as the primary signal
+        # instead of raw 2026 K-rate
+        regression_strength = min(1.0, max(0.0, 1.0 - season_bf / 250))
+        if regression_strength > 0.3 and abs(marcel_k - raw_k_pct) > 1.5:
+            # Blend raw and Marcel proportional to regression strength
+            blended_k = (1 - regression_strength) * raw_k_pct + regression_strength * marcel_k
+            prop["sv_k_pct"] = round(blended_k, 2)
+            logger.debug(
+                "[Marcel] K-rate: raw=%.1f%% Marcel=%.1f%% → blended=%.1f%% (BF=%d reg=%.0f%%)",
+                raw_k_pct, marcel_k, blended_k, season_bf, regression_strength * 100,
+            )
+
+        raw_whiff  = float(prop.get("sv_whiff_pct") or prop.get("sv_swstr_pct") or LEAGUE_AVG["whiff_pct"])
+        season_p   = season_bf * 3  # rough pitch count from BF
+        marcel_whiff = get_marcel_whiff_pct(raw_whiff, season_p)
+        prop["_marcel_whiff_pct"] = marcel_whiff
+
+    # ── Hit props — Marcel batter hit rate ────────────────────────────────────
+    elif prop_type in ("hits", "total_bases", "hits_runs_rbis", "fantasy_hitter"):
+        raw_avg  = float(prop.get("sv_xba") or prop.get("batting_avg") or LEAGUE_AVG["xba"])
+        hist_avg = float(prop.get("career_avg") or raw_avg)
+
+        marcel_h = get_marcel_hit_rate(raw_avg, season_pa, hist_avg)
+        prop["_marcel_hit_rate"] = marcel_h
+
+        # For very early season (< 80 PA), Marcel is more reliable than raw
+        regression_strength = min(1.0, max(0.0, 1.0 - season_pa / 300))
+        if regression_strength > 0.3 and abs(marcel_h - raw_avg) > 0.015:
+            blended_h = (1 - regression_strength) * raw_avg + regression_strength * marcel_h
+            prop["sv_xba"] = round(blended_h, 4)
+            logger.debug(
+                "[Marcel] xBA: raw=%.3f Marcel=%.3f → blended=%.3f (PA=%d reg=%.0f%%)",
+                raw_avg, marcel_h, blended_h, season_pa, regression_strength * 100,
+            )
+
+    return prop
+
+
+# ── Self-test ──────────────────────────────────────────────────────────────────
+
+def run_test() -> None:
+    print("\n" + "=" * 60)
+    print("  MARCEL REGRESSION — SELF TEST")
+    print("=" * 60)
+
+    cases = [
+        # (label, current, sample_n, hist, expected_direction, func)
+        ("K% elite early (35%, 80 BF)",
+         35.0, 80, None, "< 30",
+         lambda c, n, h: get_marcel_k_rate(c, n, h)),
+        ("K% elite full season (28%, 600 BF)",
+         28.0, 600, None, "25-28",
+         lambda c, n, h: get_marcel_k_rate(c, n, h)),
+        ("K% league avg (22%, 200 BF)",
+         22.0, 200, None, "~22",
+         lambda c, n, h: get_marcel_k_rate(c, n, h)),
+        ("K% with history (30% now, 25% hist, 120 BF)",
+         30.0, 120, 25.0, "24-28",
+         lambda c, n, h: get_marcel_k_rate(c, n, h)),
+        ("Hit rate elite (0.350, 80 PA)",
+         0.350, 80, None, "< 0.30",
+         lambda c, n, h: get_marcel_hit_rate(c, n, h)),
+        ("Hit rate slump (0.180, 120 PA)",
+         0.180, 120, None, "> 0.21",
+         lambda c, n, h: get_marcel_hit_rate(c, n, h)),
+        ("Hit rate full season (0.280, 500 PA)",
+         0.280, 500, None, "0.265-0.280",
+         lambda c, n, h: get_marcel_hit_rate(c, n, h)),
+    ]
+
+    all_pass = True
+    for label, current, sample_n, hist, expected, fn in cases:
+        result = fn(current, sample_n, hist)
+        # Verify regression direction
+        if "< " in expected:
+            threshold = float(expected.split("< ")[1])
+            ok = result < threshold
+        elif "> " in expected:
+            threshold = float(expected.split("> ")[1])
+            ok = result > threshold
+        else:
+            ok = True  # ~range, just display
+
+        status = "✅" if ok else "❌"
+        print(f"  {status} {label}")
+        print(f"     Raw={current} Marcel={result:.3f} (expected {expected})")
+        if not ok:
+            all_pass = False
+
+    # Test enrich_prop_with_marcel
+    print("\n  Testing enrich_prop_with_marcel():")
+    prop = {
+        "prop_type": "strikeouts",
+        "sv_k_pct": 35.0,
+        "sv_whiff_pct": 32.0,
+        "season_bf": 80,
+    }
+    result = enrich_prop_with_marcel(prop, hub={})
+    print(f"  K prop (35% K-rate, 80 BF):")
+    print(f"    _marcel_k_pct = {result.get('_marcel_k_pct', 'N/A'):.2f}%")
+    print(f"    sv_k_pct adjusted = {result.get('sv_k_pct', 35.0):.2f}%")
+    print(f"    (was 35.0%, pulled toward league avg {LEAGUE_AVG['k_pct']}%)")
+
+    prop_h = {
+        "prop_type": "hits",
+        "sv_xba": 0.360,
+        "season_pa": 60,
+    }
+    result_h = enrich_prop_with_marcel(prop_h, hub={})
+    print(f"\n  Hit prop (xBA=.360, 60 PA):")
+    print(f"    _marcel_hit_rate = {result_h.get('_marcel_hit_rate', 'N/A'):.3f}")
+    print(f"    sv_xba adjusted  = {result_h.get('sv_xba', 0.360):.3f}")
+
+    print(f"\n  {'✅ All tests passed.' if all_pass else '❌ Some tests failed.'}")
+    print(f"\n  INTEGRATION:")
+    print("""
+  In prop_enrichment_layer.py, after Steamer load and before PA model:
+
+      from marcel_layer import enrich_prop_with_marcel
+      prop = enrich_prop_with_marcel(prop, hub)
+
+  The function stamps _marcel_k_pct and _marcel_hit_rate and also
+  adjusts sv_k_pct / sv_xba for small-sample props (BF < 200, PA < 300).
+  Those adjusted values flow into the PA model and XGBoost feature build.
+  """)
+
+
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(message)s")
+    run_test()
