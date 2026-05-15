@@ -207,15 +207,15 @@ def _get_fg_pitcher(name: str) -> dict:
         from fangraphs_layer import get_pitcher  # noqa: PLC0415
         stats = get_pitcher(name) or {}
         return {
-            "k_rate":       stats.get("k_pct",     stats.get("k_rate",   0.223)),
-            "bb_rate":      stats.get("bb_pct",    stats.get("bb_rate",  0.087)),
+            "k_rate":       stats.get("k_pct",     stats.get("k_rate",   0.224)),
+            "bb_rate":      stats.get("bb_pct",    stats.get("bb_rate",  0.091)),
             "era":          stats.get("xfip",      stats.get("fip",      4.06)),
             "whip":         stats.get("whip",      1.28),
             "csw_pct":      stats.get("csw_pct",   0.275),
             "swstr_pct":    stats.get("swstr_pct", 0.110),
             "xfip":         stats.get("xfip",      4.06),
             "siera":        stats.get("siera",     4.06),
-            "k_bb_pct":     stats.get("k_bb_pct",  0.139),
+            "k_bb_pct":     stats.get("k_bb_pct",  0.133),
         }
     except Exception:
         return {}
@@ -236,14 +236,14 @@ def _get_fg_batter(name: str) -> dict:
         stats = get_batter(name) or {}
         return {
             "wrc_plus":   stats.get("wrc_plus",  100.0),
-            "woba":       stats.get("woba",       0.308),
-            "iso":        stats.get("iso",        0.156),
+            "woba":       stats.get("woba",       0.310),
+            "iso":        stats.get("iso",        0.155),
             "babip":      stats.get("babip",      0.288),
-            "o_swing":    stats.get("o_swing",    0.316),
+            "o_swing":    stats.get("o_swing",    0.287),
             "z_contact":  stats.get("z_contact",  0.850),
-            "hr_fb_pct":  stats.get("hr_fb_pct",  0.105),
-            "k_pct":      stats.get("k_pct",      0.228),
-            "bb_pct":     stats.get("bb_pct",     0.083),
+            "hr_fb_pct":  stats.get("hr_fb_pct",  0.109),
+            "k_pct":      stats.get("k_pct",      0.224),
+            "bb_pct":     stats.get("bb_pct",     0.091),
         }
     except Exception:
         return {}
@@ -550,14 +550,14 @@ def _get_form_adj(player_name: str, prop_type: str, hub: dict) -> float:
 
 def _get_chase_score(opposing_team: str, hub: dict) -> dict:
     default = {"k_prob_adjustment": 0.0, "lineup_difficulty": "NEUTRAL",
-               "avg_chase_rate": 0.316, "_opp_o_swing_avg": 0.316}
+               "avg_chase_rate": 0.287, "_opp_o_swing_avg": 0.287}
     if not opposing_team:
         return default
     try:
         from lineup_chase_layer import get_lineup_chase_score  # noqa: PLC0415
         lineups = hub.get("context", {}).get("lineups", [])
         result  = get_lineup_chase_score(opposing_team, lineups)
-        result["_opp_o_swing_avg"] = result.get("avg_chase_rate", 0.316)
+        result["_opp_o_swing_avg"] = result.get("avg_chase_rate", 0.287)
         return result
     except Exception as _lcs_err:
         logger.debug("[Enrich] lineup_chase_score failed: %s", _lcs_err)

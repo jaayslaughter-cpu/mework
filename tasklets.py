@@ -589,7 +589,7 @@ _LEAGUE_PLATOON_SPLITS = {
     "S": 0.027,   # switch: use favourable side
 }
 _STAT_DEFAULTS_PLATOON = {
-    "avg": 0.245, "obp": 0.315, "slg": 0.390, "ops": 0.705, "woba": 0.320
+    "avg": 0.241, "obp": 0.317, "slg": 0.397, "ops": 0.714, "woba": 0.310
 }
 
 
@@ -3146,15 +3146,15 @@ class _BaseAgent:
 
             # slot 2: SLG for TB/power props (16% feature importance)
             if _is_tb_prop:
-                _slg = float(prop.get("slg", 0.410) or 0.410)
+                _slg = float(prop.get("slg", 0.397) or 0.397)
                 era  = _clamp((_slg - 0.250) / 0.400)   # 0.250=0, 0.410=avg(0.40), 0.650=elite(1.0)
             else:
                 era = _clamp((float(prop.get("babip", 0.288) or 0.288) - 0.200) / 0.200)
 
             # slot 3: batter bb_pct (plate discipline)
-            whip    = _clamp(float(prop.get("bb_pct", 0.087) or 0.087) / 0.20)
+            whip    = _clamp(float(prop.get("bb_pct", 0.091) or 0.091) / 0.20)
             # slot 4: batter K% (inverse contact — higher K = worse contact)
-            shadow_whiff = _clamp(float(prop.get("k_pct", 0.223) or 0.223) / 0.35)
+            shadow_whiff = _clamp(float(prop.get("k_pct", 0.224) or 0.224) / 0.35)
 
         # Zone integrity multiplier (pitcher K-props only, 1.0 for batters)
         # Blended with pitcher type cluster: power=+0.05, command=-0.05, neutral=0

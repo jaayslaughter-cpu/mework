@@ -242,25 +242,25 @@ LEAGUE_DEFAULTS: dict[str, dict[str, float]] = {
     "pitcher": {
         "csw_pct":   0.273,   # FG 2026: ~27.3% through game 44
         "swstr_pct": 0.110,   # FG 2025: ~11.0% (unchanged)
-        "k_bb_pct":  0.130,   # FG 2025: ~13.0% (unchanged)
-        "xfip":      4.10,    # FG 2026: xFIP through game 44  
-        "siera":     4.10,    # FG 2026: SIERA through game 44  
-        "fip":       4.10,    # FG 2026: FIP through game 44  
-        "hr_fb_pct": 0.119,   # FG 2025: 11.9% (confirmed VSiN Feb 2026): ~11.8% (was 0.120)
+        "k_bb_pct":  0.133,   # blended 60/40 2026/2025: 13.3%
+        "xfip":      4.12,    # blended 60/40 2026/2025  
+        "siera":     4.12,    # blended 60/40 2026/2025  
+        "fip":       4.12,    # blended 60/40 2026/2025  
+        "hr_fb_pct": 0.109,   # blended 60/40 2026/2025 (2026 actual ~10.5%)
         "lob_pct":   0.720,   # unchanged
-        "babip":     0.288,   # FG 2025: .289 (confirmed VSiN Feb 2026): ~0.298 (was 0.300)
+        "babip":     0.292,   # blended 60/40 2026/2025 (2026 BBRef: .288)
     },
     "batter": {
         "wrc_plus":    100.0,  # by definition
-        "woba":        0.308,  # FG 2025 (was 0.312)
-        "iso":         0.156,  # FG 2025: elevated power (was 0.158)
-        "babip":       0.288,  # FG 2025: .289 (confirmed VSiN Feb 2026)
-        "o_swing":     0.316,  # FG 2025 (was 0.318)
+        "woba":        0.310,  # blended 60/40 2026/2025 (2026 actual .307)
+        "iso":         0.155,  # blended 60/40 2026/2025 (2026 actual .149)
+        "babip":       0.292,  # blended 60/40 2026/2025 (2026 BBRef: .288)
+        "o_swing":     0.287,  # blended 60/40 2026/2025 (ABS robot ump → fewer chases)
         "z_contact":   0.848,  # FG 2025: ~84.8% (was 0.850)
-        "hr_fb_pct":   0.119,  # FG 2025: 11.9% (confirmed VSiN Feb 2026)
-        "k_pct":       0.223,  # FG 2025: 22.2% (confirmed VSiN Feb 2026)
-        "bb_pct":      0.087,  # FG 2025: 8.4% (confirmed VSiN Feb 2026)
-        "slg":         0.410,  # FG 2025 (was 0.411)
+        "hr_fb_pct":   0.109,  # blended 60/40 2026/2025 (2026 actual ~10.5%)
+        "k_pct":       0.224,  # blended 60/40 2026/2025 (2026 actual 22.2%)
+        "bb_pct":      0.091,  # blended 60/40 2026/2025 (2026 actual 9.5% — ABS effect)
+        "slg":         0.397,  # blended 60/40 2026/2025 (2026 BBRef actual: .389)
         "xbh_per_game": 0.50,  # extra base hits per game — #1 feature for TB (45% importance)
     },
 }
