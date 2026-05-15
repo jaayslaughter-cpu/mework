@@ -19,6 +19,10 @@ Model files (produced by scripts/xgb_k_training.py):
   models/xgb_hits.pkl           — batter ≥1 hit
   models/xgb_feature_cols.json — feature column order per model key
 
+PR #562: Models now loaded from xgb_model_store DB table as fallback
+when filesystem PKLs are missing (Railway restart wipes ephemeral FS).
+Training script persists models to DB after each successful train.
+
 Wiring (F5Agent, tasklets.py):
   After all K adjustments (swstr, opp_k, platoon, lambda_gap, line_move):
 
@@ -80,8 +84,57 @@ _feat_cols: dict            = {}   # key → list[str]
 _loaded:    bool            = False
 
 
+def _load_models_from_db() -> int:
+    """
+    PR #562: Load models from xgb_model_store Postgres table.
+    Called as fallback when filesystem PKLs are missing (e.g., Railway restart).
+    Returns number of models loaded.
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return 0
+    try:
+        import base64
+        import pickle as _pickle
+        import psycopg2
+        with psycopg2.connect(db_url, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT prop_type, model_json, feature_names
+                    FROM xgb_model_store
+                    WHERE trained_at > NOW() - INTERVAL '14 days'
+                    ORDER BY trained_at DESC
+                """)
+                rows = cur.fetchall()
+        if not rows:
+            logger.info("[xgb_k] xgb_model_store: no recent models (< 14 days)")
+            return 0
+        loaded = 0
+        for prop_type, model_b64, feat_names_raw in rows:
+            try:
+                model = _pickle.loads(base64.b64decode(model_b64))
+                # prop_type in DB matches _models keys: "k_3.5", "k_4.5", "k_5.5", "k_6.5", "hits"
+                key = str(prop_type)
+                _models[key] = model
+                if feat_names_raw:
+                    if isinstance(feat_names_raw, str):
+                        _feat_cols[key] = json.loads(feat_names_raw)
+                    elif isinstance(feat_names_raw, list):
+                        _feat_cols[key] = feat_names_raw
+                logger.info("[xgb_k] Loaded '%s' from xgb_model_store (DB fallback)", key)
+                loaded += 1
+            except Exception as exc:
+                logger.warning("[xgb_k] Failed to deserialize '%s' from DB: %s", prop_type, exc)
+        return loaded
+    except Exception as exc:
+        logger.debug("[xgb_k] DB model load skipped: %s", exc)
+        return 0
+
+
 def _load_models() -> None:
-    """Lazy-load all available .pkl files once at first call."""
+    """Lazy-load all available .pkl files once at first call.
+    PR #562: Falls back to xgb_model_store DB table if filesystem is empty.
+    """
     global _loaded
     with _lock:
         if _loaded:
@@ -103,11 +156,19 @@ def _load_models() -> None:
                     logger.debug("[xgb_k] model not found: %s", path)
 
             if _models:
-                logger.info("[xgb_k] %d model(s) ready: %s",
+                logger.info("[xgb_k] %d model(s) ready from filesystem: %s",
                             len(_models), sorted(_models))
             else:
-                logger.info("[xgb_k] no models found in %s — "
-                            "run scripts/xgb_k_training.py to generate", _MODEL_DIR)
+                # ── PR #562: Filesystem empty → try DB ──────────────────────
+                logger.info("[xgb_k] No filesystem models found in %s — "
+                            "trying xgb_model_store DB table...", _MODEL_DIR)
+                n_db = _load_models_from_db()
+                if n_db > 0:
+                    logger.info("[xgb_k] %d model(s) loaded from DB: %s",
+                                n_db, sorted(_models))
+                else:
+                    logger.info("[xgb_k] No models found anywhere. "
+                                "Run scripts/xgb_k_training.py to generate.")
 
         except Exception:
             logger.warning("[xgb_k] model load failed:\n%s", traceback.format_exc())
@@ -237,7 +298,7 @@ def _build_k_features(prop: dict, feat_order: list) -> Optional[np.ndarray]:
         if 0.0 < raw[pct_key] <= 1.0:
             raw[pct_key] *= 100.0
 
-    cols = feat_order if feat_order else TRAINING_K_FEATURES
+    cols = feat_order if feat_order else K_FEATURES
     try:
         return np.array([[raw.get(c, 0.0) for c in cols]], dtype=np.float32)
     except Exception:
@@ -298,7 +359,7 @@ def _build_hit_features(prop: dict, pitcher: dict,
         if 0.0 < raw[pct_key] <= 1.0:
             raw[pct_key] *= 100.0
 
-    cols = feat_order if feat_order else TRAINING_HITS_FEATURES
+    cols = feat_order if feat_order else HITS_FEATURES
     try:
         return np.array([[raw.get(c, 0.0) for c in cols]], dtype=np.float32)
     except Exception:
