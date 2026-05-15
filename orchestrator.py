@@ -819,6 +819,35 @@ async def lifespan(_app: FastAPI):
         replace_existing=True,
     )
 
+    # ── Daily game logs refresh — 4:15 AM PT ─────────────────────────────────
+    # Fetches boxscores for last 7 days via MLB Stats API (tnestico/mlb_scraper pattern).
+    # Upserts into live_batting_logs + live_pitching_logs Postgres tables.
+    # Rebuilds data/stats/2026/mlb_batting_logs.csv and mlb_pitching_logs.csv.
+    def job_game_logs_refresh():
+        try:
+            from game_logs_refresh import refresh as _gl_refresh  # noqa: PLC0415
+            result = _gl_refresh(lookback_days=7)
+            logger.info(
+                "[Scheduler] GameLogsRefresh: %d games, %d batting rows, "
+                "%d pitching rows, %d errors",
+                result.get("games_fetched", 0),
+                result.get("batting_rows", 0),
+                result.get("pitching_rows", 0),
+                result.get("errors", 0),
+            )
+        except Exception as exc:
+            logger.exception("[Scheduler] GameLogsRefresh failed: %s", exc)
+
+    scheduler.add_job(
+        job_game_logs_refresh,
+        CronTrigger(hour=4, minute=15, timezone="America/Los_Angeles"),
+        id="game_logs_refresh",
+        name="Daily game logs refresh (batting + pitching)",
+        replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
+    )
+
     # ── Weekly umpire table refresh — Monday 3:00 AM PT ───────────────────────
     # Scrapes swishanalytics.com/mlb/mlb-umpire-factors for live K%, BB%, RPG, boosts.
     # Updates umpire_rates._UMPIRE_TABLE and _STATIC_RUN_IMPACT in-process.
