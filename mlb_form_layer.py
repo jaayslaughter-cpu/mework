@@ -41,6 +41,31 @@ import requests
 logger = logging.getLogger("propiq.form")
 
 
+# ── Postgres helpers (reads from live_batting_logs / live_pitching_logs) ──────
+def _get_pg():
+    """Return a psycopg2 connection or None."""
+    import os
+    try:
+        import psycopg2
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            return None
+        return psycopg2.connect(db_url)
+    except Exception:
+        return None
+
+# Mapping: API stat key → (table_col_expr_for_batting, table_col_expr_for_pitching)
+# None means not available in that table.
+_DB_STAT_MAP = {
+    "hits":        ("(h_1b + h_2b + h_3b + home_runs)", None),
+    "rbi":         ("b_rbi",                            None),
+    "runs":        ("b_runs",                           None),
+    "totalBases":  ("(h_1b + 2*h_2b + 3*h_3b + 4*home_runs)", None),
+    "strikeOuts":  ("b_k",                              "strikeouts"),
+    "earnedRuns":  (None,                               "earnedruns"),
+}
+
+
 # ── Trend significance gates (from sequencebaseball/cogs/trends.py) ───────────
 try:
     from fix_trend_significance import gate_form_adjustment, is_significant_trend
@@ -165,6 +190,143 @@ class MLBFormLayer:
     # API fetchers
     # ------------------------------------------------------------------
 
+
+    # ------------------------------------------------------------------
+    # DB-primary fetchers — read from nightly game_logs_refresh tables
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fetch_game_log_from_db(
+        player_id: int, group: str, window: int
+    ) -> list[dict] | None:
+        """
+        Query live_batting_logs / live_pitching_logs for recent game rows.
+        Returns list of synthetic "split" dicts (same shape _compute_form expects)
+        or None if the table is empty / player not found.
+        """
+        conn = _get_pg()
+        if conn is None:
+            return None
+        table  = "live_batting_logs"  if group == "hitting" else "live_pitching_logs"
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT game_date,
+                           h_1b, h_2b, h_3b, home_runs,
+                           b_rbi, b_runs, b_k,
+                           COALESCE(strikeouts, 0)   AS strikeouts,
+                           COALESCE(earnedruns, 0)   AS earnedruns,
+                           COALESCE(outs, 0)         AS outs_pitched
+                    FROM   {table}
+                    WHERE  mlbam_id = %s
+                    ORDER  BY game_date DESC
+                    LIMIT  %s
+                    """,
+                    (player_id, window),
+                ) if table == "live_batting_logs" else cur.execute(
+                    f"""
+                    SELECT game_date,
+                           0 AS h_1b, 0 AS h_2b, 0 AS h_3b, 0 AS home_runs,
+                           0 AS b_rbi, 0 AS b_runs, 0 AS b_k,
+                           COALESCE(strikeouts, 0)  AS strikeouts,
+                           COALESCE(earnedruns, 0)  AS earnedruns,
+                           COALESCE(outs, 0)        AS outs_pitched
+                    FROM   {table}
+                    WHERE  mlbam_id = %s
+                    ORDER  BY game_date DESC
+                    LIMIT  %s
+                    """,
+                    (player_id, window),
+                )
+                rows = cur.fetchall()
+        except Exception as exc:
+            logger.debug("[Form][DB] game log query failed: %s", exc)
+            return None
+        finally:
+            conn.close()
+
+        if not rows:
+            return None
+
+        def _row_to_stat(r) -> dict:
+            hits = (r[1] or 0) + (r[2] or 0) + (r[3] or 0) + (r[4] or 0)
+            tb   = (r[1] or 0) + 2*(r[2] or 0) + 3*(r[3] or 0) + 4*(r[4] or 0)
+            return {
+                "hits":       hits,
+                "rbi":        r[5] or 0,
+                "runs":       r[6] or 0,
+                "totalBases": tb,
+                "strikeOuts": r[7] if group == "hitting" else r[8],
+                "earnedRuns": r[9] or 0,
+            }
+
+        # Return synthetic split dicts
+        return [{"stat": _row_to_stat(r)} for r in rows]
+
+    @staticmethod
+    def _fetch_season_per_game_from_db(
+        player_id: int, group: str
+    ) -> dict[str, float] | None:
+        """
+        Compute season-average-per-game from DB for baseline comparison.
+        Returns {api_stat_key: per_game_avg} or None if insufficient data.
+        """
+        conn = _get_pg()
+        if conn is None:
+            return None
+        table = "live_batting_logs" if group == "hitting" else "live_pitching_logs"
+        try:
+            with conn, conn.cursor() as cur:
+                if table == "live_batting_logs":
+                    cur.execute(
+                        """
+                        SELECT COUNT(*),
+                               SUM(h_1b+h_2b+h_3b+home_runs),
+                               SUM(b_rbi), SUM(b_runs),
+                               SUM(h_1b + 2*h_2b + 3*h_3b + 4*home_runs),
+                               SUM(b_k)
+                        FROM live_batting_logs
+                        WHERE mlbam_id = %s AND game_date >= '2026-03-01'
+                        """,
+                        (player_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*),
+                               0, 0, 0, 0,
+                               SUM(strikeouts), SUM(earnedruns)
+                        FROM live_pitching_logs
+                        WHERE mlbam_id = %s AND game_date >= '2026-03-01'
+                        """,
+                        (player_id,),
+                    )
+                row = cur.fetchone()
+        except Exception as exc:
+            logger.debug("[Form][DB] season avg query failed: %s", exc)
+            return None
+        finally:
+            conn.close()
+
+        if not row or not row[0] or row[0] < 3:
+            return None
+
+        gp = row[0]
+        if group == "hitting":
+            return {
+                "hits":       (row[1] or 0) / gp,
+                "rbi":        (row[2] or 0) / gp,
+                "runs":       (row[3] or 0) / gp,
+                "totalBases": (row[4] or 0) / gp,
+                "strikeOuts": (row[5] or 0) / gp,
+            }
+        else:
+            return {
+                "strikeOuts": (row[5] or 0) / gp,
+                "earnedRuns": (row[6] or 0) / gp,
+            }
+
     @staticmethod
     def _fetch_game_log(
         player_id: int, group: str, window: int
@@ -257,8 +419,17 @@ class MLBFormLayer:
 
         for group in groups_needed:
             window        = _PITCHER_WINDOW if group == "pitching" else _HITTER_WINDOW
-            recent_splits = self._fetch_game_log(player_id, group, window)
-            season_pg     = self._fetch_season_per_game(player_id, group)
+
+            # DB-first: read from nightly game_logs_refresh tables (fast, no API quota)
+            recent_splits = self._fetch_game_log_from_db(player_id, group, window)
+            season_pg     = self._fetch_season_per_game_from_db(player_id, group)
+
+            # API fallback if DB tables are empty / player not yet seeded
+            if recent_splits is None:
+                logger.debug("[Form] DB miss for pid=%d group=%s — falling back to live API", player_id, group)
+                recent_splits = self._fetch_game_log(player_id, group, window)
+            if season_pg is None:
+                season_pg = self._fetch_season_per_game(player_id, group)
 
             if not recent_splits or not season_pg:
                 continue
