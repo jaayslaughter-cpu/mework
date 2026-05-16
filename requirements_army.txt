@@ -42,5 +42,4 @@ pybaseball>=2.2.7
 mlb-statsapi>=1.7.2
 curl_cffi>=0.6.0
 tensorflow>=2.15.0
-git+https://github.com/tnestico/mlb_scraper.git
 polars>=0.20.0
