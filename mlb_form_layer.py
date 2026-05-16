@@ -210,35 +210,38 @@ class MLBFormLayer:
         table  = "live_batting_logs"  if group == "hitting" else "live_pitching_logs"
         try:
             with conn, conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT game_date,
-                           h_1b, h_2b, h_3b, home_runs,
-                           b_rbi, b_runs, b_k,
-                           COALESCE(strikeouts, 0)   AS strikeouts,
-                           COALESCE(earnedruns, 0)   AS earnedruns,
-                           COALESCE(outs, 0)         AS outs_pitched
-                    FROM   {table}
-                    WHERE  mlbam_id = %s
-                    ORDER  BY game_date DESC
-                    LIMIT  %s
-                    """,
-                    (player_id, window),
-                ) if table == "live_batting_logs" else cur.execute(
-                    f"""
-                    SELECT game_date,
-                           0 AS h_1b, 0 AS h_2b, 0 AS h_3b, 0 AS home_runs,
-                           0 AS b_rbi, 0 AS b_runs, 0 AS b_k,
-                           COALESCE(strikeouts, 0)  AS strikeouts,
-                           COALESCE(earnedruns, 0)  AS earnedruns,
-                           COALESCE(outs, 0)        AS outs_pitched
-                    FROM   {table}
-                    WHERE  mlbam_id = %s
-                    ORDER  BY game_date DESC
-                    LIMIT  %s
-                    """,
-                    (player_id, window),
-                )
+                if table == "live_batting_logs":
+                    cur.execute(
+                        """
+                        SELECT game_date,
+                               h_1b, h_2b, h_3b, home_runs,
+                               b_rbi, b_runs, b_k,
+                               0 AS strikeouts,
+                               0 AS earnedruns,
+                               0 AS outs_pitched
+                        FROM   live_batting_logs
+                        WHERE  mlbam_id = %s
+                        ORDER  BY game_date DESC
+                        LIMIT  %s
+                        """,
+                        (player_id, window),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT game_date,
+                               0 AS h_1b, 0 AS h_2b, 0 AS h_3b, 0 AS home_runs,
+                               0 AS b_rbi, 0 AS b_runs, 0 AS b_k,
+                               COALESCE(strikeouts, 0)  AS strikeouts,
+                               COALESCE(earnedruns, 0)  AS earnedruns,
+                               COALESCE(outs, 0)        AS outs_pitched
+                        FROM   live_pitching_logs
+                        WHERE  mlbam_id = %s
+                        ORDER  BY game_date DESC
+                        LIMIT  %s
+                        """,
+                        (player_id, window),
+                    )
                 rows = cur.fetchall()
         except Exception as exc:
             logger.debug("[Form][DB] game log query failed: %s", exc)
@@ -287,7 +290,7 @@ class MLBFormLayer:
                                SUM(h_1b + 2*h_2b + 3*h_3b + 4*home_runs),
                                SUM(b_k)
                         FROM live_batting_logs
-                        WHERE mlbam_id = %s AND game_date >= '2026-03-01'
+                        WHERE mlbam_id = %s AND game_date >= CAST(EXTRACT(YEAR FROM CURRENT_DATE) || '-03-01' AS DATE)
                         """,
                         (player_id,),
                     )
@@ -298,7 +301,7 @@ class MLBFormLayer:
                                0, 0, 0, 0,
                                SUM(strikeouts), SUM(earnedruns)
                         FROM live_pitching_logs
-                        WHERE mlbam_id = %s AND game_date >= '2026-03-01'
+                        WHERE mlbam_id = %s AND game_date >= CAST(EXTRACT(YEAR FROM CURRENT_DATE) || '-03-01' AS DATE)
                         """,
                         (player_id,),
                     )
