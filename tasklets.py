@@ -7864,6 +7864,7 @@ def run_xgboost_tasklet() -> None:
                 WHERE actual_outcome IS NOT NULL
                   AND discord_sent = TRUE
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
+                  AND agent_name NOT ILIKE '%seed%'
                   AND prop_type NOT IN (
                       'fantasy_score', 'fantasy_hitter', 'fantasy_pitcher',
                       'fantasy_pts', 'hitter_fantasy_score', 'pitcher_fantasy_score'
@@ -7877,8 +7878,8 @@ def run_xgboost_tasklet() -> None:
     except Exception as e:
         logger.warning("[XGBoostTasklet] Postgres error: %s", e)
 
-    if len(rows) < 200:
-        logger.info("[XGBoostTasklet] Insufficient training data (%d rows) — skipping.", len(rows))
+    if len(rows) < 50:
+        logger.info("[XGBoostTasklet] Insufficient training data (%d rows, need 50+) — skipping.", len(rows))
         return
 
     # ── Feature padding: pad older 20-feature records to current 27-feature schema ──
@@ -7937,11 +7938,18 @@ def run_xgboost_tasklet() -> None:
     # ── Recency decay: recent bets matter more than old ones ──────────────
     # Last week ≈ 0.93 | 30 days ≈ 0.74 | 90 days ≈ 0.41 | Opening Day ≈ 0.16
     now_utc = datetime.datetime.now(datetime.timezone.utc)
+    _default_graded = now_utc - datetime.timedelta(days=30)  # PR #575: default for NULL graded_at
+    def _parse_graded_at(v):
+        if v is None:
+            return _default_graded
+        if isinstance(v, datetime.datetime):
+            return v
+        try:
+            return datetime.datetime.fromisoformat(str(v))
+        except Exception:
+            return _default_graded
     sample_weights = np.array([
-        np.exp(-0.01 * max((now_utc - (
-            r[2] if isinstance(r[2], datetime.datetime)
-            else datetime.datetime.fromisoformat(str(r[2]))
-        ).replace(tzinfo=None)).days, 0))
+        np.exp(-0.01 * max((now_utc - _parse_graded_at(r[2]).replace(tzinfo=None)).days, 0))
         for r in rows
     ], dtype=np.float32)
 
@@ -7999,9 +8007,12 @@ def run_xgboost_tasklet() -> None:
         logger.info("[XGBoostTasklet] Saved model as pickle (JSON save failed)")
 
     # ── Persist model to Postgres so it survives Railway restarts ─────────────
+    # PR #575: Save as base64 pickle — avoids reading back an ephemeral JSON file.
+    # xgb_k_layer._load_models_from_db() expects base64-encoded pickle in model_json.
     try:
-        with open(model_path, "r") as _mf:
-            _model_json_str = _mf.read()
+        import base64 as _b64  # noqa: PLC0415
+        _model_bytes  = pickle.dumps(model)
+        _model_b64str = _b64.b64encode(_model_bytes).decode("utf-8")
         _ms_conn = _pg_conn()
         with _ms_conn.cursor() as _ms_cur:
             # Keep only last 3 models to cap storage
@@ -8010,12 +8021,13 @@ def run_xgboost_tasklet() -> None:
                 "(SELECT id FROM xgb_model_store ORDER BY trained_at DESC LIMIT 2)"
             )
             _ms_cur.execute(
-                "INSERT INTO xgb_model_store (model_json, n_rows, notes) VALUES (%s, %s, %s)",
-                (_model_json_str, len(rows), f"accuracy={round(accuracy, 4)}")
+                "INSERT INTO xgb_model_store (model_json, n_rows, notes, prop_type, n_samples)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                (_model_b64str, len(rows), f"accuracy={round(accuracy, 4)}", "general", len(rows))
             )
         _ms_conn.commit()
         _ms_conn.close()
-        logger.info("[XGBoostTasklet] Model persisted to xgb_model_store (%d rows).", len(rows))
+        logger.info("[XGBoostTasklet] Model persisted to xgb_model_store (%d live rows, base64 pkl).", len(rows))
     except Exception as _ms_err:
         logger.warning("[XGBoostTasklet] xgb_model_store persist failed: %s", _ms_err)
 
