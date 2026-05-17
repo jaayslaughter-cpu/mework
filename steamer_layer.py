@@ -341,10 +341,10 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
             today,
         )
         de_data = _fetch_steamer_draftedge(hub)
-        # Require >= 50 players from DraftEdge — when hub=None at startup,
-        # the live DraftEdge API only returns ~32 players and blocks the
-        # 5,663-player static CSV (Tier 5). Treat thin results as a miss.
-        if de_data and len(de_data) >= 50:
+        # Require >= 100 players from DraftEdge — must match the health gate in
+        # tasklets.py. DraftEdge returns ~65 players in degraded state; that is
+        # below the gate so we cascade to Tier 5 (5,663-player static CSV).
+        if de_data and len(de_data) >= 100:
             _CACHE = de_data
             _CACHE_DATE = today
             logger.info(
@@ -357,7 +357,7 @@ def _get_cache(hub: dict | None = None) -> dict[str, dict]:
             if de_data:
                 logger.warning(
                     "[Steamer] Tier 4 DraftEdge only returned %d players "
-                    "(< 50 threshold) — falling through to Tier 5 static CSV.",
+                    "(< 100 threshold) — falling through to Tier 5 static CSV.",
                     len(de_data),
                 )
             # Tier 5: static CSV bundled in data/fg/steamer_ros_2026.csv
