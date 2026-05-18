@@ -1488,13 +1488,13 @@ def settle_streak_picks(game_date: str) -> None:
                     new_current = (_fresh[1] if _fresh else 0) + 1
                     streak_status = "WON" if new_wins >= STREAK_TOTAL_WINS else "ACTIVE"
                     cur.execute(
-                        "UPDATE streak_state SET wins_in_row=%s, current_pick=%s, status=%s WHERE id=%s",
+                        "UPDATE streak_state SET wins_in_row=%s, current_pick=%s, status=%s, last_pick_at=NOW() WHERE id=%s",
                         (new_wins, new_current, streak_status, streak_id),
                     )
                 elif outcome == "LOSS":
                     streak_status = "LOST"
                     cur.execute(
-                        "UPDATE streak_state SET status='LOST' WHERE id=%s",
+                        "UPDATE streak_state SET status='LOST', last_pick_at=NOW() WHERE id=%s",
                         (streak_id,),
                     )
                     # AUTO-RESET: create a fresh ACTIVE streak immediately
@@ -1517,7 +1517,7 @@ def settle_streak_picks(game_date: str) -> None:
                         cur.execute(
                             """
                             UPDATE streak_state
-                            SET status='ACTIVE', wins_in_row=0, current_pick=0
+                            SET status='ACTIVE', wins_in_row=0, current_pick=0, last_pick_at=NOW()
                             WHERE id=%s
                             """,
                             (streak_id,),
@@ -1530,7 +1530,7 @@ def settle_streak_picks(game_date: str) -> None:
                     # Mark this pick PUSH so it doesn't count toward wins_in_row,
                     # and reset current_pick so tomorrow's run re-uses this slot.
                     cur.execute(
-                        "UPDATE streak_state SET current_pick = GREATEST(0, current_pick - 1) WHERE id=%s",
+                        "UPDATE streak_state SET current_pick = GREATEST(0, current_pick - 1), last_pick_at=NOW() WHERE id=%s",
                         (streak_id,),
                     )
                     logger.info("[Streak] Pick #%d PUSH — slot preserved for re-pick", pick_number)
