@@ -6057,6 +6057,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
     # cross-process backup (e.g. multiple Railway replicas).
     today_str  = _today_pt().isoformat()   # Pacific Time date
     r_dedup    = _redis()
+    _any_discord_sent = False  # PR #577: only return True after real Discord 2xx
 
     # ── DB-backed dedup preload — survives crash + Redis cold restart ──────────
     # a fresh restart never re-sends picks that were already Discord-sent today.
@@ -6409,6 +6410,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
 
         try:
             discord_alert.send_parlay_alert(parlay)      # 4. Discord (fires last)
+            _any_discord_sent = True  # PR #577: webhook returned without raising → real send confirmed
             # Prevents ghost grades where DB has a row but subscriber never saw the pick
             try:
                 _pg3 = _pg_conn()
@@ -6614,7 +6616,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
         except Exception as _dl_err:
             logger.debug("[AgentTasklet] decision_logger flush failed: %s", _dl_err)
 
-    return True  # FIX: signals orchestrator that picks were actually sent
+    return _any_discord_sent  # PR #577: True only if ≥1 Discord webhook returned without raising
 
 
 def get_agents() -> dict:
@@ -7892,6 +7894,8 @@ def run_xgboost_tasklet() -> None:
                   AND discord_sent = TRUE
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                   AND agent_name NOT ILIKE '%seed%'
+                  AND model_prob IS NOT NULL
+                  AND model_prob >= 0.59
                   AND prop_type NOT IN (
                       'fantasy_score', 'fantasy_hitter', 'fantasy_pitcher',
                       'fantasy_pts', 'hitter_fantasy_score', 'pitcher_fantasy_score'

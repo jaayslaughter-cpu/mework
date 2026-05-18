@@ -397,45 +397,50 @@ def run(settle_date: Optional[str] = None) -> None:
             for lr in result.legs
         ]
 
-        # Phase 94: Populate bet_ledger for each settled leg
+        # Phase 94: Grade bet_ledger legs that were already Discord-confirmed.
+        # FIX (zombie INSERT root cause): No INSERT here — only UPDATE existing rows.
+        # The old INSERT path was creating model_prob=NULL / parlay_id=NULL zombie rows
+        # every night for any parlay in propiq_season_record that had no matching
+        # bet_ledger row. Now we only update rows that already exist AND were Discord-sent.
         if _CLV_FEEDBACK_AVAILABLE:
             try:
-                import os, psycopg2
-                _db_url = os.environ.get("DATABASE_URL", "")
+                import os as _os94, psycopg2 as _pg94
+                _db_url = _os94.environ.get("DATABASE_URL", "")
                 if _db_url:
-                    _conn = psycopg2.connect(_db_url, sslmode="require")
+                    _conn = _pg94.connect(_db_url, sslmode="require")
                     _cur  = _conn.cursor()
                     for _lr in result.legs:
                         _actual_outcome = 1 if _lr.outcome == "WIN" else (0 if _lr.outcome == "LOSS" else None)
                         _cur.execute(
                             """
-                            INSERT INTO bet_ledger
-                                (bet_date, agent_name, player_name, prop_type, side, line,
-                                 actual_outcome, profit_loss, status, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                            ON CONFLICT (player_name, prop_type, line, side, agent_name, bet_date)
-                            DO UPDATE SET
-                                actual_outcome = EXCLUDED.actual_outcome,
-                                status         = EXCLUDED.status,
-                                profit_loss    = EXCLUDED.profit_loss
-                            WHERE bet_ledger.actual_outcome IS NULL
+                            UPDATE bet_ledger
+                               SET actual_outcome = %s,
+                                   status         = %s,
+                                   profit_loss    = %s,
+                                   graded_at      = NOW()
+                             WHERE player_name    = %s
+                               AND prop_type      = %s
+                               AND side           = %s
+                               AND agent_name     = %s
+                               AND bet_date       = %s
+                               AND discord_sent   = TRUE
+                               AND actual_outcome IS NULL
                             """,
                             (
-                                settle_date,
-                                agent_name,
+                                _actual_outcome,
+                                _lr.outcome,
+                                result.units_profit / max(len(result.legs), 1),
                                 _lr.player_name,
                                 _lr.prop_type,
                                 _lr.side,
-                                _lr.line,
-                                _actual_outcome,
-                                result.units_profit / max(len(result.legs), 1),
-                                _lr.outcome,
+                                agent_name,
+                                settle_date,
                             ),
                         )
                     _conn.commit()
                     _conn.close()
             except Exception as _ledger_err:
-                logger.warning("[Phase94] bet_ledger insert error: %s", _ledger_err)
+                logger.warning("[Phase94] bet_ledger update error: %s", _ledger_err)
 
         if agent_name not in _ACTIVE_AGENTS:
             logger.info("[Recap] Skipping ghost agent %s", agent_name)
