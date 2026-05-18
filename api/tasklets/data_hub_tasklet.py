@@ -19,13 +19,17 @@ logger = logging.getLogger("propiq.tasklet.datahub")
 
 # ── API Keys ────────────────────────────────────────────────────────────────
 SPORTSDATA_KEY = os.getenv("SPORTSDATA_API_KEY", "")
-# PR #580 Bug 7: removed hardcoded fallback key — live key must come from env only.
-# Rotate the old key immediately at https://the-odds-api.com/account
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+# FIX: API key was hardcoded as a fallback default — live key in VCS is a
+# security violation (quota exhaustion, billing exposure, key rotation pain).
+# Set ODDS_API_KEY in Railway environment variables.
+ODDS_API_KEY   = os.getenv("ODDS_API_KEY", "")
 if not ODDS_API_KEY:
-    logger.warning("[DataHub] ODDS_API_KEY env var not set — prop odds fetch disabled.")
-TANK01_KEY = os.getenv("TANK01_API_KEY", "")
-APIFY_KEY = os.getenv("APIFY_API_KEY", "")
+    logger.warning(
+        "[DataHub] ODDS_API_KEY env var not set — player prop odds fetch will be skipped. "
+        "Add ODDS_API_KEY to Railway environment variables."
+    )
+TANK01_KEY  = os.getenv("TANK01_API_KEY", "")
+APIFY_KEY   = os.getenv("APIFY_API_KEY", "")
 
 MLB_STATS_BASE = "https://statsapi.mlb.com/api/v1"
 SPORTSDATA_BASE = "https://api.sportsdata.io/v3/mlb"
