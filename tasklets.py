@@ -7994,8 +7994,9 @@ def run_xgboost_tasklet() -> None:
             return datetime.datetime.fromisoformat(str(v))
         except Exception:
             return _default_graded
+    _now_naive = now_utc.replace(tzinfo=None)  # PR #587: fix tz-aware vs naive TypeError
     sample_weights = np.array([
-        np.exp(-0.01 * max((now_utc - _parse_graded_at(r[2]).replace(tzinfo=None)).days, 0))
+        np.exp(-0.01 * max((_now_naive - _parse_graded_at(r[2]).replace(tzinfo=None)).days, 0))
         for r in rows
     ], dtype=np.float32)
 
