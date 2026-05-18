@@ -6042,6 +6042,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
         return
 
     r        = _redis()
+    _any_discord_sent: bool = False   # PR #577: only write dispatch_date_log when Discord confirms
     for parlay in all_parlays:
         payload = json.dumps(parlay)
         r.lpush("bet_queue", payload)
@@ -6462,6 +6463,8 @@ def run_agent_tasklet(force: bool = False) -> bool:
                             agent_name, _flipped,
                             sum(1 for v in _send_clv_map.values() if v is not None),
                             len(_send_clv_map))
+                    if _flipped > 0:
+                        _any_discord_sent = True   # PR #577
             except Exception as _flip_err:
                 logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
 
@@ -6609,7 +6612,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
         except Exception as _dl_err:
             logger.debug("[AgentTasklet] decision_logger flush failed: %s", _dl_err)
 
-    return True  # FIX: signals orchestrator that picks were actually sent
+    return _any_discord_sent   # PR #577: True only when Discord confirmed ≥1 leg sent
 
 
 def get_agents() -> dict:
@@ -7865,6 +7868,8 @@ def run_xgboost_tasklet() -> None:
                   AND discord_sent = TRUE
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                   AND agent_name NOT ILIKE '%seed%'
+                  AND model_prob IS NOT NULL
+                  AND model_prob >= 0.59
                   AND prop_type NOT IN (
                       'fantasy_score', 'fantasy_hitter', 'fantasy_pitcher',
                       'fantasy_pts', 'hitter_fantasy_score', 'pitcher_fantasy_score'

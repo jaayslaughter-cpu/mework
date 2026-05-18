@@ -294,10 +294,16 @@ def run_agent_diagnostics() -> None:
             currently_frozen = _is_currently_frozen(conn, agent_name)
 
             # Freeze decision
+            # PR #579: ≥5 graded dispatches required before freeze can trigger.
+            # Prevents catch-22 where agents with too few data points enter
+            # an inescapable freeze loop (not enough data to record positive ROI).
+            _n = metrics.get("n_graded", 0)
             should_freeze = (
                 metrics.get("roi") is not None
                 and metrics["roi"] < 0.0
                 and neg_streak >= FREEZE_CONSECUTIVE_DAYS
+                and _n >= 5   # PR #579: dispatch prerequisite — no freeze on thin data
+                and "seed" not in agent_name.lower()  # PR #579: never freeze seed agents
             )
             if should_freeze and not currently_frozen:
                 _freeze_agent(
