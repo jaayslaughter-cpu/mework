@@ -578,9 +578,69 @@ def _load() -> None:
             _swing_path_count += 1
         logger.info("[StatcastStatic] bat-tracking-swing-path: %d batters supplemented", _swing_path_count)
 
-        # ── Historical batter K% trend (statcast_batters_historical.csv) ──────
-        # Store per-player list of {year, k_pct, woba, xwoba, whiff_pct, barrel_pct, hard_hit_pct}
-        # Keep 2023 onward (earlier years less predictive)
+        # ── Full multi-year batter history (statcast_batters_full_history.csv) ──
+        # 2015-2026, 2367 unique (player, year) pairs.
+        # Dual purpose:
+        #   (a) supplement _batter_statcast with any 2026 rows missing from statcast_batters_2026.csv
+        #   (b) populate _batter_k_history for Marcel 3-year regression (all years stored)
+        _full_hist_rows = _read_csv("statcast_batters_full_history.csv")
+        _full_hist_supplement = 0
+        for r in _full_hist_rows:
+            pid_s = r.get("player_id", "").strip()
+            yr_s  = r.get("year", "").strip()
+            if not pid_s or not yr_s:
+                continue
+            try:
+                pid = int(pid_s)
+                yr  = int(yr_s)
+            except ValueError:
+                continue
+            entry = {
+                "year":         yr,
+                "k_pct":        _safe_float(r.get("k_percent")),
+                "bb_pct":       _safe_float(r.get("bb_percent")),
+                "woba":         _safe_float(r.get("woba")),
+                "xwoba":        _safe_float(r.get("xwoba")),
+                "whiff_pct":    _safe_float(r.get("whiff_percent")),
+                "barrel_pct":   _safe_float(r.get("barrel_batted_rate")),
+                "hard_hit_pct": _safe_float(r.get("hard_hit_percent")),
+                "sweet_spot_pct": _safe_float(r.get("sweet_spot_percent")),
+                "swing_pct":    _safe_float(r.get("swing_percent")),
+                "pa":           _safe_float(r.get("pa")),
+            }
+            # (a) Supplement _batter_statcast — 2026 rows only, don't overwrite primary source
+            if yr == 2026 and pid not in _batter_statcast:
+                _batter_statcast[pid] = {
+                    "k_pct":           entry["k_pct"],
+                    "bb_pct":          entry["bb_pct"],
+                    "woba":            entry["woba"],
+                    "xwoba":           entry["xwoba"],
+                    "sweet_spot_pct":  entry["sweet_spot_pct"],
+                    "barrel_pct":      entry["barrel_pct"],
+                    "hard_hit_pct":    entry["hard_hit_pct"],
+                    "bat_speed_best":  _safe_float(r.get("avg_best_speed")),
+                    "bat_speed_hyper": _safe_float(r.get("avg_hyper_speed")),
+                    "whiff_pct":       entry["whiff_pct"],
+                    "swing_pct":       entry["swing_pct"],
+                }
+                _full_hist_supplement += 1
+            # (b) History — all years (enables Marcel 3-year regression in XGBoost features)
+            if pid not in _batter_k_history:
+                _batter_k_history[pid] = []
+            _batter_k_history[pid].append(entry)
+
+        # Sort each player's history by year ascending
+        for pid in _batter_k_history:
+            _batter_k_history[pid].sort(key=lambda x: x["year"])
+
+        logger.info(
+            "[StatcastStatic] full_history: supplemented _batter_statcast with %d extra 2026 batters; "
+            "_batter_k_history now has %d players (all years 2015–2026)",
+            _full_hist_supplement, len(_batter_k_history),
+        )
+
+        # ── Legacy: statcast_batters_historical.csv still loaded if present ──
+        # (for backward compat with any deployment that doesn't have full_history yet)
         for r in _read_csv("statcast_batters_historical.csv"):
             pid_s = r.get("player_id", "").strip()
             yr_s  = r.get("year", "").strip()
@@ -591,7 +651,9 @@ def _load() -> None:
                 yr  = int(yr_s)
             except ValueError:
                 continue
-            if yr < 2023:
+            # Only fill gaps not already covered by full history
+            existing = [e["year"] for e in _batter_k_history.get(pid, [])]
+            if yr in existing:
                 continue
             entry = {
                 "year":        yr,
@@ -607,9 +669,6 @@ def _load() -> None:
             if pid not in _batter_k_history:
                 _batter_k_history[pid] = []
             _batter_k_history[pid].append(entry)
-
-        # Sort each player's history by year ascending
-        for pid in _batter_k_history:
             _batter_k_history[pid].sort(key=lambda x: x["year"])
 
         # ── Pitcher arsenal by handedness (RHP/LHP) ───────────────────────────
@@ -900,11 +959,11 @@ def get_batter_k_trend(player_id: int) -> dict:
     """Multi-year K% trend for a batter (2023 onward).
 
     Returns dict with:
-        k_pct_2023, k_pct_2024, k_pct_2025   — historical K% (raw %)
-        trend_delta                            — 2025 K% minus 2023 K%
-                                                  (positive = K% rising = regression warning)
+        k_pct_{year}  — K% per year (raw %) — 2015 through 2026 in full_history build
+        woba_{year}   — wOBA per year
+        trend_delta   — most_recent K% minus earliest on record (positive = K% rising)
         most_recent_year, most_recent_k_pct
-        records                               — full list sorted by year
+        records       — full list sorted by year (all years 2015–2026 if full_history loaded)
 
     Returns {} if player not found in historical data.
 
@@ -970,8 +1029,7 @@ def get_batter_chase_discipline(player_id: int) -> dict:
 
     Falls back to empty dict if player not in dataset.
     """
-    if not _LOADED:
-        _load()
+    _load()
     try:
         return _swing_take.get(int(player_id), {})
     except (ValueError, TypeError):
