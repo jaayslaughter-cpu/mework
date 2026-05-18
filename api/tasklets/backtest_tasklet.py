@@ -507,9 +507,17 @@ class StrikeoutSimulator(BaseSimulator):
                 won = actual > line
                 push = actual == line
                 outcome = -1 if push else (1 if won else 0)
-                b_val = 100.0 / 110.0
-                profit = (unit_size := _kelly(m_prob, -110)) * b_val if outcome == 1 else (
-                    -unit_size if outcome == 0 else 0.0)
+                # PR #580 Bug 5: walrus := only assigned unit_size when outcome==1.
+                # On push (outcome==-1), unit_size was undefined → NameError.
+                # Fixed: compute unconditionally before branching.
+                unit_size = _kelly(m_prob, -110)
+                b_val     = 100.0 / 110.0
+                if outcome == 1:
+                    profit = unit_size * b_val
+                elif outcome == 0:
+                    profit = -unit_size
+                else:
+                    profit = 0.0
 
                 day_bets.append(BetRecord(
                     date=date_str, player_name=p["player_name"],

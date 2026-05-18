@@ -19,7 +19,11 @@ logger = logging.getLogger("propiq.tasklet.datahub")
 
 # ── API Keys ────────────────────────────────────────────────────────────────
 SPORTSDATA_KEY = os.getenv("SPORTSDATA_API_KEY", "")
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "14d35c33111760aca07e9547fff1561a")
+# PR #580 Bug 7: removed hardcoded fallback key — live key must come from env only.
+# Rotate the old key immediately at https://the-odds-api.com/account
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+if not ODDS_API_KEY:
+    logger.warning("[DataHub] ODDS_API_KEY env var not set — prop odds fetch disabled.")
 TANK01_KEY = os.getenv("TANK01_API_KEY", "")
 APIFY_KEY = os.getenv("APIFY_API_KEY", "")
 

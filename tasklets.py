@@ -8021,9 +8021,10 @@ def run_xgboost_tasklet() -> None:
                 "(SELECT id FROM xgb_model_store ORDER BY trained_at DESC LIMIT 2)"
             )
             _ms_cur.execute(
-                "INSERT INTO xgb_model_store (model_json, n_rows, notes, prop_type, n_samples)"
-                " VALUES (%s, %s, %s, %s, %s)",
-                (_model_b64str, len(rows), f"accuracy={round(accuracy, 4)}", "general", len(rows))
+                "INSERT INTO xgb_model_store (model_json, n_rows, notes, prop_type, n_samples, brier_score)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                (_model_b64str, len(rows), f"accuracy={round(accuracy, 4)}", "general",
+                 len(rows), None)  # brier_score populated by calibrate_model.py after retrain
             )
         _ms_conn.commit()
         _ms_conn.close()

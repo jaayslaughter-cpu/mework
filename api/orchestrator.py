@@ -333,8 +333,17 @@ async def job_monthly_leaderboard():
 
 
 async def job_settle():
-    """11:00 PM PT (2:00 AM ET) daily — settle bets and post recap to Discord."""
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nightly_recap.py")
+    """11:00 PM PT (2:00 AM ET) daily — settle bets and post recap to Discord.
+
+    PR #580 Bug 3: nightly_recap.py lives at the REPO ROOT, one level above api/.
+    Original code used os.path.dirname(__file__) = api/ — subprocess always
+    failed with FileNotFoundError (exit code 2), silently. Fixed with normpath join.
+    """
+    _api_dir = os.path.dirname(os.path.abspath(__file__))
+    script   = os.path.normpath(os.path.join(_api_dir, "..", "nightly_recap.py"))
+    if not os.path.exists(script):
+        logger.error("[NightlyRecap] Script not found at %s — settlement skipped.", script)
+        return
     asyncio.create_task(_run_subprocess("NightlyRecap", script))
 
 
