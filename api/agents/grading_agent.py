@@ -170,7 +170,13 @@ class GradingAgent(BaseAgent):
 
     @staticmethod
     def _parse_mlb_boxscore(game: dict, results: dict):
-        """Parse MLB Stats API boxscore into results dict."""
+        """Parse MLB Stats API boxscore into results dict.
+
+        PR #580 Bug 4: Store stats under BOTH the canonical internal prop-type
+        key (e.g. "strikeouts") AND the legacy prefixed key (e.g.
+        "pitcher_strikeouts") so grade_all_pending() lookups succeed regardless
+        of how prop_type was stored in the bet.
+        """
         try:
             boxscore = game.get("boxscore", {})
             for side in ("home", "away"):
@@ -184,12 +190,33 @@ class GradingAgent(BaseAgent):
                     pitching = stats.get("pitching", {})
                     batting = stats.get("batting", {})
                     if pitching:
-                        results[f"{name}|pitcher_strikeouts"] = int(pitching.get("strikeOuts", 0))
+                        k_val = int(pitching.get("strikeOuts", 0))
+                        results[f"{name}|pitcher_strikeouts"] = k_val
+                        results[f"{name}|strikeouts"] = k_val          # canonical alias
+                        results[f"{name}|pitching_outs"] = int(
+                            round(float(pitching.get("inningsPitched", 0)) * 3))
+                        results[f"{name}|hits_allowed"] = int(pitching.get("hits", 0))
+                        results[f"{name}|walks_allowed"] = int(pitching.get("baseOnBalls", 0))
+                        results[f"{name}|earned_runs"] = int(pitching.get("earnedRuns", 0))
                     if batting:
-                        results[f"{name}|batter_hits"] = int(batting.get("hits", 0))
-                        results[f"{name}|batter_home_runs"] = int(batting.get("homeRuns", 0))
-                        results[f"{name}|batter_total_bases"] = int(batting.get("totalBases", 0))
-                        results[f"{name}|batter_strikeouts"] = int(batting.get("strikeOuts", 0))
-                        results[f"{name}|batter_runs_batted_in"] = int(batting.get("rbi", 0))
+                        hits_val = int(batting.get("hits", 0))
+                        results[f"{name}|batter_hits"] = hits_val
+                        results[f"{name}|hits"] = hits_val              # canonical alias
+                        hr_val = int(batting.get("homeRuns", 0))
+                        results[f"{name}|batter_home_runs"] = hr_val
+                        results[f"{name}|home_runs"] = hr_val
+                        tb_val = int(batting.get("totalBases", 0))
+                        results[f"{name}|batter_total_bases"] = tb_val
+                        results[f"{name}|total_bases"] = tb_val
+                        hso_val = int(batting.get("strikeOuts", 0))
+                        results[f"{name}|batter_strikeouts"] = hso_val
+                        results[f"{name}|hitter_strikeouts"] = hso_val
+                        rbi_val = int(batting.get("rbi", 0))
+                        results[f"{name}|batter_runs_batted_in"] = rbi_val
+                        results[f"{name}|rbis"] = rbi_val
+                        runs_val = int(batting.get("runs", 0))
+                        results[f"{name}|runs"] = runs_val
+                        # hits_runs_rbis composite
+                        results[f"{name}|hits_runs_rbis"] = hits_val + runs_val + rbi_val
         except Exception as e:
             logger.debug("[grading] Boxscore parse error: %s", e)
