@@ -5631,7 +5631,15 @@ def _get_props(hub: dict) -> list[dict]:
                 "whip":             _fg_pitcher.get("whip",   1.3),
             })
         if props:
-            logger.info("[AgentTasklet] Using %d PrizePicks props from hub", len(props))
+            # ALSO include Underdog props — purity enforced downstream by _make_parlay.
+            # PR #503 fix was UD-first path only; PP-first path was still returning early (PR #586 fix).
+            _ud_for_pp = _extract_underdog_props(hub)
+            if _ud_for_pp:
+                props.extend(_ud_for_pp)
+                logger.info("[AgentTasklet] PP-first: %d PrizePicks + %d Underdog props",
+                            len(props) - len(_ud_for_pp), len(_ud_for_pp))
+            else:
+                logger.info("[AgentTasklet] Using %d PrizePicks props from hub (no UD)", len(props))
             return props
 
     # 2. Underdog from hub — returned as separate tagged props alongside PP props.
@@ -6362,6 +6370,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
                             # Default True (safe) if not stamped — conservative for training integrity.
                             bool(_sl.get("lookahead_safe", True)),
                             _parlay_id,
+                            _sl.get("_layer_audit"),  # layer_audit JSONB
                         ),
                     )
             _pg2.commit()
@@ -7895,7 +7904,7 @@ def run_xgboost_tasklet() -> None:
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                   AND agent_name NOT ILIKE '%seed%'
                   AND model_prob IS NOT NULL
-                  AND model_prob >= 0.59
+                  AND model_prob >= 59
                   AND prop_type NOT IN (
                       'fantasy_score', 'fantasy_hitter', 'fantasy_pitcher',
                       'fantasy_pts', 'hitter_fantasy_score', 'pitcher_fantasy_score'
