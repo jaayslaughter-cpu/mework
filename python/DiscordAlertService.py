@@ -69,8 +69,8 @@ _PROP_LABELS: dict[str, str] = {
 
 # ── Entry type badges ─────────────────────────────────────────────────────────
 _ENTRY_BADGES: dict[str, str] = {
-    "FLEX":     "🔀 FLEX",
-    "STANDARD": "⭐ STANDARD",
+    "FLEX":     "🔀 FlexPlay",
+    "STANDARD": "⭐ PowerPlay",
 }
 
 # ── Max stake ─────────────────────────────────────────────────────────────────
@@ -78,11 +78,11 @@ MAX_STAKE_USD: float = 20.00
 
 # ── Underdog payout multipliers (approximate, for display) ────────────────────
 UD_PAYOUT: dict[int, dict[str, float]] = {
-    2:  {"FLEX": 3.0,   "STANDARD": 6.0},
-    3:  {"FLEX": 6.0,   "STANDARD": 10.0},
-    4:  {"FLEX": 10.0,  "STANDARD": 20.0},
-    5:  {"FLEX": 16.0,  "STANDARD": 40.0},
-    6:  {"FLEX": 25.0,  "STANDARD": 70.0},
+    2:  {"FLEX": 3.0,   "STANDARD": 3.5},   # PowerPlay 2-leg
+    3:  {"FLEX": 5.0,   "STANDARD": 6.0},   # PowerPlay 3-leg
+    4:  {"FLEX": 6.0,   "STANDARD": 10.0},  # PowerPlay 4-leg
+    5:  {"FLEX": 10.0,  "STANDARD": 10.0},  # FlexPlay 5-leg
+    6:  {"FLEX": 12.0,  "STANDARD": 25.0},
 }
 
 # PrizePicks payout multipliers (approximate)
@@ -290,7 +290,13 @@ class DiscordAlertService:
         etype     = leg.get("entry_type", "")
 
         plat_emoji = _PLATFORM_EMOJI.get(platform.lower(), "🎯")
-        side_emoji = "🔼" if side == "Over" else "🔽"
+        # Underdog uses Higher/Lower terminology; PrizePicks uses Over/Under
+        if platform.lower() == "underdog":
+            side_word  = "Higher" if side in ("Over", "Higher") else "Lower"
+            side_emoji = "📈" if side_word == "Higher" else "📉"
+        else:
+            side_word  = side  # PrizePicks keeps Over / Under
+            side_emoji = "🔼" if side == "Over" else "🔽"
 
         prob_pct = f"{prob * 100:.1f}%"
 
@@ -306,7 +312,7 @@ class DiscordAlertService:
 
         return (
             f"**{idx}.** {player} — "
-            f"{side_emoji} **{side} {line:.1f}** {prop_lbl}{fp_note}\n"
+            f"{side_emoji} **{side_word} {line:.1f}** {prop_lbl}{fp_note}\n"
             f"   {plat_emoji} {plat_label} | Win Prob: **{prob_pct}**"
         )
 
