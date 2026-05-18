@@ -153,8 +153,7 @@ DEFAULT_ENTRY = 10   # $10 entry → $10,000 prize
 
 DISCORD_WEBHOOK = os.getenv(
     "DISCORD_WEBHOOK_URL",
-    "https://discordapp.com/api/webhooks/1484795164961800374/"
-    "jYxCVWeN8F1TFIs9SFjQtr0lZASPitLRnGBwjD3Oo2CknXOqVZB2gmmLqqQ1eH-_2liM",
+    os.getenv("DISCORD_WEBHOOK_URL", ""),
 )
 
 # Underdog API
@@ -306,12 +305,25 @@ def streak_confidence(prob: float, ev_pct: float, signal_count: int) -> float:
       prob ≥ 0.76 + ev_pct ≥ 7.5%  (e.g. hits_runs_rbis Over 0.5 = 82%)
       prob ≥ 0.80 + any ev            (dominant Over lines)
     """
-    # Prob contribution capped at 5 — prevents high base-rate props (82% hits_runs_rbis 0.5)
-    # from dominating the score. Genuine edge (EV + agent signals) carries more weight.
-    prob_score   = min((prob - 0.50) / 0.35 * 5.0, 5.0)   # was 0.30/7.0, uncapped
-    ev_bonus     = min(ev_pct / 10.0 * 3.0, 3.0)           # was /15 × 2; more EV weight
-    signal_bonus = min(signal_count * 0.2, 2.0)             # was × 0.1 cap 1.0; more signal weight
-    return round(min(10.0, max(1.0, prob_score + ev_bonus + signal_bonus)), 1)
+    prob_pct = prob * 100
+
+    # Base score from win probability (Phase 121 — primary driver)
+    if   prob_pct >= 72: base = 9.0
+    elif prob_pct >= 67: base = 8.0
+    elif prob_pct >= 63: base = 7.0
+    elif prob_pct >= 59: base = 6.0
+    elif prob_pct >= 55: base = 5.0
+    else:                base = 3.0
+
+    # EV modifier: confirms model probability is real edge
+    if   ev_pct >= 10: ev_mod = 1.0
+    elif ev_pct >= 0:  ev_mod = 0.0
+    else:              ev_mod = -1.0
+
+    # Signal bonus: agent consensus adds up to +1
+    sig_bonus = min(signal_count * 0.1, 1.0)
+
+    return round(min(10.0, max(1.0, base + ev_mod + sig_bonus)), 1)
 
 
 # ---------------------------------------------------------------------------
