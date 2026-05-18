@@ -98,6 +98,14 @@ def _ensure_tables(conn) -> None:
             """)
         except Exception:
             pass
+        # Heal: ensure agent_diagnostics UNIQUE constraint exists on pre-migration tables
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS agent_diagnostics_agent_snapshot_uidx
+                ON agent_diagnostics (agent_name, snapshot_date)
+            """)
+        except Exception:
+            pass
     conn.commit()
 
 
@@ -124,7 +132,7 @@ def _compute_agent_metrics(conn, agent_name: str, today) -> dict:
             SELECT
                 status,
                 COALESCE(profit_loss, 0.0)  AS pl,
-                COALESCE(units_wagered, ABS(kelly_units), 1.0)  AS stake,
+                COALESCE(units_wagered, 1.0)  AS stake,
                 COALESCE(model_prob,  50.0)  AS mp,
                 CASE WHEN status = 'WIN'  THEN 1
                      WHEN status = 'LOSS' THEN 0
@@ -177,7 +185,7 @@ def _negative_roi_streak(conn, agent_name: str, today) -> int:
             SELECT
                 bet_date,
                 SUM(COALESCE(profit_loss, 0.0))  AS daily_pl,
-                SUM(COALESCE(units_wagered, ABS(kelly_units), 1.0))  AS daily_stk
+                SUM(COALESCE(units_wagered, 1.0))  AS daily_stk
             FROM bet_ledger
             WHERE agent_name   = %s
               AND discord_sent = TRUE

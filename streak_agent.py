@@ -217,6 +217,8 @@ _BASE_RATES: dict[str, list[tuple[float, float]]] = {
     "fantasy_pitcher":[(30.0, 0.55), (35.0, 0.44), (40.0, 0.33), (45.0, 0.24)],
     "pitching_outs":  [(14.5, 0.58), (17.5, 0.44), (20.5, 0.28)],
     "hits_allowed":   [(3.5, 0.52), (4.5, 0.38), (5.5, 0.25)],
+    # Hitter strikeouts: P(Over | line) — batters K ~1.0x/game, line is 0.5
+    "hitter_strikeouts": [(0.5, 0.67), (1.5, 0.35), (2.5, 0.12)],
 }
 
 _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
@@ -226,6 +228,7 @@ _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
     "total_bases":    (0.5, 5.5),
     "hits_runs_rbis": (0.5, 8.5),
     "strikeouts":     (1.5, 12.5),
+    "hitter_strikeouts": (0.5, 3.5),
     "earned_runs":    (0.5, 6.5),
     "fantasy_hitter": (5.0, 60.0),
     "fantasy_pitcher":(15.0, 70.0),
@@ -234,11 +237,13 @@ _GAME_LINE_RANGES: dict[str, tuple[float, float]] = {
 _STAT_TYPE_MAP: dict[str, str] = {
     # stolen_bases, home_runs, walks removed — not approved prop types
     "strikeouts": "strikeouts", "pitcher strikeouts": "strikeouts", "ks": "strikeouts",
+    "hitter strikeouts": "hitter_strikeouts", "hitter_strikeouts": "hitter_strikeouts",
     "hits": "hits",
     "rbis": "rbis", "rbi": "rbis",
     "runs": "runs",
     "total bases": "total_bases", "total_bases": "total_bases",
     "hits+runs+rbis": "hits_runs_rbis", "hits + runs + rbis": "hits_runs_rbis",
+    "hits+runs+rbi":  "hits_runs_rbis", "h+r+rbi": "hits_runs_rbis",
     "hitter fantasy score": "fantasy_hitter", "fantasy_points_hitter": "fantasy_hitter",
     "pitcher fantasy score": "fantasy_pitcher", "fantasy_points_pitcher": "fantasy_pitcher",
     "earned runs": "earned_runs", "earned runs allowed": "earned_runs", "earned_runs": "earned_runs",
