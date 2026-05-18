@@ -230,17 +230,13 @@ async def job_agents():
     _pt_ck = datetime.now(ZoneInfo("America/Los_Angeles"))
 
     # ── Dynamic dispatch window ───────────────────────────────────────────────
-    # Open : 9:00 AM PT (props are posted, no games live yet)
+    # Open : 8:30 AM PT
     # Close: 30 min before the earliest scheduled first pitch of the day
     # Fallback ceiling: 12:30 PM PT if game time data isn't in the hub yet
-    #
-    # Why not 11 AM: Sunday east-coast first pitch is 10:05 AM PT. The old
-    # 11 AM floor meant agents fired AFTER games started — LockGate correctly
-    # killed every prop for those games, leaving nothing to send.
-    _open_pt  = _pt_ck.replace(hour=9, minute=0, second=0, microsecond=0)
+    _open_pt  = _pt_ck.replace(hour=8, minute=30, second=0, microsecond=0)
     if _pt_ck < _open_pt:
         logger.debug(
-            "[orchestrator] Pre-window at %02d:%02d PT — opens 9:00 AM. Skipping.",
+            "[orchestrator] Pre-window at %02d:%02d PT — opens 8:30 AM. Skipping.",
             _pt_ck.hour, _pt_ck.minute,
         )
         return
@@ -368,7 +364,7 @@ async def job_log_watcher():
         logger.warning("[LogWatcher] Failed: %s", exc)
 
 async def job_streak():
-    """Streak pick — runs at 10:00 AM PT, within the main dispatch window (opens 9 AM)."""
+    """Streak pick — runs at 8:45 AM PT, within the main dispatch window."""
     try:
         from streak_agent import run_streak_pick  # noqa: PLC0415
         result = await asyncio.get_event_loop().run_in_executor(None, run_streak_pick)
@@ -395,7 +391,7 @@ async def lifespan(_app: FastAPI):
     # ── Nightly maintenance jobs ──────────────────────────────────────────────
     scheduler.add_job(job_backtest, CronTrigger(hour=0,  minute=1,  timezone="America/Los_Angeles"), id="backtest")
     scheduler.add_job(job_grading,  CronTrigger(hour=2,  minute=0,  timezone="America/Los_Angeles"), id="grading")
-    scheduler.add_job(job_xgboost,  CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")  # daily retrain now that seed data available
+    scheduler.add_job(job_xgboost,  CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"), id="xgboost")
 
     # ── Line stream every 30 min 10 AM–10 PM PT ───────────────────────────────
     scheduler.add_job(
@@ -418,17 +414,17 @@ async def lifespan(_app: FastAPI):
         id="bug_checker",
     )
 
-    # ── Streak pick — 10:00 AM PT (within main dispatch window, before first pitch) ──
+    # ── Streak pick — 8:45 AM PT ──────────────────────────────────────────────
     scheduler.add_job(
         job_streak,
-        CronTrigger(hour=10, minute=0, timezone="America/Los_Angeles"),
+        CronTrigger(hour=8, minute=45, timezone="America/Los_Angeles"),
         id="streak",
     )
 
-    # ── Log watcher summary — 10:10 AM PT (after streak, within dispatch window) ──
+    # ── Log watcher summary — 9:15 AM PT ────────────────────────────────────
     scheduler.add_job(
         job_log_watcher,
-        CronTrigger(hour=10, minute=10, timezone="America/Los_Angeles"),
+        CronTrigger(hour=9, minute=15, timezone="America/Los_Angeles"),
         id="log_watcher",
     )
 
@@ -448,9 +444,8 @@ async def lifespan(_app: FastAPI):
     asyncio.create_task(job_data_hub())
 
     logger.info(
-        "All jobs scheduled: AgentTasklet@30s (canonical dispatch), settle@11PM PT, "
-        "line_stream@30min, leaderboard@monthly, "
-        "backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
+        "All jobs scheduled: AgentTasklet@30s (8:30 AM open), streak@8:45 AM, "
+        "settle@11PM PT, backtest@12:01AM, grading@2:00AM, xgboost@2:30AM (daily)"
     )
     yield
 
@@ -493,7 +488,7 @@ async def root():
         "endpoints": [
             "/props", "/insights", "/leaderboard", "/backtest/latest",
             "/health", "/propiq/dispatch", "/propiq/settle",
-            "/propiq/status", "/propiq/record",
+            "/propiq/status", "/propiq/record", "/admin/run-seed",
         ],
     }
 
@@ -684,6 +679,67 @@ async def get_season_record():
         })
     except Exception as exc:  # noqa: BLE001
         logger.error("[record] Postgres query failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+# ── Admin endpoints ───────────────────────────────────────────────────────────
+# CRITICAL: /admin/run-seed must be present. Re-inject on every zip upload.
+
+@app.post("/admin/run-seed")
+async def admin_run_seed():
+    """Manually trigger the historical seed runner (historical_seed_slow.py).
+    Runs as a background subprocess — returns immediately.
+    historical_seed_slow.py lives at repo root (one level above api/).
+    """
+    _api_dir = os.path.dirname(os.path.abspath(__file__))
+    script   = os.path.normpath(os.path.join(_api_dir, "..", "historical_seed_slow.py"))
+    if not os.path.exists(script):
+        logger.error("[admin/run-seed] historical_seed_slow.py not found at %s", script)
+        return JSONResponse(
+            {"status": "error", "message": f"historical_seed_slow.py not found at {script}"},
+            status_code=404,
+        )
+    asyncio.create_task(_run_subprocess("HistoricalSeed", script))
+    logger.info("[admin/run-seed] Historical seed subprocess launched")
+    return JSONResponse({
+        "status": "started",
+        "message": "Historical seed running in background — check Railway logs for progress",
+    })
+
+
+@app.get("/admin/run-seed")
+async def admin_run_seed_status():
+    """Check historical seed progress from seed_progress Postgres table."""
+    import psycopg2  # noqa: PLC0415
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return JSONResponse({"error": "DATABASE_URL not set"}, status_code=503)
+    try:
+        conn = psycopg2.connect(db_url)
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            SELECT season, batches_done, total_batches, last_updated
+            FROM seed_progress
+            ORDER BY season DESC
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return JSONResponse({
+            "seed_progress": [
+                {
+                    "season":        r[0],
+                    "batches_done":  r[1],
+                    "total_batches": r[2],
+                    "pct_done":      round(r[1] / r[2] * 100, 1) if r[2] else 0,
+                    "last_updated":  r[3].isoformat() if r[3] else None,
+                }
+                for r in rows
+            ]
+        })
+    except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
