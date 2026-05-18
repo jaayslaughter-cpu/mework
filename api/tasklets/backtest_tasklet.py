@@ -504,12 +504,14 @@ class StrikeoutSimulator(BaseSimulator):
             ev = (m_prob / true_p_o) - 1.0
 
             if m_prob >= 0.54 and ev >= 0.03:
-                won = actual > line
+                won  = actual > line
                 push = actual == line
                 outcome = -1 if push else (1 if won else 0)
-                # PR #580 Bug 5: walrus := only assigned unit_size when outcome==1.
-                # On push (outcome==-1), unit_size was undefined → NameError.
-                # Fixed: compute unconditionally before branching.
+
+                # FIX: walrus operator `:=` only executes when outcome==1,
+                # leaving unit_size undefined for outcome==0 (loss) and
+                # outcome==-1 (push), causing NameError on the BetRecord call.
+                # Compute unit_size unconditionally before the profit branch.
                 unit_size = _kelly(m_prob, -110)
                 b_val     = 100.0 / 110.0
                 if outcome == 1:

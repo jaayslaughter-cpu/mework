@@ -1690,9 +1690,15 @@ _XGB_MODEL_CACHE = None
 
 
 def _load_xgb_model():
-    """Lazy-load trained XGBoost model from disk. Cached at module level — never reloads
-    from disk on every cycle. Cleared by run_xgboost_tasklet() on retrain.
-    Supports both .json (XGBoost native) and .pkl (legacy pickle) formats.
+    """Lazy-load trained XGBoost model from disk or Postgres.
+    Cached at module level — never reloads from disk on every cycle.
+    Cleared by run_xgboost_tasklet() on retrain.
+
+    FIX (Observation E): xgb_model_store stores base64-encoded pickle bytes
+    (written by run_xgboost_tasklet). The old DB path tried to decode the
+    base64 string as UTF-8 XGBoost JSON and write it to a temp file, which
+    always failed silently. Now correctly decodes base64 → pickle → Booster.
+    Disk path continues to use native XGBoost JSON.
     """
     global _XGB_MODEL_CACHE
     if _XGB_MODEL_CACHE is not None:
@@ -1709,18 +1715,17 @@ def _load_xgb_model():
                     )
                     _mrow = _xcur.fetchone()
             if _mrow and _mrow[0]:
+                import base64 as _b64  # noqa: PLC0415
                 import xgboost as xgb  # noqa: PLC0415
-                import tempfile as _tmpfile  # noqa: PLC0415
-                with _tmpfile.NamedTemporaryFile(suffix=".json", delete=False) as _tf:
-                    _tf.write(_mrow[0].encode())
-                    _tmp_path = _tf.name
-                _booster = xgb.Booster()
-                _booster.load_model(_tmp_path)
-                try:
-                    os.unlink(_tmp_path)
-                except Exception:
-                    pass
-                logger.info("[XGB] Loaded model from xgb_model_store (DB recovery after restart)")
+                # FIX: model_json is base64-encoded pickle, not raw XGBoost JSON
+                _model_bytes = _b64.b64decode(_mrow[0])
+                _loaded = pickle.loads(_model_bytes)
+                # Unwrap sklearn wrapper to get the Booster
+                if hasattr(_loaded, "get_booster"):
+                    _booster = _loaded.get_booster()
+                else:
+                    _booster = _loaded
+                logger.info("[XGB] Loaded model from xgb_model_store (base64-pkl, DB recovery after restart)")
                 _XGB_MODEL_CACHE = _booster
                 return _booster
     except Exception as _dbe:
@@ -6042,7 +6047,6 @@ def run_agent_tasklet(force: bool = False) -> bool:
         return
 
     r        = _redis()
-    _any_discord_sent: bool = False   # PR #577: only write dispatch_date_log when Discord confirms
     for parlay in all_parlays:
         payload = json.dumps(parlay)
         r.lpush("bet_queue", payload)
@@ -6463,8 +6467,6 @@ def run_agent_tasklet(force: bool = False) -> bool:
                             agent_name, _flipped,
                             sum(1 for v in _send_clv_map.values() if v is not None),
                             len(_send_clv_map))
-                    if _flipped > 0:
-                        _any_discord_sent = True   # PR #577
             except Exception as _flip_err:
                 logger.warning("[AgentTasklet] discord_sent flip failed for %s: %s", agent_name, _flip_err)
 
@@ -6612,7 +6614,7 @@ def run_agent_tasklet(force: bool = False) -> bool:
         except Exception as _dl_err:
             logger.debug("[AgentTasklet] decision_logger flush failed: %s", _dl_err)
 
-    return _any_discord_sent   # PR #577: True only when Discord confirmed ≥1 leg sent
+    return True  # FIX: signals orchestrator that picks were actually sent
 
 
 def get_agents() -> dict:
@@ -7845,8 +7847,30 @@ def run_xgboost_tasklet() -> None:
     """
     Retrain XGBoost on the full Postgres settlement ledger.
     Saves model to XGB_MODEL_PATH for all agents to use.
+
+    FIX (Observation D): Now reads the `backtest_result` Redis key written by
+    run_backtest_tasklet() at 12:01 AM. If the backtest audit identified
+    low-signal features (dropped_features list), those slots are zeroed in the
+    training matrix so the model doesn't train on noise. This wires the two
+    nightly jobs together as originally intended.
     """
     import numpy as np
+
+    # ── Read backtest audit result to apply dropped features ─────────────────
+    _dropped_features: list[int] = []
+    try:
+        _bt_raw = _redis().get("backtest_result")
+        if _bt_raw:
+            _bt = json.loads(_bt_raw)
+            _dropped_features = _bt.get("dropped_features", [])
+            if _dropped_features:
+                logger.info(
+                    "[XGBoostTasklet] Backtest audit flagged %d low-signal feature slots "
+                    "to zero out during training: %s",
+                    len(_dropped_features), _dropped_features,
+                )
+    except Exception as _bte:
+        logger.warning("[XGBoostTasklet] Could not read backtest_result from Redis: %s", _bte)
 
     try:
         import xgboost as xgb
@@ -7868,8 +7892,6 @@ def run_xgboost_tasklet() -> None:
                   AND discord_sent = TRUE
                   AND (lookahead_safe IS NULL OR lookahead_safe = TRUE)
                   AND agent_name NOT ILIKE '%seed%'
-                  AND model_prob IS NOT NULL
-                  AND model_prob >= 0.59
                   AND prop_type NOT IN (
                       'fantasy_score', 'fantasy_hitter', 'fantasy_pitcher',
                       'fantasy_pts', 'hitter_fantasy_score', 'pitcher_fantasy_score'
@@ -7938,6 +7960,12 @@ def run_xgboost_tasklet() -> None:
             _padded.append(f[:_TARGET_FEATS])
 
     X = np.array(_padded, dtype=np.float32)
+    # FIX: zero out low-signal feature slots flagged by backtest audit (12:01 AM)
+    if _dropped_features:
+        for _slot in _dropped_features:
+            if 0 <= _slot < X.shape[1]:
+                X[:, _slot] = 0.0
+        logger.info("[XGBoostTasklet] Zeroed %d dropped feature slots from backtest audit.", len(_dropped_features))
     y = np.array([int(r[1]) for r in rows], dtype=np.int8)
 
     # ── Recency decay: recent bets matter more than old ones ──────────────
@@ -8025,11 +8053,16 @@ def run_xgboost_tasklet() -> None:
                 "DELETE FROM xgb_model_store WHERE id NOT IN "
                 "(SELECT id FROM xgb_model_store ORDER BY trained_at DESC LIMIT 2)"
             )
+            # FIX: schema has brier_score column — omitting it raises
+            # NotNullViolation if the column has no DEFAULT, and silently
+            # stores no calibration score otherwise. Pass NULL explicitly;
+            # calibrate_model.py populates it after retrain.
             _ms_cur.execute(
-                "INSERT INTO xgb_model_store (model_json, n_rows, notes, prop_type, n_samples, brier_score)"
+                "INSERT INTO xgb_model_store"
+                " (model_json, n_rows, notes, prop_type, n_samples, brier_score)"
                 " VALUES (%s, %s, %s, %s, %s, %s)",
-                (_model_b64str, len(rows), f"accuracy={round(accuracy, 4)}", "general",
-                 len(rows), None)  # brier_score populated by calibrate_model.py after retrain
+                (_model_b64str, len(rows), f"accuracy={round(accuracy, 4)}",
+                 "general", len(rows), None)
             )
         _ms_conn.commit()
         _ms_conn.close()

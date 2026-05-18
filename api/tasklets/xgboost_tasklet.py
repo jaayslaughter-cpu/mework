@@ -12,8 +12,9 @@ api/data/agent_army.db (SQLite) and trained on 12 features that never
 matched the live 27-slot feature schema. It has been replaced with this
 delegator so callers in api_server.py continue to work.
 
-PR #580 Bug 2: Added _ensure_root_on_path() so `import tasklets` resolves
-to the root tasklets.py monolith regardless of Railway WORKDIR.
+Historical bug 2: The bare `from tasklets import ...` resolved to
+api/tasklets.py (the thin shim) instead of the root monolith when Railway
+sets WORKDIR /app/api. Fixed by _ensure_root_on_path().
 
 DO NOT reimport sqlite3 or reopen agent_army.db here.
 """
@@ -21,7 +22,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-import os
 import pathlib
 import sys
 from pathlib import Path
@@ -29,9 +29,14 @@ from pathlib import Path
 log = logging.getLogger("propiq.tasklet.xgboost")
 
 
+# ── Path helper ────────────────────────────────────────────────────────────────
+
 def _ensure_root_on_path() -> None:
-    """Insert repo root into sys.path so `import tasklets` always resolves
-    to the root tasklets.py monolith, not api/tasklets.py."""
+    """Ensure repo root is on sys.path regardless of working directory.
+
+    Railway sets WORKDIR /app/api, so a bare `import tasklets` resolves to
+    api/tasklets.py (the thin re-export shim) instead of the root monolith.
+    """
     root = str(pathlib.Path(__file__).resolve().parents[2])
     if root not in sys.path:
         sys.path.insert(0, root)
@@ -58,6 +63,9 @@ def load_model() -> tuple:
     Checks both disk locations (canonical path from tasklets.py, then legacy path).
     """
     import json
+    import os
+
+    _ensure_root_on_path()
 
     # Try canonical path first (matches tasklets.py XGB_MODEL_PATH)
     canonical = Path(os.getenv("XGB_MODEL_PATH", "/app/api/models/prop_model_v1.json"))
