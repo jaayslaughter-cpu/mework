@@ -4915,7 +4915,7 @@ def _make_parlay(legs: list[dict], agent_name: str = "The Correlated Parlay Agen
             # Fallback when UnderdogMathEngine unavailable.
             # Standard (PowerPlay) multipliers: 2-pick=3.5x, 3-pick=6x, 4-pick=10x
             # STANDARD → DiscordAlertService maps this to "PowerPlay" correctly
-            _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 20.0}
+            _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 10.0}  # 5-leg FlexPlay
             mult = _UD_MULTS.get(n, 3.5)
             combined_ev = round((math.prod(probs) * mult - 1) * 100, 2)
             entry_type = "STANDARD"  # ensures PowerPlay label in Discord
@@ -7253,7 +7253,7 @@ def run_grading_tasklet() -> None:
         elif _all_win:
             _slip_status = "WIN"
             # DFS parlay multipliers (PowerPlay / FlexPlay)
-            _UD_MULTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
+            _UD_MULTS = {2: 3.5, 3: 6.0, 4: 10.0, 5: 10.0}  # PowerPlay 2=3.5x, FlexPlay 5=10x
             _PP_MULTS = {2: 3.0, 3: 5.0,  4: 10.0, 5: 20.0}
             _is_pp    = "prize" in (_legs[0].get("entry_type") or "").lower()
             _mult     = (_PP_MULTS if _is_pp else _UD_MULTS).get(_n, 3.0)
