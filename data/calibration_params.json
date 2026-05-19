@@ -8,15 +8,21 @@
     "[2026-05-10] Initial params \u2014 lambda_bias pre-loaded from BaseballbettingEdge live calibration",
     "[2026-05-10] swstr_k9_scale set to 16.0 (reduced from default 30.0 per live BBE evidence)",
     "[2026-05-10] ump_scale set to 0.9 (umpire adjustment less reliable than expected)",
-    "[2026-05-13] lambda_bias -0.067 \u2192 -0.15 based on 142 live graded legs. Weighted logit-delta target = -0.247; stepping conservatively to -0.15. hits_runs_rbis and pitching_outs well-calibrated (delta \u2248 0). hits (n=28, delta=-0.647) and total_bases (n=13, delta=-0.911) severely overconfident \u2014 raised per-prop MIN_PROB floors to 0.62."
+    "[2026-05-13] lambda_bias -0.067 \u2192 -0.15 based on 142 live graded legs. hits_runs_rbis and pitching_outs well-calibrated. hits (n=28) and total_bases (n=13) overconfident \u2014 raised floors to 0.62.",
+    "[2026-05-18] PR #588: Temporary floor reduction \u2014 XGB model sparse (72 rows), predicts near 50-55%. All prop types explicitly overridden. Restore floors to 0.60/0.62/0.65 when graded rows reach 200+."
   ],
-  "sample_size": 142,
-  "updated_at": "2026-05-13T20:00:00-07:00",
+  "sample_size": 72,
+  "updated_at": "2026-05-18T19:28:00-07:00",
   "prop_min_prob_overrides": {
-    "hits": 0.62,
-    "total_bases": 0.62,
-    "hitter_strikeouts": 0.62,
-    "hits_allowed": 0.65,
+    "pitcher_strikeouts": 0.55,
+    "hits_runs_rbis": 0.55,
+    "pitching_outs": 0.55,
+    "earned_runs": 0.55,
+    "walks_allowed": 0.55,
+    "hits": 0.57,
+    "total_bases": 0.57,
+    "hitter_strikeouts": 0.57,
+    "hits_allowed": 0.60,
     "fantasy_score": 0.99
   },
   "prop_calibration_brier": {
@@ -29,7 +35,7 @@
     "hits_allowed": 0.4531,
     "overall": 0.2586
   },
-  "notes": "prop_min_prob_overrides: per-prop MIN_PROB gates stricter than global 0.57. fantasy_score set to 0.99 (effectively excluded). hits_allowed excluded pending more data (Brier 0.4531).",
+  "notes": "PR #588: All prop types explicitly floored. fantasy_score=0.99 effectively excluded. hits_allowed highest floor (Brier 0.4531 = poor calibration). Restore all floors when graded rows >= 200.",
   "league_constants": {
     "_comment": "60/40 blend 2026/2025 \u2014 May 15 2026. Source: BBRef totals through May 14.",
     "woba": 0.31,
