@@ -273,19 +273,24 @@ def calculate_brier_score(predictions: list) -> Optional[float]:
 
 # ── EV Gate — 2026 Underdog Payout Table ─────────────────────────────────────
 
-# 2026 Underdog STANDARD payout multipliers
+# 2026 Underdog PowerPlay payout multipliers
+# PR #584 confirmed: 2=3.5x, 3=6x, 4=10x, 5=10x (FlexPlay)
+# PR #589 fix: was 5=20.0 (wrong) → corrected to 5=10.0
 _UD_MULTIPLIERS: Dict[int, float] = {
     2: 3.5,
-    3: 6.0,   # Underdog 2026 STANDARD 3-leg = 6.0x (confirmed by user)
+    3: 6.0,
     4: 10.0,
-    5: 20.0,
+    5: 10.0,  # PR #589: fixed from 20.0 — UD 5-leg FlexPlay = 10x, not 20x
 }
 
 # 2026 PrizePicks POWER payout multipliers
+# PR #332 confirmed: 2=3x, 3=5x, 4=10x, 5=20x
+# PR #589 fix: was 3=6.0 (wrong) → corrected to 3=5.0
 _PP_MULTIPLIERS: Dict[int, float] = {
     2: 3.0,   # 2-pick Power
-    3: 6.0,   # 3-pick Power
+    3: 5.0,   # 3-pick Power — PR #589: fixed from 6.0 → 5.0 (PR #332 confirmed)
     4: 10.0,  # 4-pick Power
+    5: 20.0,  # 5-pick Power
 }
 
 # PrizePicks FLEX: (all_correct_mult, one_miss_mult) per entry size
@@ -330,7 +335,7 @@ def is_ev_positive(
 
     Break-even per-leg win rates (Underdog):
       2-pick = 53.45 %  |  3-pick = 53.94 %
-      4-pick = 56.23 %  |  5-pick = 54.93 %
+      4-pick = 56.23 %  |  5-pick = 56.23 %
     """
     mult = get_payout_multiplier(platform, n_legs)
     entry_win_prob = p_final ** n_legs
